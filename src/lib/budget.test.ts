@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import {
   computeMtdSpent,
@@ -320,24 +320,49 @@ describe("getEffectiveAllocation", () => {
     });
   });
 
-  it("lazy-persists effective_allocation_cents after first read", () => {
+  it("does NOT write cache by default (persist=false)", () => {
     const cat = seedCategory("Gifts", "rollover");
     seedAllocation(cat.id, 2026, 3, 5000);
     seedAllocation(cat.id, 2026, 4, 1000);
 
-    getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    const result = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    expect(result?.effectiveCents).toBe(6000);
+
+    const rows = handle.db
+      .select()
+      .from(schema.budgetPeriods)
+      .where(eq(schema.budgetPeriods.categoryId, cat.id))
+      .all();
+    expect(rows.every((r) => r.effectiveAllocationCents === null)).toBe(true);
+  });
+
+  it("persists effective_allocation_cents for current and prior months when persist=true", () => {
+    const cat = seedCategory("Gifts", "rollover");
+    seedAllocation(cat.id, 2026, 3, 5000);
+    seedAllocation(cat.id, 2026, 4, 1000);
+
+    getEffectiveAllocation(handle.db, cat.id, 2026, 4, { persist: true });
 
     const persisted = handle.db
       .select()
       .from(schema.budgetPeriods)
-      .where(
-        eq(schema.budgetPeriods.categoryId, cat.id),
-      )
+      .where(eq(schema.budgetPeriods.categoryId, cat.id))
       .all();
     const april = persisted.find((r) => r.month === 4);
     const march = persisted.find((r) => r.month === 3);
     expect(april?.effectiveAllocationCents).toBe(6000);
     expect(march?.effectiveAllocationCents).toBe(5000);
+  });
+
+  it("read-only computation sees a previously persisted cache", () => {
+    const cat = seedCategory("Gifts", "rollover");
+    seedAllocation(cat.id, 2026, 3, 5000);
+    seedAllocation(cat.id, 2026, 4, 1000);
+
+    getEffectiveAllocation(handle.db, cat.id, 2026, 4, { persist: true });
+    const readOnly = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    expect(readOnly?.effectiveCents).toBe(6000);
+    expect(readOnly?.rolloverCents).toBe(5000);
   });
 
   it("walks backward across a cached month (no recompute past cached)", () => {
@@ -365,6 +390,23 @@ describe("getEffectiveAllocation", () => {
     expect(march?.effectiveCents).toBe(9999);
   });
 
+  it("read-only mode does not write even when traversing multiple uncached months", () => {
+    const cat = seedCategory("Gifts", "rollover");
+    seedAllocation(cat.id, 2026, 1, 1000);
+    seedAllocation(cat.id, 2026, 2, 1000);
+    seedAllocation(cat.id, 2026, 3, 1000);
+    seedAllocation(cat.id, 2026, 4, 1000);
+
+    getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+
+    const rows = handle.db
+      .select()
+      .from(schema.budgetPeriods)
+      .where(eq(schema.budgetPeriods.categoryId, cat.id))
+      .all();
+    expect(rows.every((r) => r.effectiveAllocationCents === null)).toBe(true);
+  });
+
   it("crosses the year boundary (Jan reads prior Dec)", () => {
     const cat = seedCategory("Gifts", "rollover");
     seedAllocation(cat.id, 2025, 12, 4000);
@@ -386,8 +428,8 @@ describe("invalidateForwardRollover", () => {
     const apr = seedAllocation(cat.id, 2026, 4, 1000);
     const may = seedAllocation(cat.id, 2026, 5, 1000);
 
-    // Prime the cache.
-    getEffectiveAllocation(handle.db, cat.id, 2026, 5);
+    // Prime the cache via an explicit persist.
+    getEffectiveAllocation(handle.db, cat.id, 2026, 5, { persist: true });
     const before = handle.db.select().from(schema.budgetPeriods).all();
     expect(before.every((r) => r.effectiveAllocationCents !== null)).toBe(true);
 
@@ -409,7 +451,7 @@ describe("invalidateForwardRollover", () => {
     seedAllocation(cat.id, 2026, 12, 2000);
     seedAllocation(cat.id, 2027, 1, 1000);
 
-    getEffectiveAllocation(handle.db, cat.id, 2027, 1);
+    getEffectiveAllocation(handle.db, cat.id, 2027, 1, { persist: true });
     invalidateForwardRollover(handle.db, cat.id, 2026, 12);
 
     const rows = handle.db.select().from(schema.budgetPeriods).all();
@@ -421,8 +463,8 @@ describe("invalidateForwardRollover", () => {
     const b = seedCategory("Travel", "rollover");
     seedAllocation(a.id, 2026, 4, 1000);
     seedAllocation(b.id, 2026, 4, 2000);
-    getEffectiveAllocation(handle.db, a.id, 2026, 4);
-    getEffectiveAllocation(handle.db, b.id, 2026, 4);
+    getEffectiveAllocation(handle.db, a.id, 2026, 4, { persist: true });
+    getEffectiveAllocation(handle.db, b.id, 2026, 4, { persist: true });
 
     invalidateForwardRollover(handle.db, a.id, 2026, 4);
 
@@ -436,5 +478,79 @@ describe("invalidateForwardRollover", () => {
   it("is a no-op when no rows match (doesn't throw)", () => {
     const cat = seedCategory("Gifts", "rollover");
     expect(() => invalidateForwardRollover(handle.db, cat.id, 2030, 1)).not.toThrow();
+  });
+
+  it("supports the categorize trigger: moving a March txn out of a category clears downstream cache", () => {
+    // Contract: categorizeTransactionAction must call invalidateForwardRollover
+    // for both the old and new category, starting from the txn's date month.
+    const account = seedAccount();
+    const batch = seedBatch();
+    const oldCat = seedCategory("Gifts", "rollover");
+    const newCat = seedCategory("Household", "rollover");
+    seedAllocation(oldCat.id, 2026, 3, 5000);
+    seedAllocation(oldCat.id, 2026, 4, 1000);
+    seedAllocation(newCat.id, 2026, 3, 5000);
+    seedAllocation(newCat.id, 2026, 4, 1000);
+
+    const txn = seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: oldCat.id,
+      date: "2026-03-12",
+      amountCents: -2000,
+    });
+
+    getEffectiveAllocation(handle.db, oldCat.id, 2026, 4, { persist: true });
+    getEffectiveAllocation(handle.db, newCat.id, 2026, 4, { persist: true });
+
+    // Simulate the categorize action.
+    handle.db
+      .update(schema.transactions)
+      .set({ categoryId: newCat.id })
+      .where(eq(schema.transactions.id, txn.id))
+      .run();
+    invalidateForwardRollover(handle.db, oldCat.id, 2026, 3);
+    invalidateForwardRollover(handle.db, newCat.id, 2026, 3);
+
+    const oldApril = getEffectiveAllocation(handle.db, oldCat.id, 2026, 4);
+    const newApril = getEffectiveAllocation(handle.db, newCat.id, 2026, 4);
+    // Old cat: March allocated 50, spent 0 → rollover 50; April = 10 + 50 = 60.
+    expect(oldApril?.effectiveCents).toBe(6000);
+    // New cat: March allocated 50, spent 20 → rollover 30; April = 10 + 30 = 40.
+    expect(newApril?.effectiveCents).toBe(4000);
+  });
+
+  it("supports the carryover-policy-change trigger: flipping rollover → none clears all downstream", () => {
+    // Contract: a policy change must call invalidateForwardRollover from the
+    // earliest allocation month (or any month <= the earliest).
+    const cat = seedCategory("Gifts", "rollover");
+    seedAllocation(cat.id, 2026, 3, 5000);
+    seedAllocation(cat.id, 2026, 4, 1000);
+
+    getEffectiveAllocation(handle.db, cat.id, 2026, 4, { persist: true });
+    const beforeApril = handle.db
+      .select()
+      .from(schema.budgetPeriods)
+      .where(
+        and(
+          eq(schema.budgetPeriods.categoryId, cat.id),
+          eq(schema.budgetPeriods.month, 4),
+        ),
+      )
+      .get();
+    expect(beforeApril?.effectiveAllocationCents).toBe(6000);
+
+    // Simulate the policy flip.
+    handle.db
+      .update(schema.categories)
+      .set({ carryoverPolicy: "none" })
+      .where(eq(schema.categories.id, cat.id))
+      .run();
+    invalidateForwardRollover(handle.db, cat.id, 2026, 3);
+
+    const april = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    // Policy 'none' means no rollover; April effective = allocated only.
+    expect(april?.effectiveCents).toBe(1000);
+    expect(april?.rolloverCents).toBe(0);
   });
 });

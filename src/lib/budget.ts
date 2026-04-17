@@ -1,7 +1,20 @@
-import { and, eq, gt, gte, isNull, sql } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
+import { and, eq, gte, isNull, sql } from "drizzle-orm";
+import type { ExtractTablesWithRelations } from "drizzle-orm";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+import { schema } from "@/db";
 
-type Db = typeof defaultDb;
+/**
+ * Structural DB type — accepts both the singleton `better-sqlite3`
+ * database and a transaction handle (`db.transaction((tx) => …)`). Both
+ * derive from `BaseSQLiteDatabase` and expose the same query-builder API
+ * used here.
+ */
+type Db = BaseSQLiteDatabase<
+  "sync",
+  unknown,
+  typeof schema,
+  ExtractTablesWithRelations<typeof schema>
+>;
 
 export type EffectiveAllocation = {
   allocatedCents: number;
@@ -9,14 +22,26 @@ export type EffectiveAllocation = {
   effectiveCents: number;
 };
 
+export type GetEffectiveAllocationOptions = {
+  /**
+   * Write the computed `effective_allocation_cents` back to the row.
+   *
+   * Default `false` (read-only). Server Component render paths must stay
+   * read-only: writing during render + React 19 prefetch can double-fire or
+   * persist stale values. Server Actions that own the mutation should pass
+   * `true` inside the same transaction that writes the user's change.
+   */
+  persist?: boolean;
+};
+
 /**
  * Return the effective allocation for a category in a given month, or `null`
  * if no budget_periods row exists for that month.
  *
- * Lazy-persist: once computed, the result is written back to
- * `budget_periods.effective_allocation_cents` so subsequent reads are O(1).
- * Invalidation (see {@link invalidateForwardRollover}) clears these cached
- * values on upstream edits.
+ * Cached `effective_allocation_cents` is preferred when present. When absent,
+ * the value is computed from the prior month's state but NOT written back
+ * unless `{ persist: true }` is passed. Invalidation (see
+ * {@link invalidateForwardRollover}) clears cached values on upstream edits.
  *
  * Rollover math: when the category's `carryover_policy = 'rollover'`, the
  * prior month's remaining budget (effective − MTD spent, floored at 0) is
@@ -28,7 +53,10 @@ export function getEffectiveAllocation(
   categoryId: number,
   year: number,
   month: number,
+  options?: GetEffectiveAllocationOptions,
 ): EffectiveAllocation | null {
+  const persist = options?.persist ?? false;
+
   const row = db
     .select()
     .from(schema.budgetPeriods)
@@ -61,7 +89,9 @@ export function getEffectiveAllocation(
   let rolloverCents = 0;
   if (category?.carryoverPolicy === "rollover") {
     const { year: priorYear, month: priorMonth } = previousMonth(year, month);
-    const prior = getEffectiveAllocation(db, categoryId, priorYear, priorMonth);
+    const prior = getEffectiveAllocation(db, categoryId, priorYear, priorMonth, {
+      persist,
+    });
     if (prior) {
       const priorSpent = computeMtdSpent(db, categoryId, priorYear, priorMonth);
       rolloverCents = Math.max(0, prior.effectiveCents - priorSpent);
@@ -70,18 +100,29 @@ export function getEffectiveAllocation(
 
   const effectiveCents = allocatedCents + rolloverCents;
 
-  db.update(schema.budgetPeriods)
-    .set({ effectiveAllocationCents: effectiveCents })
-    .where(eq(schema.budgetPeriods.id, row.id))
-    .run();
+  if (persist) {
+    db.update(schema.budgetPeriods)
+      .set({ effectiveAllocationCents: effectiveCents })
+      .where(eq(schema.budgetPeriods.id, row.id))
+      .run();
+  }
 
   return { allocatedCents, rolloverCents, effectiveCents };
 }
 
 /**
- * Clear cached `effective_allocation_cents` for the edited month and every
- * later month of the same category. The next read of any affected month will
- * recompute from fresh explicit allocations and prior-month state.
+ * Clear cached `effective_allocation_cents` for the given month and every
+ * later month of the same category. The next read of any affected month
+ * recomputes from fresh explicit allocations and prior-month state.
+ *
+ * Callers MUST invoke this after any change that shifts downstream rollover:
+ * 1. Allocation edit — `upsertBudgetAllocationAction` passes the edited month.
+ * 2. Transaction categorize / re-categorize — changing `category_id` shifts
+ *    prior-month spend for both the old and new category. Pass the
+ *    transaction's date month for each affected category.
+ * 3. `carryover_policy` change — flipping rollover ↔ reset re-keys the math
+ *    for every downstream month. Pass the earliest allocation month for the
+ *    category (or any month <= the earliest that matters).
  */
 export function invalidateForwardRollover(
   db: Db,
