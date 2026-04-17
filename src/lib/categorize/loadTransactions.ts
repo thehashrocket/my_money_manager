@@ -65,46 +65,47 @@ export function loadTransactions(
   }
 
   const where = and(...predicates);
-
-  const countRow = db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(schema.transactions)
-    .where(where)
-    .get();
-  const totalCount = Number(countRow?.count ?? 0);
-
   const offset = (filter.page - 1) * filter.pageSize;
 
-  const rows = db
-    .select({
-      id: schema.transactions.id,
-      date: schema.transactions.date,
-      rawDescription: schema.transactions.rawDescription,
-      rawMemo: schema.transactions.rawMemo,
-      normalizedMerchant: schema.transactions.normalizedMerchant,
-      amountCents: schema.transactions.amountCents,
-      isPending: schema.transactions.isPending,
-      categoryId: schema.transactions.categoryId,
-      categoryName: schema.categories.name,
-      accountId: schema.transactions.accountId,
-      accountName: schema.accounts.name,
-    })
-    .from(schema.transactions)
-    .leftJoin(
-      schema.categories,
-      eq(schema.categories.id, schema.transactions.categoryId),
-    )
-    .innerJoin(
-      schema.accounts,
-      eq(schema.accounts.id, schema.transactions.accountId),
-    )
-    .where(where)
-    .orderBy(desc(schema.transactions.date), desc(schema.transactions.id))
-    .limit(filter.pageSize)
-    .offset(offset)
-    .all();
+  return db.transaction((tx) => {
+    const countRow = tx
+      .select({ count: sql<number>`COUNT(*)` })
+      .from(schema.transactions)
+      .where(where)
+      .get();
+    const totalCount = Number(countRow?.count ?? 0);
 
-  return { rows, totalCount };
+    const rows = tx
+      .select({
+        id: schema.transactions.id,
+        date: schema.transactions.date,
+        rawDescription: schema.transactions.rawDescription,
+        rawMemo: schema.transactions.rawMemo,
+        normalizedMerchant: schema.transactions.normalizedMerchant,
+        amountCents: schema.transactions.amountCents,
+        isPending: schema.transactions.isPending,
+        categoryId: schema.transactions.categoryId,
+        categoryName: schema.categories.name,
+        accountId: schema.transactions.accountId,
+        accountName: schema.accounts.name,
+      })
+      .from(schema.transactions)
+      .leftJoin(
+        schema.categories,
+        eq(schema.categories.id, schema.transactions.categoryId),
+      )
+      .innerJoin(
+        schema.accounts,
+        eq(schema.accounts.id, schema.transactions.accountId),
+      )
+      .where(where)
+      .orderBy(desc(schema.transactions.date), desc(schema.transactions.id))
+      .limit(filter.pageSize)
+      .offset(offset)
+      .all();
+
+    return { rows, totalCount };
+  });
 }
 
 function nextMonth(year: number, month: number): [number, number] {

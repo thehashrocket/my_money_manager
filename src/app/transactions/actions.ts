@@ -8,6 +8,7 @@ import {
 } from "@/lib/categorize/categorizeTransaction";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
+import { validateCategorizeTransactionSnapshot } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
 
 /**
  * Flip a single transaction onto a category. Optional "Remember for all
@@ -60,7 +61,15 @@ export async function categorizeTransactionAction(formData: FormData) {
 export async function undoCategorizeTransactionAction(
   snapshot: CategorizeTransactionSnapshot,
 ) {
-  const result = undoCategorizeTransaction(db, snapshot);
+  const parsed = validateCategorizeTransactionSnapshot(snapshot);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(snapshot)"}: ${i.message}`)
+      .join("; ");
+    throw new Error(`Invalid undo snapshot — ${issues}`);
+  }
+
+  const result = undoCategorizeTransaction(db, parsed.data);
   revalidatePath("/transactions");
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");

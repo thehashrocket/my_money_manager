@@ -63,29 +63,29 @@ export function categorizeTransaction(
 ): CategorizeTransactionResult {
   const { transactionId, categoryId, rememberMerchant, applyToPast } = input;
 
-  const category = db
-    .select({
-      id: schema.categories.id,
-      name: schema.categories.name,
-      isSavingsGoal: schema.categories.isSavingsGoal,
-    })
-    .from(schema.categories)
-    .where(eq(schema.categories.id, categoryId))
-    .get();
-  if (!category) throw new CategoryNotFoundError(categoryId);
-  if (category.isSavingsGoal) {
-    throw new SavingsGoalCategoryError(category.id, category.name);
-  }
-
-  const firstChild = db
-    .select({ id: schema.categories.id })
-    .from(schema.categories)
-    .where(eq(schema.categories.parentId, categoryId))
-    .limit(1)
-    .get();
-  if (firstChild) throw new ParentAllocationError(category.id, category.name);
-
   return db.transaction((tx) => {
+    const category = tx
+      .select({
+        id: schema.categories.id,
+        name: schema.categories.name,
+        isSavingsGoal: schema.categories.isSavingsGoal,
+      })
+      .from(schema.categories)
+      .where(eq(schema.categories.id, categoryId))
+      .get();
+    if (!category) throw new CategoryNotFoundError(categoryId);
+    if (category.isSavingsGoal) {
+      throw new SavingsGoalCategoryError(category.id, category.name);
+    }
+
+    const firstChild = tx
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(eq(schema.categories.parentId, categoryId))
+      .limit(1)
+      .get();
+    if (firstChild) throw new ParentAllocationError(category.id, category.name);
+
     const target = tx
       .select({
         id: schema.transactions.id,
