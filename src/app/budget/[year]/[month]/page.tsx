@@ -11,7 +11,7 @@ import {
 } from "@/lib/budget/loadMonthView";
 import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
-import { upsertBudgetAllocationAction } from "../../actions";
+import { AllocateFormTrigger } from "./_allocate-form";
 
 /**
  * Route params arrive as strings from the URL; Zod coerces + bounds them.
@@ -250,11 +250,13 @@ function LeafRowView({
         <RemainingCell leaf={leaf} />
       </td>
       <td className="px-3 py-2 text-right">
-        <AllocateForm
+        <AllocateFormTrigger
           categoryId={leaf.categoryId}
+          categoryName={leaf.name}
           year={year}
           month={month}
-          allocatedCents={allocated}
+          allocation={leaf.allocation}
+          carryoverPolicy={leaf.carryoverPolicy}
         />
       </td>
     </tr>
@@ -290,49 +292,6 @@ function RemainingCell({ leaf }: { leaf: LeafRow }) {
         />
       </div>
     </div>
-  );
-}
-
-function AllocateForm({
-  categoryId,
-  year,
-  month,
-  allocatedCents,
-}: {
-  categoryId: number;
-  year: number;
-  month: number;
-  allocatedCents: number;
-}) {
-  const defaultDollars = (allocatedCents / 100).toFixed(2);
-  return (
-    <form
-      action={upsertBudgetAllocationAction}
-      className="flex items-center justify-end gap-1.5"
-    >
-      <input type="hidden" name="categoryId" value={categoryId} />
-      <input type="hidden" name="year" value={year} />
-      <input type="hidden" name="month" value={month} />
-      <label className="sr-only" htmlFor={`alloc-${categoryId}`}>
-        Allocated dollars for category {categoryId}
-      </label>
-      <input
-        id={`alloc-${categoryId}`}
-        name="allocatedDollars"
-        type="number"
-        inputMode="decimal"
-        step="0.01"
-        min="0"
-        defaultValue={defaultDollars}
-        className="h-7 w-20 rounded-md border border-border bg-background px-2 text-right text-[0.8rem] [font-variant-numeric:tabular-nums] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 outline-none"
-      />
-      <button
-        type="submit"
-        className="h-7 rounded-md bg-primary px-2.5 text-[0.8rem] font-medium text-primary-foreground hover:bg-primary/80"
-      >
-        Save
-      </button>
-    </form>
   );
 }
 
@@ -392,11 +351,13 @@ function MobileCards({ view }: { view: MonthView }) {
                     <dd>{formatCents(leaf.spentCents)}</dd>
                   </div>
                 </dl>
-                <AllocateForm
+                <AllocateFormTrigger
                   categoryId={leaf.categoryId}
+                  categoryName={leaf.name}
                   year={view.year}
                   month={view.month}
-                  allocatedCents={leaf.allocation?.allocatedCents ?? 0}
+                  allocation={leaf.allocation}
+                  carryoverPolicy={leaf.carryoverPolicy}
                 />
               </li>
             ))}
