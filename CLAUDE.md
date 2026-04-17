@@ -12,9 +12,11 @@ Read `.context/notes.md` first. It is the source-of-truth index for design artif
 - Tailwind v4 + shadcn/ui (base-nova style, Base UI primitives)
 - better-sqlite3 + Drizzle ORM (`./data/money.db`, gitignored)
 - Vitest for categorization/parser tests
-- pnpm, Node 24 (pinned via `.nvmrc`)
+- pnpm, Node 24 (pinned via `.nvmrc`, enforced via `engines` + `engine-strict`)
 
 No Recharts yet — it lands in Weekend 5 with the trend chart. Envelope cards are plain CSS.
+
+Wrong-Node symptom: any `pnpm` command fails with `ERR_PNPM_UNSUPPORTED_ENGINE` (blocked by `engines` + `engine-strict=true`). Run `nvm use` in the workspace to pick up `.nvmrc`. If you bypass pnpm (e.g., invoke `vitest` directly on Node 22), `better-sqlite3` crashes with a `NODE_MODULE_VERSION` mismatch because its native binding is built against Node 24.
 
 ## Layout
 
