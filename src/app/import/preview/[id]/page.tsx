@@ -2,14 +2,9 @@ import { notFound } from "next/navigation";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { buildPreview } from "@/lib/importBatch";
+import { formatCents } from "@/lib/money";
 import { readPendingImport } from "@/lib/pendingImport";
 import { cancelImportAction, confirmImportAction } from "../../actions";
-
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? "-" : "";
-  const abs = Math.abs(cents);
-  return `${sign}$${(abs / 100).toFixed(2)}`;
-}
 
 export default async function PreviewPage({
   params,

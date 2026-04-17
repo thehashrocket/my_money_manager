@@ -28,9 +28,29 @@ Short-term checklist. For the full roadmap see [PLAN.md](./PLAN.md). For context
 
 ## Weekend 2 — budget + categorization + integration checkpoint
 
-- [ ] Budget periods UI (envelope cards)
-- [ ] Hybrid categorization — auto-learn merchant rules + manual rule overrides at priority 50
-- [ ] Uncategorized backlog tile on dashboard
+Detailed plan: `.context/weekend-2-envelope-cards-test-plan.md`.
+
+Spine (sequential):
+- [x] Migration: add `budget_periods.effective_allocation_cents`, seed Uncategorized + 5 default leaf categories (Groceries, Gas, Dining, Utilities, Misc), BEFORE DELETE trigger on Uncategorized
+- [x] `src/lib/money.ts` — extract `formatCents`, Vitest-cover, swap both import pages
+- [x] `src/lib/test/db.ts` — `:memory:` Drizzle migrator helper
+- [x] `src/lib/budget.ts` — `getEffectiveAllocation` + lazy-persist, `invalidateForwardRollover`, `computeMtdSpent` (DB-backed, Vitest-covered)
+- [x] `src/lib/rules.ts` — `applyRuleAtImport`, `createOrUpdateRule` (Vitest-covered)
+
+Tracks (parallelizable once spine is in):
+- [ ] Track A — `/budget` + `/budget/[year]/[month]`: parent-grouped envelope cards, summary strip, Uncategorized backlog tile, "Categorize backlog" CTA
+- [ ] Track B — `/transactions`: row list, inline picker, "Remember for all [merchant]" + "Apply to past [merchant]" checkboxes, `categorizeTransactionAction`
+- [ ] Track C — `/categorize`: bulk-by-merchant view, `bulkCategorizeMerchantAction`
+- [ ] Track D — Allocate form: three-field breakdown (explicit / rollover / effective), `upsertBudgetAllocationAction`, forward invalidation
+
+Scope guardrails:
+- [ ] Zod on all new Server Actions + backfill `createAccountAction`
+- [ ] No Recharts, no savings-goals UI, no split transactions (per V1 exclusions)
+- [ ] shadcn components locked: DataTable (`/budget`), Dialog (allocate), Sonner (toasts), Combobox (inline picker)
+- [ ] `font-variant-numeric: tabular-nums` on every cents cell; WCAG AAA contrast on red/green tokens
+- [ ] Mobile (<640px) collapses `/budget` table to stacked cards; parens `($42)` for negatives everywhere
+
+Checkpoint:
 - [ ] **Integration checkpoint:** use the app for 1 week on real data before moving on
 
 ## Weekend 3-5
