@@ -36,6 +36,13 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local sqlite db + pre-import snapshots
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+/data/money.db.pre-import-*
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -1,0 +1,7 @@
+{
+    "scripts": {
+        "setup": "source ~/.nvm/nvm.sh && nvm use && pnpm install && pnpm db:migrate",
+        "run": "source ~/.nvm/nvm.sh && nvm use && pnpm db:migrate && pnpm dev",
+        "archive": ""
+    }
+}
