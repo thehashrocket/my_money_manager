@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-04-16
+
+_Weekend 1 complete — CSV import pipeline is live end-to-end. You can now upload a Star One CU CSV (checking or savings), preview what's new vs. duplicate vs. pending, and commit to a local SQLite database that's snapshotted before every write. Transfer pairs between accounts are detected automatically (memo-independent, so overdraft mislabels don't throw it off)._
+
+### Notes
+- Shipped via `/ship`. Coverage scope per CLAUDE.md: pure functional tier only; UI + Server Actions verified by live browser smoke test (543-row commit).
+- Docs fix: `CLAUDE.md` rule 3 updated to include `raw_memo` in the `import_row_hash` formula to match the code.
 
 ### Added
 - Project scaffold: Next.js 16.2.4 (App Router, Turbopack) + TypeScript + Tailwind v4 + ESLint
