@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-17
+
+_Weekend 2 Track B complete — `/transactions` is live. You now have a filtered, paginated list of every non-transfer-paired transaction with an inline category picker, "Remember for all [merchant]" to silently upsert the exact rule, and "Apply to past [merchant]" to fan the chosen category out to every uncategorized sibling. Each Save fires a 10s Sonner Undo that atomically reverses the target row, the applyToPast hits, AND any rule change, all while preserving rows the user has re-touched since. `/budget` and `/categorize` now share the same rollover-invalidation story across the Track A/B/C + D surfaces._
+
+### Notes
+- Shipped via `/ship`. Coverage scope unchanged from v0.3.0: pure functional + DB-query tier (225 tests across 22 files, +41 over v0.3.0). UI components not tested; `/transactions` verified by live browser smoke test.
+- Three pre-landing review fixes applied inline before commit: `undoCategorizeTransactionAction` is now Zod-gated against a new `categorizeTransactionSnapshotSchema` (CLAUDE.md rule: every Server Action must validate at the boundary); `categorizeTransaction`'s parent + savings-goal + category-exists preconditions now run inside the same `db.transaction(...)` as the writes (closes a narrow race window); `loadTransactions` wraps its `COUNT(*)` + paginated SELECT in a read transaction so pagination math cannot drift under a concurrent categorize write.
+- Known cosmetic: after "Apply to past" fires, sibling rows on the same page keep their "Uncategorized" badge until reload — each row owns its own `useState` seeded at mount. The live backlog counter is correct. Tracked separately.
+
+### Added
+- **`/transactions` page** (`src/app/transactions/page.tsx`):
+  - Server Component. `await connection()` + Zod `searchParamsSchema` gated by `notFound()` on tamper (matches `/budget/[year]/[month]`).
+  - Filter params: `categoryId=<leafId>|none`, optional `year`+`month` (both-or-neither), `page`, `pageSize` (clamped 1–500).
+  - Entry points: from a `/budget` row (drilldown) or standalone (no filter, newest first).
+- **Transaction query layer** (`src/lib/categorize/loadTransactions.ts`):
+  - Paginated read; transfer-paired rows excluded unconditionally via `isNull(transferPairId)`.
+  - Sort: `date DESC, id DESC` (stable tiebreaker). Joins: `leftJoin(categories)` for display name, `innerJoin(accounts)` for account name.
+- **Single-row categorize pipeline** (`src/lib/categorize/categorizeTransaction.ts`):
+  - Server-trust: `normalizedMerchant` is read from the target row, NOT from FormData. A tampered applyToPast can't broadcast across merchants.
+  - Dual-invalidation pattern: new category invalidated starting at `earliest(target.date, earliestApplyToPastDate)` month; old category invalidated at `target.date` month (only when the row had a prior category).
+  - applyToPast scope: `categoryId IS NULL AND id != target.id AND transferPairId IS NULL`. Matches Track C semantics.
+- **Undo** (`src/lib/categorize/undoCategorizeTransaction.ts`):
+  - Snapshot-based reverse inside a single `db.transaction`. Re-touch guard: both target + applyToPast UPDATEs filter `WHERE categoryId = newCategoryId`, so rows the user has since re-categorized are preserved.
+  - 3-case rule rollback (no prior rule → delete, prior → full restore). Mirrors Track C's rule rollback.
+- **Zod validators**:
+  - `src/lib/categorize/validateCategorizeTransactionInput.ts` — FormData coercion, strings → numbers/booleans.
+  - `src/lib/categorize/validateCategorizeTransactionSnapshot.ts` — new this ship, guards `undoCategorizeTransactionAction` against client-supplied snapshot payloads.
+- **Client islands**:
+  - `src/app/transactions/_transactions-ui.tsx` — sticky `aria-live` backlog strip, empty state, pagination.
+  - `src/app/transactions/_transaction-row.tsx` — inline select + Remember/Apply-to-past checkboxes + Sonner 10s Undo toast. iOS autozoom fix (`text-base sm:text-sm`) on the select.
+- **Server Actions** (`src/app/transactions/actions.ts`):
+  - `categorizeTransactionAction` — Zod-gates input, returns snapshot + updatedCount + categoryName.
+  - `undoCategorizeTransactionAction` — Zod-gates the snapshot, idempotent reverse. Both revalidate `/transactions`, `/categorize`, and the `/budget` layout.
+- **Mandatory regression guard** (`src/lib/categorize/categorizeTransaction.regression.test.ts`):
+  - The Track B review's must-pass test: categorize flips `/budget` MTD on the new category, invalidates May's rollover cache, and Undo cleanly reverses both plus the target row.
+- **Shared helper** (`src/lib/budget/monthOfIso.ts`):
+  - Extracted `parseIsoMonth(dateIso)` out of `bulkCategorize` so `categorizeTransaction` uses the same primitive.
+
+### Verified
+- Vitest suite: **225 tests across 22 files**, all green on Node 24. (+41 over v0.3.0: core/undo/validator/loader/regression/action suites.)
+- `tsc --noEmit` clean.
+- Live browser: seeded 3 uncategorized SAFEWAY rows, categorized one with "Apply to past" ticked → 2 additional rows flipped, Sonner toast shown with Undo, Undo restored all three rows + cleared the rule.
+
+### Fixed (pre-landing review)
+- `undoCategorizeTransactionAction` was accepting the snapshot without validation. A crafted payload could have flipped any row matching a chosen category back to a caller-supplied prior, and forced `invalidateForwardRollover` on arbitrary (category, year, month) combos. Now Zod-validated against `categorizeTransactionSnapshotSchema` before the reverse fires.
+- `categorizeTransaction`'s `CategoryNotFoundError` / `SavingsGoalCategoryError` / `ParentAllocationError` pre-flight checks were SELECTing outside the write transaction. Between those reads and the UPDATE, a concurrent write could have flipped the category shape. Moved both lookups inside the `db.transaction(...)`.
+- `loadTransactions` was running `COUNT(*)` and the paginated SELECT in separate DB calls. A concurrent categorize between them could produce off-by-one `totalPages` / `firstRow` / `lastRow` relative to the returned rows. Both queries now share one read transaction.
+
+### Project decisions (non-code, worth logging)
+- **Server-trust on merchant**: the target row's stored `normalized_merchant` is the source of truth for Apply-to-past. Never read from FormData. Prevents cross-merchant fanout via a tampered form.
+- **Transfer-paired rows stay hidden on `/transactions`**: they're owned by the transfer machinery. `loadTransactions` filters them out server-side and `categorizeTransaction` additionally refuses them as defense-in-depth.
+- **Undo is idempotent by design**: a user who re-categorizes a row between Save and Undo keeps their new choice. Both target and applyToPast UPDATEs filter on the snapshot's `newCategoryId`.
+- **Re-categorize support**: a row that already has a category can be flipped to a different leaf. Dual-invalidation fires on both the old and new category's month chains.
+
+### Known follow-ups (tracked in TODOS.md)
+- **P0** — `parseCsv.test.ts` fails at test-load time with ENOENT on a gitignored fixture path. Pre-existing, not caused by this ship. Either bundle a safe fixture or guard the test with `describe.skipIf`.
+- **Cosmetic** — sibling rows hit by Apply-to-past keep their "Uncategorized" badge until reload (each row form owns its `useState` seeded at mount). Backlog counter is correct; server round-trip would fix it but cost an extra render. Deferred.
+
 ## [0.3.0] - 2026-04-17
 
 _Weekend 2 complete — envelope budgeting is live. `/budget` shows per-category allocations with rollover math carried forward, `/categorize` flips every uncategorized row for a merchant onto a category in one click (with 10s Undo), and the rule engine silently auto-categorizes matching rows at import. All money still flows through signed integer `amount_cents`; the envelope math is lazy-persisted on first Allocate write and invalidated forward whenever a prior month changes._

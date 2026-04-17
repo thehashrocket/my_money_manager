@@ -1,6 +1,7 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
+import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import {
   CategoryNotFoundError,
   ParentAllocationError,
@@ -174,11 +175,5 @@ export function bulkCategorize(
       updatedCount: txnIds.length,
     };
   });
-}
-
-function parseIsoMonth(date: string): { year: number; month: number } {
-  const year = Number(date.slice(0, 4));
-  const month = Number(date.slice(5, 7));
-  return { year, month };
 }
 
