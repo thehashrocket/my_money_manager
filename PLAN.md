@@ -15,24 +15,32 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 | # | Focus | Status |
 |---|-------|--------|
 | W1 | Scaffold + CSV import end-to-end (sign correction, transfer detection, dedup) + HMR smoke test | done |
-| W2 | Budget views + hybrid categorization (auto-learn + manual rules) + integration checkpoint (use on real data for 1 week) | not started |
+| W2 | Budget views + hybrid categorization (auto-learn + manual rules) + integration checkpoint (use on real data for 1 week) | done (integration checkpoint pending) |
 | W3 | Dashboard + Uncategorized backlog tile + merchant normalization refinement | not started |
 | W4 | Subscriptions tracker — **cut-line** if behind (keep goals instead) | not started |
 | W5 | Goals / savings + Recharts trend chart | not started |
 
-## Current status (2026-04-16)
+## Current status (2026-04-17)
 
-Weekend 1 complete. Import pipeline works end-to-end in a real browser:
+Weekends 1 and 2 complete. App runs end-to-end in a real browser: CSV import → categorize → `/budget` envelope view with live allocate.
+
+Weekend 1 — CSV import pipeline:
 - Real CSV data analyzed (checking + savings, 90 days, 652 rows combined)
 - Six-table Drizzle schema + migration landed; HMR-safe DB singleton in place
 - Pure-function tier shipped with Vitest coverage: merchant normalizer (12 rules), row-hash, Star One CSV parser, memo-independent transfer-pair matcher
 - Snapshot + import orchestrator: `commitImport` snapshots the DB, inserts batch + rows in a single transaction, then links transfer pairs
 - Upload/preview/confirm UI in the App Router using Server Actions; confirm flow verified live (543 rows committed, snapshot written, redirect to success page)
 - Star One CU memo-labeling quirk logged as a durable project memory
-- 45 Vitest tests pass, `tsc --noEmit` clean, 10-reload HMR smoke test passes
+
+Weekend 2 — envelope budgeting + bulk categorize:
+- `budget_periods.effective_allocation_cents` migration + `getEffectiveAllocation` lazy-cache + `invalidateForwardRollover` contract (triggered on allocation edits, categorize/re-categorize, carryover_policy change)
+- `/budget/[year]/[month]` server-rendered table (parent-grouping with synthetic "Ungrouped" section, summary strip, backlog banner)
+- `/categorize` bulk-by-merchant surface with Sonner 10s Undo toast and live backlog counter
+- Track D — Allocate 3-field Dialog (Explicit editable, Rollover read-only, Effective live-computed) shipped as shadcn Dialog client island, with iOS autozoom fix (`text-base sm:text-sm`)
+- 174 Vitest tests pass, `tsc --noEmit` clean
 
 Next up (see [TODOS.md](./TODOS.md)):
-- Weekend 2: budget periods UI (envelope cards), hybrid categorization (auto-learn + priority-50 manual rules), Uncategorized backlog tile
+- Track B: `/transactions` row list + inline picker + `categorizeTransactionAction`
 - **Integration checkpoint** before W3: use the app on real data for 1 week
 
 ## Cut-line
