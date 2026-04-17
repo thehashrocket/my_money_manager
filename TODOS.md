@@ -49,7 +49,7 @@ Tracks (parallelizable once spine is in):
   - [x] `src/lib/budget/validateAllocateInput.ts` + unit test (pure, DB-free)
   - [x] `src/app/budget/actions.ts` — minimal `upsertBudgetAllocationAction` (single-field Allocate); integration test via `:memory:`
   - [x] Category-name cell as only `<Link>`; Allocate is sibling button (no nested `<a>`/`<button>`)
-- [ ] Track B — `/transactions`: row list, inline picker, "Remember for all [merchant]" + "Apply to past [merchant]" checkboxes, `categorizeTransactionAction` — MUST call `invalidateForwardRollover` on category change
+- [x] Track B — `/transactions`: row list, inline picker, "Remember for all [merchant]" + "Apply to past [merchant]" checkboxes, `categorizeTransactionAction` — MUST call `invalidateForwardRollover` on category change
 - [x] Track C — `/categorize`: bulk-by-merchant view, `bulkCategorizeMerchantAction` — MUST call `invalidateForwardRollover` per affected category
   - [x] `src/lib/categorize/validateBulkCategorizeInput.ts` + unit test (Zod, parent / savings-goal / unknown rejects)
   - [x] `src/lib/categorize/loadMerchantGroups.ts` + test — GROUP BY merchant with existing-rule badge (SQL-filtered)
@@ -81,6 +81,10 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 - [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)
 - [ ] **P2** — `linkTransferPairs` pulls every same-day unpaired row across every account on each import. O(n²) within a day. Fine today; revisit if an account's same-day row count gets large. (`src/lib/importBatch.ts:212`)
 - [ ] **P3** — Server Action validation hardening: `uploadCsvAction` has no file-size cap; `createAccountAction` accepts `1e10` as a finite balance. Single-user local app, so low risk — but worth tightening. (`src/app/import/actions.ts:23,42`)
+
+## Follow-ups from v0.4.0 ship review
+
+- [ ] **P0** — `parseCsv.test.ts` fails at test-load time with ENOENT on `.context/attachments/sample-csv.csv` (the fixture lives under a gitignored path per CLAUDE.md). Either bundle a safe sample fixture into the repo under `src/lib/__fixtures__/` or guard the test with `describe.skipIf(!existsSync(fixturePath))` so CI/local runs stay green without leaking real data. Pre-existing; not introduced by Track B. (`src/lib/parseCsv.test.ts`)
 
 ## Follow-ups from v0.3.0 ship review
 
