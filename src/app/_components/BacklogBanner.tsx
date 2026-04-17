@@ -24,7 +24,7 @@ export function BacklogBanner({
   const plural = backlog.count === 1 ? "" : "s";
   return (
     <div className="sticky top-0 z-10 -mx-6 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-6 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100">
-      <span>
+      <span className="[font-variant-numeric:tabular-nums]">
         <strong>{backlog.count}</strong> uncategorized transaction{plural} —{" "}
         {formatCents(backlog.totalCents)}
       </span>

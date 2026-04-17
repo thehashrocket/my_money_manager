@@ -9,6 +9,7 @@ import {
 } from "@/lib/categorize/bulkCategorize";
 import { undoBulkCategorize } from "@/lib/categorize/undoBulkCategorize";
 import { validateBulkCategorizeInput } from "@/lib/categorize/validateBulkCategorizeInput";
+import { validateBulkCategorizeSnapshot } from "@/lib/categorize/validateBulkCategorizeSnapshot";
 
 /**
  * Flip every uncategorized row for a merchant onto a category, optionally
@@ -62,7 +63,15 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
 export async function undoBulkCategorizeAction(
   snapshot: BulkCategorizeSnapshot,
 ) {
-  const result = undoBulkCategorize(db, snapshot);
+  const parsed = validateBulkCategorizeSnapshot(snapshot);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`)
+      .join("; ");
+    throw new Error(`Invalid undo snapshot — ${issues}`);
+  }
+
+  const result = undoBulkCategorize(db, parsed.data);
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");
   return result;

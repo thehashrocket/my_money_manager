@@ -32,7 +32,7 @@ export default function ImportPage() {
                   <span className="font-medium">{a.name}</span>
                   <span className="ml-2 text-zinc-500">({a.type})</span>
                 </div>
-                <div className="text-zinc-500">
+                <div className="text-zinc-500 [font-variant-numeric:tabular-nums]">
                   start {formatCents(a.startingBalanceCents)} on {a.startingBalanceDate}
                 </div>
               </li>

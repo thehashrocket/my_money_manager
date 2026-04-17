@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import type { ZodError } from "zod";
 import { db, schema } from "@/db";
 import { commitImport } from "@/lib/importBatch";
 import {
@@ -9,28 +10,28 @@ import {
   readPendingImport,
   savePendingImport,
 } from "@/lib/pendingImport";
+import { validateCreateAccountInput } from "@/lib/import/validateCreateAccountInput";
+import { validateImportIdInput } from "@/lib/import/validateImportIdInput";
+import { validateUploadCsvInput } from "@/lib/import/validateUploadCsvInput";
+
+function rejectionMessage(error: ZodError): string {
+  return error.issues
+    .map((i) => `${i.path.map(String).join(".") || "(input)"}: ${i.message}`)
+    .join("; ");
+}
 
 export async function createAccountAction(formData: FormData): Promise<void> {
-  const name = String(formData.get("name") ?? "").trim();
-  const type = String(formData.get("type") ?? "");
-  const startingBalanceRaw = String(formData.get("startingBalance") ?? "").trim();
-  const startingBalanceDate = String(formData.get("startingBalanceDate") ?? "").trim();
-
-  if (!name) throw new Error("Account name is required");
-  if (type !== "checking" && type !== "savings") {
-    throw new Error(`Invalid account type: ${type}`);
+  const parsed = validateCreateAccountInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    throw new Error(`Invalid account input — ${rejectionMessage(parsed.error)}`);
   }
-  const bal = Number(startingBalanceRaw);
-  if (!Number.isFinite(bal)) throw new Error("Invalid starting balance");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startingBalanceDate)) {
-    throw new Error("Starting balance date must be YYYY-MM-DD");
-  }
+  const { name, type, startingBalance, startingBalanceDate } = parsed.data;
 
   db.insert(schema.accounts)
     .values({
       name,
       type,
-      startingBalanceCents: Math.round(bal * 100),
+      startingBalanceCents: Math.round(startingBalance * 100),
       startingBalanceDate,
     })
     .run();
@@ -40,16 +41,11 @@ export async function createAccountAction(formData: FormData): Promise<void> {
 }
 
 export async function uploadCsvAction(formData: FormData): Promise<void> {
-  const accountIdRaw = String(formData.get("accountId") ?? "");
-  const file = formData.get("file");
-  const accountId = Number(accountIdRaw);
-
-  if (!Number.isInteger(accountId) || accountId <= 0) {
-    throw new Error("Please select an account");
+  const parsed = validateUploadCsvInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    throw new Error(`Invalid upload — ${rejectionMessage(parsed.error)}`);
   }
-  if (!(file instanceof File) || file.size === 0) {
-    throw new Error("Please choose a CSV file");
-  }
+  const { accountId, file } = parsed.data;
 
   const csv = await file.text();
   const pending = savePendingImport({
@@ -62,7 +58,12 @@ export async function uploadCsvAction(formData: FormData): Promise<void> {
 }
 
 export async function confirmImportAction(formData: FormData): Promise<void> {
-  const id = String(formData.get("id") ?? "");
+  const parsed = validateImportIdInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    throw new Error(`Invalid import id — ${rejectionMessage(parsed.error)}`);
+  }
+  const { id } = parsed.data;
+
   const pending = readPendingImport(id);
   if (!pending) throw new Error("Pending import not found or expired");
 
@@ -82,7 +83,10 @@ export async function confirmImportAction(formData: FormData): Promise<void> {
 }
 
 export async function cancelImportAction(formData: FormData): Promise<void> {
-  const id = String(formData.get("id") ?? "");
-  deletePendingImport(id);
+  const parsed = validateImportIdInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    throw new Error(`Invalid import id — ${rejectionMessage(parsed.error)}`);
+  }
+  deletePendingImport(parsed.data.id);
   redirect("/import");
 }
