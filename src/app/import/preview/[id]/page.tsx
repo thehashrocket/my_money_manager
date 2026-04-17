@@ -63,13 +63,13 @@ export default async function PreviewPage({
 
       {preview.errors.length > 0 && (
         <section className="space-y-2">
-          <h2 className="text-sm font-medium text-red-700">
+          <h2 className="text-sm font-medium text-red-800">
             Parse errors ({preview.errors.length})
           </h2>
           <ul className="divide-y divide-zinc-200 rounded-md border border-red-200 bg-red-50 text-xs">
             {preview.errors.slice(0, 20).map((e) => (
               <li key={`${e.rowIndex}-${e.reason}`} className="px-3 py-2">
-                <span className="font-mono text-red-700">row {e.rowIndex}</span> —{" "}
+                <span className="font-mono text-red-800">row {e.rowIndex}</span> —{" "}
                 {e.reason}
                 <div className="mt-1 truncate font-mono text-zinc-500">{e.raw}</div>
               </li>
@@ -109,8 +109,8 @@ export default async function PreviewPage({
                   <td className="px-2 py-1 font-mono">{r.rowIndex}</td>
                   <td className="px-2 py-1 font-mono">{r.date}</td>
                   <td
-                    className={`px-2 py-1 font-mono ${
-                      r.amountCents < 0 ? "text-red-700" : "text-emerald-700"
+                    className={`px-2 py-1 font-mono [font-variant-numeric:tabular-nums] ${
+                      r.amountCents < 0 ? "text-red-800" : "text-emerald-800"
                     }`}
                   >
                     {formatCents(r.amountCents)}
@@ -129,7 +129,7 @@ export default async function PreviewPage({
                     ) : r.isPending ? (
                       <span className="text-amber-700">pending</span>
                     ) : (
-                      <span className="text-emerald-700">new</span>
+                      <span className="text-emerald-800">new</span>
                     )}
                   </td>
                 </tr>

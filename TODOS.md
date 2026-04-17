@@ -63,10 +63,10 @@ Tracks (parallelizable once spine is in):
   - [x] iOS autozoom fix folded in (`text-base sm:text-sm` on the explicit input — see P3 below)
 
 Scope guardrails:
-- [ ] Zod on all new Server Actions + backfill `createAccountAction`
+- [x] Zod on all new Server Actions + backfill `createAccountAction` (incl. file-size cap on `uploadCsvAction`, 1e10 balance reject, UUID guard on confirm/cancel, snapshot validator on `undoBulkCategorizeAction`)
 - [ ] No Recharts, no savings-goals UI, no split transactions (per V1 exclusions)
 - [ ] shadcn components locked: DataTable (`/budget`), Dialog (allocate), Sonner (toasts), Combobox (inline picker)
-- [ ] `font-variant-numeric: tabular-nums` on every cents cell; WCAG AAA contrast on red/green tokens
+- [x] `font-variant-numeric: tabular-nums` on every cents cell; WCAG AAA contrast on red/green tokens (light-mode `--destructive` bumped to L≈0.40; all money cells use `red-800`/`emerald-800` with `dark:*-400`)
 - [ ] Mobile (<640px) collapses `/budget` table to stacked cards; parens `($42)` for negatives everywhere
 
 Checkpoint:
@@ -80,7 +80,7 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 
 - [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)
 - [ ] **P2** — `linkTransferPairs` pulls every same-day unpaired row across every account on each import. O(n²) within a day. Fine today; revisit if an account's same-day row count gets large. (`src/lib/importBatch.ts:212`)
-- [ ] **P3** — Server Action validation hardening: `uploadCsvAction` has no file-size cap; `createAccountAction` accepts `1e10` as a finite balance. Single-user local app, so low risk — but worth tightening. (`src/app/import/actions.ts:23,42`)
+- [x] **P3** — Server Action validation hardening: `uploadCsvAction` now caps at 10 MB via `validateUploadCsvInput`; `createAccountAction` rejects `1e10` via a $100M upper bound in `validateCreateAccountInput`. Both now use `Object.fromEntries(formData)` → Zod `safeParse` pattern matching `validateAllocateInput`. Also closes out `confirmImportAction`/`cancelImportAction` (UUID regex guard).
 
 ## Follow-ups from v0.4.0 ship review
 

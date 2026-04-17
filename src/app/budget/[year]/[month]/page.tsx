@@ -97,7 +97,7 @@ function Hero({ summary }: { summary: MonthViewSummary }) {
       ? "text-destructive"
       : remaining === 0
         ? "text-muted-foreground"
-        : "text-emerald-700 dark:text-emerald-400";
+        : "text-emerald-800 dark:text-emerald-400";
   return (
     <div className="py-2">
       <div className="text-xs uppercase tracking-wide text-muted-foreground">
@@ -269,7 +269,7 @@ function RemainingCell({ leaf }: { leaf: LeafRow }) {
     ? "text-destructive"
     : leaf.remainingCents === 0
       ? "text-muted-foreground"
-      : "text-emerald-700 dark:text-emerald-400";
+      : "text-emerald-800 dark:text-emerald-400";
   const pct =
     effective > 0
       ? Math.min(100, Math.max(0, (leaf.spentCents / effective) * 100))
@@ -327,7 +327,7 @@ function MobileCards({ view }: { view: MonthView }) {
                     className={
                       leaf.isOverspent
                         ? "text-destructive"
-                        : "text-emerald-700 dark:text-emerald-400"
+                        : "text-emerald-800 dark:text-emerald-400"
                     }
                   >
                     {formatCents(leaf.remainingCents)}
