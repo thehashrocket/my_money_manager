@@ -39,6 +39,6 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 
 ## Follow-ups from v0.2.0 ship review
 
-- [ ] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)
+- [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)
 - [ ] **P2** — `linkTransferPairs` pulls every same-day unpaired row across every account on each import. O(n²) within a day. Fine today; revisit if an account's same-day row count gets large. (`src/lib/importBatch.ts:212`)
 - [ ] **P3** — Server Action validation hardening: `uploadCsvAction` has no file-size cap; `createAccountAction` accepts `1e10` as a finite balance. Single-user local app, so low risk — but worth tightening. (`src/app/import/actions.ts:23,42`)
