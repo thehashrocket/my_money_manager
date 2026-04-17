@@ -84,7 +84,7 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 
 ## Follow-ups from v0.4.0 ship review
 
-- [ ] **P0** — `parseCsv.test.ts` fails at test-load time with ENOENT on `.context/attachments/sample-csv.csv` (the fixture lives under a gitignored path per CLAUDE.md). Either bundle a safe sample fixture into the repo under `src/lib/__fixtures__/` or guard the test with `describe.skipIf(!existsSync(fixturePath))` so CI/local runs stay green without leaking real data. Pre-existing; not introduced by Track B. (`src/lib/parseCsv.test.ts`)
+- [x] **P0** — `parseCsv.test.ts` fails at test-load time with ENOENT on `.context/attachments/sample-csv.csv`. Resolved by bundling synthetic fixtures into `src/lib/__fixtures__/` (`sample-checking.csv`, `sample-savings.csv`). Real-data assertions replaced with fixture-backed assertions covering every parser branch. Also added `engines: node >=24` + `engine-strict=true` so wrong-Node shells fail loudly instead of silently ABI-breaking `better-sqlite3`.
 
 ## Follow-ups from v0.3.0 ship review
 
