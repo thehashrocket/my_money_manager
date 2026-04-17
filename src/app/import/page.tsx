@@ -1,11 +1,6 @@
 import { db, schema } from "@/db";
+import { formatCents } from "@/lib/money";
 import { createAccountAction, uploadCsvAction } from "./actions";
-
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? "-" : "";
-  const abs = Math.abs(cents);
-  return `${sign}$${(abs / 100).toFixed(2)}`;
-}
 
 export default function ImportPage() {
   const accounts = db.select().from(schema.accounts).all();

@@ -111,14 +111,21 @@ export function buildPreview(
   };
 }
 
-export type CommitResult = {
-  batchId: number;
-  insertedCount: number;
-  duplicateCount: number;
-  errorCount: number;
-  pairsLinked: number;
-  snapshot: SnapshotResult;
-};
+export type CommitResult =
+  | {
+      status: "empty";
+      duplicateCount: number;
+      errorCount: number;
+    }
+  | {
+      status: "committed";
+      batchId: number;
+      insertedCount: number;
+      duplicateCount: number;
+      errorCount: number;
+      pairsLinked: number;
+      snapshot: SnapshotResult;
+    };
 
 export function commitImport(
   opts: { accountId: number; filename: string; csvText: string },
@@ -128,9 +135,11 @@ export function commitImport(
   const toInsert = preview.rows.filter((r) => !r.duplicate);
 
   if (toInsert.length === 0) {
-    throw new Error(
-      `nothing to import: ${preview.totals.duplicates} duplicates, ${preview.totals.errors} errors`,
-    );
+    return {
+      status: "empty",
+      duplicateCount: preview.totals.duplicates,
+      errorCount: preview.totals.errors,
+    };
   }
 
   const snapshot = createSnapshot(DB_PATH);
@@ -177,6 +186,7 @@ export function commitImport(
   const pairsLinked = linkTransferPairs(batchId, db);
 
   return {
+    status: "committed",
     batchId,
     insertedCount: toInsert.length,
     duplicateCount: preview.totals.duplicates,

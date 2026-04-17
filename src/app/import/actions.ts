@@ -72,6 +72,10 @@ export async function confirmImportAction(formData: FormData): Promise<void> {
     csvText: pending.csv,
   });
 
+  if (result.status === "empty") {
+    redirect(`/import/preview/${id}`);
+  }
+
   deletePendingImport(id);
   revalidatePath("/import");
   redirect(`/import/success/${result.batchId}`);

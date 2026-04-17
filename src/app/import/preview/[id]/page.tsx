@@ -2,14 +2,9 @@ import { notFound } from "next/navigation";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { buildPreview } from "@/lib/importBatch";
+import { formatCents } from "@/lib/money";
 import { readPendingImport } from "@/lib/pendingImport";
 import { cancelImportAction, confirmImportAction } from "../../actions";
-
-function formatCents(cents: number): string {
-  const sign = cents < 0 ? "-" : "";
-  const abs = Math.abs(cents);
-  return `${sign}$${(abs / 100).toFixed(2)}`;
-}
 
 export default async function PreviewPage({
   params,
@@ -52,6 +47,19 @@ export default async function PreviewPage({
         <Stat label="pending" value={preview.totals.pendingRows} />
         <Stat label="errors" value={preview.totals.errors} />
       </section>
+
+      {!canCommit && (
+        <section className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="font-medium">Nothing new to import</div>
+          <div className="mt-1 text-amber-800">
+            {preview.totals.parsedRows === 0
+              ? "No rows were parsed from this file."
+              : preview.totals.duplicates === preview.totals.parsedRows
+                ? `All ${preview.totals.duplicates} rows are already in this account. Cancel to start over.`
+                : `${preview.totals.duplicates} duplicate${preview.totals.duplicates === 1 ? "" : "s"}, ${preview.totals.errors} error${preview.totals.errors === 1 ? "" : "s"}, and no new rows. Cancel to start over.`}
+          </div>
+        </section>
+      )}
 
       {preview.errors.length > 0 && (
         <section className="space-y-2">
@@ -137,16 +145,17 @@ export default async function PreviewPage({
       </section>
 
       <section className="flex items-center gap-3">
-        <form action={confirmImportAction}>
-          <input type="hidden" name="id" value={pending.id} />
-          <button
-            type="submit"
-            disabled={!canCommit}
-            className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Confirm import ({preview.totals.newRows} rows)
-          </button>
-        </form>
+        {canCommit && (
+          <form action={confirmImportAction}>
+            <input type="hidden" name="id" value={pending.id} />
+            <button
+              type="submit"
+              className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800"
+            >
+              Confirm import ({preview.totals.newRows} rows)
+            </button>
+          </form>
+        )}
         <form action={cancelImportAction}>
           <input type="hidden" name="id" value={pending.id} />
           <button

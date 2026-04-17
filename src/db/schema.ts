@@ -134,6 +134,7 @@ export const budgetPeriods = sqliteTable(
     year: integer("year").notNull(),
     month: integer("month").notNull(),
     allocatedCents: integer("allocated_cents").notNull(),
+    effectiveAllocationCents: integer("effective_allocation_cents"),
     createdAt,
     updatedAt,
   },
