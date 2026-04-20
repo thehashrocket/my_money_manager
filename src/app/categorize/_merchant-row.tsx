@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { formatCents } from "@/lib/money";
 import type { MerchantGroup } from "@/lib/categorize/loadMerchantGroups";
 import type { LeafCategory } from "@/lib/categories";
+import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 
 type Props = {
@@ -103,23 +104,15 @@ export function MerchantRow({
       <label className="sr-only" htmlFor={`cat-${group.normalizedMerchant}`}>
         Category for {group.normalizedMerchant}
       </label>
-      <select
+      <CategoryCombobox
         id={`cat-${group.normalizedMerchant}`}
         name="categoryId"
         value={categoryId}
-        onChange={(e) => setCategoryId(e.target.value)}
-        className="h-8 min-w-[10rem] rounded-md border border-border bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        onValueChange={setCategoryId}
+        categories={leafCategories}
         required
-      >
-        <option value="" disabled>
-          Pick a category…
-        </option>
-        {leafCategories.map((cat) => (
-          <option key={cat.id} value={cat.id}>
-            {cat.name}
-          </option>
-        ))}
-      </select>
+        className="min-w-[10rem]"
+      />
       <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <input
           type="checkbox"
