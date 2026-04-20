@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ledger Paper — design system · my money manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="design/tokens.css">
+<link rel="stylesheet" href="design/primitives.css">
+<style>
+  /* Page-only layout */
+  .shell { max-width: 1100px; margin: 0 auto; padding: 48px 32px 120px; }
+  .hero {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px; margin-bottom: 40px;
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+  }
+  .hero h1 { font-family: var(--font-display); font-size: 56px; line-height: 1; margin: 0 0 12px; letter-spacing: -0.02em; font-weight: 400; }
+  .hero h1 em { font-style: italic; color: var(--accent-terracotta); font-weight: 300; }
+  .hero p { margin: 0; color: var(--fg-muted); max-width: 52ch; font-size: var(--text-md); }
+  .hero .meta { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); line-height: 1.6; text-align: right; }
+
+  section { margin-top: 64px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; gap: 16px; }
+  .section-head h2 {
+    font-family: var(--font-display); font-size: var(--text-xl); font-weight: 400; margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .section-head .kicker {
+    font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle);
+    letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .section-note { color: var(--fg-muted); font-size: var(--text-sm); max-width: 60ch; margin: -8px 0 20px; }
+
+  /* Color swatches */
+  .swatch-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  .swatch { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--bg-raised); }
+  .swatch .well { aspect-ratio: 4/3; }
+  .swatch .meta { padding: 10px 12px; border-top: 1px solid var(--border); }
+  .swatch .name { font-size: var(--text-sm); font-weight: 500; }
+  .swatch .val { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); margin-top: 2px; }
+
+  /* Type specimens */
+  .type-row { display: grid; grid-template-columns: 140px 1fr 160px; gap: 24px; padding: 18px 0; border-bottom: 1px solid var(--rule-faint); align-items: baseline; }
+  .type-row .label { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); letter-spacing: 0.08em; text-transform: uppercase; }
+  .type-row .meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); text-align: right; }
+
+  /* Money specimens */
+  .money-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .money-ex { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 16px 18px; background: var(--bg-raised); }
+  .money-ex .amt { font-family: var(--font-mono); font-size: 22px; letter-spacing: -0.02em; }
+  .money-ex .cap { font-size: var(--text-xs); color: var(--fg-subtle); margin-top: 6px; }
+
+  /* Component grid */
+  .comp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .demo { border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; background: var(--bg-raised); }
+  .demo-title { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px; }
+
+  /* Spacing scale */
+  .space-row { display: flex; align-items: center; gap: 16px; padding: 6px 0; font-family: var(--font-mono); font-size: var(--text-xs); }
+  .space-bar { background: color-mix(in oklch, var(--accent-terracotta) 35%, transparent); height: 14px; border-radius: 3px; }
+
+  /* Radii */
+  .radii-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .radii-row .r { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .radii-row .r .box { width: 68px; height: 68px; background: var(--bg-inset); border: 1px solid var(--border); }
+
+  /* Shadow demo */
+  .shadow-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .shadow-demo { background: var(--bg-raised); border-radius: var(--radius-md); padding: 28px; text-align: center; font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); }
+
+  /* States */
+  .states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .state { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 28px 18px; background: var(--bg-raised); text-align: center; font-size: var(--text-sm); color: var(--fg-muted); }
+  .state .title { font-family: var(--font-display); font-size: var(--text-md); color: var(--fg); margin-bottom: 6px; }
+  .state .symbol { display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:999px;margin-bottom:10px;background:var(--bg-inset);font-family:var(--font-mono);font-size:14px;color:var(--fg-muted);}
+
+  /* Theme toggle */
+  .theme-toggle {
+    position: fixed; top: 20px; right: 24px;
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--bg-raised); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px; font-family: var(--font-mono); font-size: 11px; z-index: 20;
+  }
+  .theme-toggle button {
+    border: none; background: transparent; font: inherit; padding: 4px 12px;
+    border-radius: 999px; cursor: pointer; color: var(--fg-muted);
+  }
+  .theme-toggle button.active { background: var(--accent-terracotta); color: var(--primary-fg); }
+
+  /* Ruled intro panel */
+  .intro-panel {
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    background: var(--bg-raised); padding: 24px 28px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 28px;
+    margin-top: 16px;
+  }
+  .intro-panel .pill {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle);
+    letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px;
+  }
+  .intro-panel h3 { font-family: var(--font-display); font-size: 18px; margin: 0 0 6px; font-weight: 400; }
+  .intro-panel p { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); }
+
+  /* Footer */
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); }
+
+  @media (max-width: 820px) {
+    .swatch-grid { grid-template-columns: repeat(2, 1fr); }
+    .money-grid, .shadow-grid { grid-template-columns: 1fr; }
+    .comp-grid { grid-template-columns: 1fr; }
+    .intro-panel { grid-template-columns: 1fr; }
+    .type-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body class="paper-grain">
+
+<div class="theme-toggle" id="themeToggle">
+  <button data-mode="light" class="active">☀ Light</button>
+  <button data-mode="dark">☾ Dark</button>
+</div>
+
+<div class="shell">
+
+  <div class="hero">
+    <div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--fg-subtle);letter-spacing:0.16em;text-transform:uppercase;margin-bottom:10px;">My Money Manager · Design System v0.1</div>
+      <h1>Ledger <em>Paper</em></h1>
+      <p>A warm, analog design language for a local-first budgeting tool. Borrowed from paper ledgers, bank tickers, and cheap notebooks — kept quiet, kept personal.</p>
+    </div>
+    <div class="meta">
+      approved · 2026-04-20<br>
+      owner · single-user<br>
+      stack · tailwind v4 · shadcn
+    </div>
+  </div>
+
+  <div class="intro-panel">
+    <div>
+      <div class="pill">Principle 01</div>
+      <h3>Paper before pixels</h3>
+      <p>Warm off-whites, hand-ruled dividers, a whisper of texture. Nothing glossy, nothing corporate. It should feel like a notebook you actually use.</p>
+    </div>
+    <div>
+      <div class="pill">Principle 02</div>
+      <h3>Numbers are the hero</h3>
+      <p>Geist Mono with tabular figures for every dollar amount. Color used sparingly — banking-parens for negatives, ledger-green restraint for positives.</p>
+    </div>
+    <div>
+      <div class="pill">Principle 03</div>
+      <h3>Quiet, but opinionated</h3>
+      <p>One terracotta accent for primary action. One ledger-green for gain, one red-brown for loss. That&rsquo;s it. Chroma held at 0.09 across the palette.</p>
+    </div>
+  </div>
+
+  <!-- ============================================= TYPE -->
+  <section>
+    <div class="section-head">
+      <h2>Type</h2>
+      <div class="kicker">01 · Newsreader + Geist + Geist Mono</div>
+    </div>
+    <div class="section-note">Three families, clear roles. Display serif reserved for headings and moments of warmth. UI sans everywhere else. Mono for money, codes, and timestamps.</div>
+
+    <div class="type-row">
+      <div class="label">Display / 3xl</div>
+      <div class="display" style="font-size:var(--text-3xl);line-height:1;">March allowance, still intact.</div>
+      <div class="meta">Newsreader 400<br>44 / 48 · −0.015em</div>
+    </div>
+    <div class="type-row">
+      <div class="label">Display / 2xl</div>
+      <div class="display" style="font-size:var(--text-2xl);line-height:1.1;">An envelope for every dollar</div>
+      <div class="meta">Newsreader 400<br>32 / 36</div>
+    </div>
+    <div class="type-row">
+      <div class="label">Display italic / xl</div>
+      <div class="display" style="font-size:var(--text-xl);font-style:italic;">Groceries — over by $12.40</div>
+      <div class="meta">Newsreader italic<br>24 / 28</div>
+    </div>
+    <div class="type-row">
+      <div class="label">UI / lg</div>
+      <div style="font-size:var(--text-lg);font-weight:500;">Transactions this week</div>
+      <div class="meta">Geist 500<br>20 / 28</div>
+    </div>
+    <div class="type-row">
+      <div class="label">UI / base</div>
+      <div style="font-size:var(--text-base);">Body copy sits at 15px with 1.5 leading for comfortable reading in dense table contexts without feeling bank-corporate.</div>
+      <div class="meta">Geist 400<br>15 / 22</div>
+    </div>
+    <div class="type-row">
+      <div class="label">UI / sm</div>
+      <div style="font-size:var(--text-sm);color:var(--fg-muted);">Secondary metadata · muted by default · used for helper text, row subtitles, timestamps</div>
+      <div class="meta">Geist 400<br>13 / 20</div>
+    </div>
+    <div class="type-row">
+      <div class="label">Mono / base</div>
+      <div class="mono" style="font-size:15px;">$3,482.19  ·  2026-04-17  ·  sha1:a9c4f12</div>
+      <div class="meta">Geist Mono 400<br>tabular · ss01</div>
+    </div>
+    <div class="type-row">
+      <div class="label">Label · caps</div>
+      <div style="font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.12em;color:var(--fg-muted);">Uncategorized · Backlog · This Month</div>
+      <div class="meta">Geist Mono 500<br>11 / 14 · 0.12em</div>
+    </div>
+  </section>
+
+  <!-- ============================================= COLOR -->
+  <section>
+    <div class="section-head">
+      <h2>Palette</h2>
+      <div class="kicker">02 · oklch · paper + ink + 4 accents</div>
+    </div>
+    <div class="section-note">All accents share chroma 0.09 — none shouts louder than another. Paper and ink are warm-neutral (hue 85/60) so whites read ivory, not grey.</div>
+
+    <div class="rule-label" style="margin-bottom:14px;">Paper</div>
+    <div class="swatch-grid">
+      <div class="swatch"><div class="well" style="background:var(--paper-0);"></div><div class="meta"><div class="name">paper-0</div><div class="val">oklch(0.995 0.004 85)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--paper-1);"></div><div class="meta"><div class="name">paper-1 · bg</div><div class="val">oklch(0.985 0.008 85)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--paper-2);"></div><div class="meta"><div class="name">paper-2 · inset</div><div class="val">oklch(0.965 0.010 85)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--paper-3);"></div><div class="meta"><div class="name">paper-3</div><div class="val">oklch(0.935 0.012 85)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--paper-4);"></div><div class="meta"><div class="name">paper-4</div><div class="val">oklch(0.895 0.014 85)</div></div></div>
+    </div>
+
+    <div class="rule-label" style="margin:28px 0 14px;">Ink</div>
+    <div class="swatch-grid">
+      <div class="swatch"><div class="well" style="background:var(--ink-1);"></div><div class="meta"><div class="name">ink-1 · fg</div><div class="val">oklch(0.22 0.015 60)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--ink-2);"></div><div class="meta"><div class="name">ink-2 · muted</div><div class="val">oklch(0.42 0.012 60)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--ink-3);"></div><div class="meta"><div class="name">ink-3 · subtle</div><div class="val">oklch(0.58 0.010 60)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--ink-4);"></div><div class="meta"><div class="name">ink-4 · disabled</div><div class="val">oklch(0.72 0.008 60)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--border);"></div><div class="meta"><div class="name">rule · regular</div><div class="val">ink-1 @ 14%</div></div></div>
+    </div>
+
+    <div class="rule-label" style="margin:28px 0 14px;">Accents · chroma 0.09</div>
+    <div class="swatch-grid">
+      <div class="swatch"><div class="well" style="background:var(--accent-terracotta);"></div><div class="meta"><div class="name">terracotta · primary</div><div class="val">oklch(0.62 0.09 45)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--accent-ledger);"></div><div class="meta"><div class="name">ledger · positive</div><div class="val">oklch(0.55 0.09 155)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--accent-redbrown);"></div><div class="meta"><div class="name">redbrown · negative</div><div class="val">oklch(0.52 0.09 25)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--accent-amber);"></div><div class="meta"><div class="name">amber · backlog</div><div class="val">oklch(0.72 0.09 75)</div></div></div>
+      <div class="swatch"><div class="well" style="background:var(--accent-indigo);"></div><div class="meta"><div class="name">indigo · info</div><div class="val">oklch(0.50 0.09 270)</div></div></div>
+    </div>
+  </section>
+
+  <!-- ============================================= MONEY -->
+  <section>
+    <div class="section-head">
+      <h2>Money</h2>
+      <div class="kicker">03 · display conventions</div>
+    </div>
+    <div class="section-note">Negatives wrap in parentheses — banking tradition, no minus ambiguity. Positives drop the plus sign. Zero goes muted. Color is restrained: ledger-green only for gains you want to feel good about (deposits, under-budget); red-brown for overspends and withdrawals in totals, but never for individual transaction rows (most spending is already expected).</div>
+
+    <div class="money-grid">
+      <div class="money-ex">
+        <div class="amt money-pos">$3,482.19</div>
+        <div class="cap">positive · deposits · savings delta · under-budget</div>
+      </div>
+      <div class="money-ex">
+        <div class="amt money-neg">($1,204.50)</div>
+        <div class="cap">negative · parens · used for totals + overspend</div>
+      </div>
+      <div class="money-ex">
+        <div class="amt money-zero">$0.00</div>
+        <div class="cap">zero · muted · never red</div>
+      </div>
+      <div class="money-ex">
+        <div class="amt">$84.22</div>
+        <div class="cap">neutral · transaction rows · no color</div>
+      </div>
+      <div class="money-ex">
+        <div class="amt"><span style="color:var(--fg-subtle)">$</span>42<span style="color:var(--fg-subtle)">.07</span></div>
+        <div class="cap">dense tables · decimal + symbol de-emphasized</div>
+      </div>
+      <div class="money-ex">
+        <div class="amt mono" style="color:var(--accent-amber);">$182<span style="font-size:14px;">.00 <span style="color:var(--fg-subtle)">over</span></span></div>
+        <div class="cap">warning · approaching or over envelope</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================= SPACING + RADII + SHADOW -->
+  <section>
+    <div class="section-head">
+      <h2>Spacing, radii, shadow</h2>
+      <div class="kicker">04 · scale</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns: 1.2fr 1fr; gap: 40px;">
+      <div>
+        <div class="rule-label" style="margin-bottom:10px;">Spacing · 4 / 8 / 12 / 16 / 20 / 28 / 40 / 56</div>
+        <div class="space-row"><div style="width: 34px;">1</div><div class="space-bar" style="width:4px;"></div><div style="color:var(--fg-subtle);">4px · hairline gap</div></div>
+        <div class="space-row"><div style="width: 34px;">2</div><div class="space-bar" style="width:8px;"></div><div style="color:var(--fg-subtle);">8px · inline gap</div></div>
+        <div class="space-row"><div style="width: 34px;">3</div><div class="space-bar" style="width:12px;"></div><div style="color:var(--fg-subtle);">12px · compact stack</div></div>
+        <div class="space-row"><div style="width: 34px;">4</div><div class="space-bar" style="width:16px;"></div><div style="color:var(--fg-subtle);">16px · base</div></div>
+        <div class="space-row"><div style="width: 34px;">5</div><div class="space-bar" style="width:20px;"></div><div style="color:var(--fg-subtle);">20px · card padding</div></div>
+        <div class="space-row"><div style="width: 34px;">6</div><div class="space-bar" style="width:28px;"></div><div style="color:var(--fg-subtle);">28px · section body</div></div>
+        <div class="space-row"><div style="width: 34px;">7</div><div class="space-bar" style="width:40px;"></div><div style="color:var(--fg-subtle);">40px · section gap</div></div>
+        <div class="space-row"><div style="width: 34px;">8</div><div class="space-bar" style="width:56px;"></div><div style="color:var(--fg-subtle);">56px · page margin</div></div>
+      </div>
+      <div>
+        <div class="rule-label" style="margin-bottom:14px;">Radii · soft, never pill</div>
+        <div class="radii-row">
+          <div class="r"><div class="box" style="border-radius:var(--radius-xs)"></div><div class="mono" style="font-size:10.5px;color:var(--fg-subtle);">xs 4</div></div>
+          <div class="r"><div class="box" style="border-radius:var(--radius-sm)"></div><div class="mono" style="font-size:10.5px;color:var(--fg-subtle);">sm 6</div></div>
+          <div class="r"><div class="box" style="border-radius:var(--radius-md)"></div><div class="mono" style="font-size:10.5px;color:var(--fg-subtle);">md 10</div></div>
+          <div class="r"><div class="box" style="border-radius:var(--radius-lg)"></div><div class="mono" style="font-size:10.5px;color:var(--fg-subtle);">lg 14</div></div>
+          <div class="r"><div class="box" style="border-radius:var(--radius-xl)"></div><div class="mono" style="font-size:10.5px;color:var(--fg-subtle);">xl 20</div></div>
+        </div>
+
+        <div class="rule-label" style="margin:28px 0 14px;">Shadow · whisper only</div>
+        <div class="shadow-grid">
+          <div class="shadow-demo" style="box-shadow:var(--shadow-hair);">hair</div>
+          <div class="shadow-demo" style="box-shadow:var(--shadow-soft);">soft</div>
+          <div class="shadow-demo" style="box-shadow:var(--shadow-lift);">lift</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================= COMPONENTS -->
+  <section>
+    <div class="section-head">
+      <h2>Components</h2>
+      <div class="kicker">05 · primitives</div>
+    </div>
+
+    <div class="comp-grid">
+      <div class="demo">
+        <div class="demo-title">Buttons</div>
+        <div class="row gap-2" style="flex-wrap:wrap;">
+          <button class="btn btn-primary">Confirm import</button>
+          <button class="btn btn-outline">Cancel</button>
+          <button class="btn btn-ghost">Reset</button>
+          <button class="btn btn-primary btn-sm">Save</button>
+          <button class="btn btn-outline btn-sm">Skip</button>
+        </div>
+      </div>
+
+      <div class="demo">
+        <div class="demo-title">Chips</div>
+        <div class="row gap-2" style="flex-wrap:wrap;">
+          <span class="chip chip-amber"><span class="chip-dot"></span>12 uncategorized</span>
+          <span class="chip chip-ledger"><span class="chip-dot"></span>linked transfer</span>
+          <span class="chip"><span class="chip-dot"></span>checking · star one</span>
+          <span class="chip">savings</span>
+          <span class="chip">imported · 2026-04-17</span>
+        </div>
+      </div>
+
+      <div class="demo">
+        <div class="demo-title">Form · text + select</div>
+        <div class="stack gap-3">
+          <div class="field">
+            <label class="field-label">Account</label>
+            <select class="input">
+              <option>Checking · Star One</option>
+              <option>Savings · Star One</option>
+            </select>
+            <div class="field-hint">Rows will dedupe against this account's prior imports.</div>
+          </div>
+          <div class="field">
+            <label class="field-label">Starting balance</label>
+            <input class="input" value="$3,482.19" />
+          </div>
+        </div>
+      </div>
+
+      <div class="demo">
+        <div class="demo-title">Envelope card</div>
+        <div class="stack gap-3">
+          <div class="envelope">
+            <div class="envelope-name">
+              <span class="cat">Groceries</span>
+              <span class="pct">68%</span>
+            </div>
+            <div class="envelope-bar"><div class="envelope-fill" style="width:68%;"></div></div>
+            <div class="envelope-amounts">
+              <span><span class="spent">$408.21</span> spent</span>
+              <span>$191.79 left of $600</span>
+            </div>
+          </div>
+          <div class="envelope">
+            <div class="envelope-name">
+              <span class="cat">Dining out</span>
+              <span class="pct" style="color:var(--accent-redbrown);">112%</span>
+            </div>
+            <div class="envelope-bar"><div class="envelope-fill over" style="width:100%;"></div></div>
+            <div class="envelope-amounts">
+              <span><span class="spent money-neg">($168.40)</span> spent</span>
+              <span class="money-neg">over by $18.40</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="demo" style="grid-column: span 2;">
+        <div class="demo-title">Transaction row · table</div>
+        <table class="table">
+          <thead><tr>
+            <th style="width:100px;">Date</th>
+            <th>Description</th>
+            <th style="width:200px;">Category</th>
+            <th style="width:120px;" class="num">Amount</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono subtle">04-17</td>
+              <td>Safeway #2930 <span class="subtle" style="font-size:11px;">· merchant normalized</span></td>
+              <td><span class="chip">Groceries</span></td>
+              <td class="num">$84.22</td>
+            </tr>
+            <tr>
+              <td class="mono subtle">04-17</td>
+              <td>Transfer to Savings <span class="chip chip-ledger" style="margin-left:6px;"><span class="chip-dot"></span>paired</span></td>
+              <td><span class="subtle">—</span></td>
+              <td class="num money-neg">($250.00)</td>
+            </tr>
+            <tr>
+              <td class="mono subtle">04-16</td>
+              <td>DIRECT DEPOSIT — Employer Inc</td>
+              <td><span class="chip">Income</span></td>
+              <td class="num money-pos">$2,140.00</td>
+            </tr>
+            <tr>
+              <td class="mono subtle">04-16</td>
+              <td>SP SHOPIFY *A-ROASTER</td>
+              <td><span class="chip chip-amber"><span class="chip-dot"></span>needs category</span></td>
+              <td class="num">$18.50</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================= STATES -->
+  <section>
+    <div class="section-head">
+      <h2>States</h2>
+      <div class="kicker">06 · empty · loading · error · success</div>
+    </div>
+    <div class="states">
+      <div class="state">
+        <div class="symbol">∅</div>
+        <div class="title">No transactions yet</div>
+        Import a CSV to get started.
+      </div>
+      <div class="state">
+        <div class="symbol" style="animation: spin 1.4s linear infinite;">◐</div>
+        <div class="title">Parsing 652 rows</div>
+        Snapshotting first…
+      </div>
+      <div class="state" style="border-color: color-mix(in oklch, var(--accent-redbrown) 40%, transparent); background: color-mix(in oklch, var(--accent-redbrown) 6%, var(--bg-raised));">
+        <div class="symbol" style="color:var(--accent-redbrown);background: color-mix(in oklch, var(--accent-redbrown) 15%, transparent);">!</div>
+        <div class="title" style="color:var(--accent-redbrown);">Couldn't parse row 314</div>
+        Malformed Amount column.
+      </div>
+      <div class="state" style="border-color: color-mix(in oklch, var(--accent-ledger) 40%, transparent); background: color-mix(in oklch, var(--accent-ledger) 6%, var(--bg-raised));">
+        <div class="symbol" style="color:var(--accent-ledger);background: color-mix(in oklch, var(--accent-ledger) 15%, transparent);">✓</div>
+        <div class="title" style="color:var(--accent-ledger);">543 rows committed</div>
+        12 transfer pairs linked.
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>my_money_manager · design system · v0.1</div>
+    <div><a href="Nav Prototype.html" style="color:var(--accent-terracotta);text-decoration:none;">→ see it applied in the nav prototype</a></div>
+  </footer>
+
+</div>
+
+<style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+
+<script>
+  const toggle = document.getElementById('themeToggle');
+  const apply = (mode) => {
+    document.documentElement.classList.toggle('dark', mode === 'dark');
+    toggle.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    localStorage.setItem('ledger-theme', mode);
+  };
+  toggle.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return; apply(b.dataset.mode);
+  });
+  apply(localStorage.getItem('ledger-theme') || 'light');
+</script>
+
+</body>
+</html>
