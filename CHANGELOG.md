@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-19
+
+_Weekend 2 scope-guardrail cleanup — the "shadcn components locked" item in TODOS.md is now honored. `/budget` renders through the shadcn `Table` primitive (still server-rendered, still no TanStack). Both inline category pickers on `/categorize` and `/transactions` swap native `<select>` for a searchable shadcn/Base UI `Combobox` via a shared `CategoryCombobox` wrapper that still submits the selected id via the FormData path, so every existing Server Action is untouched._
+
+### Notes
+- Shipped via `/ship`. Coverage scope unchanged from v0.4.0: pure functional + DB-query tier (284 tests across 27 files, identical to v0.4.0). UI components not tested; the three touched pages verified by live browser smoke test including an end-to-end category select → submit → DB write on a seeded row.
+- One pre-landing review fix applied inline before commit: `CategoryCombobox` was passing the full `{value, label}` object as `ComboboxItem.value`, which made Base UI fire `onValueChange` with the object. The wrapper's `typeof next === "string" ? next : ""` guard silently reset selection to empty on every click, so Save stayed disabled. Caught during browser smoke test (not the PLAN source's claim that "browser smoke: all render without console errors"). Fixed by passing `item.value` (string id) as `ComboboxItem.value` and adding `itemToStringLabel` so Base UI resolves the id back to the display label in the input.
+
+### Added
+- **shadcn primitives** (added via `shadcn add`, base-nova style, Base UI variant):
+  - `src/components/ui/table.tsx` — used on `/budget/[year]/[month]`.
+  - `src/components/ui/combobox.tsx` — used by the shared `CategoryCombobox` wrapper.
+  - `src/components/ui/input-group.tsx`, `input.tsx`, `textarea.tsx` — pulled in as Combobox dependencies.
+- **Shared picker** (`src/components/CategoryCombobox.tsx`):
+  - Wraps Base UI's Combobox with the `{value: string, label: string}` shape that both inline categorize rows need. `value={value || null}` so a cleared selection round-trips, `itemToStringLabel` maps id → category name for the input display, `required` / `disabled` pass-through. Name-bearing hidden input keeps FormData submission working unchanged.
+
+### Changed
+- `src/app/budget/[year]/[month]/page.tsx` — raw `<table>` / `<thead>` / `<tbody>` / `<tr>` / `<th>` / `<td>` → shadcn `Table` / `TableHeader` / `TableBody` / `TableRow` / `TableHead` / `TableCell`. Track A's "no TanStack" decision preserved; this is the shadcn primitive, not DataTable. The `MobileCards` stacked-cards path (sm:hidden) is unchanged.
+- `src/app/categorize/_merchant-row.tsx` — native `<select>` → `CategoryCombobox`. Same form, same action, same Sonner Undo toast.
+- `src/app/transactions/_transaction-row.tsx` — same swap as above. iOS autozoom fix (`text-base sm:text-sm`) now inherited from the shared wrapper's ComboboxInput.
+- `TODOS.md` — Weekend 2 scope-guardrails: "shadcn components locked" box is now `[x]` with a note recording that DataTable was intentionally ruled out in favor of the `Table` primitive; the mobile-cards + parens-for-negatives boxes marked `[x]` with anchor references.
+
+### Verified
+- Vitest suite: **284 tests across 27 files** — all green on Node 24 (unchanged from v0.4.0; no new test targets since UI components are out of scope per CLAUDE.md).
+- `tsc --noEmit` clean.
+- `pnpm lint` clean (only pre-existing `@typescript-eslint/no-unused-vars` warning in `loadMonthView.test.ts`, unrelated).
+- Live browser smoke on seeded test transaction:
+  - `/transactions`: open combobox → select "Groceries" → hidden `categoryId` input holds `"2"`, visible input displays `"Groceries"`, Save enables, click Save → Sonner toast "Categorized 1 row as Groceries." + 10s Undo → DB confirms `category_id=2` on the row.
+  - `/categorize`: same flow with "Dining" → hidden value `"4"`, visible label `"Dining"`, Save enables.
+  - `/budget/[year]/[month]`: table renders via shadcn primitive, no console errors at 390px (cards) or 1280px (table).
+
+### Fixed (pre-landing review)
+- `CategoryCombobox` was silently discarding every selection because `ComboboxItem` received the `{value, label}` item object while the wrapper only accepted string values through `onValueChange`. Base UI's `store.state.handleSelection(event, itemValue)` fires `onValueChange` with whatever `ComboboxItem.value` is set to (confirmed by reading `@base-ui/react` internals at `esm/combobox/root/AriaCombobox.js:533` and `esm/combobox/item/ComboboxItem.js:126`), so the wrapper's `typeof next === "string" ? next : ""` fallback always evaluated to `""` and the submit button stayed disabled on every click. Fixed by (a) passing `item.value` (string id) to `ComboboxItem`, and (b) adding `itemToStringLabel={(v) => labelFor(String(v))}` on the Combobox root so the input shows the category name instead of the raw id. Hidden-input serialization via `stringifyAsValue` still submits the id unchanged — the FormData contract with every Server Action is preserved.
+
+### Project decisions (non-code, worth logging)
+- **Shared `CategoryCombobox` over duplicating the Combobox boilerplate twice**: the `/categorize` and `/transactions` pickers share the exact same leaf-category set and the same FormData key (`categoryId`), so a single wrapper keeps the Base UI wiring (controlled `value`, `items`, `itemToStringLabel`, cleared-selection `null` coercion) in one file. Also makes the pre-landing fix a one-line change across both call sites.
+- **Table primitive, not DataTable**: the plan called out "no TanStack" and Track A shipped its own server-rendered table. Swapping to shadcn `Table` keeps that decision while still giving us consistent borders, spacing, and hover tokens.
+
+### Known follow-ups (tracked in TODOS.md)
+- Carry-forwards from earlier ships (P2 TOCTOU on `createOrUpdateRule`, P3 ReDoS on user-authored regex rules, P3 undo-rule-delete edge case, P2 `linkTransferPairs` O(n²)-within-day) are unchanged by this ship.
+
 ## [0.4.0] - 2026-04-17
 
 _Weekend 2 Track B complete — `/transactions` is live. You now have a filtered, paginated list of every non-transfer-paired transaction with an inline category picker, "Remember for all [merchant]" to silently upsert the exact rule, and "Apply to past [merchant]" to fan the chosen category out to every uncategorized sibling. Each Save fires a 10s Sonner Undo that atomically reverses the target row, the applyToPast hits, AND any rule change, all while preserving rows the user has re-touched since. `/budget` and `/categorize` now share the same rollover-invalidation story across the Track A/B/C + D surfaces._

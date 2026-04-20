@@ -65,9 +65,9 @@ Tracks (parallelizable once spine is in):
 Scope guardrails:
 - [x] Zod on all new Server Actions + backfill `createAccountAction` (incl. file-size cap on `uploadCsvAction`, 1e10 balance reject, UUID guard on confirm/cancel, snapshot validator on `undoBulkCategorizeAction`)
 - [ ] No Recharts, no savings-goals UI, no split transactions (per V1 exclusions)
-- [ ] shadcn components locked: DataTable (`/budget`), Dialog (allocate), Sonner (toasts), Combobox (inline picker)
+- [x] shadcn components locked: Table (`/budget`), Dialog (allocate), Sonner (toasts), Combobox (inline picker on `/categorize` + `/transactions` via shared `CategoryCombobox`). No TanStack per Track A decision; `table` is the shadcn primitive, not DataTable.
 - [x] `font-variant-numeric: tabular-nums` on every cents cell; WCAG AAA contrast on red/green tokens (light-mode `--destructive` bumped to L≈0.40; all money cells use `red-800`/`emerald-800` with `dark:*-400`)
-- [ ] Mobile (<640px) collapses `/budget` table to stacked cards; parens `($42)` for negatives everywhere
+- [x] Mobile (<640px) collapses `/budget` table to stacked cards (`MobileCards` in `src/app/budget/[year]/[month]/page.tsx`); parens `($42)` for negatives centralized in `formatCents` (`src/lib/money.ts`) and covered by `src/lib/money.test.ts`
 
 Checkpoint:
 - [ ] **Integration checkpoint:** use the app for 1 week on real data before moving on
