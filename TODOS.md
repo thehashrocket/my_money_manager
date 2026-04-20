@@ -79,7 +79,7 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 ## Follow-ups from v0.2.0 ship review
 
 - [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)
-- [ ] **P2** — `linkTransferPairs` pulls every same-day unpaired row across every account on each import. O(n²) within a day. Fine today; revisit if an account's same-day row count gets large. (`src/lib/importBatch.ts:212`)
+- [x] **P2** — `linkTransferPairs` pulls every same-day unpaired row across every account on each import. Pair-matching bucketed by `(date, |amount|)` in `findTransferPairs`, collapsing the O(n²) same-day scan to O(n). (`src/lib/transferPair.ts`)
 - [x] **P3** — Server Action validation hardening: `uploadCsvAction` now caps at 10 MB via `validateUploadCsvInput`; `createAccountAction` rejects `1e10` via a $100M upper bound in `validateCreateAccountInput`. Both now use `Object.fromEntries(formData)` → Zod `safeParse` pattern matching `validateAllocateInput`. Also closes out `confirmImportAction`/`cancelImportAction` (UUID regex guard).
 
 ## Follow-ups from v0.4.0 ship review
