@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
+import { CategoryCombobox } from "@/components/CategoryCombobox";
 import {
   categorizeTransactionAction,
   undoCategorizeTransactionAction,
@@ -147,23 +148,15 @@ export function TransactionRowForm({
       <label className="sr-only" htmlFor={`cat-${row.id}`}>
         Category for transaction {row.id}
       </label>
-      <select
+      <CategoryCombobox
         id={`cat-${row.id}`}
         name="categoryId"
         value={pickerValue}
-        onChange={(e) => setPickerValue(e.target.value)}
-        className="h-8 min-w-[10rem] rounded-md border border-border bg-background px-2 text-base sm:text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        onValueChange={setPickerValue}
+        categories={leafCategories}
         required
-      >
-        <option value="" disabled>
-          Pick a category…
-        </option>
-        {leafCategories.map((cat) => (
-          <option key={cat.id} value={cat.id}>
-            {cat.name}
-          </option>
-        ))}
-      </select>
+        className="min-w-[10rem]"
+      />
       <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <input
           type="checkbox"

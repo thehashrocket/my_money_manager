@@ -4,21 +4,21 @@ import path from "node:path";
 import { parseStarOneCsv } from "./parseCsv";
 
 const CHECKING = path.join(
-  process.cwd(),
-  ".context/attachments/sample-csv.csv",
+  import.meta.dirname,
+  "__fixtures__/sample-checking.csv",
 );
 const SAVINGS = path.join(
-  process.cwd(),
-  ".context/attachments/sample-savings-csv.csv",
+  import.meta.dirname,
+  "__fixtures__/sample-savings.csv",
 );
 
-describe("parseStarOneCsv — checking sample", () => {
+describe("parseStarOneCsv — checking fixture", () => {
   const text = readFileSync(CHECKING, "utf8");
   const { rows, errors } = parseStarOneCsv(text);
 
-  it("parses 543 data rows with no errors", () => {
+  it("parses 10 data rows with no errors", () => {
     expect(errors).toEqual([]);
-    expect(rows.length).toBe(543);
+    expect(rows.length).toBe(10);
   });
 
   it("preserves pre-correct signs — debits negative, credits positive, never both", () => {
@@ -52,15 +52,21 @@ describe("parseStarOneCsv — checking sample", () => {
     expect(r?.date).toBe("2026-04-16");
     expect(r?.rawMemo).toContain("THE BRASS TAP");
   });
+
+  it("captures check_number when present", () => {
+    const checkDeposit = rows.find((r) => r.checkNumber === "1234");
+    expect(checkDeposit).toBeDefined();
+    expect(checkDeposit?.rawDescription).toBe("DEPOSIT");
+  });
 });
 
-describe("parseStarOneCsv — savings sample", () => {
+describe("parseStarOneCsv — savings fixture", () => {
   const text = readFileSync(SAVINGS, "utf8");
   const { rows, errors } = parseStarOneCsv(text);
 
-  it("parses 109 data rows with no errors", () => {
+  it("parses 3 data rows with no errors", () => {
     expect(errors).toEqual([]);
-    expect(rows.length).toBe(109);
+    expect(rows.length).toBe(3);
   });
 
   it("WITHDRAWAL-OVERDRAFT rows are negative", () => {
