@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, ne, notLike } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { detectSubscriptions, type DetectedSubscription } from "./detectSubscriptions";
 
@@ -25,6 +25,8 @@ export function loadSubscriptions(db: Db = defaultDb): SubscriptionsResult {
       and(
         isNull(schema.transactions.transferPairId),
         eq(schema.transactions.isPending, false),
+        ne(schema.transactions.rawDescription, "DEPOSIT"),
+        notLike(schema.transactions.rawMemo, "POS _%"),
       ),
     )
     .all();
