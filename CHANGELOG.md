@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-04-21
+
+_Integration checkpoint polish. Categorized items on `/categorize` and `/transactions` now fade to 50% opacity so the uncategorized work is obvious at a glance. A new Subscriptions category joins the spending list._
+
+### Added
+- **Subscriptions category** (`drizzle/0005_subscriptions_category.sql`): generic catch-all for subscription-based charges that don't fit the more specific Streaming/Software/News categories.
+
+### Changed
+- **`/categorize`** — merchant rows with an existing rule fade to 50% opacity (`opacity-50 hover:opacity-100`). The uncategorized work rises to the top visually.
+- **`/transactions`** — already-categorized rows fade to 50% opacity, restoring on hover. Uncategorized rows stay full-brightness so the backlog is obvious.
+
 ## [0.7.0] - 2026-04-20
 
 _Weekend 5 — Goals and trend chart ship. You can now create savings goals, track contributions month-by-month, and see a 6-month spending breakdown by category directly on the dashboard. Recharts enters the stack, client-side only, rendering a stacked bar chart from server-fetched data._
