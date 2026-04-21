@@ -151,4 +151,18 @@ describe("detectSubscriptions", () => {
     expect(result[0].firstSeen).toBe("2025-03-01");
     expect(result[0].lastSeen).toBe("2025-04-30");
   });
+
+  it("uses 2% tolerance when it exceeds $0.50 (high-value subscription)", () => {
+    // median = 5000 cents ($50), 2% = 100 cents; tolerance = max(50, 100) = 100
+    // amount of 5095 = diff 95 < 100 → should pass
+    // amount of 5101 = diff 101 > 100 → would fail
+    const txns = [
+      txn("ANNUAL SUB", "2025-01-01", -5000),
+      txn("ANNUAL SUB", "2025-01-31", -5095),
+      txn("ANNUAL SUB", "2025-03-02", -5000),
+    ];
+    const result = detectSubscriptions(txns);
+    expect(result).toHaveLength(1);
+    expect(result[0].medianAmountCents).toBe(5000);
+  });
 });
