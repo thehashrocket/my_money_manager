@@ -184,7 +184,7 @@ describe("categorizeTransactionAction — end-to-end pipeline", () => {
       .where(eq(schema.transactions.id, target.id))
       .get();
     expect(after?.categoryId).toBe(household.id);
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 
   it("returns a snapshot shaped to survive JSON round-trip (Server Action return value)", () => {

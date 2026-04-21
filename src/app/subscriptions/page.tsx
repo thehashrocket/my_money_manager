@@ -1,7 +1,12 @@
 import { connection } from "next/server";
 import { loadSubscriptions } from "@/lib/subscriptions/loadSubscriptions";
 import { formatCents } from "@/lib/money";
-import { dismissSubscriptionAction, restoreSubscriptionAction } from "./actions";
+import {
+  dismissSubscriptionAction,
+  restoreSubscriptionAction,
+  categorizeSubscriptionAction,
+  categorizeAllSubscriptionsAction,
+} from "./actions";
 import type { DetectedSubscription } from "@/lib/subscriptions/detectSubscriptions";
 
 export default async function SubscriptionsPage() {
@@ -23,16 +28,26 @@ export default async function SubscriptionsPage() {
         <>
           {active.length > 0 && (
             <section className="space-y-3">
-              <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                Detected · {active.length}
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                  Detected · {active.length}
+                </h2>
+                <form action={categorizeAllSubscriptionsAction}>
+                  <button
+                    type="submit"
+                    className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                  >
+                    Categorize all
+                  </button>
+                </form>
+              </div>
               <div className="divide-y divide-border rounded-lg border border-border bg-card">
                 {active.map((sub) => (
                   <SubscriptionRow
                     key={sub.normalizedMerchant}
                     sub={sub}
-                    action={dismissSubscriptionAction}
-                    actionLabel="Not a subscription"
+                    categorizeAction={categorizeSubscriptionAction}
+                    dismissAction={dismissSubscriptionAction}
                   />
                 ))}
               </div>
@@ -49,8 +64,8 @@ export default async function SubscriptionsPage() {
                   <SubscriptionRow
                     key={sub.normalizedMerchant}
                     sub={sub}
-                    action={restoreSubscriptionAction}
-                    actionLabel="Restore"
+                    dismissAction={restoreSubscriptionAction}
+                    dismissLabel="Restore"
                   />
                 ))}
               </div>
@@ -64,12 +79,14 @@ export default async function SubscriptionsPage() {
 
 function SubscriptionRow({
   sub,
-  action,
-  actionLabel,
+  categorizeAction,
+  dismissAction,
+  dismissLabel = "Not a subscription",
 }: {
   sub: DetectedSubscription;
-  action: (formData: FormData) => Promise<void>;
-  actionLabel: string;
+  categorizeAction?: (formData: FormData) => Promise<void>;
+  dismissAction: (formData: FormData) => Promise<void>;
+  dismissLabel?: string;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const daysUntil = Math.round(
@@ -107,15 +124,28 @@ function SubscriptionRow({
         </div>
       </div>
 
-      <form action={action}>
-        <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />
-        <button
-          type="submit"
-          className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-        >
-          {actionLabel}
-        </button>
-      </form>
+      <div className="flex items-center gap-2 shrink-0">
+        {categorizeAction && (
+          <form action={categorizeAction}>
+            <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />
+            <button
+              type="submit"
+              className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            >
+              Categorize
+            </button>
+          </form>
+        )}
+        <form action={dismissAction}>
+          <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />
+          <button
+            type="submit"
+            className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          >
+            {dismissLabel}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

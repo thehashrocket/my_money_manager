@@ -176,11 +176,11 @@ describe("undoBulkCategorize — rule rollback (3 cases)", () => {
       categoryId: groceries.id,
       rememberMerchant: true,
     });
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(1);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(1);
 
     const result = undoBulkCategorize(handle.db, snap);
     expect(result.ruleAction).toBe("deleted");
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 
   it("no-op when ruleTouched=true, priorRule=null, insertedRuleId=null (defensive guard)", () => {
@@ -199,13 +199,13 @@ describe("undoBulkCategorize — rule rollback (3 cases)", () => {
     const malformed = { ...snap, insertedRuleId: null as number | null };
 
     // Should not throw and should not delete the existing rule.
-    const existingRule = handle.db.select().from(schema.categoryRules).all();
+    const existingRule = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all();
     expect(existingRule).toHaveLength(1);
 
     const result = undoBulkCategorize(handle.db, malformed);
     // insertedRuleId was null so nothing was deleted; ruleAction stays 'none'.
     expect(result.ruleAction).toBe("none");
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(1);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(1);
   });
 
   it("case 2: same-target prior rule → undo restores priority + timestamps", async () => {

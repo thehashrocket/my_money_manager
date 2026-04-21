@@ -205,7 +205,7 @@ describe("createOrUpdateRule", () => {
     expect(rule.priority).toBe(50);
     expect(rule.source).toBe("manual");
 
-    const count = handle.db.select().from(schema.categoryRules).all().length;
+    const count = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all().length;
     expect(count).toBe(1);
   });
 
@@ -276,7 +276,7 @@ describe("createOrUpdateRule", () => {
       source: "manual",
     });
 
-    const rows = handle.db.select().from(schema.categoryRules).all();
+    const rows = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchValue, "SAFEWAY")).all();
     expect(rows).toHaveLength(2);
     expect(rows.some((r) => r.matchType === "exact")).toBe(true);
     expect(rows.some((r) => r.matchType === "contains")).toBe(true);

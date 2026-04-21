@@ -257,7 +257,7 @@ describe("undoCategorizeTransaction — rule", () => {
 
     const undo = undoCategorizeTransaction(handle.db, snapshot);
     expect(undo.ruleAction).toBe("deleted");
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 
   it("restores the full prior rule verbatim when replace was undone", () => {

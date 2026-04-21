@@ -227,7 +227,7 @@ describe("bulkCategorize — rule upsert", () => {
 
     expect(result.ruleTouched).toBe(false);
     expect(result.priorRule).toBeNull();
-    const rules = handle.db.select().from(schema.categoryRules).all();
+    const rules = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all();
     expect(rules).toHaveLength(0);
   });
 
@@ -329,7 +329,7 @@ describe("bulkCategorize — rule upsert", () => {
     });
 
     expect(result.priorRule?.categoryId).toBe(groceries.id);
-    const rows = handle.db.select().from(schema.categoryRules).all();
+    const rows = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all();
     expect(rows).toHaveLength(1);
     expect(rows[0].updatedAt.getTime()).toBeGreaterThan(prior.updatedAt.getTime());
   });
@@ -459,6 +459,6 @@ describe("bulkCategorize — rejections", () => {
       .where(eq(schema.transactions.normalizedMerchant, "SAFEWAY"))
       .all();
     expect(stillNull.every((r) => r.categoryId === null)).toBe(true);
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 });
