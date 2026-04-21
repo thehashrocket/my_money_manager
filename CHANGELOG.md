@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-20
+
+_Weekend 4 — Subscriptions tracker ships. The app now automatically detects recurring charges from your transaction history using a simple, deliberate heuristic: 3+ transactions for the same merchant with consistent monthly (25–35 day) or quarterly (85–95 day) intervals and amounts within MAX($0.50, 2% of median). No manual entry, no separate subscription ledger — detection runs from the data you've already imported._
+
+### Added
+- **`/subscriptions` page**: server-rendered list of detected recurring charges with cadence (monthly/quarterly), median charge amount, first-seen date, and next expected charge date. Empty state prompts importing 3+ months of history.
+- **Dismiss/Restore**: one toggle per merchant group — "Not a subscription" moves it to a dismissed section; Restore brings it back. Implemented via `dismissSubscriptionAction` and `restoreSubscriptionAction` (Zod-validated server actions).
+- **`subscription_dismissals` table** (`drizzle/0004_chubby_the_spike.sql`): stores dismissed merchants with a unique index; applied via migration.
+- **`detectSubscriptions`** (`src/lib/subscriptions/detectSubscriptions.ts`): pure detection function, 14 Vitest tests covering monthly, quarterly, irregular, amount tolerance, empty input, and the 2%-vs-$0.50 tolerance boundary.
+- **`loadSubscriptions`** (`src/lib/subscriptions/loadSubscriptions.ts`): queries non-transfer, non-pending transactions (excluding `DEPOSIT` rows and `POS \d+` refund memos per CLAUDE.md exclusion rules), runs detection, splits results into active and dismissed.
+- Spine nav Subscriptions link enabled; Goals remains "Coming Weekend 5".
+
+### Fixed
+- **Subscription detection exclusions**: `loadSubscriptions` now filters out `raw_description = 'DEPOSIT'` and `raw_memo LIKE 'POS %'` rows before detection, per CLAUDE.md exclusion rules (these are deposits and refunds, never recurring charges).
+
 ## [0.5.2] - 2026-04-20
 
 ### Fixed
