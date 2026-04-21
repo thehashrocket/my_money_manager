@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `category_rules_match_type_value_unique` ON `category_rules` (`match_type`,`match_value`);

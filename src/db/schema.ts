@@ -64,6 +64,7 @@ export const categoryRules = sqliteTable(
     updatedAt,
   },
   (t) => [
+    uniqueIndex("category_rules_match_type_value_unique").on(t.matchType, t.matchValue),
     index("category_rules_priority_idx").on(t.priority),
     index("category_rules_match_value_idx").on(t.matchValue),
   ],
