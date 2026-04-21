@@ -16,8 +16,8 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 |---|-------|--------|
 | W1 | Scaffold + CSV import end-to-end (sign correction, transfer detection, dedup) + HMR smoke test | done |
 | W2 | Budget views + hybrid categorization (auto-learn + manual rules) + integration checkpoint (use on real data for 1 week) | done (integration checkpoint pending) |
-| W3 | Dashboard + Uncategorized backlog tile + merchant normalization refinement | not started |
-| W4 | Subscriptions tracker — **cut-line** if behind (keep goals instead) | not started |
+| W3 | Dashboard + Uncategorized backlog tile + merchant normalization refinement | done |
+| W4 | Subscriptions tracker — **cut-line** if behind (keep goals instead) | done |
 | W5 | Goals / savings + Recharts trend chart | not started |
 
 ## Current status (2026-04-17)
