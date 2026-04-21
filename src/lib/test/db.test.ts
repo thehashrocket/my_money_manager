@@ -28,6 +28,7 @@ describe("migration parse (integration)", () => {
         "categories",
         "category_rules",
         "import_batches",
+        "subscription_dismissals",
         "transactions",
       ].sort(),
     );

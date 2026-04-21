@@ -76,6 +76,15 @@ Checkpoint:
 
 See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 
+## Weekend 4 — Subscriptions tracker ✅
+
+- [x] `subscription_dismissals` table + migration (`drizzle/0004_chubby_the_spike.sql`)
+- [x] `src/lib/subscriptions/detectSubscriptions.ts` — pure detection: 3+ txns, monthly [25-35d] or quarterly [85-95d] intervals, amount within MAX($0.50, 2% of median). 13 Vitest tests.
+- [x] `src/lib/subscriptions/loadSubscriptions.ts` — queries transactions, runs detection, splits active vs dismissed
+- [x] `src/app/subscriptions/page.tsx` — server-rendered list: detected subscriptions with cadence, median charge, next expected date; dismissed section
+- [x] `src/app/subscriptions/actions.ts` — `dismissSubscriptionAction` / `restoreSubscriptionAction` (Zod-validated)
+- [x] Spine nav: Subscriptions link enabled, Goals remains "Coming Weekend 5"
+
 ## Follow-ups from v0.2.0 ship review
 
 - [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)

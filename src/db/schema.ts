@@ -203,6 +203,18 @@ export const budgetPeriodsRelations = relations(budgetPeriods, ({ one }) => ({
   }),
 }));
 
+export const subscriptionDismissals = sqliteTable(
+  "subscription_dismissals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    normalizedMerchant: text("normalized_merchant").notNull(),
+    dismissedAt: integer("dismissed_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => [uniqueIndex("subscription_dismissals_merchant_unique").on(t.normalizedMerchant)],
+);
+
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type Category = typeof categories.$inferSelect;
@@ -215,3 +227,5 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type BudgetPeriod = typeof budgetPeriods.$inferSelect;
 export type NewBudgetPeriod = typeof budgetPeriods.$inferInsert;
+export type SubscriptionDismissal = typeof subscriptionDismissals.$inferSelect;
+export type NewSubscriptionDismissal = typeof subscriptionDismissals.$inferInsert;
