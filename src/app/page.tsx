@@ -3,8 +3,10 @@ import Link from "next/link";
 import { db } from "@/db";
 import { loadAccountBalances, type AccountBalance } from "@/lib/accounts/loadAccountBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
+import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
 import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
+import { TrendChart } from "@/components/ledger/trend-chart";
 
 export default async function Home() {
   await connection();
@@ -14,6 +16,7 @@ export default async function Home() {
 
   const accounts = loadAccountBalances(db);
   const view = loadMonthView(db, year, month);
+  const trends = loadMonthlyTrends(db);
 
   const monthLabel = new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
     month: "long",
@@ -60,6 +63,8 @@ export default async function Home() {
       </section>
 
       <MonthlySummary summary={view.summary} />
+
+      <SpendingTrends trends={trends} />
 
       {view.uncategorizedBacklog.count > 0 ? (
         <BacklogTile backlog={view.uncategorizedBacklog} />
@@ -168,6 +173,19 @@ function BacklogTile({ backlog }: { backlog: UncategorizedBacklog }) {
         Categorize backlog →
       </Link>
     </div>
+  );
+}
+
+function SpendingTrends({ trends }: { trends: TrendData }) {
+  return (
+    <section>
+      <h2 className="mb-3 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+        Spending — last 6 months
+      </h2>
+      <div className="rounded-lg border border-border bg-card p-4 shadow-soft">
+        <TrendChart months={trends.months} categoryNames={trends.categoryNames} />
+      </div>
+    </section>
   );
 }
 

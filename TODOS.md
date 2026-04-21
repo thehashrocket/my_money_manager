@@ -72,6 +72,19 @@ Scope guardrails:
 Checkpoint:
 - [ ] **Integration checkpoint:** use the app for 1 week on real data before moving on
 
+## Weekend 5 — Goals + Recharts trend chart ✅
+
+- [x] `src/lib/goals/loadGoals.ts` — query layer: progress = SUM(budget_period contributions) − ABS(negative txns), monthly breakdown
+- [x] `src/lib/goals/validateGoalInput.ts` — Zod schemas for create/update-target
+- [x] `src/app/goals/actions.ts` — `createGoalAction`, `updateGoalTargetAction`
+- [x] `src/app/goals/page.tsx` — goal cards, progress bars, create form, edit-target form, monthly breakdown `<details>`
+- [x] `src/lib/categoryErrors.ts` — `NotASavingsGoalError` added
+- [x] `src/components/ledger/spine.tsx` — Goals nav link enabled (`/goals`)
+- [x] `src/lib/trends/loadMonthlyTrends.ts` — last 6 months of spend by top-level category group (transfers/savings/income excluded)
+- [x] `src/components/ledger/trend-chart.tsx` — `"use client"` Recharts stacked bar chart, CSS var colors, custom tooltip
+- [x] `src/app/page.tsx` — SpendingTrends section added between MonthlySummary and backlog tile
+- [x] `recharts@3.8.1` added to dependencies
+
 ## Weekend 3-5
 
 See [PLAN.md](./PLAN.md). Detail when starting each weekend.

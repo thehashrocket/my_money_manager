@@ -32,3 +32,10 @@ export class SavingsGoalCategoryError extends Error {
     this.name = "SavingsGoalCategoryError";
   }
 }
+
+export class NotASavingsGoalError extends Error {
+  constructor(readonly categoryId: number) {
+    super(`Category ${categoryId} is not a savings goal`);
+    this.name = "NotASavingsGoalError";
+  }
+}

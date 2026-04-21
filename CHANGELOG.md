@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-20
+
+_Weekend 5 — Goals and trend chart ship. You can now create savings goals, track contributions month-by-month, and see a 6-month spending breakdown by category directly on the dashboard. Recharts enters the stack, client-side only, rendering a stacked bar chart from server-fetched data._
+
+### Added
+- **`/goals` page**: server-rendered savings goals list. Each goal card shows name, progress bar (contributed − withdrawn / target), percentage complete, remaining amount, and a native `<details>` monthly contribution breakdown. Empty state prompts creating the first goal.
+- **Create goal form**: inline `<form action>` on `/goals` — name, target ($), carryover policy (none/rollover/reset). Validates via Zod (`validateGoalInput.ts`), inserts a category row with `is_savings_goal=true`.
+- **Edit target**: inline `<details>` disclosure form on each goal card — updates `target_cents` in place, page rerenders. No redirect needed.
+- **`loadGoals`** (`src/lib/goals/loadGoals.ts`): three synchronous queries — savings goal categories (LEFT JOIN budget_periods for contributions), withdrawal aggregation (negative transactions, transfer-excluded), monthly breakdown. Returns `GoalsView` with per-goal progress and totals strip.
+- **`validateGoalInput`** (`src/lib/goals/validateGoalInput.ts`): Zod schemas for create and update-target, following the `safeParse` pattern used throughout the project.
+- **`NotASavingsGoalError`** added to `src/lib/categoryErrors.ts`.
+- **Goals nav link** in Spine enabled (`/goals`); "Coming Weekend 5" tooltip removed.
+- **Spending trend chart** on dashboard (`/`): stacked bar chart showing last 6 months of categorized spending by top-level category group (excludes transfers, savings goals, income). Sits between MonthlySummary and the backlog tile.
+- **`loadMonthlyTrends`** (`src/lib/trends/loadMonthlyTrends.ts`): server-side query — two SQL calls (category hierarchy map + spend aggregation with `strftime`), post-processed in TypeScript into a `TrendData` shape safe to cross the RSC→Client boundary.
+- **`TrendChart`** (`src/components/ledger/trend-chart.tsx`): `"use client"` Recharts `BarChart` — stacked bars per month, CSS var chart colors, custom tooltip using `formatCents`, empty state when no data. `recharts@3.8.1` added to dependencies.
+
 ## [0.6.0] - 2026-04-20
 
 _Weekend 4 — Subscriptions tracker ships. The app now automatically detects recurring charges from your transaction history using a simple, deliberate heuristic: 3+ transactions for the same merchant with consistent monthly (25–35 day) or quarterly (85–95 day) intervals and amounts within MAX($0.50, 2% of median). No manual entry, no separate subscription ledger — detection runs from the data you've already imported._
