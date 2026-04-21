@@ -129,7 +129,9 @@ export function AllocateFormTrigger(props: AllocateFormTriggerProps) {
           </div>
 
           <DialogFooter showCloseButton>
-            <Button type="submit">Save</Button>
+            <Button type="submit" variant="primary">
+              Save
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

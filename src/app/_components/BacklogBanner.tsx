@@ -7,12 +7,14 @@ type Variant = "budget" | "categorize";
 /**
  * Sticky amber banner showing the uncategorized backlog + CTA.
  *
- * Two variants share the same visual treatment:
- * - "budget" renders the CTA link → `/categorize`.
- * - "categorize" omits the CTA (we're already on that page) and leaves room
- *   for a live client-side counter rendered by the caller.
+ * Uses the Ledger Paper amber token rather than Tailwind's amber-* palette
+ * so light/dark modes pick up the same adjustment the rest of the system
+ * uses.
  *
- * Negative-cents display uses the global parens rule via `formatCents`.
+ * Two variants share the same visual treatment:
+ *  - "budget"     renders the CTA link → `/categorize`.
+ *  - "categorize" omits the CTA (we're already there) and leaves room for
+ *    the caller's live counter.
  */
 export function BacklogBanner({
   backlog,
@@ -23,10 +25,19 @@ export function BacklogBanner({
 }) {
   const plural = backlog.count === 1 ? "" : "s";
   return (
-    <div className="sticky top-0 z-10 -mx-6 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-6 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100">
-      <span className="[font-variant-numeric:tabular-nums]">
-        <strong>{backlog.count}</strong> uncategorized transaction{plural} —{" "}
-        {formatCents(backlog.totalCents)}
+    <div
+      className="sticky top-0 z-10 -mx-6 flex items-center justify-between gap-3 border-b px-6 py-2 text-sm backdrop-blur"
+      style={{
+        background:
+          "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
+        borderBottomColor:
+          "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
+        color: "color-mix(in oklch, var(--accent-amber) 50%, var(--foreground))",
+      }}
+    >
+      <span>
+        <strong className="text-foreground">{backlog.count}</strong>{" "}
+        uncategorized transaction{plural} — {formatCents(backlog.totalCents)}
       </span>
       {variant === "budget" ? (
         <Link

@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { z } from "zod";
@@ -78,18 +77,9 @@ export default async function TransactionsPage({
   return (
     <main className="mx-auto max-w-5xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">
       <header className="space-y-2">
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <Link href="/budget" className="underline-offset-4 hover:underline">
-            ← Budget
-          </Link>
-          <Link
-            href="/categorize"
-            className="underline-offset-4 hover:underline"
-          >
-            Bulk categorize →
-          </Link>
-        </div>
-        <h1 className="text-2xl font-semibold">Transactions</h1>
+        <h1 className="font-display text-[var(--text-3xl)] leading-none tracking-[-0.015em]">
+          Transactions
+        </h1>
         <FilterSummary
           categoryName={activeCategoryName}
           categoryId={categoryId}
