@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { ExtractTablesWithRelations } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { schema } from "@/db";
@@ -68,33 +68,7 @@ export function createOrUpdateRule(
 ): CategoryRule {
   const { normalizedMerchant, categoryId, source, priority = 50 } = params;
 
-  const existing = db
-    .select()
-    .from(schema.categoryRules)
-    .where(
-      and(
-        eq(schema.categoryRules.matchType, "exact"),
-        eq(schema.categoryRules.matchValue, normalizedMerchant),
-      ),
-    )
-    .get();
-
-  if (existing) {
-    const [updated] = db
-      .update(schema.categoryRules)
-      .set({
-        categoryId,
-        priority,
-        source,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.categoryRules.id, existing.id))
-      .returning()
-      .all();
-    return updated;
-  }
-
-  const [inserted] = db
+  const [upserted] = db
     .insert(schema.categoryRules)
     .values({
       categoryId,
@@ -103,9 +77,13 @@ export function createOrUpdateRule(
       priority,
       source,
     })
+    .onConflictDoUpdate({
+      target: [schema.categoryRules.matchType, schema.categoryRules.matchValue],
+      set: { categoryId, priority, source, updatedAt: new Date() },
+    })
     .returning()
     .all();
-  return inserted;
+  return upserted;
 }
 
 function compareRules(a: CategoryRule, b: CategoryRule): number {
@@ -120,6 +98,7 @@ function matches(rule: CategoryRule, merchant: string): boolean {
     case "contains":
       return merchant.includes(rule.matchValue);
     case "regex":
+      if (rule.matchValue.length > 200) return false;
       try {
         return new RegExp(rule.matchValue).test(merchant);
       } catch {

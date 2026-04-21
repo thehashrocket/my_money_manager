@@ -39,6 +39,14 @@ export type BulkCategorizeSnapshot = {
   ruleTouched: boolean;
   /** `null` when no exact rule existed before the upsert. */
   priorRule: PriorRuleSnapshot | null;
+  /**
+   * ID of the newly inserted rule row when `priorRule = null` (no prior rule
+   * existed). `undoBulkCategorize` uses this to delete by primary key rather
+   * than by (match_type, match_value, category_id), which would be unsafe if
+   * a second bulk ran between the original and the undo.
+   * `null` when `priorRule != null` (the undo restores via prior.id instead).
+   */
+  insertedRuleId: number | null;
   /** Earliest `date` seen in `txnIds` (YYYY-MM-DD), or `null` if empty. */
   earliestDate: string | null;
 };
@@ -120,6 +128,7 @@ export function bulkCategorize(
     }, null);
 
     let priorRule: PriorRuleSnapshot | null = null;
+    let insertedRuleId: number | null = null;
     let ruleTouched = false;
 
     if (rememberMerchant) {
@@ -145,12 +154,15 @@ export function bulkCategorize(
           updatedAt: existing.updatedAt,
         };
       }
-      createOrUpdateRule(tx, {
+      const upserted = createOrUpdateRule(tx, {
         normalizedMerchant,
         categoryId,
         source: "manual",
       });
       ruleTouched = true;
+      if (priorRule === null) {
+        insertedRuleId = upserted.id;
+      }
     }
 
     if (txnIds.length > 0) {
@@ -171,6 +183,7 @@ export function bulkCategorize(
       txnIds,
       ruleTouched,
       priorRule,
+      insertedRuleId,
       earliestDate,
       updatedCount: txnIds.length,
     };

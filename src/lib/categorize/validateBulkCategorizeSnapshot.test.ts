@@ -7,6 +7,7 @@ const validWithoutPrior = {
   txnIds: [1, 2, 3],
   ruleTouched: true,
   priorRule: null,
+  insertedRuleId: 7,
   earliestDate: "2026-04-16",
 };
 
@@ -69,6 +70,30 @@ describe("validateBulkCategorizeSnapshot — happy path", () => {
 });
 
 describe("validateBulkCategorizeSnapshot — rejections", () => {
+  it("rejects insertedRuleId = 0 (must be positive)", () => {
+    const result = validateBulkCategorizeSnapshot({
+      ...validWithoutPrior,
+      insertedRuleId: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects negative insertedRuleId", () => {
+    const result = validateBulkCategorizeSnapshot({
+      ...validWithoutPrior,
+      insertedRuleId: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-integer insertedRuleId", () => {
+    const result = validateBulkCategorizeSnapshot({
+      ...validWithoutPrior,
+      insertedRuleId: 1.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects empty normalizedMerchant", () => {
     const result = validateBulkCategorizeSnapshot({
       ...validWithoutPrior,

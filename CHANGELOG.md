@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-04-20
+
+### Fixed
+- **Rule upsert race (TOCTOU)**: `createOrUpdateRule` previously did a select-then-insert that two concurrent writes could both win. Now a single `INSERT ... ON CONFLICT (match_type, match_value) DO UPDATE` backed by a new unique index on `category_rules(match_type, match_value)` closes the window entirely. Requires migration `0003_flimsy_micromacro.sql`.
+- **Undo bulk-categorize deletes wrong rule**: when no prior rule existed, `undoBulkCategorize` deleted by `(match_type, match_value, category_id)`. A concurrent bulk-categorize could cause it to delete a rule it didn't create. Now deletes by the primary key (`insertedRuleId`) captured at bulk time.
+- **ReDoS on regex rules**: `applyRuleAtImport` compiled user-authored regex patterns without a length guard. Patterns longer than 200 characters now short-circuit to non-matching before the regex engine sees them.
+
 ## [0.5.1] - 2026-04-20
 
 ### Added

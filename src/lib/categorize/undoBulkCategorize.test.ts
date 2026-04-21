@@ -183,6 +183,31 @@ describe("undoBulkCategorize — rule rollback (3 cases)", () => {
     expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
   });
 
+  it("no-op when ruleTouched=true, priorRule=null, insertedRuleId=null (defensive guard)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000 });
+
+    const snap = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: true,
+    });
+
+    // Simulate a malformed snapshot where insertedRuleId was not captured.
+    const malformed = { ...snap, insertedRuleId: null as number | null };
+
+    // Should not throw and should not delete the existing rule.
+    const existingRule = handle.db.select().from(schema.categoryRules).all();
+    expect(existingRule).toHaveLength(1);
+
+    const result = undoBulkCategorize(handle.db, malformed);
+    // insertedRuleId was null so nothing was deleted; ruleAction stays 'none'.
+    expect(result.ruleAction).toBe("none");
+    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(1);
+  });
+
   it("case 2: same-target prior rule → undo restores priority + timestamps", async () => {
     const a = seedAccount();
     const b = seedBatch();

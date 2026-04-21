@@ -74,6 +74,23 @@ describe("applyRuleAtImport", () => {
     expect(applyRuleAtImport(handle.db, "UBER")).toBeNull();
   });
 
+  it("regex patterns over 200 characters are treated as non-matching without throwing", () => {
+    const misc = seedCategory("Misc");
+    const longPattern = "a".repeat(201);
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: misc.id,
+        matchType: "regex",
+        matchValue: longPattern,
+        priority: 99,
+        source: "auto",
+      })
+      .run();
+    expect(() => applyRuleAtImport(handle.db, "aaaaaaa")).not.toThrow();
+    expect(applyRuleAtImport(handle.db, "aaaaaaa")).toBeNull();
+  });
+
   it("invalid regex patterns do not throw — they just never match", () => {
     const misc = seedCategory("Misc");
     handle.db
@@ -98,14 +115,14 @@ describe("applyRuleAtImport", () => {
       .values([
         {
           categoryId: groceries.id,
-          matchType: "exact",
-          matchValue: "SAFEWAY",
+          matchType: "contains",
+          matchValue: "SAFE",
           priority: 10,
           source: "auto",
         },
         {
           categoryId: household.id,
-          matchType: "exact",
+          matchType: "contains",
           matchValue: "SAFEWAY",
           priority: 99,
           source: "manual",
@@ -119,17 +136,16 @@ describe("applyRuleAtImport", () => {
     const a = seedCategory("A");
     const b = seedCategory("B");
 
-    const [older] = handle.db
+    handle.db
       .insert(schema.categoryRules)
       .values({
         categoryId: a.id,
-        matchType: "exact",
-        matchValue: "SAFEWAY",
+        matchType: "contains",
+        matchValue: "SAFE",
         priority: 50,
         source: "auto",
       })
-      .returning()
-      .all();
+      .run();
 
     // Ensure updatedAt differs by at least one second (unixepoch resolution).
     await new Promise((r) => setTimeout(r, 1100));
@@ -138,15 +154,15 @@ describe("applyRuleAtImport", () => {
       .insert(schema.categoryRules)
       .values({
         categoryId: b.id,
-        matchType: "exact",
+        matchType: "contains",
         matchValue: "SAFEWAY",
         priority: 50,
         source: "manual",
       })
       .run();
 
+    // Both "SAFE" and "SAFEWAY" match via contains; equal priority → newer wins.
     expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(b.id);
-    void older;
   });
 
   it("exact match wins over contains when priority is higher", () => {
