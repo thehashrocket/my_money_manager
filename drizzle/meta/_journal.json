@@ -36,6 +36,13 @@
       "when": 1776751881394,
       "tag": "0004_chubby_the_spike",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1745280000000,
+      "tag": "0005_subscriptions_category",
+      "breakpoints": true
     }
   ]
 }
