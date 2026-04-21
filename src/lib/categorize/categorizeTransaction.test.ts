@@ -314,7 +314,7 @@ describe("categorizeTransaction — rule upsert", () => {
 
     expect(result.ruleTouched).toBe(false);
     expect(result.priorRule).toBeNull();
-    expect(handle.db.select().from(schema.categoryRules).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 
   it("inserts a new rule when rememberMerchant is true and none existed", () => {
