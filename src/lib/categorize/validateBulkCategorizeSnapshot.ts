@@ -26,6 +26,7 @@ export const bulkCategorizeSnapshotSchema = z.object({
   txnIds: z.array(z.number().int().positive()),
   ruleTouched: z.boolean(),
   priorRule: priorRuleSchema.nullable(),
+  insertedRuleId: z.number().int().positive().nullable(),
   earliestDate: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD")

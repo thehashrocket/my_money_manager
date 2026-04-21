@@ -58,16 +58,12 @@ export function undoBulkCategorize(
 
     if (snapshot.ruleTouched) {
       if (snapshot.priorRule === null) {
-        tx.delete(schema.categoryRules)
-          .where(
-            and(
-              eq(schema.categoryRules.matchType, "exact"),
-              eq(schema.categoryRules.matchValue, snapshot.normalizedMerchant),
-              eq(schema.categoryRules.categoryId, snapshot.categoryId),
-            ),
-          )
-          .run();
-        ruleAction = "deleted";
+        if (snapshot.insertedRuleId !== null) {
+          tx.delete(schema.categoryRules)
+            .where(eq(schema.categoryRules.id, snapshot.insertedRuleId))
+            .run();
+          ruleAction = "deleted";
+        }
       } else {
         const prior = snapshot.priorRule;
         tx.update(schema.categoryRules)
