@@ -43,12 +43,22 @@ describe("migration parse (integration)", () => {
     expect(col!.notnull).toBe(0);
   });
 
-  it("seeds Uncategorized + 5 default leaf categories", () => {
+  it("seeds Uncategorized + 5 default leaf categories + 43 expanded categories", () => {
     const rows = handle.db.select().from(schema.categories).all();
-    const names = rows.map((r) => r.name).sort();
-    expect(names).toEqual(
-      ["Dining", "Gas", "Groceries", "Misc", "Uncategorized", "Utilities"].sort(),
-    );
+    const names = rows.map((r) => r.name);
+    // Original 6
+    expect(names).toContain("Uncategorized");
+    expect(names).toContain("Groceries");
+    expect(names).toContain("Gas");
+    expect(names).toContain("Dining");
+    expect(names).toContain("Utilities");
+    expect(names).toContain("Misc");
+    // Sample of expanded categories
+    expect(names).toContain("Rent");
+    expect(names).toContain("Streaming");
+    expect(names).toContain("Pharmacy");
+    expect(names).toContain("Flights");
+    expect(rows.length).toBeGreaterThanOrEqual(49);
   });
 
   it("creates the BEFORE DELETE trigger on Uncategorized", () => {
