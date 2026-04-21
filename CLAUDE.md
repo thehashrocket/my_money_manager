@@ -22,13 +22,19 @@ Wrong-Node symptom: any `pnpm` command fails with `ERR_PNPM_UNSUPPORTED_ENGINE` 
 
 ```
 src/
-  app/        Next.js 16 App Router pages
-  components/ UI components (shadcn in components/ui)
-  db/         Drizzle schema + client singleton
-  lib/        parsers, merchant normalizer, categorization, utils
-drizzle/      migration output (committed)
-data/        money.db + pre-import snapshots (gitignored)
-.context/    design artifacts, CSV samples, deltas (gitignored)
+  app/             Next.js 16 App Router pages + server actions
+  app/_components/ Shared RSC components co-located with the app (e.g. BacklogBanner)
+  components/      UI components (shadcn in components/ui, ledger/ design-system components)
+  db/              Drizzle schema + client singleton
+  lib/             Pure functions: parsers, normalizer, categorization, money, utils
+  lib/accounts/    loadAccountBalances — live per-account balance queries
+  lib/budget/      loadMonthView, upsertAllocation, validateAllocateInput
+  lib/categorize/  Bulk-categorize logic and validators
+  lib/import/      Import orchestration and validators
+drizzle/           Migration output (committed)
+data/             money.db + pre-import snapshots (gitignored)
+.context/         Design artifacts, CSV samples, deltas (gitignored)
+design_handoff_nav_and_design_system/  Live HTML design specimens + README
 ```
 
 ## Scripts
