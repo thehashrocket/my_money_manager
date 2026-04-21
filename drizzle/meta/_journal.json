@@ -15,6 +15,13 @@
       "when": 1776405645322,
       "tag": "0001_complete_ikaris",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1776741247000,
+      "tag": "0002_more_categories",
+      "breakpoints": true
     }
   ]
 }

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-04-20
+
+### Added
+- **43 spending categories** via `drizzle/0002_more_categories.sql`: Rent, Home Maintenance, Renter's Insurance, Car Insurance, Car Maintenance, Parking, Rideshare, Public Transit, Coffee, Fast Food, Alcohol, Internet, Phone, Electric, Water, Doctor, Dentist, Pharmacy, Health Insurance, Gym, Haircut, Clothing, Movies & Events, Hobbies, Streaming, Books & Music, Amazon, Electronics, Home Goods, Bank Fees, ATM, Gifts, Charity, Paycheck, Interest, Reimbursement, Hotels, Flights, Vacation, Childcare, School, Software, News & Magazines. Total category count: 49 (up from 6).
+
 ## [0.5.0] - 2026-04-20
 
 _Weekend 3 — Ledger Paper design system lands. The app now has a full visual identity: warm paper-tone surfaces, Newsreader serif for headings, Geist Mono for money, a Spine navigation rail that stays on every page, and a dashboard command-center that shows account balances, monthly budget summary, and the uncategorized backlog at a glance. Light and dark themes switch without flash. The design tokens and nav prototype live in `design_handoff_nav_and_design_system/` as live HTML specimens._
