@@ -26,27 +26,32 @@ export function findTransferPairs<T extends PairCandidate>(
   const pairs: TransferPair<T>[] = [];
   const used = new Set<string | number>();
 
-  const byDate = new Map<string, T[]>();
+  // Bucket by (date, |amount|) so pair candidates share date and absolute amount
+  // by construction. Collapses the O(N²) same-day scan to O(N) across buckets
+  // of size 2–3 in real data.
+  const byDateAndAbsAmount = new Map<string, T[]>();
   for (const r of rows) {
-    const list = byDate.get(r.date) ?? [];
+    if (r.amountCents === 0) continue;
+    const key = `${r.date}|${Math.abs(r.amountCents)}`;
+    const list = byDateAndAbsAmount.get(key) ?? [];
     list.push(r);
-    byDate.set(r.date, list);
+    byDateAndAbsAmount.set(key, list);
   }
 
-  for (const sameDay of byDate.values()) {
-    for (let i = 0; i < sameDay.length; i++) {
-      const a = sameDay[i];
+  for (const bucket of byDateAndAbsAmount.values()) {
+    if (bucket.length < 2) continue;
+
+    for (let i = 0; i < bucket.length; i++) {
+      const a = bucket[i];
       if (used.has(a.id)) continue;
       const aNum = Number.parseInt(a.bankTransactionNumber, 10);
       if (!Number.isFinite(aNum)) continue;
 
-      for (let j = i + 1; j < sameDay.length; j++) {
-        const b = sameDay[j];
+      for (let j = i + 1; j < bucket.length; j++) {
+        const b = bucket[j];
         if (used.has(b.id)) continue;
         if (a.accountId === b.accountId) continue;
-        if (Math.abs(a.amountCents) !== Math.abs(b.amountCents)) continue;
         if (Math.sign(a.amountCents) === Math.sign(b.amountCents)) continue;
-        if (a.amountCents === 0) continue;
 
         const bNum = Number.parseInt(b.bankTransactionNumber, 10);
         if (!Number.isFinite(bNum)) continue;

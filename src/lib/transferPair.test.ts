@@ -107,4 +107,34 @@ describe("findTransferPairs", () => {
     ]);
     expect(pairs.length).toBe(1);
   });
+
+  it("scales linearly when many unrelated rows share the same date", () => {
+    const rows: PairCandidate[] = [];
+    for (let i = 0; i < 500; i++) {
+      rows.push(
+        row({
+          id: `noise-${i}`,
+          accountId: "checking",
+          bankTransactionNumber: String(1000 + i),
+          amountCents: 100 + i,
+        }),
+      );
+    }
+    rows.push(
+      row({ id: "a", accountId: "checking", bankTransactionNumber: "5000", amountCents: 7777 }),
+      row({ id: "b", accountId: "savings", bankTransactionNumber: "5001", amountCents: -7777 }),
+    );
+    const pairs = findTransferPairs(rows);
+    expect(pairs.length).toBe(1);
+    expect(pairs[0].a.id).toBe("a");
+    expect(pairs[0].b.id).toBe("b");
+  });
+
+  it("ignores zero-amount rows", () => {
+    const pairs = findTransferPairs([
+      row({ id: 1, accountId: "checking", bankTransactionNumber: "10", amountCents: 0 }),
+      row({ id: 2, accountId: "savings", bankTransactionNumber: "11", amountCents: 0 }),
+    ]);
+    expect(pairs).toEqual([]);
+  });
 });
