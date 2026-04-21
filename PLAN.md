@@ -18,7 +18,7 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 | W2 | Budget views + hybrid categorization (auto-learn + manual rules) + integration checkpoint (use on real data for 1 week) | done (integration checkpoint pending) |
 | W3 | Dashboard + Uncategorized backlog tile + merchant normalization refinement | done |
 | W4 | Subscriptions tracker — **cut-line** if behind (keep goals instead) | done |
-| W5 | Goals / savings + Recharts trend chart | not started |
+| W5 | Goals / savings + Recharts trend chart | done |
 
 ## Current status (2026-04-17)
 
