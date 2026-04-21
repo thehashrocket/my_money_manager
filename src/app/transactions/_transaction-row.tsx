@@ -116,7 +116,11 @@ export function TransactionRowForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-3 text-sm"
+      className={`flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm transition-opacity ${
+        currentCategoryId !== null
+          ? "border-border/50 bg-muted/40 opacity-50 hover:opacity-100"
+          : "border-border bg-card"
+      }`}
     >
       <input type="hidden" name="transactionId" value={row.id} />
       <div className="flex min-w-0 flex-[2_1_16rem] items-baseline gap-2">

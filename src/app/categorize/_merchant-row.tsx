@@ -81,7 +81,11 @@ export function MerchantRow({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-card p-3 text-sm"
+      className={`flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm transition-opacity ${
+        group.existingRule
+          ? "border-border/50 bg-muted/40 opacity-50 hover:opacity-100"
+          : "border-border bg-card"
+      }`}
     >
       <input type="hidden" name="normalizedMerchant" value={group.normalizedMerchant} />
       <div className="flex min-w-0 flex-1 items-baseline gap-2">
