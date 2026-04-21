@@ -1,0 +1,145 @@
+/* ============================================================
+   Ledger Paper — design tokens for my_money_manager
+   Warm, personal, analog. Light + dark parallel.
+   ============================================================ */
+
+:root {
+  /* — Paper & ink (warm neutrals) ----------------------------- */
+  --paper-0: oklch(0.995 0.004 85);   /* card highlight */
+  --paper-1: oklch(0.985 0.008 85);   /* canvas (default bg) */
+  --paper-2: oklch(0.965 0.010 85);   /* inset, muted surface */
+  --paper-3: oklch(0.935 0.012 85);   /* subtle divider */
+  --paper-4: oklch(0.895 0.014 85);   /* strong divider */
+
+  --ink-1: oklch(0.22 0.015 60);      /* primary text */
+  --ink-2: oklch(0.42 0.012 60);      /* secondary text */
+  --ink-3: oklch(0.58 0.010 60);      /* tertiary / placeholder */
+  --ink-4: oklch(0.72 0.008 60);      /* disabled */
+
+  /* — Accents (shared chroma 0.09, varied hue) --------------- */
+  --accent-terracotta: oklch(0.62 0.09 45);   /* warm primary action */
+  --accent-ledger:     oklch(0.55 0.09 155);  /* positive money / success */
+  --accent-redbrown:   oklch(0.52 0.09 25);   /* negative money / destructive */
+  --accent-amber:      oklch(0.72 0.09 75);   /* backlog / warning */
+  --accent-indigo:     oklch(0.50 0.09 270);  /* info */
+
+  /* — Rules (hand-ruled ledger lines) ------------------------ */
+  --rule-faint:   color-mix(in oklch, var(--ink-1) 8%, transparent);
+  --rule-regular: color-mix(in oklch, var(--ink-1) 14%, transparent);
+  --rule-strong:  color-mix(in oklch, var(--ink-1) 22%, transparent);
+
+  /* — Semantic ------------------------------------------------ */
+  --bg:              var(--paper-1);
+  --bg-inset:        var(--paper-2);
+  --bg-raised:       var(--paper-0);
+  --fg:              var(--ink-1);
+  --fg-muted:        var(--ink-2);
+  --fg-subtle:       var(--ink-3);
+  --border:          var(--rule-regular);
+  --border-strong:   var(--rule-strong);
+  --primary:         var(--accent-terracotta);
+  --primary-fg:      var(--paper-0);
+  --money-pos:       var(--accent-ledger);
+  --money-neg:       var(--accent-redbrown);
+  --money-zero:      var(--ink-3);
+
+  /* — Type scale --------------------------------------------- */
+  --font-display: "Newsreader", ui-serif, Georgia, serif;
+  --font-ui: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, SFMono-Regular, monospace;
+
+  --text-xs:  11px;
+  --text-sm:  13px;
+  --text-base: 15px;
+  --text-md:  17px;
+  --text-lg:  20px;
+  --text-xl:  24px;
+  --text-2xl: 32px;
+  --text-3xl: 44px;
+
+  /* — Radii (soft, not pill) --------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* — Spacing (comfortable / iOS-ish) ------------------------ */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
+  --space-7: 40px;
+  --space-8: 56px;
+
+  /* — Shadows (whisper only) --------------------------------- */
+  --shadow-none: none;
+  --shadow-hair: 0 1px 0 color-mix(in oklch, var(--ink-1) 6%, transparent);
+  --shadow-soft: 0 1px 2px color-mix(in oklch, var(--ink-1) 8%, transparent),
+                 0 0 0 1px color-mix(in oklch, var(--ink-1) 5%, transparent);
+  --shadow-lift: 0 6px 24px -8px color-mix(in oklch, var(--ink-1) 22%, transparent),
+                 0 0 0 1px color-mix(in oklch, var(--ink-1) 8%, transparent);
+
+  /* — Focus rings -------------------------------------------- */
+  --ring: color-mix(in oklch, var(--accent-terracotta) 55%, transparent);
+}
+
+.dark {
+  /* Inverted: deep ink paper, warm highlights */
+  --paper-0: oklch(0.20 0.012 60);
+  --paper-1: oklch(0.165 0.010 60);   /* canvas */
+  --paper-2: oklch(0.14 0.010 60);    /* inset */
+  --paper-3: oklch(0.265 0.012 60);
+  --paper-4: oklch(0.32 0.012 60);
+
+  --ink-1: oklch(0.95 0.010 85);
+  --ink-2: oklch(0.78 0.012 85);
+  --ink-3: oklch(0.60 0.012 85);
+  --ink-4: oklch(0.42 0.012 85);
+
+  --accent-terracotta: oklch(0.72 0.11 45);
+  --accent-ledger:     oklch(0.74 0.12 155);
+  --accent-redbrown:   oklch(0.70 0.12 25);
+  --accent-amber:      oklch(0.82 0.12 75);
+  --accent-indigo:     oklch(0.72 0.12 270);
+
+  --rule-faint:   color-mix(in oklch, var(--ink-1) 10%, transparent);
+  --rule-regular: color-mix(in oklch, var(--ink-1) 16%, transparent);
+  --rule-strong:  color-mix(in oklch, var(--ink-1) 26%, transparent);
+
+  --shadow-soft: 0 1px 2px rgba(0,0,0,0.4),
+                 0 0 0 1px color-mix(in oklch, var(--ink-1) 8%, transparent);
+  --shadow-lift: 0 10px 36px -10px rgba(0,0,0,0.6),
+                 0 0 0 1px color-mix(in oklch, var(--ink-1) 12%, transparent);
+}
+
+/* ===== Paper texture (very subtle) ========================= */
+.paper-grain {
+  background-image:
+    radial-gradient(
+      circle at 25% 15%,
+      color-mix(in oklch, var(--ink-1) 2.5%, transparent) 0 0.5px,
+      transparent 1px),
+    radial-gradient(
+      circle at 75% 65%,
+      color-mix(in oklch, var(--ink-1) 2%, transparent) 0 0.5px,
+      transparent 1px),
+    radial-gradient(
+      circle at 45% 85%,
+      color-mix(in oklch, var(--ink-1) 2%, transparent) 0 0.5px,
+      transparent 1px);
+  background-size: 7px 7px, 11px 11px, 13px 13px;
+}
+
+/* ===== Horizontal ruled-paper lines ======================== */
+.paper-lines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 27px,
+    color-mix(in oklch, var(--ink-1) 5%, transparent) 27px,
+    color-mix(in oklch, var(--ink-1) 5%, transparent) 28px
+  );
+}

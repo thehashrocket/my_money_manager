@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Navigation — my money manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="design/tokens.css">
+<link rel="stylesheet" href="design/primitives.css">
+<style>
+  /* ======================================================
+     Page frame — holds the whole mock app
+     ====================================================== */
+  .frame { min-height: 100vh; display: flex; flex-direction: column; position: relative; }
+  .content-host {
+    flex: 1;
+    padding: 48px 56px 160px;
+    max-width: 1180px;
+    margin: 0 auto;
+    width: 100%;
+  }
+  .page-kicker {
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle);
+    letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 12px;
+  }
+  .page-kicker .dot { width: 5px; height: 5px; border-radius: 999px; background: var(--accent-terracotta); }
+  .page-title { font-family: var(--font-display); font-size: 40px; line-height: 1; margin: 0 0 10px; letter-spacing: -0.015em; font-weight: 400; }
+  .page-title em { color: var(--accent-terracotta); font-style: italic; font-weight: 300; }
+  .page-sub { color: var(--fg-muted); margin: 0 0 32px; font-size: var(--text-md); max-width: 60ch; }
+
+  /* ======================================================
+     VARIANT 1 — THE SPINE
+     Ledger-book spine on the left, pages sticking out
+     ====================================================== */
+  body[data-variant="spine"] .content-host { padding-left: 290px; max-width: 1180px; }
+
+  .spine {
+    position: fixed; top: 0; bottom: 0; left: 0; width: 240px;
+    background: linear-gradient(90deg,
+      color-mix(in oklch, var(--accent-terracotta) 10%, var(--paper-2)) 0%,
+      var(--paper-2) 70%, var(--paper-1) 100%);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    padding: 28px 0 28px 28px;
+    z-index: 10;
+  }
+  .dark .spine {
+    background: linear-gradient(90deg,
+      color-mix(in oklch, var(--accent-terracotta) 22%, var(--paper-2)) 0%,
+      var(--paper-2) 70%, var(--paper-1) 100%);
+  }
+  .spine::before {
+    /* stitched ledger spine edge */
+    content: "";
+    position: absolute; top: 0; bottom: 0; left: 18px; width: 1px;
+    background: repeating-linear-gradient(to bottom,
+      color-mix(in oklch, var(--ink-1) 25%, transparent) 0 6px,
+      transparent 6px 10px);
+  }
+  .spine-brand {
+    font-family: var(--font-display); font-size: 22px; line-height: 1;
+    letter-spacing: -0.015em; font-weight: 400;
+    margin-bottom: 4px;
+  }
+  .spine-brand em { font-style: italic; color: var(--accent-terracotta); font-weight: 300; }
+  .spine-owner {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle);
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 28px;
+  }
+
+  /* Month switcher on the spine */
+  .spine-month {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    margin-left: -4px;
+    padding: 10px 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .spine-month .m {
+    font-family: var(--font-display); font-size: 15px; font-weight: 500;
+  }
+  .spine-month .y { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); letter-spacing: 0.1em; }
+  .spine-month .arrows { display: flex; gap: 2px; }
+  .spine-month .arrows button {
+    width: 20px; height: 20px; border: none; background: transparent;
+    color: var(--fg-muted); border-radius: 4px; cursor: pointer;
+    font-size: 12px; line-height: 1;
+  }
+  .spine-month .arrows button:hover { background: var(--bg-inset); }
+
+  /* Tabs that stick out of the spine */
+  .spine-tabs { display: flex; flex-direction: column; gap: 3px; flex: 1; margin-right: -1px; }
+  .spine-tab {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px 10px 16px;
+    margin-right: -1px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-right: none;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    font-family: var(--font-ui); font-size: var(--text-sm); font-weight: 500;
+    color: var(--fg-muted);
+    cursor: pointer;
+    transition: background 120ms, color 120ms, transform 160ms;
+    position: relative;
+  }
+  .spine-tab:hover { color: var(--fg); background: color-mix(in oklch, var(--bg-raised) 50%, transparent); transform: translateX(2px); }
+  .spine-tab.active {
+    background: var(--bg-raised);
+    border-color: var(--border);
+    color: var(--fg);
+    transform: translateX(8px);
+  }
+  .spine-tab.active::after {
+    /* Joins tab to the content area, hiding the right border */
+    content: "";
+    position: absolute; top: 0; bottom: 0; right: -1px; width: 2px;
+    background: var(--bg-raised);
+  }
+  .spine-tab .tab-icon {
+    width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 12px; color: var(--fg-subtle);
+  }
+  .spine-tab.active .tab-icon { color: var(--accent-terracotta); }
+  .spine-tab .count {
+    margin-left: auto; font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--fg-subtle); background: var(--bg-inset); border-radius: 4px;
+    padding: 1px 6px;
+  }
+  .spine-tab.backlog .count {
+    background: color-mix(in oklch, var(--accent-amber) 22%, transparent);
+    color: color-mix(in oklch, var(--accent-amber) 55%, var(--fg));
+  }
+
+  /* Balance peek at bottom of spine */
+  .spine-peek {
+    margin: 20px -1px 0 0;
+    padding: 14px 16px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border); border-right: none;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+  }
+  .spine-peek .title {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle);
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 8px;
+  }
+  .spine-peek .acct { display: flex; justify-content: space-between; font-size: var(--text-sm); padding: 4px 0; }
+  .spine-peek .acct .name { color: var(--fg-muted); }
+  .spine-peek .acct .amt { font-family: var(--font-mono); font-weight: 500; }
+  .spine-peek .sep { height: 1px; background: var(--rule-faint); margin: 6px 0; }
+  .spine-peek .total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 4px; }
+  .spine-peek .total .lbl { font-family: var(--font-display); font-size: 14px; font-style: italic; color: var(--fg-muted); }
+  .spine-peek .total .amt { font-family: var(--font-mono); font-size: 17px; font-weight: 500; }
+
+  /* ======================================================
+     VARIANT 2 — THE TICKER
+     Horizontal bank-ticker across the top
+     ====================================================== */
+  body[data-variant="ticker"] .content-host { padding-top: 120px; }
+
+  .ticker {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border-strong);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    letter-spacing: -0.005em;
+  }
+  .ticker-inner {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: stretch;
+    height: 56px;
+  }
+  .ticker-brand {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 20px 0 24px;
+    border-right: 1px dashed var(--border);
+  }
+  .ticker-brand .mark {
+    width: 26px; height: 26px; border-radius: 5px;
+    background: var(--accent-terracotta);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--primary-fg);
+    font-family: var(--font-display); font-size: 15px; font-style: italic; font-weight: 500;
+  }
+  .ticker-brand .words {
+    font-family: var(--font-display); font-size: 15px;
+    letter-spacing: -0.015em;
+  }
+  .ticker-brand .words em { font-style: italic; color: var(--accent-terracotta); font-weight: 300; }
+
+  .ticker-pages {
+    display: flex; align-items: stretch;
+    overflow-x: auto;
+  }
+  .ticker-page {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 0 18px;
+    white-space: nowrap;
+    color: var(--fg-muted);
+    font-weight: 500;
+    font-family: var(--font-ui);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border: none; background: transparent;
+    transition: color 120ms;
+  }
+  .ticker-page:hover { color: var(--fg); background: var(--bg-inset); }
+  .ticker-page .num {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--fg-subtle); letter-spacing: 0.08em;
+    padding: 1px 5px; background: var(--bg-inset); border-radius: 3px;
+  }
+  .ticker-page.active { color: var(--fg); }
+  .ticker-page.active::after {
+    content: ""; position: absolute; left: 12px; right: 12px; bottom: 0;
+    height: 2px; background: var(--accent-terracotta);
+  }
+  .ticker-page.backlog .num {
+    background: color-mix(in oklch, var(--accent-amber) 22%, transparent);
+    color: color-mix(in oklch, var(--accent-amber) 55%, var(--fg));
+  }
+
+  .ticker-peek {
+    display: flex; align-items: stretch;
+    border-left: 1px dashed var(--border);
+    overflow: hidden;
+  }
+  .ticker-balance {
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 0 18px;
+    border-right: 1px dashed var(--border);
+  }
+  .ticker-balance .lbl { font-size: 10px; color: var(--fg-subtle); letter-spacing: 0.12em; text-transform: uppercase; }
+  .ticker-balance .val { font-family: var(--font-mono); font-size: 15px; font-weight: 500; }
+  .ticker-balance .val.pos { color: var(--accent-ledger); }
+  .ticker-month {
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 16px;
+  }
+  .ticker-month .m { font-family: var(--font-display); font-size: 15px; }
+  .ticker-month button {
+    width: 22px; height: 22px; border: none; background: transparent;
+    color: var(--fg-muted); border-radius: 4px; cursor: pointer;
+  }
+  .ticker-month button:hover { background: var(--bg-inset); }
+
+  /* Secondary strip — a scrolling marquee-feel row with recent activity */
+  .ticker-marquee {
+    height: 28px;
+    border-top: 1px solid var(--rule-faint);
+    background: var(--bg);
+    display: flex; align-items: center;
+    font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted);
+    overflow: hidden;
+  }
+  .ticker-marquee .tag {
+    padding: 0 16px; border-right: 1px dashed var(--border);
+    display: inline-flex; align-items: center; gap: 8px;
+    white-space: nowrap;
+  }
+  .ticker-marquee .tag .pill {
+    font-size: 9px; letter-spacing: 0.15em; color: var(--fg-subtle);
+    padding: 2px 5px; border-radius: 3px; background: var(--bg-inset);
+  }
+  .ticker-marquee-track {
+    display: inline-flex; animation: marquee 44s linear infinite;
+    min-width: 100%; flex-shrink: 0;
+  }
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+
+  /* ======================================================
+     VARIANT 3 — THE DOCK
+     Floating bottom dock, macOS-ish, with balance peek above
+     ====================================================== */
+  body[data-variant="dock"] .content-host { padding-top: 64px; padding-bottom: 200px; }
+
+  .dock-header {
+    position: fixed; top: 20px; left: 24px; right: 24px;
+    display: flex; align-items: center; justify-content: space-between;
+    z-index: 10; pointer-events: none;
+  }
+  .dock-header > * { pointer-events: auto; }
+  .dock-brand {
+    font-family: var(--font-display); font-size: 18px;
+    background: color-mix(in oklch, var(--bg-raised) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 16px;
+  }
+  .dock-brand em { font-style: italic; color: var(--accent-terracotta); font-weight: 300; }
+  .dock-month-chip {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: color-mix(in oklch, var(--bg-raised) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+  }
+  .dock-month-chip .m { font-family: var(--font-display); font-size: 14px; }
+  .dock-month-chip button {
+    width: 20px; height: 20px; border-radius: 999px;
+    border: none; background: var(--bg-inset); color: var(--fg-muted); cursor: pointer;
+  }
+
+  .dock-wrap {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    z-index: 12;
+  }
+  .dock-peek {
+    display: flex; align-items: center; gap: 16px;
+    background: color-mix(in oklch, var(--bg-raised) 92%, transparent);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 10px 16px;
+    box-shadow: var(--shadow-lift);
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+    transition: opacity 200ms, transform 200ms;
+    pointer-events: none;
+  }
+  .dock-wrap.peek-open .dock-peek {
+    opacity: 1; transform: translateY(0) scale(1); pointer-events: auto;
+  }
+  .dock-peek .acct {
+    display: flex; flex-direction: column; padding: 4px 8px;
+    border-right: 1px dashed var(--border);
+  }
+  .dock-peek .acct:last-child { border-right: none; }
+  .dock-peek .lbl { font-family: var(--font-mono); font-size: 9.5px; color: var(--fg-subtle); letter-spacing: 0.12em; text-transform: uppercase; }
+  .dock-peek .amt { font-family: var(--font-mono); font-size: 14px; font-weight: 500; }
+  .dock-peek .amt.pos { color: var(--accent-ledger); }
+
+  .dock {
+    display: flex; align-items: center; gap: 2px;
+    background: color-mix(in oklch, var(--bg-raised) 90%, transparent);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 6px;
+    box-shadow: var(--shadow-lift);
+  }
+  .dock-btn {
+    position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 52px; height: 46px; padding: 0 14px;
+    border: none; background: transparent;
+    border-radius: 12px;
+    font-family: var(--font-display); font-size: 15px; font-weight: 500;
+    color: var(--fg-muted);
+    cursor: pointer;
+    transition: background 140ms, color 140ms, transform 160ms;
+  }
+  .dock-btn:hover { background: var(--bg-inset); color: var(--fg); transform: translateY(-2px); }
+  .dock-btn.active { background: var(--accent-terracotta); color: var(--primary-fg); }
+  .dock-btn .badge {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 16px; height: 16px; border-radius: 999px;
+    background: var(--accent-amber);
+    font-family: var(--font-mono); font-size: 9px; font-weight: 600;
+    color: oklch(0.25 0.08 75);
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 0 4px;
+    border: 1.5px solid var(--bg-raised);
+  }
+  .dock-sep { width: 1px; height: 26px; background: var(--border); margin: 0 4px; }
+  .dock-peek-btn {
+    min-width: 46px; font-family: var(--font-mono); font-size: 11px;
+  }
+
+  /* ======================================================
+     Shared content — Dashboard page rendered below every nav
+     ====================================================== */
+  .panel-grid {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 28px;
+    margin-bottom: 28px;
+  }
+  .big-card {
+    background: var(--bg-raised); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 28px;
+  }
+  .big-card h3 {
+    margin: 0 0 4px; font-family: var(--font-display); font-size: 22px; font-weight: 400;
+  }
+  .big-card .since { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 18px;}
+
+  .allocation-bar {
+    height: 36px; background: var(--bg-inset); border-radius: 8px; overflow: hidden;
+    display: flex; margin-bottom: 12px;
+  }
+  .allocation-bar > div {
+    display: flex; align-items: center; padding: 0 10px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--primary-fg);
+    white-space: nowrap;
+  }
+  .allocation-labels { display: flex; flex-wrap: wrap; gap: 16px; font-size: 11px; color: var(--fg-muted); font-family: var(--font-mono); }
+  .allocation-labels .lg { display: inline-flex; align-items: center; gap: 6px; }
+  .allocation-labels .sw { width: 10px; height: 10px; border-radius: 3px; }
+
+  .env-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 860px) { .env-grid { grid-template-columns: 1fr 1fr; } }
+
+  .side-card {
+    background: var(--bg-raised); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 22px 24px;
+  }
+  .side-card h4 {
+    margin: 0 0 14px; font-family: var(--font-display); font-size: 17px; font-weight: 400;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .side-card .activity-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0; border-bottom: 1px solid var(--rule-faint);
+    font-size: var(--text-sm);
+  }
+  .side-card .activity-row:last-child { border-bottom: none; }
+  .side-card .activity-row .when { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); }
+
+  /* ======================================================
+     TWEAKS PANEL
+     ====================================================== */
+  .tweaks {
+    position: fixed; bottom: 24px; right: 24px; z-index: 40;
+    background: var(--bg-raised); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lift);
+    width: 280px;
+    font-family: var(--font-ui);
+    transform: translateX(calc(100% + 40px));
+    transition: transform 280ms cubic-bezier(.2,.9,.3,1.2);
+    display: none;
+  }
+  body.tweaks-available .tweaks { display: block; }
+  body.tweaks-open .tweaks { transform: translateX(0); }
+  .tweaks h5 {
+    margin: 0; padding: 14px 18px 10px;
+    font-family: var(--font-display); font-size: 16px; font-weight: 400;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--rule-faint);
+  }
+  .tweaks h5 em { font-style: italic; color: var(--accent-terracotta); }
+  .tweaks .close {
+    border: none; background: transparent; color: var(--fg-subtle); cursor: pointer;
+    font-family: var(--font-mono); font-size: 14px;
+  }
+  .tweaks-section { padding: 14px 18px; border-bottom: 1px solid var(--rule-faint); }
+  .tweaks-section:last-child { border-bottom: none; }
+  .tweaks-label {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle);
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 10px;
+  }
+  .seg {
+    display: flex; gap: 2px; background: var(--bg-inset); border-radius: 8px; padding: 3px;
+  }
+  .seg button {
+    flex: 1; border: none; background: transparent; font: inherit;
+    font-size: var(--text-xs); padding: 6px 8px; border-radius: 6px;
+    color: var(--fg-muted); cursor: pointer;
+  }
+  .seg button.active { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-hair); }
+  .tweaks-toggle {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 0; font-size: var(--text-sm);
+  }
+  .switch {
+    width: 34px; height: 20px; border-radius: 999px; background: var(--paper-3);
+    position: relative; cursor: pointer; border: 1px solid var(--border);
+    transition: background 160ms;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px;
+    background: var(--bg-raised); border-radius: 999px; transition: transform 160ms;
+    box-shadow: var(--shadow-hair);
+  }
+  .switch.on { background: var(--accent-terracotta); border-color: transparent; }
+  .switch.on::after { transform: translateX(14px); }
+
+  .tweaks-trigger {
+    position: fixed; bottom: 24px; right: 24px; z-index: 39;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--bg-raised); border: 1px solid var(--border);
+    box-shadow: var(--shadow-soft); cursor: pointer;
+    display: none; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 16px; color: var(--fg-muted);
+  }
+  body.tweaks-available:not(.tweaks-open) .tweaks-trigger { display: flex; }
+
+  /* Dark toggle mini (always visible) */
+  .theme-mini {
+    position: fixed; top: 24px; right: 340px; z-index: 41;
+    background: var(--bg-raised); border: 1px solid var(--border);
+    border-radius: 999px; padding: 3px;
+    display: inline-flex; font-family: var(--font-mono); font-size: 10.5px;
+  }
+  .theme-mini button { border: none; background: transparent; font: inherit; padding: 5px 10px; border-radius: 999px; color: var(--fg-muted); cursor: pointer; }
+  .theme-mini button.active { background: var(--accent-terracotta); color: var(--primary-fg); }
+
+  body[data-variant="ticker"] .theme-mini { top: 14px; }
+
+  /* Toast */
+  .variant-toast {
+    position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-60px);
+    background: var(--ink-1); color: var(--paper-0);
+    padding: 10px 18px; border-radius: 999px;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.05em;
+    opacity: 0; transition: transform 300ms cubic-bezier(.2,.9,.3,1.2), opacity 300ms;
+    z-index: 50; pointer-events: none;
+  }
+  .variant-toast.show { transform: translateX(-50%) translateY(60px); opacity: 1; }
+
+  /* Hide the variant-specific chrome when not active */
+  body:not([data-variant="spine"]) .spine,
+  body:not([data-variant="ticker"]) .ticker,
+  body:not([data-variant="dock"]) .dock-header,
+  body:not([data-variant="dock"]) .dock-wrap { display: none; }
+
+  @media (max-width: 820px) {
+    .content-host { padding: 32px 20px 200px !important; }
+    body[data-variant="spine"] .content-host { padding-left: 20px !important; padding-top: 260px !important; }
+    body[data-variant="spine"] .spine {
+      position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border);
+      flex-direction: column;
+    }
+    .panel-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-variant="spine" class="paper-grain">
+
+<div class="variant-toast" id="toast"></div>
+
+<!-- dark toggle -->
+<div class="theme-mini" id="themeMini">
+  <button data-mode="light" class="active">☀</button>
+  <button data-mode="dark">☾</button>
+</div>
+
+<!-- ================================================
+     VARIANT 1 — SPINE
+     ================================================ -->
+<aside class="spine">
+  <div class="spine-brand"><em>my</em> money<br>manager</div>
+  <div class="spine-owner">jason · local</div>
+
+  <div class="spine-month">
+    <div class="arrows"><button>‹</button></div>
+    <div><div class="m">April</div></div>
+    <div class="y">'26</div>
+    <div class="arrows"><button>›</button></div>
+  </div>
+
+  <nav class="spine-tabs">
+    <button class="spine-tab"><span class="tab-icon">◇</span>Dashboard<span class="count">·</span></button>
+    <button class="spine-tab active"><span class="tab-icon">▣</span>Budget<span class="count">24</span></button>
+    <button class="spine-tab"><span class="tab-icon">≡</span>Transactions<span class="count">652</span></button>
+    <button class="spine-tab backlog"><span class="tab-icon">!</span>Categorize<span class="count">12</span></button>
+    <button class="spine-tab"><span class="tab-icon">↻</span>Subscriptions<span class="count">—</span></button>
+    <button class="spine-tab"><span class="tab-icon">★</span>Goals<span class="count">3</span></button>
+    <button class="spine-tab" style="margin-top:8px;"><span class="tab-icon">↥</span>Import<span class="count"></span></button>
+  </nav>
+
+  <div class="spine-peek">
+    <div class="title">Peek · balances</div>
+    <div class="acct"><span class="name">Checking</span><span class="amt">$3,482.19</span></div>
+    <div class="acct"><span class="name">Savings</span><span class="amt">$8,210.04</span></div>
+    <div class="sep"></div>
+    <div class="total"><span class="lbl">total</span><span class="amt money-pos">$11,692.23</span></div>
+  </div>
+</aside>
+
+<!-- ================================================
+     VARIANT 2 — TICKER
+     ================================================ -->
+<header class="ticker">
+  <div class="ticker-inner">
+    <div class="ticker-brand">
+      <div class="mark">m</div>
+      <div class="words"><em>my</em> money manager</div>
+    </div>
+    <nav class="ticker-pages">
+      <button class="ticker-page"><span>Dashboard</span><span class="num">D</span></button>
+      <button class="ticker-page active"><span>Budget</span><span class="num">B</span></button>
+      <button class="ticker-page"><span>Transactions</span><span class="num">T</span></button>
+      <button class="ticker-page backlog"><span>Categorize</span><span class="num">12</span></button>
+      <button class="ticker-page"><span>Subscriptions</span><span class="num">S</span></button>
+      <button class="ticker-page"><span>Goals</span><span class="num">G</span></button>
+      <button class="ticker-page"><span>Import</span><span class="num">I</span></button>
+    </nav>
+    <div class="ticker-peek">
+      <div class="ticker-balance">
+        <span class="lbl">Total</span>
+        <span class="val pos">$11,692.23</span>
+      </div>
+      <div class="ticker-month">
+        <button>‹</button>
+        <div class="m">April '26</div>
+        <button>›</button>
+      </div>
+    </div>
+  </div>
+  <div class="ticker-marquee">
+    <div class="ticker-marquee-track">
+      <span class="tag"><span class="pill">CHECKING</span>$3,482.19</span>
+      <span class="tag"><span class="pill">SAVINGS</span>$8,210.04</span>
+      <span class="tag"><span class="pill">APR SPEND</span>$1,204.50 of $2,400</span>
+      <span class="tag"><span class="pill">BACKLOG</span>12 uncategorized · $248.40</span>
+      <span class="tag"><span class="pill">GROCERIES</span>68% used</span>
+      <span class="tag"><span class="pill">DINING</span>112% · over by $18.40</span>
+      <span class="tag"><span class="pill">LAST IMPORT</span>543 rows · 2d ago</span>
+      <span class="tag"><span class="pill">GOALS</span>3 active · on track</span>
+      <!-- duplicate for seamless loop -->
+      <span class="tag"><span class="pill">CHECKING</span>$3,482.19</span>
+      <span class="tag"><span class="pill">SAVINGS</span>$8,210.04</span>
+      <span class="tag"><span class="pill">APR SPEND</span>$1,204.50 of $2,400</span>
+      <span class="tag"><span class="pill">BACKLOG</span>12 uncategorized · $248.40</span>
+      <span class="tag"><span class="pill">GROCERIES</span>68% used</span>
+      <span class="tag"><span class="pill">DINING</span>112% · over by $18.40</span>
+      <span class="tag"><span class="pill">LAST IMPORT</span>543 rows · 2d ago</span>
+      <span class="tag"><span class="pill">GOALS</span>3 active · on track</span>
+    </div>
+  </div>
+</header>
+
+<!-- ================================================
+     VARIANT 3 — DOCK
+     ================================================ -->
+<div class="dock-header">
+  <div class="dock-brand"><em>my</em> money manager</div>
+  <div class="dock-month-chip">
+    <button>‹</button>
+    <span class="m">April '26</span>
+    <button>›</button>
+  </div>
+</div>
+<div class="dock-wrap" id="dockWrap">
+  <div class="dock-peek">
+    <div class="acct"><span class="lbl">Checking</span><span class="amt">$3,482.19</span></div>
+    <div class="acct"><span class="lbl">Savings</span><span class="amt">$8,210.04</span></div>
+    <div class="acct"><span class="lbl">Total</span><span class="amt pos">$11,692.23</span></div>
+  </div>
+  <nav class="dock">
+    <button class="dock-btn">Home</button>
+    <button class="dock-btn active">Budget</button>
+    <button class="dock-btn">Txns</button>
+    <button class="dock-btn">Cat<span class="badge">12</span></button>
+    <button class="dock-btn">Subs</button>
+    <button class="dock-btn">Goals</button>
+    <span class="dock-sep"></span>
+    <button class="dock-btn">Import</button>
+    <button class="dock-btn dock-peek-btn" id="peekBtn">$$</button>
+  </nav>
+</div>
+
+<!-- ================================================
+     SHARED CONTENT — The "Budget · April" page
+     ================================================ -->
+<div class="frame">
+  <main class="content-host">
+    <div class="page-kicker"><span class="dot"></span>Budget · April 2026 · Week 3</div>
+    <h1 class="page-title">Seventeen days <em>still in the envelope.</em></h1>
+    <p class="page-sub">You've spent $1,204.50 of $2,400 this month. Dining is over, groceries are on pace, and 12 transactions need a category before rent posts.</p>
+
+    <div class="panel-grid">
+      <div class="big-card">
+        <h3>April allocation</h3>
+        <div class="since">$2,400 across 7 envelopes</div>
+        <div class="allocation-bar">
+          <div style="background: oklch(0.55 0.09 155); width: 25%;">Rent 25%</div>
+          <div style="background: oklch(0.62 0.09 45); width: 25%;">Groceries 25%</div>
+          <div style="background: oklch(0.60 0.09 220); width: 14%;">Utilities</div>
+          <div style="background: oklch(0.52 0.09 25); width: 10%;">Dining</div>
+          <div style="background: oklch(0.50 0.09 270); width: 10%;">Transit</div>
+          <div style="background: oklch(0.72 0.09 75); width: 8%;">Misc</div>
+          <div style="background: oklch(0.45 0.06 120); width: 8%;">Save</div>
+        </div>
+        <div class="allocation-labels">
+          <span class="lg"><span class="sw" style="background:oklch(0.55 0.09 155);"></span>Rent $600</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.62 0.09 45);"></span>Groceries $600</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.60 0.09 220);"></span>Utilities $340</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.52 0.09 25);"></span>Dining $240</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.50 0.09 270);"></span>Transit $240</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.72 0.09 75);"></span>Misc $200</span>
+          <span class="lg"><span class="sw" style="background:oklch(0.45 0.06 120);"></span>Save $180</span>
+        </div>
+
+        <div style="margin-top: 28px;">
+          <div class="rule-label" style="margin-bottom: 14px;">Envelopes</div>
+          <div class="env-grid">
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Rent</span><span class="pct">100%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill" style="width:100%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent">$600</span> paid</span><span>done</span></div>
+            </div>
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Groceries</span><span class="pct">68%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill" style="width:68%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent">$408.21</span> spent</span><span>$191.79 left</span></div>
+            </div>
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Dining out</span><span class="pct" style="color:var(--accent-redbrown);">112%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill over" style="width:100%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent money-neg">($268)</span></span><span class="money-neg">over $28</span></div>
+            </div>
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Utilities</span><span class="pct">42%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill" style="width:42%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent">$142.80</span></span><span>$197.20 left</span></div>
+            </div>
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Transit</span><span class="pct">84%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill warn" style="width:84%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent">$201.60</span></span><span>$38.40 left</span></div>
+            </div>
+            <div class="envelope">
+              <div class="envelope-name"><span class="cat">Misc</span><span class="pct">18%</span></div>
+              <div class="envelope-bar"><div class="envelope-fill" style="width:18%;"></div></div>
+              <div class="envelope-amounts"><span><span class="spent">$35.50</span></span><span>$164.50 left</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack gap-4">
+        <div class="side-card">
+          <h4>Recent activity <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--fg-subtle);letter-spacing:0.1em;">last 4</span></h4>
+          <div class="activity-row">
+            <span>Safeway #2930</span>
+            <span class="mono">$84.22</span>
+          </div>
+          <div class="activity-row">
+            <span>Transfer to Savings</span>
+            <span class="mono money-neg">($250.00)</span>
+          </div>
+          <div class="activity-row">
+            <span>DIRECT DEPOSIT</span>
+            <span class="mono money-pos">$2,140.00</span>
+          </div>
+          <div class="activity-row">
+            <span>SP SHOPIFY *A-ROASTER</span>
+            <span class="mono">$18.50</span>
+          </div>
+        </div>
+        <div class="side-card" style="background: color-mix(in oklch, var(--accent-amber) 8%, var(--bg-raised)); border-color: color-mix(in oklch, var(--accent-amber) 30%, var(--border));">
+          <h4>Backlog</h4>
+          <p style="margin:0 0 12px;font-size:var(--text-sm);color:var(--fg-muted);">12 rows are waiting on a category. They add up to $248.40 — small enough to miss, big enough to matter.</p>
+          <button class="btn btn-primary btn-sm">Categorize all →</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ================================================
+     TWEAKS
+     ================================================ -->
+<button class="tweaks-trigger" id="tweaksTrigger" title="Open tweaks">⚙</button>
+<aside class="tweaks" id="tweaksPanel">
+  <h5><span><em>Tweaks</em></span><button class="close" id="tweaksClose">×</button></h5>
+
+  <div class="tweaks-section">
+    <div class="tweaks-label">Navigation shape</div>
+    <div class="seg" data-tweak="variant">
+      <button data-value="spine" class="active">Spine</button>
+      <button data-value="ticker">Ticker</button>
+      <button data-value="dock">Dock</button>
+    </div>
+    <div style="font-size:11px;color:var(--fg-subtle);margin-top:8px;line-height:1.5;">
+      <strong>Spine</strong> · ledger-book edge w/ tabs<br>
+      <strong>Ticker</strong> · bank-style top strip<br>
+      <strong>Dock</strong> · floating bottom bar
+    </div>
+  </div>
+
+  <div class="tweaks-section">
+    <div class="tweaks-label">Theme</div>
+    <div class="seg" data-tweak="theme">
+      <button data-value="light" class="active">Light</button>
+      <button data-value="dark">Dark</button>
+    </div>
+  </div>
+
+  <div class="tweaks-section">
+    <div class="tweaks-label">Texture</div>
+    <div class="tweaks-toggle"><span>Paper grain</span><div class="switch on" data-tweak-toggle="grain"></div></div>
+    <div class="tweaks-toggle"><span>Balance peek</span><div class="switch on" data-tweak-toggle="peek"></div></div>
+  </div>
+
+  <div class="tweaks-section">
+    <div class="tweaks-label">Money color</div>
+    <div class="seg" data-tweak="money">
+      <button data-value="restrained" class="active">Restrained</button>
+      <button data-value="bold">Bold</button>
+      <button data-value="none">None</button>
+    </div>
+  </div>
+</aside>
+
+<script>
+  // ================= Variant switching =================
+  const body = document.body;
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+  const showToast = (msg) => {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 1400);
+  };
+
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "variant": "spine",
+    "theme": "light",
+    "grain": true,
+    "peek": true,
+    "money": "restrained"
+  }/*EDITMODE-END*/;
+
+  const state = { ...TWEAK_DEFAULTS, ...JSON.parse(localStorage.getItem('mmm-nav') || '{}') };
+
+  const applyVariant = (v) => {
+    body.dataset.variant = v;
+    document.querySelectorAll('[data-tweak="variant"] button').forEach(b => b.classList.toggle('active', b.dataset.value === v));
+    showToast('nav · ' + v);
+  };
+  const applyTheme = (t) => {
+    document.documentElement.classList.toggle('dark', t === 'dark');
+    document.querySelectorAll('[data-tweak="theme"] button').forEach(b => b.classList.toggle('active', b.dataset.value === t));
+    document.querySelectorAll('#themeMini button').forEach(b => b.classList.toggle('active', b.dataset.mode === t));
+  };
+  const applyGrain = (on) => {
+    body.classList.toggle('paper-grain', on);
+    document.querySelector('[data-tweak-toggle="grain"]').classList.toggle('on', on);
+  };
+  const applyPeek = (on) => {
+    document.querySelectorAll('.spine-peek, .ticker-peek, #peekBtn').forEach(el => {
+      el.style.display = on ? '' : 'none';
+    });
+    document.querySelector('[data-tweak-toggle="peek"]').classList.toggle('on', on);
+  };
+  const applyMoney = (mode) => {
+    const root = document.documentElement;
+    if (mode === 'bold') {
+      root.style.setProperty('--money-pos', 'oklch(0.6 0.18 155)');
+      root.style.setProperty('--money-neg', 'oklch(0.55 0.2 25)');
+    } else if (mode === 'none') {
+      root.style.setProperty('--money-pos', 'var(--ink-1)');
+      root.style.setProperty('--money-neg', 'var(--ink-1)');
+    } else {
+      root.style.removeProperty('--money-pos');
+      root.style.removeProperty('--money-neg');
+    }
+    document.querySelectorAll('[data-tweak="money"] button').forEach(b => b.classList.toggle('active', b.dataset.value === mode));
+  };
+
+  const persist = () => {
+    localStorage.setItem('mmm-nav', JSON.stringify(state));
+    try {
+      window.parent.postMessage({ type: '__edit_mode_set_keys', edits: state }, '*');
+    } catch (e) {}
+  };
+
+  const setKey = (k, v) => {
+    state[k] = v;
+    if (k === 'variant') applyVariant(v);
+    if (k === 'theme') applyTheme(v);
+    if (k === 'grain') applyGrain(v);
+    if (k === 'peek') applyPeek(v);
+    if (k === 'money') applyMoney(v);
+    persist();
+  };
+
+  // Apply initial state
+  applyVariant(state.variant);
+  applyTheme(state.theme);
+  applyGrain(state.grain);
+  applyPeek(state.peek);
+  applyMoney(state.money);
+
+  // Segment controls
+  document.querySelectorAll('.seg').forEach(seg => {
+    seg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      setKey(seg.dataset.tweak, b.dataset.value);
+    });
+  });
+  // Toggle switches
+  document.querySelectorAll('[data-tweak-toggle]').forEach(sw => {
+    sw.addEventListener('click', () => {
+      const k = sw.dataset.tweakToggle;
+      setKey(k, !state[k]);
+    });
+  });
+  // Mini theme toggle (always visible)
+  document.getElementById('themeMini').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    setKey('theme', b.dataset.mode);
+  });
+
+  // Dock peek
+  const dockWrap = document.getElementById('dockWrap');
+  const peekBtn = document.getElementById('peekBtn');
+  if (peekBtn) peekBtn.addEventListener('click', () => dockWrap.classList.toggle('peek-open'));
+
+  // ================= Edit mode (Tweaks toolbar) =================
+  const trigger = document.getElementById('tweaksTrigger');
+  const panel = document.getElementById('tweaksPanel');
+  document.getElementById('tweaksClose').addEventListener('click', () => body.classList.remove('tweaks-open'));
+  trigger.addEventListener('click', () => body.classList.add('tweaks-open'));
+
+  window.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.type === '__activate_edit_mode') {
+      body.classList.add('tweaks-available', 'tweaks-open');
+    }
+    if (d.type === '__deactivate_edit_mode') {
+      body.classList.remove('tweaks-available', 'tweaks-open');
+    }
+  });
+  try { window.parent.postMessage({ type: '__edit_mode_available' }, '*'); } catch(e) {}
+
+  // Keyboard: 1/2/3 for variants
+  document.addEventListener('keydown', (e) => {
+    if (e.target.closest('input, textarea, select, [contenteditable]')) return;
+    if (e.key === '1') setKey('variant', 'spine');
+    if (e.key === '2') setKey('variant', 'ticker');
+    if (e.key === '3') setKey('variant', 'dock');
+    if (e.key === 'd') setKey('theme', state.theme === 'dark' ? 'light' : 'dark');
+  });
+</script>
+
+</body>
+</html>

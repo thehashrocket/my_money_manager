@@ -11,6 +11,15 @@ import {
 } from "@/lib/budget/loadMonthView";
 import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
+import { EnvelopeCard } from "@/components/ledger/envelope-card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { AllocateFormTrigger } from "./_allocate-form";
 
 /**
@@ -144,19 +153,19 @@ function BudgetTable({ view }: { view: MonthView }) {
 
   return (
     <div className="hidden sm:block overflow-hidden rounded-md border border-border">
-      <table className="w-full border-collapse text-sm">
-        <thead className="sticky top-0 bg-muted text-xs uppercase tracking-wide text-muted-foreground">
-          <tr>
-            <th className="px-3 py-2 text-left font-medium">Category</th>
-            <th className="px-3 py-2 text-right font-medium">Allocated</th>
-            <th className="px-3 py-2 text-right font-medium">Rollover</th>
-            <th className="px-3 py-2 text-right font-medium">Effective</th>
-            <th className="px-3 py-2 text-right font-medium">Spent</th>
-            <th className="px-3 py-2 text-right font-medium">Remaining</th>
-            <th className="px-3 py-2 text-right font-medium">Allocate</th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table className="border-collapse">
+        <TableHeader className="sticky top-0 bg-muted text-xs uppercase tracking-wide text-muted-foreground">
+          <TableRow>
+            <TableHead className="px-3">Category</TableHead>
+            <TableHead className="px-3 text-right">Allocated</TableHead>
+            <TableHead className="px-3 text-right">Rollover</TableHead>
+            <TableHead className="px-3 text-right">Effective</TableHead>
+            <TableHead className="px-3 text-right">Spent</TableHead>
+            <TableHead className="px-3 text-right">Remaining</TableHead>
+            <TableHead className="px-3 text-right">Allocate</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {view.sections.map((section) => (
             <SectionRows
               key={section.parentId ?? "ungrouped"}
@@ -165,8 +174,8 @@ function BudgetTable({ view }: { view: MonthView }) {
               month={view.month}
             />
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </div>
   );
 }
@@ -183,14 +192,14 @@ function SectionRows({
   const label = section.parentName ?? "Ungrouped";
   return (
     <>
-      <tr className="bg-muted/40">
-        <td
+      <TableRow className="bg-muted/40 hover:bg-muted/40">
+        <TableCell
           colSpan={7}
           className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"
         >
           {label}
-        </td>
-      </tr>
+        </TableCell>
+      </TableRow>
       {section.categories.map((leaf) => (
         <LeafRowView
           key={leaf.categoryId}
@@ -216,8 +225,8 @@ function LeafRowView({
   const rollover = leaf.allocation?.rolloverCents ?? 0;
   const effective = leaf.allocation?.effectiveCents ?? 0;
   return (
-    <tr className="border-t border-border">
-      <td className="px-3 py-2">
+    <TableRow>
+      <TableCell className="px-3 py-2">
         <Link
           href={`/transactions?categoryId=${leaf.categoryId}&year=${year}&month=${month}`}
           className="text-primary underline-offset-4 hover:underline"
@@ -229,13 +238,17 @@ function LeafRowView({
             Rollover
           </span>
         ) : null}
-      </td>
-      <td className="px-3 py-2 text-right">{formatCents(allocated)}</td>
-      <td className="px-3 py-2 text-right text-muted-foreground">
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right">
+        {formatCents(allocated)}
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right text-muted-foreground">
         {rollover === 0 ? "—" : formatCents(rollover)}
-      </td>
-      <td className="px-3 py-2 text-right">{formatCents(effective)}</td>
-      <td className="px-3 py-2 text-right">
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right">
+        {formatCents(effective)}
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right">
         {formatCents(leaf.spentCents)}
         {leaf.pendingCents > 0 ? (
           <span
@@ -245,11 +258,11 @@ function LeafRowView({
             +p
           </span>
         ) : null}
-      </td>
-      <td className="px-3 py-2 text-right">
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right">
         <RemainingCell leaf={leaf} />
-      </td>
-      <td className="px-3 py-2 text-right">
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right">
         <AllocateFormTrigger
           categoryId={leaf.categoryId}
           categoryName={leaf.name}
@@ -258,8 +271,8 @@ function LeafRowView({
           allocation={leaf.allocation}
           carryoverPolicy={leaf.carryoverPolicy}
         />
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -307,57 +320,41 @@ function MobileCards({ view }: { view: MonthView }) {
     <div className="sm:hidden space-y-4">
       {view.sections.map((section) => (
         <section key={section.parentId ?? "ungrouped"} className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <h2 className="font-mono text-xs uppercase tracking-[0.1em] text-muted-foreground">
             {section.parentName ?? "Ungrouped"}
           </h2>
-          <ul className="space-y-2">
+          <ul className="space-y-3">
             {section.categories.map((leaf) => (
-              <li
-                key={leaf.categoryId}
-                className="rounded-md border border-border bg-card p-3 space-y-2"
-              >
-                <div className="flex items-baseline justify-between gap-2">
-                  <Link
-                    href={`/transactions?categoryId=${leaf.categoryId}&year=${view.year}&month=${view.month}`}
-                    className="font-medium text-primary underline-offset-4 hover:underline"
-                  >
-                    {leaf.name}
-                  </Link>
-                  <span
-                    className={
-                      leaf.isOverspent
-                        ? "text-destructive"
-                        : "text-emerald-800 dark:text-emerald-400"
-                    }
-                  >
-                    {formatCents(leaf.remainingCents)}
-                  </span>
-                </div>
-                <dl className="grid grid-cols-3 gap-2 text-xs">
-                  <div>
-                    <dt className="text-muted-foreground">Allocated</dt>
-                    <dd>
-                      {formatCents(leaf.allocation?.allocatedCents ?? 0)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">Effective</dt>
-                    <dd>
-                      {formatCents(leaf.allocation?.effectiveCents ?? 0)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">Spent</dt>
-                    <dd>{formatCents(leaf.spentCents)}</dd>
-                  </div>
-                </dl>
-                <AllocateFormTrigger
-                  categoryId={leaf.categoryId}
-                  categoryName={leaf.name}
-                  year={view.year}
-                  month={view.month}
-                  allocation={leaf.allocation}
-                  carryoverPolicy={leaf.carryoverPolicy}
+              <li key={leaf.categoryId}>
+                <EnvelopeCard
+                  name={leaf.name}
+                  effectiveCents={leaf.allocation?.effectiveCents ?? 0}
+                  spentCents={leaf.spentCents}
+                  titleAs={(node) => (
+                    <Link
+                      href={`/transactions?categoryId=${leaf.categoryId}&year=${view.year}&month=${view.month}`}
+                      className="underline-offset-4 hover:underline"
+                    >
+                      {node}
+                    </Link>
+                  )}
+                  badges={
+                    leaf.carryoverPolicy === "rollover" ? (
+                      <span className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Rollover
+                      </span>
+                    ) : null
+                  }
+                  footer={
+                    <AllocateFormTrigger
+                      categoryId={leaf.categoryId}
+                      categoryName={leaf.name}
+                      year={view.year}
+                      month={view.month}
+                      allocation={leaf.allocation}
+                      carryoverPolicy={leaf.carryoverPolicy}
+                    />
+                  }
                 />
               </li>
             ))}

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Newsreader } from "next/font/google";
 import { Toaster } from "sonner";
+import { Spine } from "@/components/ledger/spine";
+import { ThemeInit } from "@/components/ledger/theme-init";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -11,6 +13,12 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+});
+
+const newsreader = Newsreader({
+  variable: "--font-display-var",
+  subsets: ["latin"],
+  style: ["normal", "italic"],
 });
 
 export const metadata: Metadata = {
@@ -26,10 +34,17 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${newsreader.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
-      <body className="min-h-full flex flex-col">
-        {children}
+      <head>
+        <ThemeInit />
+      </head>
+      <body className="min-h-full paper-grain">
+        <div className="ledger-shell">
+          <Spine />
+          <div className="ledger-content">{children}</div>
+        </div>
         <Toaster position="bottom-right" richColors closeButton />
       </body>
     </html>
