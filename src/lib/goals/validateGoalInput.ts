@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const createGoalSchema = z.object({
   name: z.string().trim().min(1).max(100),
-  targetDollars: z.coerce.number().positive(),
+  targetDollars: z.coerce.number().positive().multipleOf(0.01),
   carryoverPolicy: z.enum(["none", "rollover", "reset"]).default("none"),
 });
 
@@ -10,7 +10,7 @@ export type CreateGoalInput = z.infer<typeof createGoalSchema>;
 
 export const updateGoalTargetSchema = z.object({
   categoryId: z.coerce.number().int().positive(),
-  targetDollars: z.coerce.number().positive(),
+  targetDollars: z.coerce.number().positive().multipleOf(0.01),
 });
 
 export type UpdateGoalTargetInput = z.infer<typeof updateGoalTargetSchema>;

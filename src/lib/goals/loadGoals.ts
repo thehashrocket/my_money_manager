@@ -69,7 +69,7 @@ export function loadGoals(db: Db): GoalsView {
   const withdrawalMap = new Map<number, number>();
   for (const row of withdrawalRows) {
     if (row.categoryId !== null) {
-      withdrawalMap.set(row.categoryId, Math.abs(row.totalWithdrawnSigned));
+      withdrawalMap.set(row.categoryId, 0 - row.totalWithdrawnSigned);
     }
   }
 

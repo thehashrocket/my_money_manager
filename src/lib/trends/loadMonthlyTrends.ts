@@ -117,6 +117,8 @@ export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
   const spendByMonthAndGroup = new Map<string, Map<string, number>>();
   for (const row of spendRows) {
     if (row.categoryId === null) continue;
+    // Skip savings-goal categories — they don't appear in the category name map
+    if (!categoryNameById.has(row.categoryId) && !parentIdById.has(row.categoryId)) continue;
     const groupName = resolveGroupName(row.categoryId);
     const key = `${row.yr}-${row.mo}`;
     const bucket = spendByMonthAndGroup.get(key) ?? new Map<string, number>();
