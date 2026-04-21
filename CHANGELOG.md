@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-20
+
+_Weekend 3 — Ledger Paper design system lands. The app now has a full visual identity: warm paper-tone surfaces, Newsreader serif for headings, Geist Mono for money, a Spine navigation rail that stays on every page, and a dashboard command-center that shows account balances, monthly budget summary, and the uncategorized backlog at a glance. Light and dark themes switch without flash. The design tokens and nav prototype live in `design_handoff_nav_and_design_system/` as live HTML specimens._
+
+### Added
+- **Dashboard** (`src/app/page.tsx`): account balance tiles per account, total balance row, monthly summary strip (Allocated / Effective / Spent / Remaining), uncategorized backlog tile, quick links to `/budget` and `/transactions`. Empty state shows `∅` with a link to import.
+- **Spine navigation rail** (`src/components/ledger/spine*.tsx`): fixed left rail with app branding, active-tab highlight, month picker (context-aware: follows current month on most pages, follows the URL on `/budget`), account balance peek with running total, and an amber count chip for the uncategorized backlog.
+- **Ledger Paper design system** (`src/app/globals.css`, `design_handoff_nav_and_design_system/`): full token set — paper surfaces (`--paper-0/1/2/3/4`), ink text (`--ink-1/2/3/4`), semantic money colors (`--money-pos/neg/zero`), Terracotta primary, Amber backlog, Ledger green, Redbrown destructive. Radii, shadow, and spacing cadence locked. Tailwind utilities wired to all tokens.
+- **Light / dark theme** (`src/components/ledger/theme-toggle.tsx`, `theme-init.tsx`): system-preference default, FOITD-free inline script in `<head>` so there is no flash on reload.
+- **`EnvelopeCard`** (`src/components/ledger/envelope-card.tsx`): signature card component for budget envelope display — envelope name, allocated / spent / remaining cells with correct money coloring, over-budget destructive state.
+- **`loadAccountBalances`** (`src/lib/accounts/loadAccountBalances.ts`): authoritative per-account balance using the formula from CLAUDE.md (`starting_balance_cents + SUM(amount_cents WHERE date > starting_balance_date)`).
+- **Design handoff** (`design_handoff_nav_and_design_system/`): live HTML specimens for the design system and nav prototype, plus a `README.md` capturing all visual decisions.
+- **Zod validation on all Server Actions** (`src/app/import/actions.ts`, `src/app/categorize/actions.ts`): `validateCreateAccountInput`, `validateUploadCsvInput`, `validateImportIdInput`, `validateBulkCategorizeSnapshot` replace ad-hoc checks. All validators ship with full test suites (124 new tests across 4 files).
+- shadcn primitives: `src/components/ui/table.tsx`, `combobox.tsx`, `input-group.tsx`, `input.tsx`, `textarea.tsx`.
+- Shared `CategoryCombobox` wrapper (`src/components/CategoryCombobox.tsx`) used by both categorize and transactions inline pickers.
+- CSV fixture files for testing: `src/lib/__fixtures__/sample-checking.csv`, `sample-savings.csv`.
+- Node 24 engine lock (`.nvmrc`, `engines` field in `package.json`, `.npmrc` with `engine-strict=true`).
+
+### Changed
+- **Layout** (`src/app/layout.tsx`): Newsreader + Geist + Geist Mono loaded via `next/font`, Spine rail wired into the shell, `ThemeInit` script in `<head>`.
+- **`BacklogBanner`**: updated to use Amber design tokens; accepts `variant="budget"` prop.
+- `/budget` page: raw `<table>` → shadcn `Table` / `TableHeader` / `TableBody` / `TableRow` / `TableHead` / `TableCell` primitives.
+- `/categorize` and `/transactions` inline pickers: native `<select>` → searchable `CategoryCombobox` (Base UI Combobox variant).
+- **`findTransferPairs`** (`src/lib/transferPair.ts`): buckets candidates by `(date, |amount|)` — same-day scan drops from O(N²) to O(N).
+
+### Fixed
+- `parseCsv` test fixture aligned with actual Star One CSV format.
+
 ## [0.4.1] - 2026-04-19
 
 _Weekend 2 polish — transfer-pair matcher now scales linearly on same-day imports. Previously, every unpaired row for a given date was compared against every other unpaired row for that date; with N rows sharing one date, that's O(N²) work on each import. Now candidates are bucketed by `(date, |amount|)` before the pairing scan, so two rows only enter the inner comparison if they already agree on both. Real-world same-day row counts stay in the single digits, but the ceiling is no longer O(N²)._
