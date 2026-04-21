@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-04-21
+
+_Subscriptions can now be categorized in one click. New auto-categorize actions on the subscriptions page tag detected recurring charges as Subscriptions and create a remember-this-merchant rule. Twenty-three category rules for common streaming and software services seed automatically so new imports land in the right bucket from day one._
+
+### Added
+- **"Categorize" button per subscription row** — tags all uncategorized transactions from that merchant as Subscriptions and saves an exact rule for future imports.
+- **"Categorize all" button** — bulk-categorizes every active detected subscription at once.
+- **Subscription service category rules** (`drizzle/0006_subscription_rules.sql`) — 23 `contains` rules at priority 30 for Netflix, Spotify, Hulu, Disney+, Amazon Prime, YouTube Premium, HBO Max, Peacock, Paramount+, Adobe, Dropbox, GitHub, Zoom, Crunchyroll, iCloud, Google One, Microsoft 365, Office 365, Apple One, ESPN+, and Audible. Priority 30 means user-created rules (priority 50) always win.
+
+### Fixed
+- **Test suite compatibility** — rule-count assertions now filter to `matchType = 'exact'` so the seeded `contains` rules from this migration don't inflate counts.
+
 ## [0.7.1] - 2026-04-21
 
 _Integration checkpoint polish. Categorized items on `/categorize` and `/transactions` now fade to 50% opacity so the uncategorized work is obvious at a glance. A new Subscriptions category joins the spending list._
