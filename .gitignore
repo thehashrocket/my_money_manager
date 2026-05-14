@@ -47,3 +47,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# gbrain worktree-scoped source pin (per-machine, set by /sync-gbrain)
+.gbrain-source
