@@ -37,6 +37,7 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     txnIds: result.txnIds,
     ruleTouched: result.ruleTouched,
     priorRule: result.priorRule,
+    insertedRuleId: result.insertedRuleId,
     earliestDate: result.earliestDate,
   };
 
