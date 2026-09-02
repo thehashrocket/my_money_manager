@@ -142,15 +142,24 @@ Still open:
 
 ## Follow-ups from the dockerize + Postgres plan review (2026-09-02)
 
-- [ ] **P0 — `importBatch.ts` never checks `createSnapshot`'s `consistent` flag.**
+- [x] **P0 — `importBatch.ts` never checks `createSnapshot`'s `consistent` flag.**
   CLAUDE.md rule 5 says a degraded snapshot is never silently ignored, and
   `src/lib/simplefin/sync.ts:345` does check it. `src/lib/importBatch.ts:145` calls
   `createSnapshot(DB_PATH)` and goes straight into `db.transaction(...)` with no check,
   so a plain-copy fallback (which `snapshot.ts:62-86` documents as sometimes producing a
   file that will not open at all) is recorded as `import_batches.snapshot_path` and the
   CSV import proceeds believing it has a rollback. This is live on `main` today and
-  independent of the Docker work. Tracked in the plan as F18/T6a so it lands with PR1,
-  but it is worth fixing sooner — it is ~5 lines plus a test.
+  independent of the Docker work. Fixed ahead of PR1: `CommitResult`'s `committed`
+  variant now carries `warnings: string[]` (warn-and-proceed, matching `sync.ts`'s
+  policy — commit still succeeds). Initial version surfaced the warning via a
+  `?warning=` query param on the redirect; adversarial review (Claude + Codex,
+  independently) flagged that as forgeable and non-durable — it vanished on any
+  later visit to `/import/success/[batchId]` and put raw SQLite error text in the
+  URL/browser history. Fixed by persisting it instead: `import_batches` gained a
+  nullable `snapshot_warning` column (migration `0009_narrow_sentinels.sql`),
+  written once at commit time; the success page reads it straight from the batch
+  row. Covered by tests in `importBatch.test.ts`. Originally tracked in the plan
+  as F18/T6a to land with PR1; fixed sooner instead, on its own branch.
   Found by the `/ship` adversarial pass, 2026-09-02.
 
 Deferred out of `docs/plans/dockerize-postgres.md` during `/plan-eng-review`. Both were

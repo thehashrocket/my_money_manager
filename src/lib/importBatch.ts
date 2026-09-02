@@ -125,6 +125,7 @@ export type CommitResult =
       errorCount: number;
       pairsLinked: number;
       snapshot: SnapshotResult;
+      warnings: string[];
     };
 
 export function commitImport(
@@ -143,6 +144,14 @@ export function commitImport(
   }
 
   const snapshot = createSnapshot(DB_PATH);
+  const warnings: string[] = [];
+  if (!snapshot.consistent) {
+    warnings.push(
+      `The pre-import snapshot fell back to a plain file copy${
+        snapshot.degradedReason ? ` (${snapshot.degradedReason})` : ""
+      } — it may be missing the most recent writes, or fail to open at all if restored.`,
+    );
+  }
 
   const batchId = db.transaction((tx) => {
     const [batch] = tx
@@ -151,6 +160,7 @@ export function commitImport(
         source: "csv",
         filename: opts.filename,
         snapshotPath: snapshot.snapshotPath,
+        snapshotWarning: warnings.length > 0 ? warnings.join(" ") : null,
         transactionCount: 0,
       })
       .returning({ id: schema.importBatches.id })
@@ -199,6 +209,7 @@ export function commitImport(
     errorCount: preview.totals.errors,
     pairsLinked,
     snapshot,
+    warnings,
   };
 }
 

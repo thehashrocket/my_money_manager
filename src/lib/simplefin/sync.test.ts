@@ -52,6 +52,7 @@ vi.mock("./client", async (importOriginal) => ({
 vi.mock("../snapshot", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../snapshot")>()),
   createSnapshot: createSnapshotMock,
+  pruneSnapshots: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
 }));
 
 
@@ -568,6 +569,53 @@ describe("syncSimpleFin — rows dated before the fetch window", () => {
     if (outcome.status !== "up-to-date") throw new Error("unreachable");
     expect(outcome.accounts[0].duplicateByContent).toBe(1);
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+  });
+});
+
+describe("syncSimpleFin — snapshot consistency", () => {
+  it("still commits but persists a warning when the pre-sync snapshot degrades", async () => {
+    seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    createSnapshotMock.mockReturnValueOnce({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      prunedPaths: [],
+      consistent: false,
+      degradedReason: "database disk image is malformed",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // The write still happens — a degraded snapshot changes the safety net,
+    // not whether the sync proceeds (CLAUDE.md rule 5).
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.warnings.join(" ")).toMatch(/fell back to a plain file copy/);
+
+    const written = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .get();
+    expect(written?.snapshotWarning).toMatch(/database disk image is malformed/);
+  });
+
+  it("persists no warning when the pre-sync snapshot is consistent", async () => {
+    seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const written = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .get();
+    expect(written?.snapshotWarning).toBeNull();
   });
 });
 

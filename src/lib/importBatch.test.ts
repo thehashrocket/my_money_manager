@@ -1,7 +1,33 @@
-import { describe, it, expect } from "vitest";
-import { transformRow } from "./importBatch";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as schema from "@/db/schema";
+import { createTestDb, type TestDbHandle } from "@/lib/test/db";
+import { commitImport, transformRow } from "./importBatch";
 import { computeImportRowHash } from "./hash";
 import type { ParsedRow } from "./parseCsv";
+
+// `commitImport` calls `createSnapshot` against a real `data/money.db` path,
+// which does not exist in the test environment — stubbed the same way
+// `src/lib/simplefin/sync.test.ts` stubs it, so these tests can drive the
+// `consistent`/`degradedReason` branch without touching disk.
+const { createSnapshotMock } = vi.hoisted(() => ({
+  createSnapshotMock: vi.fn(() => ({
+    snapshotPath: "/tmp/money.db.pre-import-TEST",
+    timestamp: "TEST",
+    consistent: true,
+    degradedReason: null as string | null,
+  })),
+}));
+
+vi.mock("./snapshot", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./snapshot")>()),
+  createSnapshot: createSnapshotMock,
+  pruneSnapshots: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
+}));
+
+const STAR_ONE_CSV = [
+  "Transaction Number,Date,Description,Memo,Amount Debit,Amount Credit,Balance,Check Number,Fees",
+  '12345,04/16/2026,WITHDRAWAL,"TST*THE BRASS TAP - Modesto CA Card #:8568",37.13,,1000.00,,',
+].join("\n");
 
 function row(overrides: Partial<ParsedRow> = {}): ParsedRow {
   return {
@@ -64,5 +90,100 @@ describe("transformRow", () => {
     const a = transformRow(row({ rowIndex: 0 }));
     const b = transformRow(row({ rowIndex: 1 }));
     expect(a.importRowHash).not.toBe(b.importRowHash);
+  });
+});
+
+describe("commitImport", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  it("commits and reports no warnings when the snapshot is consistent", () => {
+    const result = commitImport(
+      { accountId, filename: "test.csv", csvText: STAR_ONE_CSV },
+      handle.db,
+    );
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.warnings).toEqual([]);
+    expect(result.snapshot.snapshotPath).toBe("/tmp/money.db.pre-import-TEST");
+
+    const [batch] = handle.db.select().from(schema.importBatches).all();
+    expect(batch.snapshotWarning).toBeNull();
+  });
+
+  // TODOS.md P0 / plan T6a — importBatch.ts silently recorded a degraded
+  // snapshot as if it were a good rollback target. It must still commit
+  // (sync.ts's warn-and-proceed policy, not a new abort behavior) but the
+  // caller must be told — durably, on the batch row, not just for the one
+  // redirect right after commit (adversarial review: a URL-only warning is
+  // forgeable and disappears on a later visit to the success page).
+  it("still commits but surfaces a warning when the snapshot degrades to a plain copy", () => {
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: false,
+      degradedReason: "database disk image is malformed",
+    });
+
+    const result = commitImport(
+      { accountId, filename: "test.csv", csvText: STAR_ONE_CSV },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.insertedCount).toBe(1);
+    expect(result.snapshot.snapshotPath).toBe("/tmp/money.db.pre-import-TEST");
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("database disk image is malformed");
+
+    const [batch] = handle.db.select().from(schema.importBatches).all();
+    expect(batch.snapshotPath).toBe("/tmp/money.db.pre-import-TEST");
+    expect(batch.snapshotWarning).toContain("database disk image is malformed");
+  });
+
+  it("omits the parenthetical when the snapshot degrades with no reason given", () => {
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: false,
+      degradedReason: null,
+    });
+
+    const result = commitImport(
+      { accountId, filename: "test.csv", csvText: STAR_ONE_CSV },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).not.toMatch(/\(null\)|\(\)/);
   });
 });

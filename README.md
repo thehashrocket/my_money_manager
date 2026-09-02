@@ -2,7 +2,7 @@
 
 Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** v0.8.0. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.8.2. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
@@ -45,7 +45,7 @@ SimpleFIN caps history at 90 days — the feed says so itself when you ask for m
 
 ### CSV import (older history)
 
-Upload a Star One CSV export at `/import`. The preview shows row counts, duplicates, pending rows, and errors; clicking **Confirm import** snapshots the DB, inserts the batch inside a transaction, and links transfer pairs across accounts. This is the only way to load anything the feed no longer carries.
+Upload a Star One CSV export at `/import`. The preview shows row counts, duplicates, pending rows, and errors; clicking **Confirm import** snapshots the DB, inserts the batch inside a transaction, and links transfer pairs across accounts. If the snapshot degrades to a plain file copy, the import still completes, but the success page shows a warning instead of silently trusting it as a working rollback point. This is the only way to load anything the feed no longer carries.
 
 Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simplefin-sample.json` when you want to inspect what the feed actually returns.
 
@@ -94,7 +94,7 @@ These are load-bearing — the whole app is built around them:
 2. **The CSV's signs are already correct.** `Amount Debit` is pre-negative, `Amount Credit` is positive. No `Math.abs`, no sign flips by description. (This is the bug Plaid users keep hitting.)
 3. **Dedup is `(account_id, import_batch_id, import_row_hash)`**, never Star One's `Transaction Number` — they reuse `6098` for pending deposits across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index)`. Feed rows have no row index, so they dedup on the bank's own `external_id` instead, enforced by a partial unique index on `(account_id, external_id)`. The feed also re-sends days you already imported from CSV, so sync compares content signatures too — counted as a multiset, so two genuinely identical same-day coffees both survive. Memo whitespace is normalised on both sides of that comparison, because the CSV parser preserves Star One's padding byte-for-byte while the feed sends the same row trimmed.
 4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only. The feed carries no transaction number, so sync pairs by counting instead: bucket on `(date, |amount|)`, keep only opposite-signed rows in different accounts, and auto-link any bucket where the two sides balance, since every possible pairing excludes the same rows from spending. Unbalanced buckets are the ones `/sync` asks you about — as are pairs that would join a feed row to a CSV row without the memo agreeing, since the CSV row carries a transaction number the stronger ±1 matcher already judged.
-5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`, using `VACUUM INTO` so WAL-resident writes are included — a plain file copy could produce a snapshot that would not open. Last 10 are kept, pruned only once the write commits. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server.
+5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`, using `VACUUM INTO` so WAL-resident writes are included — a plain file copy could produce a snapshot that would not open. Last 10 are kept, pruned only once the write commits. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server. Both paths check whether the snapshot actually came back consistent; if it degraded to a plain copy, a warning is persisted on the batch and shown on its success page instead of assuming the rollback works.
 6. **Money comes in as decimal strings from the feed** — parse with `parseAmountToCents` (string math), never `parseFloat(x) * 100`.
 
 ## What's NOT in V1
