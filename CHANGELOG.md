@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-09-02
+
+_Planning only — the app itself is unchanged and every one of the 402 tests still passes. This release adds the reviewed plan for running my_money_manager in a container and moving it to Postgres, staged as two separate PRs so the ledger is never protected by an undefined safety net. It also records a real bug the review turned up in code that already ships._
+
+### Added
+- **Dockerize + Postgres plan** (`docs/plans/dockerize-postgres.md`) — the full design for PR1 (containerize on SQLite) and PR2 (migrate to Postgres), with 20 implementation tasks, 23 required tests, and 24 tracked failure modes. Staged deliberately: PR1 leaves the app better off even if PR2 never happens, and the snapshot/rollback story is never undefined at the same time as the container story.
+- **Two follow-ups recorded in `TODOS.md`** — reaching the app from a phone or a NAS (the reason Postgres is in the plan at all), and a `/budget` query rewrite that closes itself if a measurement comes in under 150ms.
+
+### Known issues
+- Nothing in shipped code changed this release, but one existing defect is now written down rather than unknown: **CSV import records a database snapshot it never verifies.** `createSnapshot` reports `consistent: false` when it falls back to a plain copy, which can produce a file that will not open at all. `/sync` checks that flag; CSV import does not, so an import can complete believing it has a rollback that would fail at the moment it is needed. Tracked as a P0 in `TODOS.md` and scheduled as the first task of PR1 (T6a).
+
 ## [0.8.0] - 2026-09-02
 
 _Transactions now pull themselves in. Link your Star One accounts once and `/sync` fetches posted transactions straight from the bank behind a database snapshot you can undo — no weekly CSV download, no sign-in. Balances are checked against the bank's own figure on every visit, so a missing or duplicated row shows up as drift instead of hiding. CSV import is untouched and stays the only way to load history older than 45 days._
