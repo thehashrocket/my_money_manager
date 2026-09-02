@@ -9,11 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 _Planning only — the app itself is unchanged and every one of the 402 tests still passes. This release adds the reviewed plan for running my_money_manager in a container and moving it to Postgres, staged as two separate PRs so the ledger is never protected by an undefined safety net. It also records a real bug the review turned up in code that already ships._
 
 ### Added
-- **Dockerize + Postgres plan** (`docs/plans/dockerize-postgres.md`) — the full design for PR1 (containerize on SQLite) and PR2 (migrate to Postgres), with 20 implementation tasks, 21 required tests, and 24 tracked failure modes. Staged deliberately: PR1 leaves the app better off even if PR2 never happens, and the snapshot/rollback story is never undefined at the same time as the container story.
+- **Dockerize + Postgres plan** (`docs/plans/dockerize-postgres.md`) — the full design for PR1 (containerize on SQLite) and PR2 (migrate to Postgres), with 20 implementation tasks, 23 required tests, and 24 tracked failure modes. Staged deliberately: PR1 leaves the app better off even if PR2 never happens, and the snapshot/rollback story is never undefined at the same time as the container story.
 - **Two follow-ups recorded in `TODOS.md`** — reaching the app from a phone or a NAS (the reason Postgres is in the plan at all), and a `/budget` query rewrite that closes itself if a measurement comes in under 150ms.
 
-### Fixed
-- Nothing in shipped code yet, but one defect is now written down rather than unknown: **CSV import records a database snapshot it never verifies.** `createSnapshot` reports `consistent: false` when it falls back to a plain copy, which can produce a file that will not open at all. `/sync` checks that flag; CSV import does not, so an import can complete believing it has a rollback that would fail at the moment it is needed. Tracked as a P0 in `TODOS.md` and scheduled as the first task of PR1.
+### Known issues
+- Nothing in shipped code changed this release, but one existing defect is now written down rather than unknown: **CSV import records a database snapshot it never verifies.** `createSnapshot` reports `consistent: false` when it falls back to a plain copy, which can produce a file that will not open at all. `/sync` checks that flag; CSV import does not, so an import can complete believing it has a rollback that would fail at the moment it is needed. Tracked as a P0 in `TODOS.md` and scheduled as the first task of PR1 (T6a).
 
 ## [0.8.0] - 2026-09-02
 

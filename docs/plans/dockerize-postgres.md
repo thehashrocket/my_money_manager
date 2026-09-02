@@ -38,7 +38,7 @@ reads it. That is why it is a separate PR with its own review.
   PR1 ─ containerize on SQLite ────────────► shippable, reversible
    │    Dockerfile, compose, standalone output, TZ fix, health endpoint,
    │    programmatic migrator. Zero query-layer changes; all 402 existing tests
-   │    keep passing, and PR1 adds ~13 more.
+   │    keep passing, and PR1 adds ~14 more.
    │
    ▼
   PR2 ─ SQLite → Postgres ─────────────────► shippable, one-way for data
@@ -137,8 +137,6 @@ is a worse outcome than an error message.
                    COPY --from=builder drizzle           → /app/drizzle
                    COPY --from=builder docker/           → /app/docker/     ← was missing
                    COPY --from=builder scripts/          → /app/scripts/    ← snapshot-cli
-                   COPY --from=deps node_modules/better-sqlite3
-                                                         → /app/node_modules/better-sqlite3
                    USER node
                    CMD ["node", "/app/docker/entrypoint.mjs"]
 ```
@@ -185,10 +183,25 @@ import `src/lib/snapshot.ts`**: the runner copies `.next/standalone`, `public`,
 The CI `docker` job smoke-tests `db:export` end to end, so a missing artifact fails the
 build rather than surfacing the first time a rollback is needed.
 
-The explicit `better-sqlite3` copy is deliberate. Next's standalone tracer follows
-static `import` graphs; `better-sqlite3` resolves its `.node` binary through
-`bindings`-style runtime path lookup, which tracing does not always follow. Copying
-the package wholesale is two lines and removes the failure mode entirely.
+**No explicit `better-sqlite3` copy — an earlier draft of this plan had one, and it was
+wrong.** `better-sqlite3` is in Next 16's default `serverExternalPackages` list
+(`node_modules/next/dist/esm/lib/server-external-packages.jsonc:33`), which tells Next to
+leave the package external rather than bundle it; the standalone-output tracer then
+copies the resolved package tree — native `.node` binary included — into
+`.next/standalone/node_modules` on its own. The earlier draft's `COPY --from=deps
+node_modules/better-sqlite3 → /app/node_modules/better-sqlite3` assumed tracing "does not
+always follow" `bindings`-style runtime lookups and copied the package explicitly to be
+safe. Under pnpm that copy is actively wrong, not just redundant:
+`node_modules/better-sqlite3` is a **symlink** into
+`.pnpm/better-sqlite3@<version>/node_modules/better-sqlite3`, and that package's own
+runtime dependencies (`bindings`, `prebuild-install`) live as *siblings* inside the same
+`.pnpm` store entry, not as children of the symlinked directory. Copying the symlink
+target alone produces a package whose `require('bindings')` cannot resolve — and because
+the COPY ran after `.next/standalone` landed in the runner, it **overwrote Next's
+correctly-traced copy with a broken one**, the opposite of the intended safety net. T9's
+verify step (`docker compose up` serves the dashboard) is exactly the check that would
+have caught this. If tracing is ever observed to miss the binary, the fix is to copy the
+resolved `.pnpm` subtree for the package, never the bare symlinked directory.
 
 ## Files added or changed
 
@@ -199,6 +212,8 @@ the package wholesale is two lines and removes the failure mode entirely.
 | `compose.yaml` | new — one `app` service, named volume, **optional** `env_file`, **loopback-only port bind** (D3.1A) |
 | `docker/entrypoint.mjs` | new — TZ guard, migrations, then boots `/app/server.js` |
 | `scripts/snapshot-cli.mjs` | new — callable snapshot entry point for `db:export` |
+| `scripts/db-export.mjs` | new — `db:export` wrapper: runs `snapshot-cli.mjs` in the container, checks `consistent`, `docker compose cp`s the result out |
+| `scripts/db-import.mjs` | new — `db:import`: stops the container, refuses a `-wal`-shadowed `money.db`, restores a `VACUUM INTO` snapshot file into the volume (D3.2B) |
 | `scripts/seed-volume.mjs` | new — first-run host→volume DB copy, refuses a non-empty target |
 | `next.config.ts` | `output: "standalone"` |
 | `package.json` | add `"packageManager": "pnpm@10.32.1"` for corepack determinism |
@@ -247,46 +262,71 @@ needs to exist inside the image.
 
 ### 2. The container runs UTC — and that silently moves your budget month
 
-`Dockerfile` inherits `TZ=UTC`. Eight server-side sites derive "now" in **local**
-time — six of them here:
+`Dockerfile` inherits `TZ=UTC`. Eight server-side sites derive "now," but they split into
+two genuinely different failure shapes, and conflating them is itself a bug this plan had
+in an earlier draft: setting `TZ=America/Los_Angeles` alone fixes five of the eight and
+does **nothing** for the other three.
+
+**Five sites read local calendar fields off a `Date`** — `getFullYear()`, `getMonth()`, and
+friends. Node derives these from the process's `TZ` environment variable via ICU, so they
+are genuinely timezone-aware and the boot-time `TZ` fix closes them on its own:
 
 ```
 src/app/page.tsx:13                    const now = new Date()
-src/app/budget/page.tsx:16             redirect(`/budget/${now.getFullYear()}/${now.getMonth()+1}`)
+src/app/budget/page.tsx:17             redirect(`/budget/${now.getFullYear()}/${now.getMonth()+1}`)
 src/app/categorize/page.tsx:21         const now = new Date()
 src/app/transactions/page.tsx:67       const now = new Date()
+src/lib/trends/loadMonthlyTrends.ts:47 const now = new Date()          ← outside voice #4
+```
+
+**Three sites instead build the date string with `.toISOString()`**, which always renders
+the UTC calendar date **regardless of `TZ`** — setting the container's timezone changes
+nothing for these, and describing them as "local time" sites, as an earlier draft of this
+plan did, is the mistake that would have shipped a half-fix:
+
+```
 src/app/subscriptions/page.tsx:91      new Date().toISOString().slice(0,10)
 src/app/import/page.tsx:7              new Date().toISOString().slice(0,10)
+src/app/sync/page.tsx:37               new Date(Date.now() - days*86_400_000)
+                                         .toISOString().slice(0,10)          ← adversarial pass
+```
+
+Plus one client-side site that must stay exactly as it is:
+
+```
 src/components/ledger/spine-month.tsx:35  const now = new Date()
-```
-
-Plus two more server-side sites that earlier passes missed:
-
-```
-src/lib/trends/loadMonthlyTrends.ts:47   const now = new Date()        ← outside voice #4
-src/app/sync/page.tsx:37                 new Date(Date.now() - days*86_400_000)
-                                           .toISOString().slice(0,10)  ← adversarial pass
 ```
 
 `loadMonthlyTrends.ts:47` derives its own 6-month window. `sync/page.tsx:37` is
 `daysAgoIso()`, whose output is the cutoff fed to `findAmbiguousTransfers` and
 `findLinkedTransferPairs` (`page.tsx:43-44`) and compared with an **inclusive** `gte`
-(`src/lib/simplefin/sync.ts:669,716`). Under UTC the window boundary lands a day early
-for most of the evening Pacific, so a transfer pair sitting exactly on the edge drops out
-of the review list — and an unreviewed ambiguous pair is one that stays unlinked and keeps
-inflating spending. It survived three passes because it does not look like a date
-default; it looks like arithmetic.
+(`src/lib/simplefin/sync.ts:669,716`). Because `daysAgoIso()` computes off the UTC instant
+rather than the local calendar date, evenings in Pacific time land on the *next* UTC day —
+so the computed cutoff string is one calendar day *later* than local intent (e.g.
+`2026-06-03` instead of the locally-intended `2026-06-02` at 6pm PT), and the inclusive
+`gte` comparison silently excludes transactions dated on that locally-intended oldest day.
+A transfer pair sitting on that edge drops out of the review list, and an unreviewed
+ambiguous pair is one that stays unlinked and keeps inflating spending. It survived three
+passes because it does not look like a date default; it looks like arithmetic — and,
+subtler still, because `TZ` alone looks like the fix and isn't.
 
 `spine-month.tsx:1` is `"use client"` — its `new Date()` runs in the **browser**, in your
 real timezone, and is already correct. It must NOT be routed through a server helper.
 
-**Separately: `/import` renders at build time.** Every other route opts into per-request
-rendering — `page.tsx`, `budget`, `categorize`, `transactions`, `subscriptions` all call
+**Separately: `/import` renders at build time — and inside the container that is not just
+a stale date, it is a build failure.** Every other route opts into per-request rendering —
+`page.tsx`, `budget`, `categorize`, `transactions`, `subscriptions` all call
 `await connection()`, and `/sync` sets `export const dynamic`. `src/app/import/page.tsx`
-has **neither**, so its `new Date().toISOString().slice(0,10)` (line 7) freezes at build
-time. In a container that means the image build date, which could be weeks stale. This is
-a pre-existing bug that containerization makes materially worse, and it is the exact class
-`src/app/budget/page.tsx`'s comment already warns about. PR1 adds `await connection()`.
+has **neither**, so it runs its synchronous better-sqlite3 account-list query and its
+`new Date().toISOString().slice(0,10)` (line 7) during `next build`. On the host that just
+freezes the date to build time — a pre-existing bug. Inside the builder stage it is worse:
+`.dockerignore` excludes `data/` (see Files table below), so `/app/data` does not exist
+when `pnpm build` runs, and `new Database(path.join(process.cwd(),"data","money.db"))`
+throws `SQLITE_CANTOPEN` — **the image fails to build, full stop.** `.github/workflows/ci.yml`
+already runs `pnpm db:migrate` before `pnpm build` for exactly this reason (a database has
+to exist before build touches it), which is the tell that this was always latent. PR1 adds
+`await connection()` to `/import`, and that fix has to land **before** the Docker build
+lane is attempted — see the dependency added in Worktree parallelization below.
 
 That asymmetry is the tell. On 30 September at 6pm Pacific, `getMonth()` in a UTC
 container returns **October** on the server while the client spine picker still says
@@ -305,9 +345,13 @@ Fix, three parts:
   genuinely wants UTC writes `TZ=UTC`, which is the right forcing function.
 - `src/lib/now.ts` exporting `currentMonth()` / `todayIso()` / `daysAgoIso()`, with all
   **8 server sites** routed through it (6 pages + `loadMonthlyTrends.ts:47` +
-  `sync/page.tsx:37`). One place to test, one place to fix. This is the reuse-ladder
-  answer: the repetition already exists, containerization just makes it dangerous.
-  `spine-month.tsx` stays on its own client-side `new Date()`.
+  `sync/page.tsx:37`). **`todayIso()` and `daysAgoIso()` must derive their string from
+  local `Date` component getters (`getFullYear`/`getMonth`/`getDate`), never from
+  `.toISOString()`** — that is the actual fix for the three sites above that were already
+  using `.toISOString()` and getting UTC regardless of `TZ`; routing them through a shared
+  helper does nothing if the helper makes the same mistake. One place to test, one place
+  to fix. This is the reuse-ladder answer: the repetition already exists, containerization
+  just makes it dangerous. `spine-month.tsx` stays on its own client-side `new Date()`.
 
 `src/lib/snapshot.ts:formatTimestamp` already uses `getUTC*` throughout and is
 correct as-is — snapshot filenames should be UTC.
@@ -416,7 +460,8 @@ env_file:
 ## PR1 does NOT change
 
 Any query. The schema. The migrations. The dialect. No existing test changes its
-assertions — PR1 only adds tests (V1-V13). Two modules do change, both narrowly:
+assertions — PR1 only adds tests (V1-V6, V6b, V6c, V12, V13; **not** V7-V11, which are
+PR2's). Two modules do change, both narrowly:
 `src/db/index.ts` and `src/lib/importBatch.ts`/`sync.ts` swap their hard-coded path
 constants for `src/lib/paths.ts` (T2), and `src/lib/snapshot.ts` gains a `SNAPSHOT_DIR`
 override (T6) plus the `consistent` check its CSV caller was missing (T6a). No query
@@ -450,7 +495,7 @@ with proof that nothing changed.
 | `integer({mode:"boolean"})` | `boolean()` | real type; Drizzle keeps the TS surface identical |
 | `integer({mode:"timestamp"})` | **`timestamp({withTimezone:true})`** | See below — "keep integer" is not available |
 | `text("date")` ISO `YYYY-MM-DD` | **keep `text`** | every comparison is a string compare (`date < firstDayNext`); switching to `date` changes semantics in ~12 queries for no gain |
-| `sql\`(unixepoch())\`` × 6 | `defaultNow()` | **not** `extract(epoch from now())::int` — that is an integer expression, and the column above it is now `timestamptz`. Postgres would reject it. |
+| `sql\`(unixepoch())\`` × 4 (`schema.ts:13,17,91,237`) | `defaultNow()` | **not** `extract(epoch from now())::int` — that is an integer expression, and the column above it is now `timestamptz`. Postgres would reject it. |
 | `uniqueIndex().where(…)` × 2 | identical | partial unique indexes port 1:1 |
 | `strftime('%Y'/'%m', date)` | `left(date, 4)` / `substring(date, 6, 2)` | `loadMonthlyTrends.ts:95-96` only. Plain string ops on fixed-format ISO text — no per-row `::date` cast, and no throw on a malformed value the way a cast would. |
 
@@ -470,9 +515,10 @@ grep mode node_modules/drizzle-orm/sqlite-core/columns/integer.d.ts   → mode: 
 
 SQLite's `integer({ mode: "timestamp" })` stores an int and hands TypeScript a `Date`.
 Postgres's `integer()` is `number`, full stop. Porting it literally silently retypes
-`createdAt`/`updatedAt` and breaks every `.set({ updatedAt: new Date() })` — at least
-8 sites including `budget/upsertAllocation.ts:59`, `goals/actions.ts:44`,
-`simplefin/link.ts:92`, `rules.ts:82`, and four in `categorize/`.
+`createdAt`/`updatedAt` and breaks every `.set({ updatedAt: new Date() })` — 10 sites
+total: `budget/upsertAllocation.ts:59`, `goals/actions.ts:44`, `simplefin/link.ts:92`,
+`rules.ts:82`, and six in `categorize/` (`categorizeTransaction.ts` ×2,
+`undoCategorizeTransaction.ts` ×2, `bulkCategorize.ts` ×1, `undoBulkCategorize.ts` ×1).
 
 `timestamp({ withTimezone: true })` maps to `Date` in Drizzle, so **every one of those
 call sites compiles unchanged**. The storage format changes; the TypeScript surface does
@@ -522,13 +568,14 @@ mitigation working in our favor.
 ### The connection singleton must be rewritten, not ported (D6.2A)
 
 ```
-src/db/index.ts:22   if (cached && cached.open && globalForDb.__mm_drizzle) {
+src/db/index.ts:24   if (cached && cached.open && globalForDb.__mm_drizzle) {
 ```
 
 `.open` is a `better-sqlite3` `Database` property. A `pg.Pool` has none, so ported
-literally this guard is permanently falsy and the Proxy on line 37 constructs a **new
-Pool on every property access** — Postgres defaults to `max_connections = 100` and
-would be exhausted within seconds.
+literally this guard is permanently falsy and the Proxy declared at `src/db/index.ts:33`
+constructs a **new Pool on every property access** (its `get` handler calls `getClient()`
+unconditionally on line 35) — Postgres defaults to `max_connections = 100` and would be
+exhausted within seconds.
 
 Rewrite: cache the `Pool` on `globalThis` as today, gate on `!pool.ended`, and add a
 test asserting repeated `db` access returns the same pool instance. That test is the
@@ -544,10 +591,12 @@ converted. `drizzle/` is replaced wholesale, not appended to.
 
 Prior learning applies (`drizzle-multi-stmt-migration`, 5/10, 2026-04-21): hand-edited
 migrations need `--> statement-breakpoint` between statements or the migrator throws
-`RangeError: … more than one statement`. Migrations `0002`, `0005`, `0006` are
+`RangeError: … more than one statement`. Migrations `0001`, `0002`, `0005`, `0006` are
 hand-written (seed data, triggers) and will need re-authoring, not just re-generating.
-The `BEFORE DELETE` trigger on the Uncategorized category is SQLite trigger syntax and
-becomes a Postgres trigger function + trigger.
+The `BEFORE DELETE` trigger on the Uncategorized category (`categories_uncategorized_no_delete`)
+lives in `drizzle/0001_complete_ikaris.sql` — not in `0002`, `0005`, or `0006`, which are
+seed-data-only — and is SQLite trigger syntax; it becomes a Postgres trigger function +
+trigger.
 
 ## P2.4 — Test harness
 
@@ -765,9 +814,13 @@ before the app is pointed at Postgres.
 ## P2.7 — Docs
 
 `readme-plan-drift-my-money-manager` (8/10) says README and PLAN.md are this repo's
-reliably-stale pair. PR2 changes documented behavior in both, plus CLAUDE.md rules 3
-and 5 and README's "Core data rules" 3 and 5. All four files are in the PR2 diff, not
-a follow-up.
+reliably-stale pair. PR2 changes documented behavior in both, plus **CLAUDE.md rule 5**
+(the `VACUUM INTO` → `pg_dump`/`pg_restore` mechanism, P2.5) and CLAUDE.md's
+**Conventions** section — "timestamps as Unix seconds" and "booleans as `integer` with
+`mode: 'boolean'`" both retire (D7.2A) — and README's "Core data rules" entry mirroring
+rule 5. **Rule 3 (dedup keys) does not change and is explicitly out of scope for this
+pass**: partial unique indexes port 1:1 (P2.1), and an earlier draft of this doc task
+named rule 3 by mistake. All files above are in the PR2 diff, not a follow-up.
 
 ---
 
@@ -790,8 +843,9 @@ of the PR that introduces the code, not a follow-up.
 | V4 | `entrypoint.mjs` guards | `docker/entrypoint.test.mjs` | `TZ` unset → exit 1; **`process.cwd()` ≠ `/app` → exit 1** (F19); migrate throws → exit 1 and server never imported; pragmas set before migrate |
 | V5 | `/api/health` | `src/app/api/health/route.test.ts` | 200 `{ok:true}`; DB throws → 503 |
 | V6 | `db-export` refuses a degraded copy | `scripts/db-export.test.mjs` | `consistent:false` → exit 1, no file emitted. The silent-corruption guard. |
+| V6c | `db-import` refuses a `-wal`-shadowed target | `scripts/db-import.test.mjs` | A bare `money.db` with a `-wal` sidecar next to it → exit 1, volume untouched. A `VACUUM INTO` snapshot file (no sidecars) → restores cleanly. Container is stopped first; import refuses to run against a live one. This is CLAUDE.md rule 5's rollback path under the named-volume topology (D7.5A) — the one move D3.2B calls out as able to corrupt an otherwise-fine ledger. |
 | V12 | Volume seed refuses a non-empty target | `scripts/seed-volume.test.mjs` | Empty volume → seed + row counts **and** per-account balances match source. Non-empty volume → exit 1, target untouched, source never modified. `consistent:false` → exit 1. **Rows committed only to `-wal` at seed time survive** — the WAL-loss regression (F17). Existing snapshot files copied into `./backups/`; **`import_batches.snapshot_path` rows unchanged** — they are absolute host paths, display-only, and rewriting history to a container path that was never true is worse than leaving it. |
-| V6b | `importBatch` aborts on a degraded snapshot | `src/lib/importBatch.test.ts` | `createSnapshot` returns `consistent:false` → import throws before any row is inserted and no `import_batches` row is created. Mirrors the check `sync.ts:345` already makes. |
+| V6b | `importBatch` warns on a degraded snapshot | `src/lib/importBatch.test.ts` | `createSnapshot` returns `consistent:false` → `commitImport` still writes the batch and still records `snapshotPath`, but `CommitResult`'s `committed` variant now carries a `warnings: string[]` entry matching the message shape `sync.ts:346-350` already pushes. This is the actual mirror of `sync.ts:345` — the check *and* the policy, not just the check. An abort-on-degraded policy was considered and rejected: it would make CSV import stricter than sync for the same condition, which is a new, undecided behavior change, not a bug fix. |
 | V13 | `/import` is not build-frozen | `src/app/import/page.test.ts` | `await connection()` present; the date field reflects request time, not build time |
 
 ### PR2
@@ -860,12 +914,12 @@ Nothing here is rebuilt in parallel.
 | F11 | `pnpm db:export` | Bare `cp` of a live WAL DB → unopenable rollback file | planned | `VACUUM INTO` first (D3.2B) | `consistent:false` → exit 1 ✅ |
 | F4 | `better-sqlite3` in runner | `.node` binary missing from standalone trace | build-time | fails at boot | Container won't start — loud ✅ |
 | F5 | P2.2 missed `await` | `if (promise)` truthy → allocation reads 0 | 402 tests + tsc + lint | compile error, mostly | Silent wrong envelope ❌ |
-| F6 | `createSnapshot` pg | `pg_dump` version mismatch with server | V8 | `consistent:false` → **abort the write** (P2.5), both callers | Import refuses to run — loud ✅ |
+| F6 | `createSnapshot` pg | `pg_dump` version mismatch with server | V8 | `consistent:false` → warn and proceed, both callers — the policy T6a establishes for CSV import and P2.5 carries over unchanged for pg, not a new stricter behavior | Warning surfaced, undo still works — visible ⚠️ |
 | F7 | `migrate-to-pg.mjs` | Partial insert then crash → half-migrated PG | reconciliation | exit 1, sqlite untouched | Explicit PASS/FAIL ✅ |
 | F8 | Identity sequences | Not reset after cutover → first insert collides on PK | planned | n/a | Insert error — loud ✅ |
 | F9 | `/api/health` | Probe passes while DB is read-only/full | planned | `SELECT 1` only | Healthy but broken ⚠️ |
 | F12 | Volume seed | Volume starts empty, no seed → app serves a blank ledger | V12 | seed step + refuse non-empty | Empty dashboard — visible ✅ |
-| F13 | `/import` build-freeze | Date field frozen to image build date | V13 | `await connection()` | Wrong default date ⚠️ → closed |
+| F13 | `/import` build-freeze | `.dockerignore` excludes `data/`; the build-time DB query throws `SQLITE_CANTOPEN` — **the image build fails outright**, not just a stale date | V13 | `await connection()` (PR1-b, must land before PR1-a's build is attempted) | Container image fails to build — loud ✅ → closed |
 | F14 | pg timestamps | `integer()` retypes `Date`→`number`, 8+ write sites break | tsc + 402 tests | `timestamp({withTimezone})` | Compile error — loud ✅ |
 | F15 | Cutover self-refs | `transfer_pair_id` silently nulled → 56 transfers un-hidden, spending inflated | V15 | deferred constraints | Row-hash FAIL ✅ |
 | F16 | **Reconciliation blindness** | Scrambled `category_id` preserves every count and balance | **V14** | row-level hash (D7.4B) | Row-hash FAIL ✅ |
@@ -876,7 +930,7 @@ Nothing here is rebuilt in parallel.
 | F21 | Non-deferrable FKs | `SET CONSTRAINTS ALL DEFERRED` is a no-op; cutover fails on the first self-referencing row | **V20** | hand-written `ALTER CONSTRAINT` migration + `pg_constraint` test | Transaction aborts — loud ✅ |
 | F22 | Cutover reads a live file | `/sync` or an import writes mid-cutover; PG certified against a state that never existed as a whole | **V21** | migrate from a `VACUUM INTO` snapshot, not `money.db` | Reports PASS on a partial ledger ❌ → closed |
 | F23 | `import_batches.snapshot_path` | Snapshot files live only in the old host `data/`; the new `./backups` bind starts empty | **V12** | seed copies the files, leaves the rows (absolute host paths, display-only) | Missing artifact, path text still true ⚠️ |
-| F24 | **`sync/page.tsx:37` transfer-review window** | `daysAgoIso()` off `Date.now()`; under UTC the inclusive `gte` cutoff lands a day early, dropping edge-of-window ambiguous pairs from review | **V3** | route through `now.ts` | Silent — pair stays unlinked, spending inflated ❌ |
+| F24 | **`sync/page.tsx:37` transfer-review window** | `daysAgoIso()` builds its string via `.toISOString()`, always UTC regardless of `TZ`; evenings in Pacific land on the next UTC day, so the computed cutoff is a day *later* than local intent and the inclusive `gte` drops the locally-intended oldest edge day from review | **V3** | route through `now.ts`, implemented via local getters not `.toISOString()` — `TZ` alone does not fix this site | Silent — pair stays unlinked, spending inflated ❌ |
 
 **Critical gaps in the plan: none remain open.** The one open row, F18, is not a gap in
 the plan — it is a bug in shipped code that this review discovered, scheduled as T6a and
@@ -895,7 +949,7 @@ backup is PR3.
 
 | Step | Modules touched | Depends on |
 |---|---|---|
-| PR1-a Docker build | `Dockerfile`, `compose.yaml`, `.dockerignore`, `next.config.ts` | — |
+| PR1-a Docker build | `Dockerfile`, `compose.yaml`, `.dockerignore`, `next.config.ts` | **PR1-b** — `pnpm build` inside the builder stage runs `/import`'s build-time DB query; without T3's `await connection()` fix the image build throws `SQLITE_CANTOPEN` (F13). Not independent. |
 | PR1-b TZ + `now.ts` | `src/lib/`, `src/app/*/page.tsx`, `src/components/ledger/` | — |
 | PR1-c health + entrypoint | `src/app/api/`, `docker/` | — |
 | PR1-d CI docker job | `.github/workflows/` | PR1-a |
@@ -906,8 +960,8 @@ backup is PR3.
 | PR2-e cutover script | `scripts/` | PR2-a, PR2-c |
 
 ```
-  Lane A: PR1-a → PR1-d          (Docker + CI, shared workflow files)
-  Lane B: PR1-b                  (independent — src/lib + pages)
+  Lane B: PR1-b                  (src/lib + pages — lands first; PR1-a's build depends on it)
+  Lane A: PR1-b → PR1-a → PR1-d  (Docker + CI, shared workflow files)
   Lane C: PR1-c                  (independent — new files only)
           └─► merge A+B+C ─► PR1 ships
   Lane D: PR2-a                  (must land alone — everything depends on it)
@@ -918,8 +972,10 @@ backup is PR3.
               └─► merge E+F+G+H ─► PR2 ships
 ```
 
-**Conflict flags:** Lanes B and E both touch `src/lib/` and `src/app/` — but they are
-in different PRs, so no concurrent conflict. Within PR2, lanes E, F, G all touch
+**Conflict flags:** Lane A is no longer independent — it cannot be worktree-parallel with
+Lane B, only sequential after it, because PR1-a's `docker build` exercises `next build`
+against the `/import` route Lane B fixes. Lanes B and E both touch `src/lib/` and
+`src/app/` — but they are in different PRs, so no concurrent conflict. Within PR2, lanes E, F, G all touch
 `src/lib/`; F and G are confined to single files (`test/db.ts`, `snapshot.ts`) that E
 does not modify, so the three can run in parallel worktrees. E is the wide one and
 should own `src/lib/` otherwise.
@@ -958,14 +1014,14 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Surfaced by: D3.3B; `snapshot.ts:57`, `importBatch.ts:190`, `sync.ts:400` all derive the dir from the DB path
   - Files: `src/lib/snapshot.ts`, `src/lib/importBatch.ts`, `src/lib/simplefin/sync.ts`, `src/lib/snapshot.test.ts`
   - Verify: **V1 (regression)** — 12 imports leave exactly 10 snapshots in `SNAPSHOT_DIR`
-- [ ] **T6a (P0, human: ~30min / CC: ~5min)** — lib — `importBatch.ts` must honor `createSnapshot`'s `consistent` flag
-  - Surfaced by: adversarial review — **live bug on `main`**, not a containerization one. `src/lib/simplefin/sync.ts:345` checks the flag; `src/lib/importBatch.ts:145` calls `createSnapshot(DB_PATH)` and goes straight into `db.transaction(…)` with no check, so a degraded copy is recorded as `snapshot_path` and the import proceeds believing it has a rollback. Contradicts CLAUDE.md rule 5.
-  - Files: `src/lib/importBatch.ts`, `src/lib/importBatch.test.ts`
-  - Verify: **V6b** — `consistent:false` aborts the import before any row is written
-- [ ] **T7 (P1, human: ~3h / CC: ~20min)** — scripts — `snapshot-cli.mjs` (**esbuild-bundled from `src/lib/snapshot.ts` in the builder stage** — the runner has no `src/`) + `db:export`/`db:import`; `db:import` refuses a `money.db` with a `-wal` beside it
-  - Surfaced by: D3.2B (bare `cp` of a live WAL DB); outside voice #2 (no callable helper in the runner)
-  - Files: `scripts/snapshot-cli.mjs`, `scripts/db-export.mjs`, `package.json`
-  - Verify: V6 — `consistent:false` exits 1; exported file opens in `sqlite3`
+- [ ] **T6a (P0, human: ~45min / CC: ~10min)** — lib — `importBatch.ts` must honor `createSnapshot`'s `consistent` flag, the same way `sync.ts` does
+  - Surfaced by: adversarial review — **live bug on `main`**, not a containerization one. `src/lib/simplefin/sync.ts:345` checks the flag and pushes a warning; `src/lib/importBatch.ts:145` calls `createSnapshot(DB_PATH)` and goes straight into `db.transaction(…)` with no check at all, so a degraded copy is recorded as `snapshot_path` and the caller is never told. Contradicts CLAUDE.md rule 5. **The fix is to warn, not to abort** — matching `sync.ts`'s warn-and-proceed exactly is the actual mirror of existing behavior; making CSV import abort on a condition sync.ts merely warns on would be a new, undecided stricter policy, not a bug fix.
+  - Files: `src/lib/importBatch.ts` (add `warnings: string[]` to `CommitResult`'s `committed` variant), `src/lib/importBatch.test.ts`, `src/app/import/success/[batchId]/page.tsx` (render the warning the way `src/app/sync/ActionForm.tsx:51-61` renders `state.warnings`)
+  - Verify: **V6b** — `consistent:false` still commits the batch and records `snapshot_path`, and the returned `CommitResult` carries a warning matching `sync.ts:346`'s message shape
+- [ ] **T7 (P1, human: ~4h / CC: ~30min)** — scripts — `snapshot-cli.mjs` (**esbuild-bundled from `src/lib/snapshot.ts` in the builder stage** — the runner has no `src/`) + `db:export`/`db:import`; `db:import` stops the container and refuses a `money.db` with a `-wal` beside it
+  - Surfaced by: D3.2B (bare `cp` of a live WAL DB); outside voice #2 (no callable helper in the runner); adversarial review — `db:import` had no owning file, task, or test despite being CLAUDE.md rule 5's actual rollback path under the named-volume topology
+  - Files: `scripts/snapshot-cli.mjs`, `scripts/db-export.mjs`, `scripts/db-import.mjs`, `scripts/db-import.test.mjs`, `package.json`
+  - Verify: V6 — `consistent:false` exits 1; exported file opens in `sqlite3`. **V6c** — `db:import` refuses a `-wal`-shadowed `money.db`, restores a clean snapshot file
 - [ ] **T8 (P2, human: ~1h / CC: ~10min)** — app — `/api/health`
   - Surfaced by: Architecture — compose healthcheck; `/` is too heavy to probe
   - Files: `src/app/api/health/route.ts`
@@ -994,7 +1050,7 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Files: `src/lib/**`, `src/app/**`
   - Verify: `tsc --noEmit`; `no-floating-promises` + `no-misused-promises` in CI; 402 tests green
 - [ ] **T14 (P1, human: ~1d / CC: ~45min)** — drizzle — regenerate all 9 migrations, **plus a hand-written `ALTER CONSTRAINT … DEFERRABLE INITIALLY IMMEDIATE` migration** (Drizzle's pg FK builder has no deferrable option) and a test asserting `condeferrable` in `pg_constraint`
-  - Surfaced by: D7.3B; prior learning `drizzle-multi-stmt-migration` (statement-breakpoints in hand-written `0002`/`0005`/`0006`, plus the SQLite trigger → pg trigger function)
+  - Surfaced by: D7.3B; prior learning `drizzle-multi-stmt-migration` (statement-breakpoints in hand-written `0001`/`0002`/`0005`/`0006` — the delete trigger lives in `0001`, not `0002` — plus the SQLite trigger → pg trigger function)
   - Files: `drizzle/**`, `drizzle.config.ts`
   - Verify: `pnpm db:migrate` on an empty database
 - [ ] **T15 (P1, human: ~1d / CC: ~45min)** — test — PGlite harness + real `postgres:17` CI service
@@ -1014,9 +1070,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
   - Files: `src/db/index.ts`
   - Verify: recorded number; under ~150ms cold → no action
 - [ ] **T19 (P2, human: ~3h / CC: ~20min)** — docs — CLAUDE.md, README, PLAN.md, TODOS.md
-  - Surfaced by: Prior learning `readme-plan-drift-my-money-manager` (8/10); rules 3 and 5 and the Unix-seconds convention all change
+  - Surfaced by: Prior learning `readme-plan-drift-my-money-manager` (8/10); rule 5 and the Conventions section (Unix-seconds timestamps, boolean-as-integer-mode) change. **Rule 3 (dedup keys) does not change** — do not touch it.
   - Files: `CLAUDE.md`, `README.md`, `PLAN.md`, `TODOS.md`
-  - Verify: rule 5 text matches the `pg_dump` mechanism; no stale `VACUUM INTO` references
+  - Verify: rule 5 text matches the `pg_dump` mechanism; Conventions section no longer claims Unix-seconds or integer-boolean mode for PR2-era tables; no stale `VACUUM INTO` references; rule 3 text unchanged
 
 ## GSTACK REVIEW REPORT
 
