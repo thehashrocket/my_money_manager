@@ -25,6 +25,10 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 
 All five weekends shipped, plus the automated sync that follows them. The app runs end-to-end in a real browser: transactions arrive from `/sync` (or `/import` for older history) → categorize → `/budget` envelope view with live allocate → dashboard, subscriptions, goals and the 6-month trend chart.
 
+v0.8.2 — CSV import now checks the snapshot it takes before trusting it as a rollback point, closing the known issue recorded in 0.8.1 (`commitImport` never checked `createSnapshot`'s `consistent` flag; `/sync` already did). A degraded snapshot no longer blocks the import — it's recorded on `import_batches.snapshot_warning` and shown on `/import/success/[batchId]` instead of being silently assumed to work. See the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
+
+v0.8.1 — planning only: reviewed plan for running the app in a container and moving it to Postgres, staged as two PRs. No app code changed in that release.
+
 v0.8.0 — automated sync:
 - `/sync`: map each local account to a Star One account from the feed, pull posted transactions on demand, undo the last batch without stopping the dev server
 - `src/lib/simplefin/`: access-URL parsing, feed client, row mapping, two-source dedup (`external_id` + content signature), counting-based transfer matcher, logical undo
@@ -49,7 +53,8 @@ Weekend 2 — envelope budgeting + bulk categorize:
 - 174 Vitest tests pass, `tsc --noEmit` clean
 
 Next up (see [TODOS.md](./TODOS.md)):
-- v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link still orphans `external_id`s (open). The dropped sync warnings, the cross-source dedup and snapshot bugs, and the sync test gaps are all closed — see the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
+- v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link still orphans `external_id`s (open). The dropped sync warnings, the cross-source dedup and snapshot bugs, the sync test gaps, and the CSV-import snapshot-check gap are all closed — see the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
+- Dockerize + Postgres migration (planned in 0.8.1, staged as two PRs — not started)
 - **Integration checkpoint**: use the app on real data for a week, now with sync doing the loading
 
 ## Cut-line
