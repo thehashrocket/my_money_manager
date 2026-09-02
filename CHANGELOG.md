@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-09-02
+
+_Closes the known issue recorded in 0.8.1: CSV import now actually checks the snapshot it takes before trusting it as a rollback point._
+
+### Fixed
+- **CSV import no longer trusts an unverified database snapshot.** `commitImport` now checks the `consistent` flag `createSnapshot` returns, matching the check `/sync` already had. If the pre-import snapshot degrades to a plain file copy (which can produce a file that won't open at all if restored), the import still completes — it isn't blocked — but a warning is now recorded on the batch and shown on the import success page, so it's visible instead of silently assumed to be a working rollback.
+- The warning is persisted on the batch row (`import_batches.snapshot_warning`), not just shown once right after import — it stays visible on that batch's success page on any later visit, and never touches the URL.
+
 ## [0.8.1] - 2026-09-02
 
 _Planning only — the app itself is unchanged and every one of the 402 tests still passes. This release adds the reviewed plan for running my_money_manager in a container and moving it to Postgres, staged as two separate PRs so the ledger is never protected by an undefined safety net. It also records a real bug the review turned up in code that already ships._
