@@ -59,6 +59,20 @@ export default async function SuccessPage({
         )}
       </dl>
 
+      {batch.snapshotWarning && (
+        <ul
+          className="space-y-1 rounded-md border p-2 text-sm"
+          style={{
+            background:
+              "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
+            borderColor:
+              "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
+          }}
+        >
+          <li>{batch.snapshotWarning}</li>
+        </ul>
+      )}
+
       <div className="flex gap-3">
         <Link
           href="/import"
