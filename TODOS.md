@@ -139,3 +139,47 @@ Still open:
 - [x] **P3** — `undoBulkCategorize` rule-delete: when the snapshot's `priorRule` was "no rule existed," the undo deletes the current exact-match rule for the merchant unconditionally. If an overlapping bulk-categorize ran between the original and the undo, this could delete a rule it didn't create. Filter by inserted rule id when available. (`src/lib/categorize/undoBulkCategorize.ts`)
 - [x] **P3** — ReDoS on user-authored `regex`-type rules: `applyRuleAtImport` runs user regex without a timeout guard. Single-user, low severity — but consider a hard length cap on the pattern. (`src/lib/rules.ts`)
 - [x] **P3** — Input field styling: `/budget` allocate input is `text-sm` which undershoots 16px and triggers iOS autozoom. Bump to `text-base` on mobile breakpoints. (`src/app/budget/[year]/[month]/_allocate-form.tsx` — `text-base sm:text-sm`)
+
+## Follow-ups from the dockerize + Postgres plan review (2026-09-02)
+
+- [ ] **P0 — `importBatch.ts` never checks `createSnapshot`'s `consistent` flag.**
+  CLAUDE.md rule 5 says a degraded snapshot is never silently ignored, and
+  `src/lib/simplefin/sync.ts:345` does check it. `src/lib/importBatch.ts:145` calls
+  `createSnapshot(DB_PATH)` and goes straight into `db.transaction(...)` with no check,
+  so a plain-copy fallback (which `snapshot.ts:62-86` documents as sometimes producing a
+  file that will not open at all) is recorded as `import_batches.snapshot_path` and the
+  CSV import proceeds believing it has a rollback. This is live on `main` today and
+  independent of the Docker work. Tracked in the plan as F18/T6a so it lands with PR1,
+  but it is worth fixing sooner — it is ~5 lines plus a test.
+  Found by the `/ship` adversarial pass, 2026-09-02.
+
+Deferred out of `docs/plans/dockerize-postgres.md` during `/plan-eng-review`. Both were
+considered and explicitly scoped out, not forgotten.
+
+- [ ] **PR3 — reach the app from a phone / run it on a NAS.** The reason Postgres is in
+  the plan at all. PR1 and PR2 make it possible; neither makes it happen. Three parts:
+  (a) **private network access** — the app has no auth by design (CLAUDE.md, "NOT in V1"),
+  which is correct on a loopback-bound container and wrong on a routable one. Tailscale or
+  WireGuard is the boring answer: your devices only, no port-forward, and no auth needed.
+  Reach for real auth only if you reject that. (b) **multi-arch images** — NAS hardware is
+  usually `linux/amd64` (Synology, UGREEN) or `linux/arm64` (Pi); the dev Mac is arm64, so
+  publishing needs `buildx` and a registry (GHCR). (c) **off-box backups** — failure mode
+  F3 is downgraded, not closed: snapshots survive on a host bind mount, but
+  `docker compose down -v` still destroys the live ledger, and ten rolling snapshots
+  inside one machine is not a backup once the app lives on a NAS. Depends on PR1
+  (container) and PR2 (`pg_dump` as the backup unit).
+
+- [ ] **P3 — `/budget` set-based query rewrite, gated on the T18 measurement.**
+  `src/lib/budget/loadMonthView.ts:103-104` calls `getEffectiveAllocation` and
+  `computeMtdSpent` per leaf category, and `getEffectiveAllocation` recurses into prior
+  months (`src/lib/budget.ts:92`) doing three more queries per level — roughly `2N + 3ND`
+  queries per render. In-process and free under better-sqlite3; one socket round trip each
+  under Postgres. The cold path is the common one, since `invalidateForwardRollover`
+  clears `effective_allocation_cents` on every categorize and every allocation edit.
+  **Close this item with the number:** T18 adds a dev-only query counter and records
+  `/budget` cold and warm on real data right after cutover. Under ~150ms cold, close it
+  as not-needed. Over it, replace the loop with one join for allocations and one grouped
+  aggregate for spend. Deliberately NOT done during the migration — `getEffectiveAllocation`'s
+  rollover math is the most subtly-tested logic in the repo (`budget.test.ts` covers both
+  persist modes and all three invalidation triggers), and a structural rewrite riding along
+  with a dialect change would give a wrong envelope two candidate causes.
