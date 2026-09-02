@@ -1,12 +1,12 @@
 # Plan — my_money_manager
 
-Local-first, single-user budgeting app. CSV import from Star One CU. No cloud, no auth, no Plaid.
+Local-first, single-user budgeting app. Automated transaction sync from Star One CU over SimpleFIN, plus CSV import for history older than the feed carries. No cloud copy of your data, no auth, no Plaid.
 
 The canonical design doc lives at `~/.gstack/projects/thehashrocket-my_money_manager/jasonshultz-thehashrocket-budgeting-app-design-20260416-173405.md` (APPROVED). This file is the in-repo roadmap; it does not duplicate the design doc.
 
 ## Stack
 
-Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · better-sqlite3 · Drizzle ORM · Vitest · pnpm · Node 24
+Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · better-sqlite3 · Drizzle ORM · Recharts · Vitest · pnpm · Node 24 · SimpleFIN for the bank feed
 
 ## Timeline
 
@@ -19,10 +19,19 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 | W3 | Dashboard + Uncategorized backlog tile + merchant normalization refinement | done |
 | W4 | Subscriptions tracker — **cut-line** if behind (keep goals instead) | done |
 | W5 | Goals / savings + Recharts trend chart | done |
+| S1 | Automated sync from Star One over SimpleFIN (`/sync`): link, pull, balance check, transfer review, undo | done (v0.8.0) |
 
-## Current status (2026-04-17)
+## Current status (2026-09-02)
 
-Weekends 1 and 2 complete. App runs end-to-end in a real browser: CSV import → categorize → `/budget` envelope view with live allocate.
+All five weekends shipped, plus the automated sync that follows them. The app runs end-to-end in a real browser: transactions arrive from `/sync` (or `/import` for older history) → categorize → `/budget` envelope view with live allocate → dashboard, subscriptions, goals and the 6-month trend chart.
+
+v0.8.0 — automated sync:
+- `/sync`: map each local account to a Star One account from the feed, pull posted transactions on demand, undo the last batch without stopping the dev server
+- `src/lib/simplefin/`: access-URL parsing, feed client, row mapping, two-source dedup (`external_id` + content signature), counting-based transfer matcher, logical undo
+- Migrations `0007` (`accounts.simplefin_account_id`, `transactions.external_id` + partial unique indexes) and `0008` (`transactions.payee`)
+- `pnpm simplefin:claim` / `pnpm simplefin:sample`
+- Snapshot fix: WAL is folded in before the file copy, so pre-write snapshots are complete — this affected CSV import too
+- Feed limits that shape the design: ~45 days of history, posted rows only, accounts imported only once explicitly linked. CSV import is not legacy; it is the only path to older history.
 
 Weekend 1 — CSV import pipeline:
 - Real CSV data analyzed (checking + savings, 90 days, 652 rows combined)
@@ -40,8 +49,8 @@ Weekend 2 — envelope budgeting + bulk categorize:
 - 174 Vitest tests pass, `tsc --noEmit` clean
 
 Next up (see [TODOS.md](./TODOS.md)):
-- Track B: `/transactions` row list + inline picker + `categorizeTransactionAction`
-- **Integration checkpoint** before W3: use the app on real data for 1 week
+- v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link still orphans `external_id`s (open). The dropped sync warnings, the cross-source dedup and snapshot bugs, and the sync test gaps are all closed — see the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
+- **Integration checkpoint**: use the app on real data for a week, now with sync doing the loading
 
 ## Cut-line
 
@@ -58,3 +67,6 @@ Drop the subscriptions tracker (Weekend 4) if behind. Keep goals/savings (Weeken
 | Release history | [CHANGELOG.md](./CHANGELOG.md) |
 | Current version | `package.json` `"version"` field |
 | Star One CU labeling quirk | `~/.claude/projects/…/memory/project_star_one_cu_overdraft_labeling.md` |
+| SimpleFIN feed shape (real payload) | `~/.claude/projects/…/memory/project_simplefin_star_one_data_shape.md` |
+| Design system reference | [DESIGN.md](./DESIGN.md) |
+| SimpleFIN credentials | `SIMPLEFIN_ACCESS_URL` in `.env.local` (gitignored; written by `pnpm simplefin:claim`) |

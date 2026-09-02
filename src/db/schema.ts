@@ -16,15 +16,27 @@ const updatedAt = integer("updated_at", { mode: "timestamp" })
   .notNull()
   .default(sql`(unixepoch())`);
 
-export const accounts = sqliteTable("accounts", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull(),
-  type: text("type", { enum: ["checking", "savings"] }).notNull(),
-  startingBalanceCents: integer("starting_balance_cents").notNull(),
-  startingBalanceDate: text("starting_balance_date").notNull(),
-  createdAt,
-  updatedAt,
-});
+export const accounts = sqliteTable(
+  "accounts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    type: text("type", { enum: ["checking", "savings"] }).notNull(),
+    startingBalanceCents: integer("starting_balance_cents").notNull(),
+    startingBalanceDate: text("starting_balance_date").notNull(),
+    // SimpleFIN's opaque account id (e.g. "ACT-d326a3ba-..."). NULL means this
+    // account is CSV-only and sync skips it — that is how the mortgage account
+    // the feed also returns stays out of a checking/savings-only app.
+    simplefinAccountId: text("simplefin_account_id"),
+    createdAt,
+    updatedAt,
+  },
+  (t) => [
+    uniqueIndex("accounts_simplefin_account_id_unique")
+      .on(t.simplefinAccountId)
+      .where(sql`${t.simplefinAccountId} IS NOT NULL`),
+  ],
+);
 
 export const categories = sqliteTable(
   "categories",
@@ -92,6 +104,11 @@ export const transactions = sqliteTable(
     rawDescription: text("raw_description").notNull(),
     rawMemo: text("raw_memo").notNull(),
     normalizedMerchant: text("normalized_merchant").notNull(),
+    // MX's cleaned merchant label ("Save Mart" vs the raw "SAVEMART MA
+    // MANTECA"). Display only — categorization still keys on
+    // normalized_merchant, so trained category_rules keep matching. NULL for
+    // CSV rows, which have no such field.
+    payee: text("payee"),
     amountCents: integer("amount_cents").notNull(),
     bankTransactionNumber: text("bank_transaction_number"),
     cardLastFour: text("card_last_four"),
@@ -103,6 +120,10 @@ export const transactions = sqliteTable(
       .notNull()
       .references(() => importBatches.id, { onDelete: "restrict" }),
     importRowHash: text("import_row_hash").notNull(),
+    // SimpleFIN's stable per-account transaction id. NULL for CSV rows. This is
+    // a real primary key from the source, so it dedupes re-syncs exactly —
+    // unlike import_row_hash, which needs a row index to break ties.
+    externalId: text("external_id"),
     transferPairId: integer("transfer_pair_id").references(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },
@@ -122,6 +143,9 @@ export const transactions = sqliteTable(
     index("transactions_account_date_idx").on(t.accountId, t.date),
     index("transactions_category_idx").on(t.categoryId),
     index("transactions_merchant_idx").on(t.normalizedMerchant),
+    uniqueIndex("transactions_account_external_id_unique")
+      .on(t.accountId, t.externalId)
+      .where(sql`${t.externalId} IS NOT NULL`),
   ],
 );
 

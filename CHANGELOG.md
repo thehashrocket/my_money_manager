@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-02
+
+_Transactions now pull themselves in. Link your Star One accounts once and `/sync` fetches posted transactions straight from the bank behind a database snapshot you can undo — no weekly CSV download, no sign-in. Balances are checked against the bank's own figure on every visit, so a missing or duplicated row shows up as drift instead of hiding. CSV import is untouched and stays the only way to load history older than 45 days._
+
+### Added
+- **`/sync` page** — link each local account to a Star One account, pull posted transactions on demand, and see what landed. Writes straight to the ledger; no preview step.
+- **Undo last sync** — removes the batch's transactions and the batch itself without stopping the dev server. The pre-write database snapshot stays as the escape hatch for anything undo can't reach.
+- **Balance check** — the bank's own balance against the one this ledger computes, with the difference called out when they disagree. Available balance is shown separately, which is where pending card holds appear.
+- **Transfers needing review** — when a same-day, same-amount transfer genuinely can't be resolved by counting, it asks instead of guessing. On real data this is roughly one day per quarter. Note the UI counts *buckets*, which are emitted per account-pair direction, so a single undecidable day can show as two entries.
+- **Automatic transfer matching for feed rows** (`src/lib/simplefin/matchTransfers.ts`) — the CSV matcher keys on Star One's sequential transaction number, which the feed doesn't carry, so this replaces it with a counting argument over `(date, |amount|)` buckets, filtered within each bucket to opposite signs across different accounts. 56 of 58 pairs link themselves on a real 90-day pull; the one undecidable day admits two more. A pair spanning both sources only auto-links when the memo corroborates it — otherwise the CSV transaction-number matcher, which is a stronger signal and already declined that row, would be silently overridden by a same-day coincidence.
+- **Pending rows from the feed are refused, not written** — sync never requests them and Star One returns none, but if one ever arrived it could not be updated when it posted, so the pre-authorisation amount would be frozen and the posted row added alongside it. They are now skipped and reported instead.
+- **Unpair a transfer** — a "Linked transfers" list on `/sync` with a "Not a transfer" button. Auto-linking excludes both rows from every spending view, so this is the way back out when a same-day, same-amount coincidence gets paired by mistake.
+- **Merchant names from the feed** (`drizzle/0008_naive_zeigeist.sql`) — the bank's cleaned payee ("Save Mart") is stored alongside the raw description. Categorization still matches on the raw form, so existing rules keep working.
+- **`pnpm simplefin:claim`** — one-time exchange of a SimpleFIN setup token for an access URL, written to `.env.local` with owner-only permissions.
+- **`pnpm simplefin:sample`** — dumps a live account payload to `.context/` for inspection.
+
+### Changed
+- **Duplicate detection now understands two sources** (`drizzle/0007_unique_lily_hollister.sql`) — feed rows dedupe on the bank's own transaction id, enforced by a database index. Because the feed re-sends days already imported from CSV, rows are also compared on content, counted rather than matched, so two genuinely identical same-day purchases both survive.
+- **Sidebar** — added a Sync tab above Import.
+
+### Fixed
+- **Pre-import snapshots could be unreadable, not just incomplete.** The database runs in WAL mode, so committed writes can live in a side file that a plain copy missed. Folding the log in first with `PRAGMA wal_checkpoint` is not enough: it does not fail loudly when another connection holds a read — it reports "busy" in a return value the old code discarded — and the resulting copy could fail to open at all with "database disk image is malformed". Snapshots are now written with `VACUUM INTO`, which is consistent by construction, and a snapshot that has to fall back to a plain copy says so. This affects CSV import too, not just sync.
+- **Old snapshots were deleted before the write they protect.** A failed import had already evicted the oldest snapshot to make room for a useless one, so repeated failures quietly ate the rollback history. Pruning now happens only after a write commits, and a failure to delete an old snapshot no longer aborts an import that already succeeded.
+- **`.context/` was not ignored by the committed `.gitignore`** — it held real transaction data and was excluded only by a local, unshared git setting, so a fresh clone would have left it exposed to `git add`.
+
 ## [0.7.2] - 2026-04-21
 
 _Subscriptions can now be categorized in one click. New auto-categorize actions on the subscriptions page tag detected recurring charges as Subscriptions and create a remember-this-merchant rule. Twenty-three category rules for common streaming and software services seed automatically so new imports land in the right bucket from day one._

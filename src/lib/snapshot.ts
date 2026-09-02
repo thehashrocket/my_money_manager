@@ -6,6 +6,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
+import Database from "better-sqlite3";
 
 export const SNAPSHOT_RETENTION = 10;
 const SNAPSHOT_PREFIX = "money.db.pre-import-";
@@ -13,7 +14,15 @@ const SNAPSHOT_PREFIX = "money.db.pre-import-";
 export type SnapshotResult = {
   snapshotPath: string;
   timestamp: string;
-  prunedPaths: string[];
+  /**
+   * True when the snapshot is a consistent standalone database. False means it
+   * degraded to a bare file copy that may be missing WAL-resident commits —
+   * still worth having, but the caller must say so rather than imply rule 5's
+   * guarantee held.
+   */
+  consistent: boolean;
+  /** Why the consistent path failed, when it did. */
+  degradedReason: string | null;
 };
 
 function formatTimestamp(d: Date): string {
@@ -41,7 +50,6 @@ export function listSnapshots(dataDir: string): string[] {
 export function createSnapshot(
   dbPath: string,
   now: Date = new Date(),
-  retention: number = SNAPSHOT_RETENTION,
 ): SnapshotResult {
   if (!existsSync(dbPath)) {
     throw new Error(`database file does not exist: ${dbPath}`);
@@ -49,13 +57,75 @@ export function createSnapshot(
   const dataDir = path.dirname(dbPath);
   const ts = formatTimestamp(now);
   const snapshotPath = path.join(dataDir, `${SNAPSHOT_PREFIX}${ts}`);
-  copyFileSync(dbPath, snapshotPath);
 
-  const all = listSnapshots(dataDir);
-  const prunedPaths: string[] = [];
-  for (const p of all.slice(retention)) {
-    unlinkSync(p);
-    prunedPaths.push(p);
+  // The database runs in WAL mode (see src/db/index.ts), so committed
+  // transactions can still live in money.db-wal and would be absent from a bare
+  // file copy — and restoring an older main file beside a newer -wal leaves
+  // SQLite applying a mismatched log.
+  //
+  // `VACUUM INTO` writes a consistent standalone copy through the connection,
+  // so it sees WAL-resident commits by construction. It is used in preference to
+  // checkpoint-then-copyFileSync because `PRAGMA wal_checkpoint` does NOT throw
+  // when it cannot take the lock — it returns `{busy: 1, ...}`. The app's own
+  // long-lived singleton connection is exactly such a reader, so the previous
+  // try/catch could never detect the one failure it was written to handle.
+  //
+  // Measured with this repo's better-sqlite3, with a reader holding an open read
+  // transaction: the checkpoint returned {busy: 1, log: 4, checkpointed: 3} and
+  // the resulting copy did not merely lack recent rows — it failed to open at
+  // all with SQLITE_CORRUPT, "database disk image is malformed". A partially
+  // truncated WAL leaves the main file inconsistent on its own.
+  let consistent = false;
+  let degradedReason: string | null = null;
+  let src: Database.Database | undefined;
+  try {
+    src = new Database(dbPath, { readonly: true });
+    // Single-quoted SQL literal; escape any quote in the path rather than
+    // interpolating blind. The path is ours, but this is still SQL text.
+    src.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+    consistent = true;
+  } catch (err) {
+    degradedReason = err instanceof Error ? err.message : String(err);
+  } finally {
+    // close() in a finally: a throw from exec() previously leaked the handle
+    // for the life of the dev server.
+    src?.close();
   }
-  return { snapshotPath, timestamp: ts, prunedPaths };
+
+  if (!consistent) {
+    // Not a SQLite database, or VACUUM could not run. A plain copy of whatever
+    // is there beats no snapshot at all — but the caller is told it degraded.
+    copyFileSync(dbPath, snapshotPath);
+  }
+
+  return { snapshotPath, timestamp: ts, consistent, degradedReason };
+}
+
+/**
+ * Trims the snapshot directory to the most recent `retention` files.
+ *
+ * Deliberately NOT part of createSnapshot. Pruning there ran *before* the write
+ * the snapshot protects, so a sync that then failed had already evicted the
+ * oldest real snapshot to make room for a useless one — ten consecutive
+ * failures left ten identical snapshots of an unchanged database and no history.
+ * Callers prune only once their write has committed.
+ *
+ * A prune failure is reported, never thrown: losing the ability to delete an old
+ * snapshot must not abort an import that has already succeeded.
+ */
+export function pruneSnapshots(
+  dataDir: string,
+  retention: number = SNAPSHOT_RETENTION,
+): { prunedPaths: string[]; failedPaths: string[] } {
+  const prunedPaths: string[] = [];
+  const failedPaths: string[] = [];
+  for (const p of listSnapshots(dataDir).slice(retention)) {
+    try {
+      unlinkSync(p);
+      prunedPaths.push(p);
+    } catch {
+      failedPaths.push(p);
+    }
+  }
+  return { prunedPaths, failedPaths };
 }

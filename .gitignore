@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# design artifacts + real bank-data samples (simplefin:sample writes here)
+/.context/
+
 # local sqlite db + pre-import snapshots
 /data/*.db
 /data/*.db-journal
