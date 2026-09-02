@@ -152,9 +152,10 @@ Spine is implemented at `src/components/ledger/spine.tsx`. Mounted as a Server C
 ### What the dashboard is NOT
 
 - Not the envelope table (that lives on `/budget/[year]/[month]`)
-- No trend chart (Weekend 5, Recharts not yet in stack)
-- No subscription insights (Weekend 4)
-- No goals progress (Weekend 5)
+- No subscription insights (those live on `/subscriptions`)
+- No goals progress (that lives on `/goals`)
+
+The 6-month trend chart did land here in v0.7.0 — `SpendingTrends` sits between the monthly summary and the backlog tile, rendered by `src/components/ledger/trend-chart.tsx`.
 
 ---
 

@@ -1,18 +1,19 @@
 # my_money_manager
 
-Local-first, single-user personal budgeting app. Import CSVs from Star One Credit Union (checking + savings), categorize, and track envelope-style budgets — without handing your transactions to Plaid or a cloud service.
+Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** Weekend 1 complete. Import pipeline works end-to-end (parse → dedup → snapshot → transactional insert → transfer-pair linking). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.8.0. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
 - **Next.js 16** (App Router + Turbopack) · **React 19** · **TypeScript**
 - **Tailwind v4** · **shadcn/ui** (base-nova style, Base UI primitives)
 - **better-sqlite3** + **Drizzle ORM** — local SQLite file at `./data/money.db`
-- **Vitest** for parser/categorization unit tests
+- **Recharts** for the dashboard trend chart (client-side only)
+- **Vitest** for parser/categorization/sync unit tests · GitHub Actions runs lint + test + build on every PR
 - **pnpm** · **Node 24** (pinned via `.nvmrc`)
 
-No cloud. No auth. No Plaid. No deployment target — this runs on your machine.
+No auth. No Plaid. No deployment target — this runs on your machine, and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
 
 ## Getting started
 
@@ -20,10 +21,32 @@ No cloud. No auth. No Plaid. No deployment target — this runs on your machine.
 nvm use                 # picks up Node 24 from .nvmrc
 pnpm install
 pnpm db:migrate         # applies Drizzle migrations to ./data/money.db
-pnpm dev                # http://localhost:3000 → redirects to /import
+pnpm dev                # http://localhost:3000 → dashboard
 ```
 
-Create an account (name, type, starting balance + date) from `/import`, then upload a Star One CSV export. The preview shows row counts, duplicates, pending rows, and errors; clicking **Confirm import** snapshots the DB, inserts the batch inside a transaction, and links transfer pairs across accounts.
+Create an account (name, type, starting balance + date) from `/import`. From there you have two ways to get transactions in.
+
+### Automated sync (the normal path)
+
+```bash
+SIMPLEFIN_SETUP_TOKEN=<token from simplefin.org> pnpm simplefin:claim
+```
+
+That runs once. It exchanges the setup token for a long-lived access URL and writes `SIMPLEFIN_ACCESS_URL` to `.env.local` with owner-only permissions — the URL carries your credentials, so it is gitignored and only its host is ever displayed.
+
+Then open `/sync`, pick which remote account each local account maps to, and hit **Sync now**. Posted transactions are written straight to the ledger — no preview step — behind a database snapshot taken first. The page also shows:
+
+- **Balance check** — the bank's balance next to the one this ledger computes, with the difference called out when they disagree. Available balance is listed separately; that gap is where pending card holds live.
+- **Transfers needing review** — the rare same-day, same-amount transfer the matcher can't resolve by counting. Pick the two halves yourself.
+- **Undo this sync** — deletes the last batch's rows and the batch itself, no dev-server restart needed. The pre-write snapshot stays as the escape hatch.
+
+SimpleFIN caps history at 90 days and warns that anything past 45 is outside its recommended range, so sync never asks for more than 45 days. It also never returns pending transactions. Both are properties of the feed, not missing features.
+
+### CSV import (older history)
+
+Upload a Star One CSV export at `/import`. The preview shows row counts, duplicates, pending rows, and errors; clicking **Confirm import** snapshots the DB, inserts the batch inside a transaction, and links transfer pairs across accounts. This is the only way to load anything the feed no longer carries.
+
+Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simplefin-sample.json` when you want to inspect what the feed actually returns.
 
 ## Scripts
 
@@ -34,19 +57,31 @@ Create an account (name, type, starting balance + date) from `/import`, then upl
 | `pnpm db:generate` | Generate a new Drizzle migration from `src/db/schema.ts` |
 | `pnpm db:migrate` | Apply pending migrations |
 | `pnpm db:studio` | Open Drizzle Studio |
+| `pnpm simplefin:claim` | One-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`) |
+| `pnpm simplefin:sample` | Dump a live `/accounts` payload to `.context/simplefin-sample.json` |
 | `pnpm lint` | ESLint |
 
 ## Layout
 
 ```
 src/
-  app/        Next.js 16 App Router pages (/import, /import/preview/[id], /import/success/[batchId])
-  components/ shadcn/ui + app components
-  db/         Drizzle schema + HMR-safe client singleton
-  lib/        parseCsv, normalize, hash, transferPair, snapshot, importBatch, pendingImport
-drizzle/      Committed migration output
-data/         money.db, pre-import snapshots, pending-import stash (gitignored)
-.context/     Design artifacts, CSV samples, design deltas (gitignored)
+  app/           App Router pages: / (dashboard), /budget/[year]/[month], /transactions,
+                 /categorize, /subscriptions, /goals, /sync, /import (+ preview + success)
+  components/    shadcn/ui (components/ui) + design-system pieces (components/ledger)
+  db/            Drizzle schema + HMR-safe client singleton
+  lib/           parseCsv, normalize, hash, transferPair, snapshot, money, rules
+  lib/accounts/  Live per-account balance queries
+  lib/budget/    Month view, allocations, validators
+  lib/categorize/ Bulk-categorize logic and validators
+  lib/goals/     Savings goal progress
+  lib/import/    CSV import orchestration and validators
+  lib/simplefin/ Automated sync: access URL, client, mapping, bucket transfer matcher, undo
+  lib/subscriptions/ Recurring-charge detection
+  lib/trends/    6-month spend by category
+scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs
+drizzle/         Committed migration output
+data/            money.db, pre-import snapshots, pending-import stash (gitignored)
+.context/        Design artifacts, CSV samples, design deltas (gitignored)
 ```
 
 ## Core data rules
@@ -55,17 +90,19 @@ These are load-bearing — the whole app is built around them:
 
 1. **All money is stored as signed integer `amount_cents`.** Never floats. Withdrawals negative, deposits positive.
 2. **The CSV's signs are already correct.** `Amount Debit` is pre-negative, `Amount Credit` is positive. No `Math.abs`, no sign flips by description. (This is the bug Plaid users keep hitting.)
-3. **Dedup is `(account_id, import_batch_id, import_row_hash)`**, never Star One's `Transaction Number` — they reuse `6098` for pending deposits across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index)`.
-4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only.
-5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`. Last 10 are kept. Rollback = stop dev server, swap file.
+3. **Dedup is `(account_id, import_batch_id, import_row_hash)`**, never Star One's `Transaction Number` — they reuse `6098` for pending deposits across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index)`. Feed rows have no row index, so they dedup on the bank's own `external_id` instead, enforced by a partial unique index on `(account_id, external_id)`. The feed also re-sends days you already imported from CSV, so sync compares content signatures too — counted as a multiset, so two genuinely identical same-day coffees both survive.
+4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only. The feed carries no transaction number, so sync pairs by counting instead: bucket on `(date, |amount|, opposite sign, cross-account)` and auto-link any bucket where the two sides balance, since every possible pairing excludes the same rows from spending. Unbalanced buckets are the ones `/sync` asks you about.
+5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`. Last 10 are kept. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server.
+6. **Money comes in as decimal strings from the feed** — parse with `parseAmountToCents` (string math), never `parseFloat(x) * 100`.
 
 ## What's NOT in V1
 
-Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions. YNAB-style overspend-shuffle. CI. Deployment.
+Credit cards. Auth. Cloud sync of your data. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions. YNAB-style overspend-shuffle. Deployment.
 
 ## Further reading
 
 - [CLAUDE.md](./CLAUDE.md) — guide for AI agents working in this repo (rules, conventions, Next.js 16 gotchas)
-- [PLAN.md](./PLAN.md) — 5-weekend roadmap
-- [TODOS.md](./TODOS.md) — short-term checklist
+- [DESIGN.md](./DESIGN.md) — Ledger Paper design system: fonts, tokens, money display rules, spine nav
+- [PLAN.md](./PLAN.md) — roadmap and current status
+- [TODOS.md](./TODOS.md) — short-term checklist and post-ship follow-ups
 - [CHANGELOG.md](./CHANGELOG.md) — release notes
