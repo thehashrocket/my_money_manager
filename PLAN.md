@@ -49,7 +49,7 @@ Weekend 2 — envelope budgeting + bulk categorize:
 - 174 Vitest tests pass, `tsc --noEmit` clean
 
 Next up (see [TODOS.md](./TODOS.md)):
-- v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link orphans `external_id`s, `syncNowAction` drops the sync warnings, and the sync test gaps
+- v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link still orphans `external_id`s (open). The dropped sync warnings, the cross-source dedup and snapshot bugs, and the sync test gaps are all closed — see the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
 - **Integration checkpoint**: use the app on real data for a week, now with sync doing the loading
 
 ## Cut-line

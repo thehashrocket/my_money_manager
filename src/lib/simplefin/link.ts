@@ -34,9 +34,10 @@ export async function listRemoteAccounts(
   const response = await fetchAccounts(creds, {
     startDate: Math.floor(Date.now() / 1000),
     balancesOnly: true,
-    // undici imposes no request timeout, and this runs inside the /sync render.
-    // Without a deadline a stalled bridge hangs the page instead of falling
-    // through to the error banner.
+    // undici defaults headersTimeout and bodyTimeout to 300s each — far too
+    // long for something inside a page render. Without a shorter deadline a
+    // stalled bridge hangs the page for five minutes instead of falling through
+    // to the error banner.
     signal: AbortSignal.timeout(LIST_ACCOUNTS_TIMEOUT_MS),
   });
 

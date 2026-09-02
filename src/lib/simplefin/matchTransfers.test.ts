@@ -23,7 +23,11 @@ describe("matchTransfers", () => {
 
     expect(ambiguous).toHaveLength(0);
     expect(pairs).toHaveLength(1);
-    expect(pairs[0].confidence).toBe("certain");
+    // The overdraft label is what "certain" used to encode; it now decides the
+    // cross-source guard rather than being stored on the pair.
+    expect(
+      isOverdraftLabeled(pairs[0].a) || isOverdraftLabeled(pairs[0].b),
+    ).toBe(true);
     expect([pairs[0].a.id, pairs[0].b.id].sort()).toEqual(
       [sweep.id, inbound.id].sort(),
     );
@@ -139,7 +143,10 @@ describe("matchTransfers", () => {
       row(CHK, 50000, "SDAXFER 125506980-1 Ref# 137C2"),
     ]);
     expect(pairs).toHaveLength(1);
-    expect(pairs[0].confidence).toBe("high");
+    // Linked on counting alone, with no memo corroboration on either leg.
+    expect(
+      isOverdraftLabeled(pairs[0].a) || isOverdraftLabeled(pairs[0].b),
+    ).toBe(false);
   });
 
   it("refuses to guess when a third account makes the partner account ambiguous", () => {
@@ -199,5 +206,58 @@ describe("label helpers", () => {
     expect(isAtmWithdrawal({ rawMemo: "ATMOSPHERE COFFEE MANTECA CA" } as never)).toBe(
       false,
     );
+  });
+});
+
+/**
+ * The counting argument cannot distinguish a real transfer pair from a same-day,
+ * same-amount coincidence. Between two feed rows that risk is accepted (it is
+ * what the 56-pair result was measured on). Against a CSV row carrying a bank
+ * transaction number it is not: the ±1 matcher is a strictly stronger signal and
+ * already declined to pair that row.
+ */
+describe("cross-source candidacy guard", () => {
+  const csv = (accountId: number, amountCents: number, memo: string) => ({
+    ...row(accountId, amountCents, memo),
+    adjudicatedByTxnNumber: true,
+  });
+  const feed = (accountId: number, amountCents: number, memo: string) => ({
+    ...row(accountId, amountCents, memo),
+    adjudicatedByTxnNumber: false,
+  });
+
+  it("asks instead of guessing when an uncorroborated pair spans two sources", () => {
+    const { pairs, ambiguous } = matchTransfers([
+      feed(CHK, -5000, "SAFEWAY 2231 MANTECA CA"),
+      csv(SAV, 5000, "DIVIDEND"),
+    ]);
+    expect(pairs).toHaveLength(0);
+    expect(ambiguous).toHaveLength(1);
+  });
+
+  it("still auto-links a cross-source pair the memo corroborates", () => {
+    const { pairs, ambiguous } = matchTransfers([
+      feed(CHK, 10000, "POS 0902 1340 AIRBNB.COM CA"),
+      csv(SAV, -10000, "WITHDRAWAL-OVERDRAFT"),
+    ]);
+    expect(ambiguous).toHaveLength(0);
+    expect(pairs).toHaveLength(1);
+  });
+
+  it("leaves same-source pairing untouched — this is where 56/58 was measured", () => {
+    const { pairs, ambiguous } = matchTransfers([
+      feed(CHK, 50000, "SDAXFER 125506980-1 Ref# 137C2"),
+      feed(SAV, -50000, "Online 08/12/2026 MEMO: House payment"),
+    ]);
+    expect(ambiguous).toHaveLength(0);
+    expect(pairs).toHaveLength(1);
+  });
+
+  it("treats rows with no flag at all as same-source, so existing callers are unaffected", () => {
+    const { pairs } = matchTransfers([
+      row(CHK, 2500, "A"),
+      row(SAV, -2500, "B"),
+    ]);
+    expect(pairs).toHaveLength(1);
   });
 });

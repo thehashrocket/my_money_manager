@@ -4,10 +4,19 @@ import { formatCents } from "@/lib/money";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
 import { readAccessUrl } from "@/lib/simplefin/accessUrl";
 import { listRemoteAccounts, type RemoteAccount } from "@/lib/simplefin/link";
-import { findAmbiguousTransfers } from "@/lib/simplefin/sync";
+import {
+  findAmbiguousTransfers,
+  findLinkedTransferPairs,
+} from "@/lib/simplefin/sync";
 import { findLastSyncBatch } from "@/lib/simplefin/undoSync";
 import { SyncButton } from "./SyncButton";
-import { linkAccountAction, resolveTransferAction, undoSyncAction } from "./actions";
+import { ActionForm } from "./ActionForm";
+import {
+  linkAccountAction,
+  resolveTransferAction,
+  undoSyncAction,
+  unlinkTransferAction,
+} from "./actions";
 
 // Never serve a cached balance. The bank round-trip is isolated inside
 // <RemoteSections> behind Suspense, so the ledger-backed parts of this page
@@ -15,6 +24,13 @@ import { linkAccountAction, resolveTransferAction, undoSyncAction } from "./acti
 // and only the SimpleFIN-dependent sections wait on the network.
 export const dynamic = "force-dynamic";
 
+/**
+ * Deliberately wider than sync's own 45-day MAX_LOOKBACK_DAYS. This list is not
+ * limited to what a sync touched: it surfaces every unresolved same-day,
+ * same-amount collision in recent history, including ones that predate the first
+ * sync and came in from CSV. Do not "fix" this to match MAX_LOOKBACK_DAYS —
+ * they answer different questions.
+ */
 const REVIEW_WINDOW_DAYS = 120;
 
 function daysAgoIso(days: number): string {
@@ -25,6 +41,7 @@ export default function SyncPage() {
   const accounts = db.select().from(schema.accounts).all();
   const lastBatch = findLastSyncBatch();
   const ambiguous = findAmbiguousTransfers(daysAgoIso(REVIEW_WINDOW_DAYS));
+  const linkedPairs = findLinkedTransferPairs(daysAgoIso(REVIEW_WINDOW_DAYS));
 
   let host: string | null = null;
   let configError: string | null = null;
@@ -89,7 +106,7 @@ export default function SyncPage() {
             two halves of each transfer.
           </p>
           {ambiguous.map((bucket) => (
-            <form
+            <ActionForm
               key={`${bucket.date}-${bucket.absAmountCents}-${bucket.positives[0]?.id}`}
               action={resolveTransferAction}
               className="space-y-3 rounded-md border border-border p-4"
@@ -135,8 +152,49 @@ export default function SyncPage() {
               >
                 Link as transfer
               </button>
-            </form>
+            </ActionForm>
           ))}
+        </section>
+      )}
+
+      {/* ---- linked transfers, with a way back out ---- */}
+      {linkedPairs.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+            Linked transfers ({linkedPairs.length})
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Paired rows are excluded from every spending view. Sync links a pair
+            on its own when the counts balance, so check anything that looks like
+            a coincidence — a same-day, same-amount deposit and charge that
+            aren&apos;t actually two halves of one transfer.
+          </p>
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {linkedPairs.map((pair) => (
+              <li
+                key={pair.a.id}
+                className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm"
+              >
+                <span className="font-mono [font-variant-numeric:tabular-nums]">
+                  {pair.a.date} · {formatCents(Math.abs(pair.a.amountCents))}
+                </span>
+                <span className="min-w-40 flex-1 text-muted-foreground">
+                  {accountsById.get(pair.a.accountId)?.name ?? pair.a.accountId}{" "}
+                  ← {accountsById.get(pair.b.accountId)?.name ?? pair.b.accountId}
+                  {pair.b.rawMemo ? ` · ${pair.b.rawMemo.slice(0, 40)}` : ""}
+                </span>
+                <ActionForm action={unlinkTransferAction}>
+                  <input type="hidden" name="id" value={pair.a.id} />
+                  <button
+                    type="submit"
+                    className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+                  >
+                    Not a transfer
+                  </button>
+                </ActionForm>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
@@ -159,7 +217,7 @@ export default function SyncPage() {
                 categorised — that work is lost too.
               </p>
             )}
-            <form action={undoSyncAction} className="mt-3">
+            <ActionForm action={undoSyncAction} className="mt-3">
               <input type="hidden" name="batchId" value={lastBatch.batchId} />
               <button
                 type="submit"
@@ -167,7 +225,7 @@ export default function SyncPage() {
               >
                 Undo this sync
               </button>
-            </form>
+            </ActionForm>
           </div>
         </section>
       )}
@@ -226,7 +284,7 @@ async function RemoteSections({ host }: { host: string | null }) {
           <ul className="divide-y divide-border rounded-md border border-border">
             {accounts.map((a) => (
               <li key={a.id} className="px-4 py-3 text-sm">
-                <form
+                <ActionForm
                   action={linkAccountAction}
                   className="flex flex-wrap items-center gap-3"
                 >
@@ -272,7 +330,7 @@ async function RemoteSections({ host }: { host: string | null }) {
                   >
                     Save
                   </button>
-                </form>
+                </ActionForm>
               </li>
             ))}
           </ul>
@@ -286,13 +344,24 @@ async function RemoteSections({ host }: { host: string | null }) {
       </section>
 
       {/* ---- balance check ---- */}
-      {remote.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Balance check</h2>
-          <p className="text-sm text-muted-foreground">
-            The bank&apos;s own figure against the one this ledger computes. Any
-            drift means a row is missing or duplicated.
+      {/* Rendered unconditionally. This is the app's only ledger-vs-bank
+          integrity display, and gating it on a successful fetch meant a bridge
+          hiccup silently removed the one thing that would reveal a duplicated or
+          missing row — with nothing to say it was gone. */}
+      <section className="space-y-3">
+        <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Balance check</h2>
+        <p className="text-sm text-muted-foreground">
+          The bank&apos;s own figure against the one this ledger computes. Any
+          drift means a row is missing or duplicated.
+        </p>
+        {remote.length === 0 ? (
+          <p className="rounded-md border border-border p-4 text-sm text-muted-foreground">
+            {!host
+              ? "SimpleFIN isn't configured, so there is no bank figure to compare against."
+              : "Couldn't reach the bank to compare balances, so drift can't be checked right now. Your ledger is unchanged — reload to try again."}
           </p>
+        ) : (
+          <>
           <ul className="divide-y divide-border rounded-md border border-border">
             {remote
               .filter((r) => r.linkedAccountId !== null)
@@ -345,8 +414,9 @@ async function RemoteSections({ host }: { host: string | null }) {
             Pending card holds show up as the gap between balance and available —
             Star One doesn&apos;t expose them as individual rows.
           </p>
-        </section>
-      )}
+          </>
+        )}
+      </section>
     </>
   );
 }

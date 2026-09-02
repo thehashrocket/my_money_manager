@@ -1,7 +1,11 @@
 import path from "node:path";
 import { and, eq, gte, inArray, isNull, isNotNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { createSnapshot, type SnapshotResult } from "../snapshot";
+import {
+  createSnapshot,
+  pruneSnapshots,
+  type SnapshotResult,
+} from "../snapshot";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
 import { contentSignature, mapTransaction, type MappedRow } from "./mapTransaction";
@@ -14,8 +18,14 @@ type Db = typeof defaultDb;
 const DB_PATH = path.join(process.cwd(), "data", "money.db");
 
 /**
- * SimpleFIN hard-caps the window at 90 days but warns that anything over 45 is
- * "outside the recommended range" and "may be capped" in future, so stay at 45.
+ * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
+ * the feed, which returns the error string "Requested date range exceeds limit of
+ * 90 days and was capped." when you ask for more.
+ *
+ * 45 is OUR conservative choice, not a documented provider limit — halving the
+ * cap leaves headroom if the provider tightens it, and nothing here depends on
+ * the exact number. Do not restate it elsewhere as a quoted SimpleFIN rule.
+ *
  * This only bounds a FIRST sync — steady state asks for about a week. Anything
  * older than the window has to come from a CSV import; the feed cannot reach it.
  */
@@ -26,7 +36,17 @@ const DAY_SECONDS = 86_400;
 /** Pulling up to 45 days of rows is slower than a balance check, but bounded. */
 const SYNC_TIMEOUT_MS = 60_000;
 
-export type AccountSyncSummary = {
+/**
+ * What is known about an account before the ledger is re-read.
+ *
+ * Split from AccountSyncSummary because the balance figures cannot be computed
+ * until after the write. Previously both lived on one type and the balance
+ * fields were seeded with `computedBalanceCents: 0` and patched in place, which
+ * made an un-finalised summary indistinguishable from a correctly-computed zero
+ * balance — and left any account finaliseBalances skipped silently rendering a
+ * fabricated 0 in the UI.
+ */
+export type AccountSyncCounts = {
   accountId: number;
   name: string;
   insertedCount: number;
@@ -34,12 +54,23 @@ export type AccountSyncSummary = {
   duplicateByExternalId: number;
   /** Already had this row from a CSV import, matched on content. */
   duplicateByContent: number;
+  /**
+   * Pending rows the feed returned and sync refused to write. Should always be
+   * 0 — see the skip in the row loop for why writing them would double-count.
+   */
+  skippedPending: number;
   reportedBalanceCents: number | null;
   availableBalanceCents: number | null;
-  computedBalanceCents: number;
-  /** computed − reported. Non-zero means the ledger has drifted from the bank. */
-  driftCents: number | null;
   balanceDate: string | null;
+};
+
+export type AccountSyncSummary = AccountSyncCounts & {
+  computedBalanceCents: number;
+  /**
+   * computed − reported. Non-zero means the ledger has drifted from the bank.
+   * NULL means only one thing now: the bank reported no balance.
+   */
+  driftCents: number | null;
 };
 
 export type SyncOutcome =
@@ -66,6 +97,8 @@ type TransferRow = {
   date: string;
   amountCents: number;
   rawMemo: string;
+  /** Carries a bank transaction number, so the CSV ±1 matcher already saw it. */
+  adjudicatedByTxnNumber: boolean;
 };
 
 function isoDaysAgo(days: number, now: Date): string {
@@ -75,10 +108,15 @@ function isoDaysAgo(days: number, now: Date): string {
 }
 
 /**
- * Start from just before the newest row we already hold, not from a fixed
- * window — re-fetching the whole lookback window on every sync would be
- * wasteful and would lean hard on content dedup. The overlap covers rows that
- * post a few days late.
+ * Starts a week before the OLDEST of the per-account newest rows — not the
+ * newest overall. Taking the oldest means an account that has lagged behind
+ * still gets its gap re-fetched rather than being skipped past. The overlap
+ * covers rows that post a few days late.
+ *
+ * The alternative, re-fetching the full 45-day window every time, is avoided for
+ * bandwidth rather than for correctness: re-sent rows all carry an external_id
+ * and would be caught by the cheap `seenExternalIds` set, never by content
+ * dedup, which only ever applies to CSV rows.
  */
 export function resolveStartDate(
   latestDates: (string | null)[],
@@ -163,7 +201,7 @@ export async function syncSimpleFin(
   // ---- dedup, per account ----
   type Staged = { account: (typeof linked)[number]; rows: MappedRow[] };
   const staged: Staged[] = [];
-  const summaries: AccountSyncSummary[] = [];
+  const counts: AccountSyncCounts[] = [];
 
   for (const account of linked) {
     const remote = byExternalId.get(account.simplefinAccountId!);
@@ -173,9 +211,36 @@ export async function syncSimpleFin(
       );
     }
 
-    const existing = db
+    // Deliberately NOT bounded by date. The partial unique index on
+    // (account_id, external_id) is not bounded either, so any window here that
+    // is narrower than the set of rows the feed can return leaves a gap where a
+    // row escapes the in-memory check and hits the constraint instead — which
+    // aborts the whole batch with a raw SqliteError. A feed row's date comes
+    // from `posted`, but postedToIsoDate falls back to `transacted_at`, so a
+    // derived date can legitimately precede startIso. Matching the index
+    // exactly is cheap: external_id is indexed and NULL for every CSV row.
+    const seenExternalIds = new Set(
+      db
+        .select({ externalId: schema.transactions.externalId })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.accountId, account.id),
+            isNotNull(schema.transactions.externalId),
+          ),
+        )
+        .all()
+        .map((r) => r.externalId)
+        .filter((v): v is string => !!v),
+    );
+
+    // Content dedup only has to cover what the feed can actually send, which the
+    // 45-day cap bounds — so this uses the lookback floor rather than startIso.
+    // Bounding it at startIso let a feed row dated before the window content-match
+    // nothing and insert a duplicate of an older CSV row.
+    const contentFloorIso = isoDaysAgo(MAX_LOOKBACK_DAYS, now);
+    const existingByContent = db
       .select({
-        externalId: schema.transactions.externalId,
         date: schema.transactions.date,
         amountCents: schema.transactions.amountCents,
         rawMemo: schema.transactions.rawMemo,
@@ -184,30 +249,44 @@ export async function syncSimpleFin(
       .where(
         and(
           eq(schema.transactions.accountId, account.id),
-          gte(schema.transactions.date, startIso),
+          // Rows with an external_id came from a sync and are caught above; only
+          // CSV rows can collide by content.
+          isNull(schema.transactions.externalId),
+          gte(schema.transactions.date, contentFloorIso),
         ),
       )
       .all();
 
-    const seenExternalIds = new Set(
-      existing.map((r) => r.externalId).filter((v): v is string => !!v),
-    );
-    // Rows without an external_id came from CSV. They are the only ones that
-    // can collide by content, and a repeated signature is a real repeat (two
-    // identical coffees), so this counts rather than sets.
+    // A repeated signature is a real repeat (two identical coffees), so this
+    // counts rather than sets.
     const contentBudget = new Map<string, number>();
-    for (const r of existing) {
-      if (r.externalId) continue;
+    for (const r of existingByContent) {
       const sig = contentSignature(r);
       contentBudget.set(sig, (contentBudget.get(sig) ?? 0) + 1);
     }
 
     let duplicateByExternalId = 0;
     let duplicateByContent = 0;
+    let skippedPending = 0;
     const toInsert: MappedRow[] = [];
 
     for (const txn of remote?.transactions ?? []) {
       const row = mapTransaction(txn);
+
+      // Enforce the invariant the design already depends on rather than
+      // assuming it. Sync never asks for pending rows, and Star One returns
+      // none today — but that is an observation about one institution at one
+      // time, not a guarantee. If one ever arrives, writing it is the worst
+      // outcome available: dedup keys on external_id, SimpleFIN may change that
+      // id when the row posts, and there is no update path — so the pre-auth
+      // amount would be frozen forever AND the posted row inserted alongside it.
+      // Skipping costs nothing: the row simply arrives on the next sync once it
+      // has posted, which is exactly the behaviour we want.
+      if (row.isPending) {
+        skippedPending++;
+        continue;
+      }
+
       if (seenExternalIds.has(row.externalId)) {
         duplicateByExternalId++;
         continue;
@@ -224,22 +303,29 @@ export async function syncSimpleFin(
       toInsert.push(row);
     }
 
+    if (skippedPending > 0) {
+      warnings.push(
+        `Skipped ${skippedPending} pending transaction${
+          skippedPending === 1 ? "" : "s"
+        } on "${account.name}" — they will import once the bank posts them.`,
+      );
+    }
+
     staged.push({ account, rows: toInsert });
 
     const reported = remote?.balance ? parseAmountToCents(remote.balance) : null;
     const available = remote?.["available-balance"]
       ? parseAmountToCents(remote["available-balance"]!)
       : null;
-    summaries.push({
+    counts.push({
       accountId: account.id,
       name: account.name,
       insertedCount: toInsert.length,
       duplicateByExternalId,
       duplicateByContent,
+      skippedPending,
       reportedBalanceCents: reported,
       availableBalanceCents: available,
-      computedBalanceCents: 0, // filled in after the write
-      driftCents: null,
       balanceDate: remote?.["balance-date"]
         ? new Date(remote["balance-date"]! * 1000).toISOString()
         : null,
@@ -249,12 +335,20 @@ export async function syncSimpleFin(
   const totalToInsert = staged.reduce((n, s) => n + s.rows.length, 0);
 
   if (totalToInsert === 0) {
-    finaliseBalances(summaries, db);
-    return { status: "up-to-date", accounts: summaries, warnings };
+    const finalised = finaliseBalances(counts, db);
+    warnings.push(...missingAccountWarnings(finalised.missingAccounts));
+    return { status: "up-to-date", accounts: finalised.summaries, warnings };
   }
 
   // ---- write ----
   const snapshot = createSnapshot(DB_PATH);
+  if (!snapshot.consistent) {
+    warnings.push(
+      `The pre-sync snapshot fell back to a plain file copy${
+        snapshot.degradedReason ? ` (${snapshot.degradedReason})` : ""
+      } — it may be missing the most recent writes. Undo for this batch still works.`,
+    );
+  }
 
   const batchId = db.transaction((tx) => {
     const [batch] = tx
@@ -285,7 +379,9 @@ export async function syncSimpleFin(
             importBatchId: batch.id,
             importRowHash: row.importRowHash,
             externalId: row.externalId,
-            isPending: row.isPending,
+            // Always false: pending rows are skipped above, so anything that
+            // reaches here has posted.
+            isPending: false,
           })
           .run();
       }
@@ -299,8 +395,20 @@ export async function syncSimpleFin(
     return batch.id;
   });
 
+  // Prune only now that the write has committed, so a failed sync never evicts
+  // an older snapshot to make room for a useless one.
+  const pruned = pruneSnapshots(path.dirname(DB_PATH));
+  if (pruned.failedPaths.length > 0) {
+    warnings.push(
+      `Could not delete ${pruned.failedPaths.length} old snapshot${
+        pruned.failedPaths.length === 1 ? "" : "s"
+      } — check the data/ directory's permissions.`,
+    );
+  }
+
   const { pairsLinked, ambiguous } = linkTransfersByBucket(startIso, db, batchId);
-  finaliseBalances(summaries, db);
+  const finalised = finaliseBalances(counts, db);
+  warnings.push(...missingAccountWarnings(finalised.missingAccounts));
 
   return {
     status: "synced",
@@ -309,19 +417,46 @@ export async function syncSimpleFin(
     pairsLinked,
     ambiguous,
     snapshot,
-    accounts: summaries,
+    accounts: finalised.summaries,
     warnings,
   };
 }
 
-function finaliseBalances(summaries: AccountSyncSummary[], db: Db): void {
-  for (const s of summaries) {
+function missingAccountWarnings(names: string[]): string[] {
+  return names.map(
+    (n) =>
+      `"${n}" disappeared from the ledger while the sync was running, so its balance could not be checked.`,
+  );
+}
+
+/**
+ * Re-reads the ledger and returns finalised summaries. Returns rather than
+ * mutating, so it is impossible to hand a caller a summary whose balance was
+ * never computed.
+ *
+ * Balance is `starting_balance_cents + SUM(amount_cents WHERE date >
+ * starting_balance_date)` per CLAUDE.md rule 1 — strictly greater than, so a row
+ * dated exactly on the starting balance date is already counted in it.
+ */
+function finaliseBalances(
+  counts: AccountSyncCounts[],
+  db: Db,
+): { summaries: AccountSyncSummary[]; missingAccounts: string[] } {
+  const summaries: AccountSyncSummary[] = [];
+  const missingAccounts: string[] = [];
+
+  for (const c of counts) {
     const account = db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, s.accountId))
+      .where(eq(schema.accounts.id, c.accountId))
       .get();
-    if (!account) continue;
+
+    if (!account) {
+      // Was silently skipped before, leaving a fabricated 0 balance on display.
+      missingAccounts.push(c.name);
+      continue;
+    }
 
     const row = db
       .select({
@@ -330,18 +465,24 @@ function finaliseBalances(summaries: AccountSyncSummary[], db: Db): void {
       .from(schema.transactions)
       .where(
         and(
-          eq(schema.transactions.accountId, s.accountId),
+          eq(schema.transactions.accountId, c.accountId),
           sql`${schema.transactions.date} > ${account.startingBalanceDate}`,
         ),
       )
       .get();
 
-    s.computedBalanceCents = account.startingBalanceCents + (row?.delta ?? 0);
-    s.driftCents =
-      s.reportedBalanceCents === null
-        ? null
-        : s.computedBalanceCents - s.reportedBalanceCents;
+    const computedBalanceCents = account.startingBalanceCents + (row?.delta ?? 0);
+    summaries.push({
+      ...c,
+      computedBalanceCents,
+      driftCents:
+        c.reportedBalanceCents === null
+          ? null
+          : computedBalanceCents - c.reportedBalanceCents,
+    });
   }
+
+  return { summaries, missingAccounts };
 }
 
 /**
@@ -361,6 +502,7 @@ export function linkTransfersByBucket(
       date: schema.transactions.date,
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
+      bankTransactionNumber: schema.transactions.bankTransactionNumber,
     })
     .from(schema.transactions)
     .where(
@@ -369,7 +511,11 @@ export function linkTransfersByBucket(
         isNull(schema.transactions.transferPairId),
       ),
     )
-    .all();
+    .all()
+    .map((r) => ({
+      ...r,
+      adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
+    }));
 
   const { pairs: allPairs, ambiguous } = matchTransfers(unlinked);
 
@@ -460,6 +606,93 @@ export function linkTransferPairManually(
 }
 
 /**
+ * Clears BOTH sides of a transfer pair.
+ *
+ * Every other writer of `transfer_pair_id` only ever assigns a partner. Without
+ * this there is no path in the app that sets it back to NULL, so a wrong link —
+ * whether auto-linked by the counting argument or picked by hand in the review
+ * UI — could only be undone by restoring a snapshot or undoing the whole batch,
+ * and the latter only works until the next sync becomes the newest batch. Since
+ * a paired row is excluded from every spending surface (budget, trends, goals,
+ * categorize, subscriptions), a wrong link silently removes real money from the
+ * budget with no way back.
+ *
+ * Both legs are cleared in one transaction: leaving one side pointing at a row
+ * that no longer points back is exactly the dangling state that
+ * `linkTransferPairManually` refuses to create.
+ */
+export function unlinkTransferPair(id: number, db: Db = defaultDb): void {
+  const row = db
+    .select()
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, id))
+    .get();
+
+  if (!row) throw new Error(`No such transaction: ${id}`);
+  // Idempotent: a double-submit or a stale tab should be a no-op, not an error.
+  if (row.transferPairId === null) return;
+
+  const partnerId = row.transferPairId;
+  db.transaction((tx) => {
+    tx.update(schema.transactions)
+      .set({ transferPairId: null })
+      .where(inArray(schema.transactions.id, [id, partnerId]))
+      .run();
+  });
+}
+
+export type LinkedTransferPair = { a: TransferRow; b: TransferRow };
+
+/**
+ * Linked pairs on or after `sinceIso`, so the sync screen can show what was
+ * auto-linked and offer to undo it. Emits each pair once (keyed on the lower
+ * id) and skips half-links, which should not exist but must not crash the page
+ * if they somehow do.
+ */
+export function findLinkedTransferPairs(
+  sinceIso: string,
+  db: Db = defaultDb,
+): LinkedTransferPair[] {
+  const rows = db
+    .select({
+      id: schema.transactions.id,
+      accountId: schema.transactions.accountId,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      rawMemo: schema.transactions.rawMemo,
+      bankTransactionNumber: schema.transactions.bankTransactionNumber,
+      transferPairId: schema.transactions.transferPairId,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        gte(schema.transactions.date, sinceIso),
+        isNotNull(schema.transactions.transferPairId),
+      ),
+    )
+    .all();
+
+  const byId = new Map(
+    rows.map((r) => [
+      r.id,
+      { ...r, adjudicatedByTxnNumber: r.bankTransactionNumber !== null },
+    ]),
+  );
+  const pairs: LinkedTransferPair[] = [];
+  // Iterate the mapped values, not the raw rows, so both legs carry
+  // adjudicatedByTxnNumber.
+  for (const row of byId.values()) {
+    const partner = byId.get(row.transferPairId!);
+    if (!partner || partner.transferPairId !== row.id) continue;
+    if (row.id > partner.id) continue;
+    const positive = row.amountCents >= 0 ? row : partner;
+    const negative = row.amountCents >= 0 ? partner : row;
+    pairs.push({ a: positive, b: negative });
+  }
+  return pairs.sort((x, y) => y.a.date.localeCompare(x.a.date));
+}
+
+/**
  * Re-derives the undecidable buckets from whatever is currently unpaired.
  * Deliberately stateless — there is no "needs review" flag to keep in sync with
  * reality, so resolving a pair anywhere simply makes it stop showing up here.
@@ -475,6 +708,7 @@ export function findAmbiguousTransfers(
       date: schema.transactions.date,
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
+      bankTransactionNumber: schema.transactions.bankTransactionNumber,
     })
     .from(schema.transactions)
     .where(
@@ -483,7 +717,11 @@ export function findAmbiguousTransfers(
         isNull(schema.transactions.transferPairId),
       ),
     )
-    .all();
+    .all()
+    .map((r) => ({
+      ...r,
+      adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
+    }));
 
   return matchTransfers(unlinked).ambiguous;
 }

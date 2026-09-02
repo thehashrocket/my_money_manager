@@ -38,9 +38,10 @@ Then open `/sync`, pick which remote account each local account maps to, and hit
 
 - **Balance check** — the bank's balance next to the one this ledger computes, with the difference called out when they disagree. Available balance is listed separately; that gap is where pending card holds live.
 - **Transfers needing review** — the rare same-day, same-amount transfer the matcher can't resolve by counting. Pick the two halves yourself.
+- **Linked transfers** — what got paired automatically, each with a **Not a transfer** button. Pairing hides both rows from every spending view, so this is the way back out when a same-day, same-amount coincidence gets linked by mistake.
 - **Undo this sync** — deletes the last batch's rows and the batch itself, no dev-server restart needed. The pre-write snapshot stays as the escape hatch.
 
-SimpleFIN caps history at 90 days and warns that anything past 45 is outside its recommended range, so sync never asks for more than 45 days. It also never returns pending transactions. Both are properties of the feed, not missing features.
+SimpleFIN caps history at 90 days — the feed says so itself when you ask for more. Sync halves that to 45 as its own conservative limit, so anything older has to come from a CSV import; that is a property of the feed, not a missing feature. The feed also returns only posted rows, and sync refuses to write a pending one if it ever appears: there is no way to update a row once it posts, so it would freeze a pre-authorisation amount and duplicate the real charge.
 
 ### CSV import (older history)
 
@@ -75,7 +76,8 @@ src/
   lib/categorize/ Bulk-categorize logic and validators
   lib/goals/     Savings goal progress
   lib/import/    CSV import orchestration and validators
-  lib/simplefin/ Automated sync: access URL, client, mapping, bucket transfer matcher, undo
+  lib/simplefin/ Automated sync: access URL, client, mapping, bucket transfer matcher,
+                 link/unlink, undo
   lib/subscriptions/ Recurring-charge detection
   lib/trends/    6-month spend by category
 scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs
@@ -90,9 +92,9 @@ These are load-bearing — the whole app is built around them:
 
 1. **All money is stored as signed integer `amount_cents`.** Never floats. Withdrawals negative, deposits positive.
 2. **The CSV's signs are already correct.** `Amount Debit` is pre-negative, `Amount Credit` is positive. No `Math.abs`, no sign flips by description. (This is the bug Plaid users keep hitting.)
-3. **Dedup is `(account_id, import_batch_id, import_row_hash)`**, never Star One's `Transaction Number` — they reuse `6098` for pending deposits across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index)`. Feed rows have no row index, so they dedup on the bank's own `external_id` instead, enforced by a partial unique index on `(account_id, external_id)`. The feed also re-sends days you already imported from CSV, so sync compares content signatures too — counted as a multiset, so two genuinely identical same-day coffees both survive.
-4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only. The feed carries no transaction number, so sync pairs by counting instead: bucket on `(date, |amount|, opposite sign, cross-account)` and auto-link any bucket where the two sides balance, since every possible pairing excludes the same rows from spending. Unbalanced buckets are the ones `/sync` asks you about.
-5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`. Last 10 are kept. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server.
+3. **Dedup is `(account_id, import_batch_id, import_row_hash)`**, never Star One's `Transaction Number` — they reuse `6098` for pending deposits across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index)`. Feed rows have no row index, so they dedup on the bank's own `external_id` instead, enforced by a partial unique index on `(account_id, external_id)`. The feed also re-sends days you already imported from CSV, so sync compares content signatures too — counted as a multiset, so two genuinely identical same-day coffees both survive. Memo whitespace is normalised on both sides of that comparison, because the CSV parser preserves Star One's padding byte-for-byte while the feed sends the same row trimmed.
+4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only. The feed carries no transaction number, so sync pairs by counting instead: bucket on `(date, |amount|)`, keep only opposite-signed rows in different accounts, and auto-link any bucket where the two sides balance, since every possible pairing excludes the same rows from spending. Unbalanced buckets are the ones `/sync` asks you about — as are pairs that would join a feed row to a CSV row without the memo agreeing, since the CSV row carries a transaction number the stronger ±1 matcher already judged.
+5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`, using `VACUUM INTO` so WAL-resident writes are included — a plain file copy could produce a snapshot that would not open. Last 10 are kept, pruned only once the write commits. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server.
 6. **Money comes in as decimal strings from the feed** — parse with `parseAmountToCents` (string math), never `parseFloat(x) * 100`.
 
 ## What's NOT in V1

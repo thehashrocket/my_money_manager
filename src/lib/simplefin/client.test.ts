@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { fetchAccounts, SimpleFinFetchError } from "./client";
-import type { SimpleFinCredentials } from "./accessUrl";
+import { Secret, type SimpleFinCredentials } from "./accessUrl";
 
 /**
  * Every case here runs against a stubbed global fetch — no network, no
@@ -8,7 +8,7 @@ import type { SimpleFinCredentials } from "./accessUrl";
  */
 const CREDS: SimpleFinCredentials = {
   accountsEndpoint: "https://bridge.simplefin.org/simplefin/accounts",
-  authHeader: "Basic YWxpY2U6c2VjcmV0",
+  authHeader: new Secret("Basic YWxpY2U6c2VjcmV0"),
   host: "bridge.simplefin.org",
 };
 
@@ -51,9 +51,9 @@ describe("fetchAccounts", () => {
     expect(url.searchParams.get("balances-only")).toBe("1");
     // Not inline in the URL, so it cannot leak into a redirect or a log line.
     expect(url.username).toBe("");
-    expect(String(target)).not.toContain(CREDS.authHeader);
+    expect(String(target)).not.toContain(CREDS.authHeader.expose());
     expect((init?.headers as Record<string, string>).Authorization).toBe(
-      CREDS.authHeader,
+      CREDS.authHeader.expose(),
     );
     expect(init?.cache).toBe("no-store");
   });
@@ -104,5 +104,84 @@ describe("fetchAccounts", () => {
     await expect(fetchAccounts(CREDS, { startDate: 0 })).rejects.toThrow(
       /non-JSON response/,
     );
+  });
+});
+
+/**
+ * The feed is the only untrusted input in the app. A bare cast let a shape
+ * change through as `undefined` fields, which the downstream `?? []` fallbacks
+ * then read as "no accounts" — reporting a clean "up to date" while importing
+ * nothing.
+ */
+describe("fetchAccounts — response validation", () => {
+  const creds = {
+    accountsEndpoint: "https://bridge.test/simplefin/accounts",
+    authHeader: new Secret("Basic dGVzdDp0ZXN0"),
+    host: "bridge.test",
+  };
+
+  function respond(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects an account missing its id rather than silently importing nothing", async () => {
+    respond({ accounts: [{ name: "CHECKING", balance: "1.00" }] });
+    await expect(fetchAccounts(creds, { startDate: 0 })).rejects.toThrow(
+      /unexpected response shape/i,
+    );
+  });
+
+  it("rejects a numeric amount, which would break string-math cent parsing", async () => {
+    respond({
+      accounts: [
+        {
+          id: "ACT-1",
+          name: "CHECKING",
+          balance: "1.00",
+          transactions: [
+            { id: "TRN-1", posted: 1788264000, amount: -4.87, description: "X" },
+          ],
+        },
+      ],
+    });
+    await expect(fetchAccounts(creds, { startDate: 0 })).rejects.toThrow(
+      /unexpected response shape/i,
+    );
+  });
+
+  it("names the offending field so the banner is actionable", async () => {
+    respond({ accounts: [{ id: "ACT-1", name: "CHECKING" }] });
+    await expect(fetchAccounts(creds, { startDate: 0 })).rejects.toThrow(/balance/);
+  });
+
+  it("passes unknown extra fields through untouched, so a new MX field is not a hard failure", async () => {
+    respond({
+      accounts: [
+        {
+          id: "ACT-1",
+          name: "CHECKING",
+          balance: "1.00",
+          brand_new_mx_field: "surprise",
+          transactions: [
+            {
+              id: "TRN-1",
+              posted: 1788264000,
+              amount: "-4.87",
+              description: "X",
+              another_new_field: 1,
+            },
+          ],
+        },
+      ],
+    });
+    const res = await fetchAccounts(creds, { startDate: 0 });
+    expect(res.accounts?.[0].transactions?.[0].id).toBe("TRN-1");
   });
 });

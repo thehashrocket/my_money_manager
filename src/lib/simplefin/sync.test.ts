@@ -3,7 +3,12 @@ import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import type { SimpleFinResponse, SimpleFinTransaction } from "./types";
-import { syncSimpleFin, linkTransferPairManually } from "./sync";
+import {
+  syncSimpleFin,
+  linkTransferPairManually,
+  unlinkTransferPair,
+  findLinkedTransferPairs,
+} from "./sync";
 
 /**
  * Exercises the dedup and manual-pairing logic against a real :memory: schema.
@@ -19,17 +24,25 @@ const { fetchAccountsMock, createSnapshotMock } = vi.hoisted(() => ({
     snapshotPath: "/tmp/money.db.pre-import-TEST",
     timestamp: "TEST",
     prunedPaths: [] as string[],
+    consistent: true,
+    degradedReason: null as string | null,
   })),
 }));
 
-vi.mock("./accessUrl", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./accessUrl")>()),
-  readAccessUrl: () => ({
-    accountsEndpoint: "https://bridge.test/simplefin/accounts",
-    authHeader: "Basic dGVzdDp0ZXN0",
-    host: "bridge.test",
-  }),
-}));
+vi.mock("./accessUrl", async (importOriginal) => {
+  // Secret comes from importOriginal, not a top-level import: vi.mock factories
+  // are hoisted above the import block, so a module-scope binding would not be
+  // initialised yet when this runs.
+  const actual = await importOriginal<typeof import("./accessUrl")>();
+  return {
+    ...actual,
+    readAccessUrl: () => ({
+      accountsEndpoint: "https://bridge.test/simplefin/accounts",
+      authHeader: new actual.Secret("Basic dGVzdDp0ZXN0"),
+      host: "bridge.test",
+    }),
+  };
+});
 
 vi.mock("./client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./client")>()),
@@ -343,5 +356,241 @@ describe("linkTransferPairManually", () => {
     );
     expect(byId.get(inbound.id)?.transferPairId).toBe(out.id);
     expect(byId.get(out.id)?.transferPairId).toBe(inbound.id);
+  });
+});
+
+/**
+ * Regression cover for the whitespace half of cross-source dedup.
+ *
+ * Star One's CSV pads pending-row memos with leading spaces and `parseCsv`
+ * keeps them verbatim (import_row_hash is derived from the exact bytes). The
+ * feed sends the same row trimmed. Comparing raw memo strings therefore missed
+ * exactly the population content dedup exists for, and inserted the row twice.
+ */
+describe("syncSimpleFin — cross-source dedup ignores memo whitespace", () => {
+  it("does not re-import a CSV row whose memo was stored with padding", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-pad" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      // Exactly what parseCsv stores for a pending row.
+      rawMemo: `  ${COFFEE_MEMO}`,
+      date: "2026-09-01",
+    });
+
+    respondWith("ACT-pad", [feedTxn("ext-pad-1", "-48.70")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.length).toBe(1);
+    expect(rows.reduce((n, r) => n + r.amountCents, 0)).toBe(-4870);
+  });
+
+  it("collapses internal whitespace too, but still keeps genuinely different rows", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-pad2" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: "COSTCO WHSE #1031  MANTECA  CA",
+      date: "2026-09-01",
+    });
+
+    respondWith("ACT-pad2", [
+      feedTxn("ext-same", "-48.70", "COSTCO WHSE #1031 MANTECA CA"),
+      feedTxn("ext-other", "-48.70", "SAFEWAY 2231 MANTECA CA"),
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(handle.db.select().from(schema.transactions).all().length).toBe(2);
+  });
+});
+
+describe("unlinkTransferPair / findLinkedTransferPairs", () => {
+  function seedLinkedPair() {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: 20000,
+      rawMemo: "DEPOSIT-OVERDRAFT",
+      date: "2026-09-01",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -20000,
+      rawMemo: "WITHDRAWAL-OVERDRAFT",
+      date: "2026-09-01",
+    });
+    linkTransferPairManually(a.id, b.id, handle.db);
+    return { a, b };
+  }
+
+  it("lists a linked pair once, positive leg first", () => {
+    const { a, b } = seedLinkedPair();
+    const pairs = findLinkedTransferPairs("2026-01-01", handle.db);
+    expect(pairs.length).toBe(1);
+    expect(pairs[0].a.id).toBe(a.id);
+    expect(pairs[0].b.id).toBe(b.id);
+  });
+
+  it("clears BOTH sides, so neither row is left pointing at a stale partner", () => {
+    const { a, b } = seedLinkedPair();
+
+    unlinkTransferPair(a.id, handle.db);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+    expect(findLinkedTransferPairs("2026-01-01", handle.db)).toEqual([]);
+    // Both rows survive — unlinking is not deleting.
+    expect(rows.map((r) => r.id).sort()).toEqual([a.id, b.id].sort());
+  });
+
+  it("unlinks from either leg", () => {
+    const { b } = seedLinkedPair();
+    unlinkTransferPair(b.id, handle.db);
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .all()
+        .every((r) => r.transferPairId === null),
+    ).toBe(true);
+  });
+
+  it("is idempotent on an already-unlinked row, so a double submit is harmless", () => {
+    const { a } = seedLinkedPair();
+    unlinkTransferPair(a.id, handle.db);
+    expect(() => unlinkTransferPair(a.id, handle.db)).not.toThrow();
+  });
+
+  it("rejects an unknown transaction rather than silently doing nothing", () => {
+    expect(() => unlinkTransferPair(9999, handle.db)).toThrow(/No such transaction/);
+  });
+
+  it("relinking after an unlink is allowed (the pair guard is not sticky)", () => {
+    const { a, b } = seedLinkedPair();
+    unlinkTransferPair(a.id, handle.db);
+    expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
+    expect(findLinkedTransferPairs("2026-01-01", handle.db).length).toBe(1);
+  });
+});
+
+/**
+ * The `existing` lookup used to be bounded by startIso while the partial unique
+ * index on (account_id, external_id) is not bounded at all. A feed row whose
+ * DERIVED date fell before the window escaped both dedup paths — reachable via
+ * postedToIsoDate's documented `posted === 0 -> transacted_at` fallback.
+ */
+describe("syncSimpleFin — rows dated before the fetch window", () => {
+  /** 2026-08-01T12:00:00Z: before startIso (2026-08-25), after the 45-day floor. */
+  const AUG_1_NOON = 1785585600;
+
+  function backdatedFeedTxn(id: string, amount: string, memo = COFFEE_MEMO) {
+    // posted === 0 makes postedToIsoDate fall back to transacted_at.
+    return { ...feedTxn(id, amount, memo), posted: 0, transacted_at: AUG_1_NOON };
+  }
+
+  it("dedups an already-synced row instead of aborting the batch on the unique index", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-old" });
+    const prior = seedBatch("simplefin");
+    // Anchors startIso at 2026-08-25.
+    seedTxn({
+      accountId: account.id,
+      batchId: prior.id,
+      amountCents: -100,
+      rawMemo: "ANCHOR",
+      date: "2026-09-01",
+      source: "simplefin",
+      externalId: "TRN-anchor",
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: prior.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-08-01",
+      source: "simplefin",
+      externalId: "TRN-backdated",
+    });
+
+    respondWith("ACT-old", [backdatedFeedTxn("TRN-backdated", "-4.87")]);
+
+    // Previously: SqliteError, UNIQUE constraint failed, whole batch rolled back.
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.accounts[0].duplicateByExternalId).toBe(1);
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+  });
+
+  it("content-dedups a backdated row against a CSV row older than the window", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-old2" });
+    const batch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      amountCents: -100,
+      rawMemo: "ANCHOR",
+      date: "2026-09-01",
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-08-01",
+    });
+
+    // A NEW external id, so only content dedup can catch it.
+    respondWith("ACT-old2", [backdatedFeedTxn("TRN-fresh", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+  });
+});
+
+describe("syncSimpleFin — pending rows", () => {
+  it("refuses to write a pending row and says so, rather than freezing a pre-auth amount", async () => {
+    seedAccount({ simplefinAccountId: "ACT-pending" });
+    respondWith("ACT-pending", [
+      { ...feedTxn("TRN-pending", "-40.00"), pending: true },
+      feedTxn("TRN-posted", "-12.34"),
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.accounts[0].skippedPending).toBe(1);
+    expect(outcome.warnings.join(" ")).toMatch(/Skipped 1 pending transaction/);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("TRN-posted");
+    // Nothing written is ever flagged pending.
+    expect(rows.every((r) => r.isPending === false)).toBe(true);
   });
 });

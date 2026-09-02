@@ -28,9 +28,15 @@ export const resolveTransferInputSchema = z
     message: "a transfer pair needs two different transactions",
   });
 
+/** Unlink takes either leg — the pair is cleared from whichever id is given. */
+export const unlinkTransferInputSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
+
 export type LinkAccountInput = z.infer<typeof linkAccountInputSchema>;
 export type UndoSyncInput = z.infer<typeof undoSyncInputSchema>;
 export type ResolveTransferInput = z.infer<typeof resolveTransferInputSchema>;
+export type UnlinkTransferInput = z.infer<typeof unlinkTransferInputSchema>;
 
 type Validation<T> = { success: true; data: T } | { success: false; error: z.ZodError };
 
@@ -44,4 +50,9 @@ export function validateResolveTransferInput(
   i: unknown,
 ): Validation<ResolveTransferInput> {
   return resolveTransferInputSchema.safeParse(i);
+}
+export function validateUnlinkTransferInput(
+  i: unknown,
+): Validation<UnlinkTransferInput> {
+  return unlinkTransferInputSchema.safeParse(i);
 }

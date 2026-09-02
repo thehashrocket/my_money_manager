@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import { syncNowAction, type SyncActionState } from "./actions";
+import { ActionStatus } from "./ActionForm";
 
 const INITIAL: SyncActionState = { status: "idle" };
 
@@ -21,18 +22,10 @@ export function SyncButton({ disabled }: { disabled?: boolean }) {
         {pending ? "Syncing…" : "Sync now"}
       </button>
 
-      {state.status !== "idle" && (
-        <p
-          role="status"
-          className={
-            state.status === "error"
-              ? "text-sm text-destructive"
-              : "text-sm text-money-pos"
-          }
-        >
-          {state.message}
-        </p>
-      )}
+      {/* Renders the warnings too: SimpleFIN reports a broken bank connection
+          in `errors[]` on an HTTP 200, so without these a dead connection looks
+          exactly like a clean "already up to date". */}
+      <ActionStatus state={state} />
     </form>
   );
 }

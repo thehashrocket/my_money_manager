@@ -5,7 +5,7 @@ import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
 import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
-import { createSnapshot, type SnapshotResult } from "./snapshot";
+import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
 
 type Db = typeof defaultDb;
 
@@ -182,6 +182,12 @@ export function commitImport(
 
     return batch.id;
   });
+
+  // Prune only after the write has committed — pruning before it meant a failed
+  // import had already evicted the oldest snapshot to make room for a useless
+  // one. Failures to delete are ignored here rather than aborting an import that
+  // has already succeeded.
+  pruneSnapshots(path.dirname(DB_PATH));
 
   const pairsLinked = linkTransferPairs(batchId, db);
 

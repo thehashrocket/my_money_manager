@@ -42,11 +42,23 @@ if (existingEnv.includes(`${KEY}=`) && !force) {
 }
 
 // The setup token is a base64-encoded claim URL.
-let claimUrl;
-try {
-  claimUrl = Buffer.from(token.trim(), "base64").toString("utf8").trim();
-} catch {
-  fail("Token is not valid base64.");
+//
+// Buffer.from(x, "base64") never throws — Node silently discards characters
+// outside the base64 alphabet and tolerates bad padding — so a try/catch here
+// is dead code. A typo or a stray line-break would decode to a truncated URL
+// and, in the worst case, POST the token to the wrong endpoint. Validate the
+// charset first and round-trip to confirm nothing was dropped.
+const trimmedToken = token.trim().replace(/\s+/g, "");
+if (!/^[A-Za-z0-9+/]+={0,2}$/.test(trimmedToken)) {
+  fail("Token is not valid base64 — check for a truncated or mistyped paste.");
+}
+const claimUrl = Buffer.from(trimmedToken, "base64").toString("utf8").trim();
+if (Buffer.from(claimUrl, "utf8").toString("base64").replace(/=+$/, "") !==
+    trimmedToken.replace(/=+$/, "")) {
+  fail(
+    "Token did not decode cleanly — some characters were dropped.\n" +
+      "  Copy the setup token again, making sure it is complete.",
+  );
 }
 
 let parsed;
@@ -61,8 +73,30 @@ if (parsed.protocol !== "https:") {
 
 console.log(`\n  Claiming against ${parsed.origin} ...`);
 
-const res = await fetch(claimUrl, { method: "POST" });
-const body = (await res.text()).trim();
+// This POST is the one irreversible step in the script: the setup token is
+// SINGLE USE, so a socket hangup after the bridge has processed it burns the
+// token. Without this guard that surfaced as a raw "TypeError: fetch failed"
+// stack with no indication of whether the token was spent — and with no
+// timeout, a stalled bridge hung the script forever with no output at all.
+const CLAIM_TIMEOUT_MS = 30_000;
+let res;
+let body;
+try {
+  res = await fetch(claimUrl, {
+    method: "POST",
+    signal: AbortSignal.timeout(CLAIM_TIMEOUT_MS),
+  });
+  body = (await res.text()).trim();
+} catch (err) {
+  fail(
+    `Could not complete the claim against ${parsed.origin}:\n  ${
+      err instanceof Error ? err.message : String(err)
+    }\n\n` +
+      "  The bridge may still have consumed the token. Check whether the setup\n" +
+      "  token still works; if it does not, generate a fresh one at the\n" +
+      "  SimpleFIN Bridge and re-run this script.",
+  );
+}
 
 if (!res.ok) {
   fail(

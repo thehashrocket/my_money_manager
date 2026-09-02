@@ -6,19 +6,30 @@
  * SimpleFIN feed has no transaction number and no `extra` object, so that rule
  * cannot be ported — see the "SimpleFIN Star One feed shape" note.
  *
- * What replaces it is a counting argument. Bucket rows by (date, |amount|,
- * opposite sign, cross-account). When a bucket holds N positives and N
- * negatives, EVERY bijection between them excludes exactly the same rows from
- * spending, so which row pairs with which is cosmetic — the budget is identical
- * either way and the bucket can be linked without asking. Only a bucket whose
- * counts do not balance is genuinely undecidable.
+ * What replaces it is a counting argument. Rows are bucketed on (date,
+ * |amount|) — the key is only those two fields; opposite sign and
+ * cross-account are applied as filters within each bucket below, not as part of
+ * the key. When a bucket holds N positives and N negatives, EVERY bijection
+ * between them excludes exactly the same rows from spending, so which row pairs
+ * with which is cosmetic — the budget is identical either way and the bucket can
+ * be linked without asking. Only a bucket whose counts do not balance is
+ * genuinely undecidable.
  *
  * Measured on a real 90-day pull: 56 pairs auto-link and a single day is left
- * undecidable. Three refinements do that work — excluding ATM cash withdrawals
- * from candidacy (never transfer legs, but they collide on the round amounts
- * sweeps use), counting per account-pair direction rather than across the whole
- * bucket, and refusing to guess when a row has candidate partners in more than
- * one account.
+ * undecidable. TWO refinements produce that result:
+ *   1. ATM cash withdrawals are excluded from candidacy (never transfer legs,
+ *      but they collide on the round amounts sweeps use). Removing this takes
+ *      the undecidable buckets from 2 to 4.
+ *   2. Counts are compared per account-pair direction, not across the whole
+ *      bucket.
+ *
+ * The third guard below — refusing to guess when a row has candidate partners in
+ * more than one ACCOUNT — is forward-looking defence, not part of that measured
+ * result. It can only fire with 3+ accounts in a single bucket, and this app's
+ * checking|savings enum plus the deliberately-unlinked mortgage means only two
+ * accounts ever carry rows. Removing it changes nothing on the real data
+ * (verified: still 56 pairs, still 1 undecidable day). Keep it, but do not read
+ * it as load-bearing today.
  */
 export type TransferCandidate = {
   id: string | number;
@@ -26,12 +37,24 @@ export type TransferCandidate = {
   date: string;
   amountCents: number;
   rawMemo: string;
+  /**
+   * True when the row carries a bank transaction number — i.e. it came from CSV
+   * and the ±1 matcher in src/lib/transferPair.ts has ALREADY examined it and
+   * declined to pair it. See the cross-source guard below.
+   */
+  adjudicatedByTxnNumber?: boolean;
 };
 
+/**
+ * No `confidence` field. The previous one was computed for every pair and read
+ * by nothing outside tests, so it asserted a distinction nothing could rely on.
+ * The certain/high signal now does real work instead — it decides the
+ * cross-source guard below. To surface it in the UI later, persist it as a
+ * transfer_confidence column rather than reviving a field with no consumer.
+ */
 export type MatchedPair<T extends TransferCandidate> = {
   a: T;
   b: T;
-  confidence: "certain" | "high";
 };
 
 export type AmbiguousBucket<T extends TransferCandidate> = {
@@ -146,17 +169,37 @@ export function matchTransfers<T extends TransferCandidate>(
         const ordered = [...negatives].sort(
           (x, y) => Number(isOverdraftLabeled(y)) - Number(isOverdraftLabeled(x)),
         );
-        for (let i = 0; i < positives.length; i++) {
-          const a = positives[i];
-          const b = ordered[i];
+        const candidates = positives.map((a, i) => ({ a, b: ordered[i] }));
+
+        // Cross-source guard. The counting argument is sound only when the rows
+        // in a bucket really are transfer legs; it has no way to tell a genuine
+        // pair from a same-day, same-amount coincidence. That is an acceptable
+        // risk between two feed rows, which is what the 56-pair result was
+        // measured on. It is NOT acceptable when one leg came from CSV and
+        // carries a bank transaction number, because the ±1 matcher — a strictly
+        // stronger signal — already looked at that row and declined to pair it.
+        // Overriding it on a coincidence would silently drop two real
+        // transactions out of every spending view.
+        //
+        // So an uncorroborated cross-source pair asks instead of guessing. The
+        // whole direction is diverted, never a subset: linking some pairs and
+        // querying others would break the very bijection-equivalence the
+        // counting argument rests on.
+        const uncorroboratedCrossSource = candidates.some(
+          ({ a, b }) =>
+            a.adjudicatedByTxnNumber !== b.adjudicatedByTxnNumber &&
+            !isOverdraftLabeled(a) &&
+            !isOverdraftLabeled(b),
+        );
+        if (uncorroboratedCrossSource) {
+          ambiguous.push({ date, absAmountCents, positives, negatives });
+          continue;
+        }
+
+        for (const { a, b } of candidates) {
           used.add(a.id);
           used.add(b.id);
-          pairs.push({
-            a,
-            b,
-            confidence:
-              isOverdraftLabeled(a) || isOverdraftLabeled(b) ? "certain" : "high",
-          });
+          pairs.push({ a, b });
         }
       }
     }

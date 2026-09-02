@@ -1,6 +1,6 @@
 # Todos
 
-Short-term checklist. For the full roadmap see [PLAN.md](./PLAN.md). For context and design decisions see `.context/notes.md`.
+Short-term checklist. For the full roadmap see [PLAN.md](./PLAN.md). For context and design decisions see `.context/notes.md` — note `.context/` is gitignored (it holds real bank data), so it exists only on a machine where those artifacts were generated.
 
 ## Weekend 1 — scaffold + CSV import ✅
 
@@ -101,8 +101,26 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 ## Follow-ups from v0.8.0 ship review
 
 - [ ] **P2** — Re-pointing a SimpleFIN link orphans `external_id`s. `setAccountLink` blocks two local accounts holding the same feed id at once, but not unlink-then-relink to a different account: the rows already imported keep their `external_id` under the old account, and the partial unique index is scoped to `(account_id, external_id)`, so the next sync re-imports the whole overlap window into the new account and every amount double-counts. Either refuse while that account still holds feed rows, or clear their `external_id` and warn that content dedup alone will cover the re-import. (`src/lib/simplefin/link.ts`)
-- [ ] **P2** — `syncNowAction` discards `outcome.warnings`. When a linked account drops out of the feed, `syncSimpleFin` pushes "SimpleFIN returned nothing for X — the connection may need re-authorising", but the UI renders only counts, so a dark account reports the reassuring "Already up to date — nothing new to import." Surface warnings in the sync result. (`src/app/sync/actions.ts`)
-- [ ] **P3** — Test gaps the ship testing specialist flagged and this branch did not close: the `linkTransfersByBucket` query→match→write round-trip at the DB layer, `warnings[]` forwarding, `findAmbiguousTransfers`'s window + stateless-resolution contract, and a non-zero `driftCents` case (drift is only ever asserted at 0). (`src/lib/simplefin/`)
+- [x] **P2** — `syncNowAction` discards `outcome.warnings`. Fixed: `SyncActionState` carries `warnings` and a `warning` status, rendered by `ActionStatus`. A sync carrying warnings is never shown as a plain success, so a dark account can no longer report "Already up to date." (`src/app/sync/actions.ts`)
+- [x] **P3** — Test gaps: `warnings[]` forwarding, the pending-row refusal, the cross-source candidacy guard, the whitespace dedup case, the out-of-window dedup case, unlink round-trips and WAL snapshot consistency are all covered (375 → 402 tests). Still uncovered: `findAmbiguousTransfers`'s window + stateless-resolution contract, and a non-zero `driftCents` case. (`src/lib/simplefin/`)
+
+## Follow-ups from the v0.8.0 code review (this branch)
+
+Fixed on this branch — listed so the reasoning is findable, not as open work:
+- [x] Cross-source content dedup compared a trimmed feed memo against an untrimmed CSV one, duplicating any row imported from CSV while pending. `contentSignature` now normalises whitespace on both sides.
+- [x] `createSnapshot` used `PRAGMA wal_checkpoint`, which reports `busy` in a return value rather than throwing; with a reader pinned it could produce a snapshot that would not open (`SQLITE_CORRUPT`). Now `VACUUM INTO`, with a `consistent` flag when it has to fall back.
+- [x] Snapshot pruning ran before the write it protects, so failed syncs ate rollback history. Now `pruneSnapshots`, called after commit.
+- [x] The dedup lookup was date-bounded while the unique index is not, so a row dated before the window either duplicated or aborted the batch with a raw `SqliteError`.
+- [x] The feed response was cast, not validated. Now zod-parsed in `client.ts` with `looseObject` for forward compatibility.
+- [x] Three of four server actions threw with no error boundary on the route; all four now return state, plus `src/app/sync/error.tsx`.
+- [x] `undoSyncAction` discarded its `UndoResult`, making a no-op undo look identical to a successful one.
+- [x] No code path anywhere cleared `transfer_pair_id`. Added `unlinkTransferPair` + a "Linked transfers" list with "Not a transfer".
+- [x] Pending feed rows were written rather than refused; `authHeader` was a bare string; `AccountSyncSummary` was built invalid and patched in place.
+
+Still open:
+- [ ] **P3** — `import_batches.filename` is NOT NULL and now holds a synthetic non-filename for sync batches (`simplefin 2026-09-02 17:00Z`), which `SyncBatchSummary.filename` passes through to the UI. Consider renaming the field to `label` and deriving the display string from `source` + `importedAt`. (`src/lib/simplefin/undoSync.ts`)
+- [ ] **P3** — Transfer-pair confidence is no longer stored anywhere. If the "Linked transfers" list should flag pairs auto-linked without memo corroboration (the likeliest place a wrong link hides), that needs a `transfer_confidence` column, not a revived field with no consumer. (`src/lib/simplefin/matchTransfers.ts`)
+- [ ] **P4** — Money is `number` everywhere, with CLAUDE.md rule 1 carried by naming convention alone. A branded `Cents` type would make it a compile-time property; `parseAmountToCents` is the natural single point of introduction. Large diff, no behaviour change — only worth doing as a dedicated pass.
 - [ ] **P4** — Simplification, advisory only (~120 lines removable): a shared batch-writer between `importBatch.ts` and `simplefin/sync.ts` (the snapshot → insert batch → insert rows → update count block is duplicated line-for-line); a shared `(date, |amount|)` bucketing helper between `transferPair.ts` and `simplefin/matchTransfers.ts` — CLAUDE.md rule 4 justifies a second decision *rule*, not a second bucketer; and a `selectUnlinked(sinceIso, db)` helper for the query `linkTransfersByBucket` and `findAmbiguousTransfers` share verbatim.
 
 ## Follow-ups from v0.2.0 ship review
