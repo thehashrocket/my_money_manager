@@ -1,6 +1,6 @@
 {
   "name": "barcelona-v2",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "private": true,
   "engines": {
     "node": ">=24.0.0 <25.0.0"
@@ -16,7 +16,9 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "simplefin:claim": "node scripts/simplefin-claim.mjs",
+    "simplefin:sample": "node scripts/simplefin-fetch-sample.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

@@ -31,6 +31,7 @@ src/
   lib/budget/      loadMonthView, upsertAllocation, validateAllocateInput
   lib/categorize/  Bulk-categorize logic and validators
   lib/import/      Import orchestration and validators
+  lib/simplefin/   Automated sync: client, mapping, bucket transfer matcher, undo
 drizzle/           Migration output (committed)
 data/             money.db + pre-import snapshots (gitignored)
 .context/         Design artifacts, CSV samples, deltas (gitignored)
@@ -44,6 +45,8 @@ design_handoff_nav_and_design_system/  Live HTML design specimens + README
 - `pnpm db:generate` — generate Drizzle migration from `src/db/schema.ts`
 - `pnpm db:migrate` — apply pending migrations
 - `pnpm db:studio` — Drizzle Studio GUI
+- `pnpm simplefin:claim` — one-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`)
+- `pnpm simplefin:sample` — dump a live `/accounts` payload to `.context/simplefin-sample.json` for analysis
 
 ## Core rules baked into the data model
 
@@ -54,10 +57,12 @@ These are load-bearing. Violating them corrupts the database.
 2. **The CSV's signs are already correct.** `Amount Debit` is pre-negative, `Amount Credit` is positive, mutually exclusive. Parser rule: `debit ? debit*100 : credit*100`. No `Math.abs`, no negation by `Description`. The Plaid bug happens because Plaid transforms the data; this app doesn't.
 
 3. **Dedup key is `(account_id, import_batch_id, import_row_hash)`**, never the bank's `Transaction Number`. Star One reuses `6098` as a pending-deposit placeholder across rows. `import_row_hash = sha1(date | amount_cents | raw_description | raw_memo | row_index_in_source_file)`.
+   **SimpleFIN rows dedup on `external_id` instead** — the feed's own per-account transaction id, enforced by a partial unique index on `(account_id, external_id)`. There is no row index in a JSON feed, so `import_row_hash` is derived from the external id. Because the feed re-sends days already imported from CSV, sync ALSO dedups on a content signature (`date|amount_cents|raw_memo`) counted as a multiset, so two genuinely identical same-day coffees still both survive.
 
 4. **Transfer pair matcher is MEMO-INDEPENDENT.** Two rows are a transfer pair iff: `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only 20% of the time; the other 80% it mislabels with the triggering merchant. Memo is confirmation-only, never disqualifying. See `memory/project_star_one_cu_overdraft_labeling.md`.
+   **This rule is CSV-only.** The SimpleFIN feed carries no transaction number and no `extra{}`, so `src/lib/simplefin/matchTransfers.ts` replaces it with a counting argument: bucket by `(date, |amount|, opposite sign, cross-account)`, and when a bucket holds N positives and N negatives, every bijection excludes the same rows from spending — so link it without asking. Only unbalanced buckets need a human. Two refinements matter and are both load-bearing: ATM cash withdrawals are excluded from candidacy (they collide on the round amounts sweeps use), and counts are compared **per account-pair direction**, never globally (a charge in the same account as an inbound sweep is the purchase that triggered it, not a candidate for it). Measured on real data: 56 pairs auto-link, ~1 undecidable day per 90.
 
-5. **Every batch import writes a DB snapshot first.** Copy `data/money.db` to `data/money.db.pre-import-{timestamp}` before any write. Rollback = stop dev server, swap file. Keep last 10 snapshots.
+5. **Every batch import writes a DB snapshot first.** Copy `data/money.db` to `data/money.db.pre-import-{timestamp}` before any write. Rollback = stop dev server, swap file. Keep last 10 snapshots. Sync does this too, and additionally supports a logical undo (delete the batch's rows) that works without stopping the server — the file snapshot stays as the escape hatch.
 
 6. **Uncategorized transactions have `category_id = NULL`** and surface in the dashboard backlog tile. The "Uncategorized" seed category is for manual overrides; NULL is the default for unmatched rows.
 
@@ -69,6 +74,19 @@ These are load-bearing. Violating them corrupts the database.
 - Foreign keys: always declare `references(() => ...)` on the column. Use `onDelete: 'restrict'` by default; explicit `'cascade'` where it makes sense (e.g. `category_rules` → `categories`).
 - Merchant normalization is a pure function in `src/lib/normalize.ts`. Tested in isolation. 12 rules total (8 checking + 4 savings). See `.context/csv-format.md`.
 - Subscription detection excludes rows where `raw_description = 'DEPOSIT'` or `raw_memo` starts with `POS ` + digits (those are refunds, never recurring).
+
+## Automated sync (SimpleFIN)
+
+`/sync` pulls posted transactions from Star One via SimpleFIN and writes them straight in — no preview step — behind a pre-write snapshot and a per-batch undo. Credentials live in `SIMPLEFIN_ACCESS_URL` in `.env.local` (gitignored); only the host is ever safe to display.
+
+Constraints that are properties of the feed, not choices:
+
+- **Never more than ~45 days of history.** SimpleFIN hard-caps at 90 days and warns above 45. CSV import stays the only path to anything older — it is not legacy.
+- **No pending transactions.** Star One via MX exposes posted rows only, so there is no insert-then-update path to write. Pending activity is visible only as the gap between `balance` and `available-balance`.
+- **Accounts must be linked explicitly** (`accounts.simplefin_account_id`). The feed also returns a mortgage, which the `checking|savings` enum does not model; unlinked means never imported.
+- **`description === memo` on every row**, so `raw_description` has no source field and is derived from the sign. This keeps the subscription-detection exclusion on `raw_description = 'DEPOSIT'` working.
+- Amounts are decimal strings — parse via `parseAmountToCents` (string math), never `parseFloat(x) * 100`.
+- `normalizeMerchant` needs no SimpleFIN-specific rules: the feed's `description` is byte-identical in shape to the CSV `Memo` column, so trained `category_rules` keep matching. MX's cleaned `payee` is persisted to `transactions.payee` for display only — categorization keys on `normalized_merchant`, never on `payee`, or every trained rule would break. NULL on CSV rows.
 
 ## What's NOT in V1 — do not add
 

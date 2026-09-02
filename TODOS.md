@@ -98,6 +98,13 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 - [x] `src/app/subscriptions/actions.ts` — `dismissSubscriptionAction` / `restoreSubscriptionAction` (Zod-validated)
 - [x] Spine nav: Subscriptions link enabled, Goals remains "Coming Weekend 5"
 
+## Follow-ups from v0.8.0 ship review
+
+- [ ] **P2** — Re-pointing a SimpleFIN link orphans `external_id`s. `setAccountLink` blocks two local accounts holding the same feed id at once, but not unlink-then-relink to a different account: the rows already imported keep their `external_id` under the old account, and the partial unique index is scoped to `(account_id, external_id)`, so the next sync re-imports the whole overlap window into the new account and every amount double-counts. Either refuse while that account still holds feed rows, or clear their `external_id` and warn that content dedup alone will cover the re-import. (`src/lib/simplefin/link.ts`)
+- [ ] **P2** — `syncNowAction` discards `outcome.warnings`. When a linked account drops out of the feed, `syncSimpleFin` pushes "SimpleFIN returned nothing for X — the connection may need re-authorising", but the UI renders only counts, so a dark account reports the reassuring "Already up to date — nothing new to import." Surface warnings in the sync result. (`src/app/sync/actions.ts`)
+- [ ] **P3** — Test gaps the ship testing specialist flagged and this branch did not close: the `linkTransfersByBucket` query→match→write round-trip at the DB layer, `warnings[]` forwarding, `findAmbiguousTransfers`'s window + stateless-resolution contract, and a non-zero `driftCents` case (drift is only ever asserted at 0). (`src/lib/simplefin/`)
+- [ ] **P4** — Simplification, advisory only (~120 lines removable): a shared batch-writer between `importBatch.ts` and `simplefin/sync.ts` (the snapshot → insert batch → insert rows → update count block is duplicated line-for-line); a shared `(date, |amount|)` bucketing helper between `transferPair.ts` and `simplefin/matchTransfers.ts` — CLAUDE.md rule 4 justifies a second decision *rule*, not a second bucketer; and a `selectUnlinked(sinceIso, db)` helper for the query `linkTransfersByBucket` and `findAmbiguousTransfers` share verbatim.
+
 ## Follow-ups from v0.2.0 ship review
 
 - [x] **P2** — `commitImport` throws a generic Error when every row is a duplicate. Show a friendlier preview-page message ("nothing new to import") instead of bubbling to the error boundary. (`src/lib/importBatch.ts:130`)

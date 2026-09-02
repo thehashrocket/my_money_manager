@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-02
+
+_Transactions now pull themselves in. Link your Star One accounts once and `/sync` fetches posted transactions straight from the bank behind a database snapshot you can undo — no weekly CSV download, no sign-in. Balances are checked against the bank's own figure on every visit, so a missing or duplicated row shows up as drift instead of hiding. CSV import is untouched and stays the only way to load history older than 45 days._
+
+### Added
+- **`/sync` page** — link each local account to a Star One account, pull posted transactions on demand, and see what landed. Writes straight to the ledger; no preview step.
+- **Undo last sync** — removes the batch's transactions and the batch itself without stopping the dev server. The pre-write database snapshot stays as the escape hatch for anything undo can't reach.
+- **Balance check** — the bank's own balance against the one this ledger computes, with the difference called out when they disagree. Available balance is shown separately, which is where pending card holds appear.
+- **Transfers needing review** — when a same-day, same-amount transfer genuinely can't be resolved by counting, it asks instead of guessing. On real data this is roughly one day per quarter.
+- **Automatic transfer matching for feed rows** (`src/lib/simplefin/matchTransfers.ts`) — the CSV matcher keys on Star One's sequential transaction number, which the feed doesn't carry, so this replaces it with a counting argument over `(date, amount, opposite sign, cross-account)` buckets. 56 of 57 pairs link themselves on a real 90-day pull.
+- **Merchant names from the feed** (`drizzle/0008_naive_zeigeist.sql`) — the bank's cleaned payee ("Save Mart") is stored alongside the raw description. Categorization still matches on the raw form, so existing rules keep working.
+- **`pnpm simplefin:claim`** — one-time exchange of a SimpleFIN setup token for an access URL, written to `.env.local` with owner-only permissions.
+- **`pnpm simplefin:sample`** — dumps a live account payload to `.context/` for inspection.
+
+### Changed
+- **Duplicate detection now understands two sources** (`drizzle/0007_unique_lily_hollister.sql`) — feed rows dedupe on the bank's own transaction id, enforced by a database index. Because the feed re-sends days already imported from CSV, rows are also compared on content, counted rather than matched, so two genuinely identical same-day purchases both survive.
+- **Sidebar** — added a Sync tab above Import.
+
+### Fixed
+- **Pre-import snapshots could omit recent transactions.** The database runs in WAL mode, so committed writes can live in a side file that a plain copy missed — meaning the snapshot taken before every CSV import was not always a complete database. Snapshots now fold the write-ahead log in first. This affects CSV import too, not just sync.
+- **`.context/` was not ignored by the committed `.gitignore`** — it held real transaction data and was excluded only by a local, unshared git setting, so a fresh clone would have left it exposed to `git add`.
+
 ## [0.7.2] - 2026-04-21
 
 _Subscriptions can now be categorized in one click. New auto-categorize actions on the subscriptions page tag detected recurring charges as Subscriptions and create a remember-this-merchant rule. Twenty-three category rules for common streaming and software services seed automatically so new imports land in the right bucket from day one._

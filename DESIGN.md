@@ -67,6 +67,7 @@ Fixed left rail, 240px. Main content: `pl-[290px]` (240 + 50 gutter). Below 820p
 │ ↻ Subscriptions     │  ← disabled, tooltip "Coming Weekend 4"
 │ ★ Goals             │  ← disabled, tooltip "Coming Weekend 5"
 │ ─────────           │
+│ ⟳ Sync              │
 │ ↥ Import            │
 │                     │
 │ Checking  $3,482    │  ← balance peek, mono sm
