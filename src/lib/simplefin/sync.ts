@@ -342,12 +342,12 @@ export async function syncSimpleFin(
 
   // ---- write ----
   const snapshot = createSnapshot(DB_PATH);
+  let snapshotWarning: string | null = null;
   if (!snapshot.consistent) {
-    warnings.push(
-      `The pre-sync snapshot fell back to a plain file copy${
-        snapshot.degradedReason ? ` (${snapshot.degradedReason})` : ""
-      } — it may be missing the most recent writes. Undo for this batch still works.`,
-    );
+    snapshotWarning = `The pre-sync snapshot fell back to a plain file copy${
+      snapshot.degradedReason ? ` (${snapshot.degradedReason})` : ""
+    } — it may be missing the most recent writes. Undo for this batch still works.`;
+    warnings.push(snapshotWarning);
   }
 
   const batchId = db.transaction((tx) => {
@@ -357,6 +357,7 @@ export async function syncSimpleFin(
         source: "simplefin",
         filename: `simplefin ${now.toISOString().slice(0, 16).replace("T", " ")}Z`,
         snapshotPath: snapshot.snapshotPath,
+        snapshotWarning,
         transactionCount: 0,
       })
       .returning({ id: schema.importBatches.id })

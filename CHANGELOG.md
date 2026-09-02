@@ -11,6 +11,7 @@ _Closes the known issue recorded in 0.8.1: CSV import now actually checks the sn
 ### Fixed
 - **CSV import no longer trusts an unverified database snapshot.** `commitImport` now checks the `consistent` flag `createSnapshot` returns, matching the check `/sync` already had. If the pre-import snapshot degrades to a plain file copy (which can produce a file that won't open at all if restored), the import still completes — it isn't blocked — but a warning is now recorded on the batch and shown on the import success page, so it's visible instead of silently assumed to be a working rollback.
 - The warning is persisted on the batch row (`import_batches.snapshot_warning`), not just shown once right after import — it stays visible on that batch's success page on any later visit, and never touches the URL.
+- `/sync` now persists its own degraded-snapshot warning the same way. It already checked `consistent`, but only ever surfaced the warning transiently through the sync page's action state — the batch row itself was left with `snapshot_warning` always `NULL`, which made the DB an unreliable record for any SimpleFIN-sourced batch.
 
 ## [0.8.1] - 2026-09-02
 

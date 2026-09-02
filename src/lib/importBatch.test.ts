@@ -21,6 +21,7 @@ const { createSnapshotMock } = vi.hoisted(() => ({
 vi.mock("./snapshot", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./snapshot")>()),
   createSnapshot: createSnapshotMock,
+  pruneSnapshots: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
 }));
 
 const STAR_ONE_CSV = [
