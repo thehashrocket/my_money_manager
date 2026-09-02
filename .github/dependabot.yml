@@ -3,9 +3,22 @@
 # Please see the documentation for all configuration options:
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
+# This repo has no CI (by design — see CLAUDE.md), so every Dependabot PR gets
+# verified by hand (install, test, build) before merge. Monthly + grouped
+# keeps that a once-a-month sitting instead of a weekly trickle. Security
+# advisories still arrive immediately regardless of this schedule.
 version: 2
 updates:
-  - package-ecosystem: "pnpm" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "pnpm"
+    directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+      development:
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
+    # Major upgrades arrive individually — they need reading, not batching.
