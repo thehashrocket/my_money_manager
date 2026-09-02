@@ -64,6 +64,13 @@
       "when": 1788377697225,
       "tag": "0008_naive_zeigeist",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788390255063,
+      "tag": "0009_narrow_sentinels",
+      "breakpoints": true
     }
   ]
 }

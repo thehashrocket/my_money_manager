@@ -91,6 +91,12 @@ export const importBatches = sqliteTable("import_batches", {
     .default(sql`(unixepoch())`),
   transactionCount: integer("transaction_count").notNull().default(0),
   snapshotPath: text("snapshot_path"),
+  // Non-null only when createSnapshot() reported `consistent: false` for this
+  // batch's pre-write snapshot. Persisted (not just redirected as a query
+  // param) so the warning survives a later visit to this batch's success
+  // page, not just the one right after commit — CLAUDE.md rule 5 requires the
+  // degraded flag never be silently dropped.
+  snapshotWarning: text("snapshot_warning"),
 });
 
 export const transactions = sqliteTable(
