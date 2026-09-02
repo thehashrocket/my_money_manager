@@ -56,7 +56,8 @@ export async function Spine() {
     },
     { label: "Subscriptions", href: "/subscriptions", icon: "↻", matchPrefix: "/subscriptions" },
     { label: "Goals", href: "/goals", icon: "★", matchPrefix: "/goals" },
-    { label: "Import", href: "/import", icon: "↥", matchPrefix: "/import", divider: true },
+    { label: "Sync", href: "/sync", icon: "⟳", matchPrefix: "/sync", divider: true },
+    { label: "Import", href: "/import", icon: "↥", matchPrefix: "/import" },
   ];
 
   return (
