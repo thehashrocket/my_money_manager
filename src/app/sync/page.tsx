@@ -203,7 +203,7 @@ export default function SyncPage() {
         <section className="space-y-3">
           <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Last sync</h2>
           <div className="rounded-md border border-border p-4 text-sm">
-            <p className="font-medium">{lastBatch.filename}</p>
+            <p className="font-medium">{lastBatch.label}</p>
             <p className="mt-1 text-muted-foreground">
               {lastBatch.transactionCount} transaction
               {lastBatch.transactionCount === 1 ? "" : "s"}

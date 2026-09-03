@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { findLastSyncBatch, undoSyncBatch, undoLastSync } from "./undoSync";
 import { linkTransfersByBucket } from "./sync";
+import { deriveBatchLabel } from "@/lib/batchLabel";
 
 let handle: TestDbHandle;
 
@@ -32,10 +33,10 @@ function seedAccount(name = "Checking") {
   return row;
 }
 
-function seedBatch(source: "csv" | "simplefin", filename: string) {
+function seedBatch(source: "csv" | "simplefin", label: string | null) {
   const [row] = handle.db
     .insert(schema.importBatches)
-    .values({ source, filename })
+    .values({ source, label })
     .returning()
     .all();
   return row;
@@ -106,10 +107,21 @@ describe("findLastSyncBatch", () => {
 
     const summary = findLastSyncBatch(handle.db);
     expect(summary?.batchId).toBe(newest.id);
-    expect(summary?.filename).toBe("simplefin 2026-09-02 10:00Z");
+    expect(summary?.label).toBe("simplefin 2026-09-02 10:00Z");
     expect(summary?.transactionCount).toBe(2);
     // The warning on the page ("that work is lost too") depends on this.
     expect(summary?.categorizedCount).toBe(1);
+  });
+
+  it("derives a display label from source + importedAt when the batch has none", () => {
+    const account = seedAccount();
+    const batch = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: batch.id, amountCents: -200 });
+
+    const summary = findLastSyncBatch(handle.db);
+    expect(summary?.label).toBe(
+      deriveBatchLabel("simplefin", batch.importedAt),
+    );
   });
 });
 

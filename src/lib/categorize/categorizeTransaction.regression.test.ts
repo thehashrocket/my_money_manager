@@ -49,7 +49,7 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
 
     const [batch] = handle.db
       .insert(schema.importBatches)
-      .values({ source: "csv", filename: "seed.csv" })
+      .values({ source: "csv", label: "seed.csv" })
       .returning()
       .all();
 

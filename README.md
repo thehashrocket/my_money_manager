@@ -2,7 +2,7 @@
 
 Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** v0.8.2. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.8.3. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
@@ -80,7 +80,7 @@ src/
                  link/unlink, undo
   lib/subscriptions/ Recurring-charge detection
   lib/trends/    6-month spend by category
-scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs
+scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs, migrate.mjs
 drizzle/         Committed migration output
 data/            money.db, pre-import snapshots, pending-import stash (gitignored)
 .context/        Design artifacts, CSV samples, design deltas (gitignored)

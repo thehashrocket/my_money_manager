@@ -44,7 +44,7 @@ function seedAccount() {
 function seedBatch() {
   const [row] = handle.db
     .insert(schema.importBatches)
-    .values({ source: "csv", filename: "seed.csv" })
+    .values({ source: "csv", label: "seed.csv" })
     .returning()
     .all();
   return row;

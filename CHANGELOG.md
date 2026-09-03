@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-09-02
+
+_Re-pointing a SimpleFIN account link no longer crashes the next sync — and the database migration that made that possible was hardened after it turned out to crash on any real database, not just an empty dev one._
+
+### Fixed
+- **Re-linking a SimpleFIN account to a different feed no longer crashes the next sync.** Previously, un-linking or re-pointing an account's feed kept its old rows tagged with the feed's `external_id`, so the next sync collided with a unique-index constraint and aborted. `setAccountLink` now clears those tags when a link changes, and reports how many rows it touched.
+  - This does **not** fully prevent double-counted transactions if a different account later claims the same feed — the app's duplicate-detection is scoped per account by design, so it can't see rows that moved to a different one. The warning now says so explicitly instead of promising protection it can't deliver; tracked as a follow-up in `TODOS.md`.
+- **A batch's stored label no longer holds a fake filename.** Sync batches used to store a synthetic string like `"simplefin 2026-09-02 17:00Z"` in a field meant for real uploaded filenames. `import_batches.filename` is now a nullable `label` — CSV imports still record the real filename, and sync batches leave it blank, with the display computed from the batch's source and time instead.
+- **Database migrations no longer risk failing on a real database.** The migration above needed a full table rebuild (SQLite can't relax a `NOT NULL` column any other way), which turned out to crash with a foreign-key error the moment the database had any real imported data — invisible in local dev because an empty database never hits the failure path. `pnpm db:migrate` now runs through a small custom script that disables foreign-key enforcement for the duration of the migration instead of relying on `drizzle-kit migrate`'s default connection handling, which can't do that safely.
+
 ## [0.8.2] - 2026-09-02
 
 _Closes the known issue recorded in 0.8.1: CSV import now actually checks the snapshot it takes before trusting it as a rollback point._

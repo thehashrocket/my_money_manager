@@ -1,6 +1,6 @@
 {
   "name": "barcelona-v2",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "engines": {
     "node": ">=24.0.0 <25.0.0"
@@ -14,7 +14,7 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
+    "db:migrate": "node scripts/migrate.mjs",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "simplefin:claim": "node scripts/simplefin-claim.mjs",

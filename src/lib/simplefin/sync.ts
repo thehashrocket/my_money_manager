@@ -355,7 +355,6 @@ export async function syncSimpleFin(
       .insert(schema.importBatches)
       .values({
         source: "simplefin",
-        filename: `simplefin ${now.toISOString().slice(0, 16).replace("T", " ")}Z`,
         snapshotPath: snapshot.snapshotPath,
         snapshotWarning,
         transactionCount: 0,

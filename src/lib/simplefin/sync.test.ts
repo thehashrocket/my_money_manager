@@ -9,6 +9,7 @@ import {
   unlinkTransferPair,
   findLinkedTransferPairs,
 } from "./sync";
+import { setAccountLink } from "./link";
 
 /**
  * Exercises the dedup and manual-pairing logic against a real :memory: schema.
@@ -93,7 +94,7 @@ function seedAccount(opts: { simplefinAccountId?: string | null; name?: string }
 function seedBatch(source: "csv" | "simplefin") {
   const [row] = handle.db
     .insert(schema.importBatches)
-    .values({ source, filename: `${source}.seed` })
+    .values({ source, label: `${source}.seed` })
     .returning()
     .all();
   return row;
@@ -617,6 +618,28 @@ describe("syncSimpleFin — snapshot consistency", () => {
       .get();
     expect(written?.snapshotWarning).toBeNull();
   });
+
+  it("writes a sync batch with no label, relying on deriveBatchLabel for display", async () => {
+    // The old synthetic `simplefin ${timestamp}` filename string is gone;
+    // display now derives from source + importedAt (src/lib/batchLabel.ts).
+    // A regression here would mean the sync path silently reintroduces a
+    // stored label, which findLastSyncBatch's null-coalescing would then
+    // never exercise.
+    seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const written = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .get();
+    expect(written?.label).toBeNull();
+  });
 });
 
 describe("syncSimpleFin — pending rows", () => {
@@ -640,5 +663,68 @@ describe("syncSimpleFin — pending rows", () => {
     expect(rows[0].externalId).toBe("TRN-posted");
     // Nothing written is ever flagged pending.
     expect(rows.every((r) => r.isPending === false)).toBe(true);
+  });
+});
+
+/**
+ * Proves the P2 relink fix (`src/lib/simplefin/link.ts`) end to end: not just
+ * that `external_id` gets cleared (covered in `link.test.ts`), but that a
+ * real resync against the write path afterward actually resolves rather than
+ * throwing a raw SqliteError off the `(account_id, external_id)` partial
+ * unique index.
+ */
+describe("syncSimpleFin — relink then resync", () => {
+  it("relinking away and back to the same feed, then resyncing, does not throw and does not duplicate the row", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    const first = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(first.status).toBe("synced");
+
+    setAccountLink(account.id, "ACT-2", handle.db);
+    setAccountLink(account.id, "ACT-1", handle.db);
+
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    const second = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(second.status).toBe("up-to-date");
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+  });
+});
+
+/**
+ * Documents the known, tracked P1 gap (TODOS.md: "the relink fix above stops
+ * the crash but not the double-count it was meant to prevent") rather than a
+ * bug in this PR's own logic — the fix deliberately ships the crash fix with
+ * an honest warning instead of solving this, per the ship-review decision
+ * recorded there. This test pins down TODAY's behavior so it fails loudly,
+ * for the right reason, the day someone claims the P1 follow-up without
+ * actually re-checking this path. Delete or update once that follow-up
+ * lands.
+ */
+describe("syncSimpleFin — cross-account relink double-count (known P1 gap)", () => {
+  it("a different account claiming a freed feed cannot see the old account's orphaned rows, so it re-imports them", async () => {
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Old Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    setAccountLink(a.id, null, handle.db);
+    const b = seedAccount({ name: "New Checking" });
+    setAccountLink(b.id, "ACT-1", handle.db);
+
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+
+    const all = handle.db.select().from(schema.transactions).all();
+    expect(all).toHaveLength(2);
+    expect(all.filter((r) => r.amountCents === -487)).toHaveLength(2);
   });
 });
