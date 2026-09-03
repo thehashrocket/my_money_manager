@@ -590,6 +590,44 @@ describe("commitImport — auto-categorization", () => {
     );
     expect(committedRows()[0].categoryId).toBe(otherId);
   });
+
+  // Without this, undoImportCategorization (TODOS.md P1 — migration 0006's 23
+  // broad `contains` rules with no bulk undo) has no way to know which rows a
+  // batch's rule matching touched.
+  it("records an import_batch_categorizations row for every rule-matched insert, and none for unmatched rows", () => {
+    const [rule] = handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId,
+        matchType: "exact",
+        matchValue: COFFEE_MERCHANT,
+        source: "manual",
+      })
+      .returning()
+      .all();
+
+    const result = commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("expected commit");
+
+    const audit = handle.db
+      .select()
+      .from(schema.importBatchCategorizations)
+      .where(eq(schema.importBatchCategorizations.importBatchId, result.batchId))
+      .all();
+    expect(audit).toHaveLength(1);
+    expect(audit[0].categoryId).toBe(categoryId);
+    expect(audit[0].ruleId).toBe(rule.id);
+
+    const coffeeRow = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.normalizedMerchant, COFFEE_MERCHANT))
+      .get();
+    expect(audit[0].transactionId).toBe(coffeeRow?.id);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1042,62 @@ describe("commitImport — a pending row's posted re-export updates it in place"
     const rows = handle.db.select().from(schema.transactions).all();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual(original);
+  });
+
+  it("never writes a second import_batch_categorizations row when a pending row is only updated to posted", () => {
+    // The pending row itself goes through `toInsert` (not `toUpdate`) on its
+    // first import, so a matching rule DOES categorize and audit it there.
+    // The point of this test is the SECOND commit: the posted re-export takes
+    // the `toUpdate` branch, which never reads `matchRule` or touches
+    // `categoryId` at all — so it must not add a second audit row, and the
+    // one audit row that exists must stay attributed to the original batch.
+    const dining = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Dining"))
+      .get()!;
+    const pendingMerchant = transformRow(row({ rawMemo: pending.memo })).normalizedMerchant;
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: dining.id,
+        matchType: "exact",
+        matchValue: pendingMerchant,
+        source: "manual",
+      })
+      .run();
+
+    const first = commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([pending]) },
+      handle.db,
+    );
+    if (first.status !== "committed") throw new Error("expected commit");
+
+    const auditAfterFirst = handle.db
+      .select()
+      .from(schema.importBatchCategorizations)
+      .all();
+    expect(auditAfterFirst).toHaveLength(1);
+    expect(auditAfterFirst[0].importBatchId).toBe(first.batchId);
+
+    const second = commitImport(
+      { accountId, filename: "second.csv", csvText: starOneCsv([posted]) },
+      handle.db,
+    );
+    if (second.status !== "committed") throw new Error("expected commit");
+
+    const auditAfterSecond = handle.db
+      .select()
+      .from(schema.importBatchCategorizations)
+      .all();
+    // Still exactly one row, still attributed to the FIRST batch — the update
+    // pass wrote no audit row of its own.
+    expect(auditAfterSecond).toHaveLength(1);
+    expect(auditAfterSecond[0].importBatchId).toBe(first.batchId);
+
+    const [row_] = handle.db.select().from(schema.transactions).all();
+    expect(row_.categoryId).toBe(dining.id);
+    expect(row_.isPending).toBe(false);
   });
 });
 

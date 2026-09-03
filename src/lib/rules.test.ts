@@ -356,9 +356,23 @@ describe("buildRuleMatcher", () => {
       .run();
 
     const match = buildRuleMatcher(handle.db);
-    expect(match("SAFEWAY")).toBe(high.id);
-    expect(match("SAFEWAY")).toBe(applyRuleAtImport(handle.db, "SAFEWAY"));
+    expect(match("SAFEWAY")?.categoryId).toBe(high.id);
+    expect(match("SAFEWAY")?.categoryId).toBe(applyRuleAtImport(handle.db, "SAFEWAY"));
     // Only the lower-priority `contains` rule reaches this one.
-    expect(match("SAFEHOUSE")).toBe(low.id);
+    expect(match("SAFEHOUSE")?.categoryId).toBe(low.id);
+  });
+
+  // `import_batch_categorizations` records this alongside `categoryId` so a
+  // batch's auto-categorization can be undone later (undoImportCategorization).
+  it("returns the matched rule's id alongside its category", () => {
+    const groceries = seedCategory("Groceries");
+    const rule = createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY")).toEqual({ categoryId: groceries.id, ruleId: rule.id });
   });
 });

@@ -321,7 +321,15 @@ export function commitImport(
       .all();
 
     for (const row of toInsert) {
-      tx.insert(schema.transactions)
+      // Auto-categorize on the way in. Without this every import lands 100%
+      // uncategorized no matter how many rules the user has trained, and the
+      // backlog only ever grows — which is how 498 rows accumulated before
+      // this was wired up. No match still means NULL, which is what the
+      // dashboard backlog tile counts (CLAUDE.md rule 6).
+      const match = matchRule(row.normalizedMerchant);
+
+      const [inserted] = tx
+        .insert(schema.transactions)
         .values({
           accountId: opts.accountId,
           date: row.date,
@@ -336,14 +344,24 @@ export function commitImport(
           importRowHash: row.importRowHash,
           balanceCents: row.balanceCents,
           isPending: row.isPending,
-          // Auto-categorize on the way in. Without this every import lands 100%
-          // uncategorized no matter how many rules the user has trained, and
-          // the backlog only ever grows — which is how 498 rows accumulated
-          // before this was wired up. No match still means NULL, which is what
-          // the dashboard backlog tile counts (CLAUDE.md rule 6).
-          categoryId: matchRule(row.normalizedMerchant),
+          categoryId: match?.categoryId ?? null,
         })
-        .run();
+        .returning({ id: schema.transactions.id })
+        .all();
+
+      // Recorded so a too-broad rule's whole batch of auto-categorization can
+      // be undone later (undoImportCategorization) — matching bulkCategorize's
+      // existing undo pattern, which import-time categorization never had.
+      if (match) {
+        tx.insert(schema.importBatchCategorizations)
+          .values({
+            importBatchId: batch.id,
+            transactionId: inserted.id,
+            categoryId: match.categoryId,
+            ruleId: match.ruleId,
+          })
+          .run();
+      }
     }
 
     tx.update(schema.importBatches)
