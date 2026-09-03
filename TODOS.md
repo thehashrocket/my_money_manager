@@ -265,3 +265,51 @@ missed):
   code path only exercised later. Worth an esbuild-metafile check that fails the build
   loudly if a second native dependency creeps in — deferred as speculative (no such
   import exists today) rather than blocking this PR.
+- [ ] **P3** — `./backups`'s bind-mount ownership is untested on a real Linux/NAS host.
+  Docker on native Linux auto-creates a missing bind-mount host directory as root-owned;
+  the Dockerfile's `chown` only affects the image filesystem, which the bind mount then
+  shadows. All testing so far has been on macOS Docker Desktop, whose bind-mount layer is
+  more permissive. Workaround documented in CLAUDE.md (`mkdir -p ./backups && chown
+  1000:1000`); a real fix belongs with PR3 (NAS deployment), where there's an actual
+  Linux host to verify against. Surfaced independently by both a Claude adversarial pass
+  and Codex during `/ship`.
+
+Fixed after the adversarial passes (Claude + Codex, both dispatched during `/ship`):
+- [x] `docker/entrypoint.src.mjs`'s `checkTz` only verified `TZ` was non-empty, not that
+  it named a real IANA zone. A typo (`America/Los_Angelss`) doesn't throw anywhere on its
+  own — Node silently renders as UTC, reintroducing the exact bug this branch exists to
+  fix, with no signal anything was wrong. Verified empirically before fixing. Now
+  validated via `Intl.DateTimeFormat`.
+- [x] **`db-import.mjs`/`seed-volume.mjs` hardcoded a volume-name default
+  (`my_money_manager_mm_data`) for their bare `docker run -v` calls, which bypass `docker
+  compose` (which resolves the name itself).** Verified empirically: `COMPOSE_PROJECT_NAME`
+  overrides `compose.yaml`'s pinned `name:` field, and a bare `docker run -v <name>:...`
+  silently auto-creates a missing named volume with no error — so under an overridden
+  project name, `db:import`'s WAL-cleanup/chown step (and every write `seed-volume.mjs`
+  makes) would silently target a different, empty, orphaned volume than the one
+  `docker compose cp` actually restored into. New `scripts/docker-volume.mjs` resolves
+  the real name from `docker compose config` instead of guessing. Found by a Claude
+  adversarial subagent during `/ship`, which ran real Docker commands to verify the claim
+  rather than asserting it; independently reproduced with `COMPOSE_PROJECT_NAME=override_test`
+  end-to-end (seed → up → export → import, confirmed no phantom volume created).
+- [x] `scripts/seed-volume.mjs`'s "copy existing snapshot files to ./backups" step only
+  enumerated the pre-import pool (`listSnapshots`'s default prefix), silently leaving a
+  user's `scripts/migrate.mjs`-produced `pre-migrate-*` rollback history behind in the old
+  host `data/` directory when migrating an existing ledger into Docker. Now copies both
+  pools. Found by Codex's structured review (`codex review`).
+
+**Two Codex structured-review findings investigated and disproven, not fixed** (both
+plausible-sounding, both wrong about actual platform behavior — verified empirically
+before deciding, not assumed):
+- Claimed a brand-new named Docker volume mounted over `/app/data` stays root-owned even
+  though the Dockerfile `chown`s that path before the volume ever attaches, so a fresh
+  `docker compose up` (without running `db:seed-volume` first) would fail. Disproven:
+  created a genuinely fresh volume and checked ownership directly inside a container —
+  Docker correctly copies the image layer's content *and ownership* into a new volume on
+  first mount. Matches every one of this session's successful from-scratch
+  `docker compose up` tests, none of which ran `db:seed-volume` first.
+- Claimed `seed-volume.mjs` copies existing snapshot files newest-first, and since
+  `fs.copyFileSync` allegedly doesn't preserve mtime, the copies would end up with
+  reversed retention order (an unrelated later prune could keep the wrong 10). Disproven:
+  ran an actual copy test with distinct source mtimes, on both macOS and Linux (inside the
+  built container image) — `copyFileSync` preserves the source mtime on both.
