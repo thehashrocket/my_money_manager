@@ -208,3 +208,60 @@ considered and explicitly scoped out, not forgotten.
   rollover math is the most subtly-tested logic in the repo (`budget.test.ts` covers both
   persist modes and all three invalidation triggers), and a structural rewrite riding along
   with a dialect change would give a wrong envelope two candidate causes.
+
+## Follow-ups from v0.9.0 ship review (PR1 — containerize on SQLite)
+
+A pre-landing review (7 specialists + a Red Team pass, since the diff was 1600+ lines)
+found 10 issues. Fixed same-branch, listed so the reasoning is findable:
+- [x] Every container restart wrote a rollback snapshot into the same retention pool CSV
+  import/sync prune to the last 10 — a crash loop or routine reboot could silently evict
+  a real pre-import snapshot. `docker/entrypoint.src.mjs` now uses its own prefix
+  (`PRE_MIGRATE_PREFIX`, matching `scripts/migrate.mjs`'s host-side convention) and prunes
+  its own pool, so the two never compete for the same 10 slots. (`src/lib/snapshot.ts`)
+- [x] `pnpm db:import` had no sanity check on the file being restored — a 0-byte or
+  truncated snapshot is still a file SQLite opens as a valid, empty database, so a corrupt
+  `docker compose cp` or a mistakenly-passed file would "restore" as a silently empty
+  ledger with no error anywhere. `assertRestorableSnapshot` now checks for a real
+  `accounts` table before the container is ever stopped, and a mid-restore failure
+  (between the `cp` and the WAL-cleanup step) now prints explicit recovery guidance
+  instead of an uncaught crash. (`scripts/db-import.mjs`)
+- [x] `scripts/db-export.mjs`'s JSON parse of `snapshot-cli.mjs`'s output could throw
+  uncaught on malformed/empty stdout. Now caught and reported as a normal failure.
+- [x] `/api/health` returned the raw driver error message to any caller on a 503 — could
+  leak filesystem paths or SQLite internals. Now returns a generic message; the real error
+  is still logged server-side.
+- [x] CI's `docker` job exercised `db:export` but never `db:seed-volume` or `db:import`'s
+  real docker orchestration (only their pure guard functions had unit tests). The job now
+  seeds a fixture account before first boot, and round-trips an export → import, asserting
+  the container comes back healthy with the seeded data intact.
+- [x] `docker/entrypoint.src.mjs`'s `runMigrations` had no test for the specific case
+  CLAUDE.md rule 7 calls out — `foreign_key_check` finding violations while `migrate()`
+  itself reports success (the exact state a partially-applied rebuild leaves). Added.
+
+Skipped (low-confidence, low-stakes DRY nits — reviewed and explicitly declined, not
+missed):
+- [ ] **P4** — `"/app"` (the container WORKDIR) is a bare string repeated across
+  `docker/entrypoint.src.mjs`, `Dockerfile`, `scripts/build-docker-artifacts.mjs`,
+  `scripts/db-export.mjs`. Docker-convention-locked either way (the Dockerfile's
+  `WORKDIR` line is the real source of truth); an indirection layer for one path used in
+  4 files is its own complexity.
+- [ ] **P4** — `scripts/seed-volume.mjs`'s balance/count verification logic exists twice:
+  once as real JS (`accountBalances`/`tableCounts`), once as a hand-copied SQL string
+  template run inside the container. A future change to one could drift from the other
+  undetected. A cross-reference comment would be proportionate; shared codegen across the
+  host/container boundary is more machinery than the risk warrants for a script already
+  manually verified end-to-end.
+- [ ] **P4** — The `node` user's uid (`1000`) is hardcoded identically in both
+  `db-import.mjs` and `seed-volume.mjs`. `node:24-bookworm-slim`'s `node` user has been
+  uid 1000 for years; not worth a runtime `id -u node` subprocess call to save one
+  duplicated literal.
+- [ ] **P3** — `scripts/build-docker-artifacts.mjs`'s esbuild bundle step has no
+  assertion guarding which packages stay external. A future change to
+  `docker/entrypoint.src.mjs` or `scripts/snapshot-cli.src.mjs` that imports another
+  native/binary npm package (anything not `better-sqlite3`) would bundle "successfully"
+  but only fail at container runtime (missing native binding), since the runner stage
+  copies no `node_modules` for these scripts beyond what Next's tracer already put in
+  `.next/standalone`. CI's docker healthcheck would catch a full boot failure, but not a
+  code path only exercised later. Worth an esbuild-metafile check that fails the build
+  loudly if a second native dependency creeps in — deferred as speculative (no such
+  import exists today) rather than blocking this PR.

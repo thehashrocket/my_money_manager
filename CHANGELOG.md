@@ -4,7 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.3] - 2026-09-02
+## [0.9.0] - 2026-09-03
+
+_PR1 of the dockerize-postgres plan: the app now runs in Docker, still on SQLite. `pnpm dev` is unaffected — this is a second way to run the app, not a replacement._
+
+### Added
+- **`docker compose up` starts the app at `localhost:3000`**, serving your existing ledger. The port is bound to loopback only (this app has no auth), the ledger lives in a named Docker volume (SQLite's WAL mode doesn't tolerate bind-mount filesystems reliably), and pre-write/pre-migrate snapshots land on a separate `./backups` bind mount so `docker compose down -v` can't take the ledger and its rollback history out in one command.
+- `pnpm db:seed-volume` — one-time host → volume copy for the first `docker compose up`, so a fresh container doesn't start with an empty ledger. Refuses to overwrite a volume that already has data.
+- `pnpm db:export` / `pnpm db:import <file>` — snapshot the running container's ledger out to `./backups`, and restore a snapshot back in (stopping and restarting the container). `db:import` now also refuses to restore a file that isn't a real, openable database with an `accounts` table — a corrupt or empty snapshot used to "restore" silently as an empty ledger with no error.
+- `/api/health` — a liveness probe the Compose healthcheck uses; doesn't run the full dashboard query set.
+- A CI job builds the Docker image on every PR, seeds it, brings it up, and round-trips an export/import to catch regressions in the container path before merge.
+
+### Fixed
+- **The app could compute the wrong budget month for part of every day**, because it read the system clock through `.toISOString()` in a few places, which always renders the UTC calendar date regardless of the configured timezone. A shared `src/lib/now.ts` fixes this everywhere it mattered, including one site that fed the transfer-review window — under the old code an ambiguous transfer pair right at the edge of that window could silently drop out of review and keep inflating spending.
+- **`/import` was frozen at build time** (a pre-existing bug, surfaced by containerizing): the page never opted into per-request rendering, so its starting-balance date default froze to whenever the app was last built rather than updating daily.
+- Every container restart was writing a rollback snapshot into the same retention pool that CSV imports and syncs prune to the last 10 — so a crash loop or a routine host reboot could silently evict a real pre-import snapshot a user might actually need. Restart snapshots now use their own pool, matching the naming convention `pnpm db:migrate` already used for this on the host.
 
 _Re-pointing a SimpleFIN account link no longer crashes the next sync — and the database migration that made that possible was hardened after it turned out to crash on any real database, not just an empty dev one._
 
