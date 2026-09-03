@@ -37,6 +37,7 @@ drizzle/           Migration output (committed)
 data/             money.db + pre-import snapshots (gitignored)
 .context/         Design artifacts, CSV samples, deltas (gitignored)
 design_handoff_nav_and_design_system/  Live HTML design specimens + README
+docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuild-bundled, gitignored)
 ```
 
 ## Scripts
@@ -48,6 +49,17 @@ design_handoff_nav_and_design_system/  Live HTML design specimens + README
 - `pnpm db:studio` — Drizzle Studio GUI
 - `pnpm simplefin:claim` — one-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`)
 - `pnpm simplefin:sample` — dump a live `/accounts` payload to `.context/simplefin-sample.json` for analysis
+
+## Docker (SQLite still — no Postgres yet)
+
+`docker compose up` is a second way to run the app, alongside `pnpm dev`, not a replacement — see `docs/plans/dockerize-postgres.md` for the staged Postgres migration this sets up. The ledger lives in a named volume (`mm_data:/app/data`), not a bind mount: SQLite WAL-mode locking over VirtioFS/gRPC-FUSE (macOS bind mounts) is a known corruption hazard class, so `money.db` isn't directly visible on the host under Docker the way it is under `pnpm dev`. Snapshots land on a separate bind mount (`./backups`, `SNAPSHOT_DIR=/app/backups` in `compose.yaml`) so they survive `docker compose down -v`.
+
+- `pnpm db:seed-volume` — **run once, before the first `docker compose up`.** Copies `./data/money.db` into the (currently empty) volume via `createSnapshot`'s `VACUUM INTO`, never a bare `cp` — the host DB runs in WAL mode, and a plain copy can silently drop rows still in `money.db-wal`. Refuses (rather than overwrites) if the volume already has a `money.db`.
+- `pnpm db:export` — snapshots the running container's ledger (via `docker compose exec` + the bundled `scripts/snapshot-cli.mjs`) and copies the result to `./backups/`. Refuses to copy out a degraded (`consistent: false`) snapshot.
+- `pnpm db:import <file>` — stops the container, restores a snapshot file (must have no `-wal` sidecar — see rule 5), restarts.
+- `docker/entrypoint.mjs` and `scripts/snapshot-cli.mjs` are gitignored **build artifacts**: the runner image has no `src/` tree and no devDependencies, so they can't stay thin wrappers around `src/lib/snapshot.ts`/`src/lib/paths.ts`. `scripts/build-docker-artifacts.mjs` (esbuild, `better-sqlite3` external) bundles `docker/entrypoint.src.mjs` and `scripts/snapshot-cli.src.mjs` into them during the Docker builder stage — edit the `.src.mjs` files, not the generated ones.
+- The container refuses to boot without `TZ` set (`compose.yaml` sets `America/Los_Angeles`) — the app derives the current budget month from local time (`src/lib/now.ts`), and Docker's default `TZ=UTC` would silently compute the wrong month for part of every day.
+- The published port is loopback-only (`127.0.0.1:3000:3000`): this app has no auth, so binding `0.0.0.0` would make the ledger LAN-readable.
 
 ## Core rules baked into the data model
 

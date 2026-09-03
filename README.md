@@ -13,7 +13,7 @@ Local-first, single-user personal budgeting app for Star One Credit Union (check
 - **Vitest** for parser/categorization/sync unit tests · GitHub Actions runs lint + test + build on every PR
 - **pnpm** · **Node 24** (pinned via `.nvmrc`)
 
-No auth. No Plaid. No deployment target — this runs on your machine, and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
+No auth. No Plaid. No cloud — this runs on your machine (or your own Docker host), and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
 
 ## Getting started
 
@@ -23,6 +23,24 @@ pnpm install
 pnpm db:migrate         # applies Drizzle migrations to ./data/money.db
 pnpm dev                # http://localhost:3000 → dashboard
 ```
+
+### Docker
+
+An alternative to `pnpm dev`, still on SQLite — no Postgres yet (see `docs/plans/dockerize-postgres.md`). The ledger lives in a named Docker volume rather than `./data`, so it isn't directly visible on the host; use the scripts below rather than reaching into the volume.
+
+```bash
+pnpm db:seed-volume     # first run only, BEFORE `docker compose up` — copies ./data/money.db
+                         # into the volume so the container doesn't start with an empty ledger
+docker compose up -d    # http://127.0.0.1:3000 — bound to loopback only, this app has no auth
+```
+
+`.env.local` is optional: SimpleFIN sync degrades to a configuration banner without it, and CSV import works either way. `TZ` is required (`compose.yaml` sets `America/Los_Angeles`; the container refuses to boot without one, since the app derives the current budget month from local time).
+
+| Command | What it does |
+|---|---|
+| `pnpm db:export` | Snapshot the running container's ledger out to `./backups/` |
+| `pnpm db:import <file>` | Stop the container, restore a snapshot file from `./backups/`, restart |
+| `pnpm db:seed-volume` | One-time host → volume copy (run before the first `docker compose up`) |
 
 Create an account (name, type, starting balance + date) from `/import`. From there you have two ways to get transactions in.
 
@@ -61,6 +79,7 @@ Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simp
 | `pnpm simplefin:claim` | One-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`) |
 | `pnpm simplefin:sample` | Dump a live `/accounts` payload to `.context/simplefin-sample.json` |
 | `pnpm lint` | ESLint |
+| `pnpm db:export` / `db:import` / `db:seed-volume` | Docker rollback + first-run seed — see [Docker](#docker) above |
 
 ## Layout
 
