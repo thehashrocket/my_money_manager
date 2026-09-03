@@ -5,6 +5,8 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { resolveBatchLabel } from "@/lib/batchLabel";
 import { formatCents } from "@/lib/money";
+import { countRevertibleCategorizations } from "@/lib/categorize/undoImportCategorization";
+import { undoImportCategorizationAction } from "../../actions";
 
 export default async function SuccessPage({
   params,
@@ -46,6 +48,13 @@ export default async function SuccessPage({
       ),
     )
     .all();
+
+  // Rows still revertible via undoImportCategorizationAction — present only
+  // while the batch's rule-matched categorization hasn't been undone yet AND
+  // the transaction hasn't since been hand-categorized to something else
+  // (countRevertibleCategorizations mirrors undoImportCategorization's own
+  // stale-row check, so this number is never an overclaim).
+  const revertibleCount = countRevertibleCategorizations(db, batchId);
 
   // A CSV import can move the account's starting-balance anchor onto a real
   // bank balance read from the file's running-balance column. That rewrites the
@@ -138,6 +147,31 @@ export default async function SuccessPage({
         >
           {batch.snapshotWarning}
         </p>
+      )}
+
+      {revertibleCount > 0 && (
+        <div className="rounded-md border border-zinc-200 p-4 text-sm">
+          <p>
+            {revertibleCount} of the {autoCategorized} auto-categorized row
+            {autoCategorized === 1 ? "" : "s"} above {revertibleCount === 1 ? "is" : "are"} still
+            exactly as a trained rule left {revertibleCount === 1 ? "it" : "them"}. If one matched
+            too broadly, undo just the categorization — the rest of this import stays.
+          </p>
+          <form action={undoImportCategorizationAction} className="mt-3">
+            <input type="hidden" name="batchId" value={batch.id} />
+            <button
+              type="submit"
+              className="rounded-md border px-3 py-1 text-sm hover:opacity-80"
+              style={{
+                borderColor:
+                  "color-mix(in oklch, var(--accent-redbrown) 45%, transparent)",
+                color: "var(--accent-redbrown)",
+              }}
+            >
+              Undo auto-categorization
+            </button>
+          </form>
+        </div>
       )}
 
       <div className="flex gap-3">

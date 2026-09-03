@@ -1,6 +1,8 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents } from "@/lib/money";
+import { countRevertibleCategorizations } from "@/lib/categorize/undoImportCategorization";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
 import { readAccessUrl } from "@/lib/simplefin/accessUrl";
 import { listRemoteAccounts, type RemoteAccount } from "@/lib/simplefin/link";
@@ -81,6 +83,14 @@ function describeDrift(
 export default function SyncPage() {
   const accounts = db.select().from(schema.accounts).all();
   const lastBatch = findLastSyncBatch();
+  // A sync batch auto-categorizes through the same rule engine as a CSV
+  // import, but the undo control for THAT lives on /import/success/[batchId]
+  // (Red Team, /ship 2026-09-03) — this page had no link there at all, so a
+  // sync batch's per-categorization undo was reachable only by guessing the
+  // URL. This surfaces it instead of duplicating the undo button here.
+  const revertibleCount = lastBatch
+    ? countRevertibleCategorizations(db, lastBatch.batchId)
+    : 0;
   const ambiguous = findAmbiguousTransfers(daysAgoIso(REVIEW_WINDOW_DAYS));
   const linkedPairs = findLinkedTransferPairs(daysAgoIso(REVIEW_WINDOW_DAYS));
 
@@ -256,6 +266,21 @@ export default function SyncPage() {
                 Undoing deletes {lastBatch.categorizedCount} row
                 {lastBatch.categorizedCount === 1 ? "" : "s"} you&apos;ve already
                 categorised — that work is lost too.
+              </p>
+            )}
+            {revertibleCount > 0 && (
+              <p className="mt-2 text-muted-foreground">
+                {revertibleCount} of the {lastBatch.categorizedCount} categorised row
+                {lastBatch.categorizedCount === 1 ? "" : "s"} above{" "}
+                {revertibleCount === 1 ? "is" : "are"} still exactly as a trained rule left{" "}
+                {revertibleCount === 1 ? "it" : "them"}.{" "}
+                <Link
+                  href={`/import/success/${lastBatch.batchId}`}
+                  className="underline underline-offset-2 hover:no-underline"
+                >
+                  Review or undo just the categorization
+                </Link>{" "}
+                without undoing the whole sync.
               </p>
             )}
             <ActionForm action={undoSyncAction} className="mt-3">
