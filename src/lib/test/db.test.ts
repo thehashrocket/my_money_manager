@@ -27,6 +27,7 @@ describe("migration parse (integration)", () => {
         "budget_periods",
         "categories",
         "category_rules",
+        "import_batch_categorizations",
         "import_batches",
         "subscription_dismissals",
         "transactions",
