@@ -34,3 +34,106 @@ jobs:
       - run: pnpm db:migrate
 
       - run: pnpm build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      # db:export/db:import/seed-volume shell out to `docker` and import
+      # this repo's own src/lib modules directly (Node 24 strips TS types
+      # natively) — installing here gives them the same node_modules the
+      # `docker` CLI commands below don't need but these scripts do.
+      - run: pnpm install --frozen-lockfile
+
+      - name: docker compose build
+        run: docker compose build
+
+      # Seeded BEFORE the container ever starts: db:seed-volume refuses a
+      # volume that already has a money.db, so this has to run first. A test
+      # account gives the later steps something real to verify (dashboard
+      # shows it, export/import round-trips it) instead of an empty ledger
+      # that would pass every check trivially.
+      - name: create a host db with one seed account
+        run: |
+          pnpm db:migrate
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('data/money.db');
+            db.prepare(
+              'INSERT INTO accounts (name, type, starting_balance_cents, starting_balance_date) VALUES (?, ?, ?, ?)'
+            ).run('CI Seed Account', 'checking', 10000, '2026-01-01');
+            db.close();
+          "
+
+      - name: pnpm db:seed-volume
+        run: pnpm db:seed-volume
+
+      - name: docker compose up (no .env.local — SimpleFIN stays optional)
+        run: docker compose up -d
+
+      - name: wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q app)")
+            if [ "$status" = "healthy" ]; then
+              echo "healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::container never became healthy"
+          docker compose logs app
+          exit 1
+
+      - name: dashboard shows the seeded account, not an empty ledger
+        run: curl -sf http://127.0.0.1:3000/ | grep -q "CI Seed Account"
+
+      # F20: the runner image has no src/ tree, so db:export's in-container
+      # half (snapshot-cli.mjs) only exists if the builder stage's esbuild
+      # step actually ran and produced it. This is the smoke test that
+      # catches a missing artifact at build time, not the first time a
+      # rollback is needed.
+      - name: pnpm db:export produces an openable snapshot
+        run: |
+          pnpm db:export
+          exported=$(ls -t backups/money.db.pre-import-* | head -1)
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database(process.argv[1], { readonly: true });
+            db.prepare('select count(*) from accounts').get();
+            db.close();
+            console.log('opened OK:', process.argv[1]);
+          " "$exported"
+          echo "EXPORTED_SNAPSHOT=$exported" >> "$GITHUB_ENV"
+
+      # Round-trips the file db:export just produced: stops the container,
+      # restores it, restarts, and checks the seeded account survived —
+      # exercising db-import.mjs's real docker orchestration end to end, not
+      # just its pure guard functions (which the unit tests already cover).
+      - name: pnpm db:import round-trips the export
+        run: |
+          pnpm db:import "$EXPORTED_SNAPSHOT"
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q app)")
+            if [ "$status" = "healthy" ]; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3000/ | grep -q "CI Seed Account"
+
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs app
+
+      - name: teardown
+        if: always()
+        run: docker compose down -v
