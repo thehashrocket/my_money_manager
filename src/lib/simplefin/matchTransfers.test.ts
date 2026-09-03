@@ -235,6 +235,20 @@ describe("cross-source candidacy guard", () => {
     expect(ambiguous).toHaveLength(1);
   });
 
+  it("asks instead of guessing when BOTH legs are CSV-adjudicated and uncorroborated — the strongest evidence against, not the weakest", () => {
+    // The ±1 matcher already looked at both of these rows and declined to
+    // pair them. An XOR guard (`a.adjudicatedByTxnNumber !== b...`) would
+    // treat "both adjudicated" the same as "neither adjudicated" and
+    // auto-link this — exactly backwards, since two declined rows is a
+    // stronger signal against a real transfer than two untouched feed rows.
+    const { pairs, ambiguous } = matchTransfers([
+      csv(CHK, -5000, "SAFEWAY 2231 MANTECA CA"),
+      csv(SAV, 5000, "DIVIDEND"),
+    ]);
+    expect(pairs).toHaveLength(0);
+    expect(ambiguous).toHaveLength(1);
+  });
+
   it("still auto-links a cross-source pair the memo corroborates", () => {
     const { pairs, ambiguous } = matchTransfers([
       feed(CHK, 10000, "POS 0902 1340 AIRBNB.COM CA"),
