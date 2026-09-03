@@ -145,8 +145,9 @@ export async function linkAccountAction(
   if (!parsed.success) {
     return fail(`Invalid link request — ${rejectionMessage(parsed.error)}`);
   }
+  let result: ReturnType<typeof setAccountLink>;
   try {
-    setAccountLink(parsed.data.accountId, parsed.data.simplefinAccountId);
+    result = setAccountLink(parsed.data.accountId, parsed.data.simplefinAccountId);
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -155,6 +156,7 @@ export async function linkAccountAction(
     parsed.data.simplefinAccountId
       ? "Account linked — it will be included in the next sync."
       : "Account unlinked — it will no longer be synced.",
+    result.warning ? [result.warning] : [],
   );
 }
 
