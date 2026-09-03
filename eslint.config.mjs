@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // esbuild-bundled Docker-image-only artifacts (gitignored) — these
+    // inline drizzle-orm's own source, which isn't ours to lint.
+    "docker/entrypoint.mjs",
+    "scripts/snapshot-cli.mjs",
   ]),
 ]);
 

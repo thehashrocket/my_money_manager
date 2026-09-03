@@ -1,0 +1,66 @@
+# Pinned rather than left to Compose's directory-basename default: the
+# scripts (db-export.mjs, db-import.mjs, seed-volume.mjs) shell out to plain
+# `docker run -v <name>:...` for volume access, bypassing `docker compose`,
+# so they need a stable, predictable volume name — not whatever this repo
+# happens to be checked out into (a Conductor workspace folder, a fork name,
+# anything).
+name: my_money_manager
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      # The container's default TZ is UTC (Dockerfile base image); the app
+      # derives the current budget month from local time (src/lib/now.ts),
+      # so entrypoint.mjs refuses to boot if this is unset. Override it here
+      # rather than baking it into the image, so a NAS deployment can pick
+      # its own zone. Someone who genuinely wants UTC sets TZ=UTC — that is
+      # the right forcing function, not a silent default.
+      TZ: America/Los_Angeles
+      # Docker sets HOSTNAME to the container ID by default, and Next's
+      # standalone server.js binds to `process.env.HOSTNAME` verbatim
+      # (falling back to 0.0.0.0 only when unset) — so without this override
+      # the server listens on the container's own bridge IP, not loopback.
+      # Compose's published port still reaches it (Docker's port-forwarding
+      # targets that IP directly), but anything hitting it as 127.0.0.1
+      # *inside* the container's network namespace — including the
+      # healthcheck below — gets ECONNREFUSED.
+      HOSTNAME: "0.0.0.0"
+      # Snapshots must land on the separate ./backups bind mount below, not
+      # inside the mm_data volume they protect — otherwise `docker compose
+      # down -v` takes the ledger and all ten rollback copies out together.
+      SNAPSHOT_DIR: /app/backups
+    env_file:
+      # SimpleFIN is optional: the app runs CSV-only without it, and /sync
+      # renders a configuration banner rather than failing to boot.
+      # `required: false` keeps a fresh clone (no .env.local yet) working.
+      - path: .env.local
+        required: false
+    volumes:
+      # Named volume, not a bind mount: SQLite WAL-mode locking over
+      # VirtioFS/gRPC-FUSE (macOS bind mounts) is a known corruption hazard
+      # class. money.db therefore isn't visible from the host — use
+      # `pnpm db:export` / `pnpm db:seed-volume` rather than reaching into
+      # the volume directly.
+      - mm_data:/app/data
+      # Snapshots on a separate host bind mount so they survive
+      # `docker compose down -v` / `docker system prune --volumes`, which
+      # would otherwise take the ledger and all ten rollback copies out in
+      # one command. VACUUM INTO output is written once and never reopened
+      # by a live connection, so the WAL-over-FUSE hazard above doesn't
+      # apply to it.
+      - ./backups:/app/backups
+    ports:
+      # Loopback-only: this app has no auth (see CLAUDE.md — "What's NOT in
+      # V1"), so publishing on 0.0.0.0 would make the ledger LAN-readable.
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mm_data:

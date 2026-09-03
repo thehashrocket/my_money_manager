@@ -54,3 +54,13 @@ next-env.d.ts
 
 # gbrain worktree-scoped source pin (per-machine, set by /sync-gbrain)
 .gbrain-source
+
+# Docker-image-only build artifacts: esbuild-bundled from docker/entrypoint.src.mjs
+# and scripts/snapshot-cli.src.mjs by scripts/build-docker-artifacts.mjs, which the
+# builder stage runs. The runner has no src/ tree, so these can't stay thin wrappers
+# that import it — see docs/plans/dockerize-postgres.md.
+/docker/entrypoint.mjs
+/scripts/snapshot-cli.mjs
+
+# db:export destination + host bind mount for container snapshots (D3.3B)
+/backups/
