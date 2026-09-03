@@ -40,14 +40,14 @@
     {
       "idx": 5,
       "version": "6",
-      "when": 1745280000000,
+      "when": 1776751881395,
       "tag": "0005_subscriptions_category",
       "breakpoints": true
     },
     {
       "idx": 6,
       "version": "6",
-      "when": 1745193600000,
+      "when": 1776751881396,
       "tag": "0006_subscription_rules",
       "breakpoints": true
     },
@@ -84,6 +84,13 @@
       "version": "6",
       "when": 1788412403220,
       "tag": "0011_living_black_tom",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1788448532697,
+      "tag": "0012_anchor_starting_balance_on_batch",
       "breakpoints": true
     }
   ]
