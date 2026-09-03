@@ -19,7 +19,8 @@ export const uploadCsvInputSchema = z.object({
     .refine((f) => f.size > 0, { message: "file is empty" })
     .refine((f) => f.size <= MAX_CSV_BYTES, {
       message: `file exceeds ${MAX_CSV_BYTES} bytes`,
-    }),
+    })
+    .refine((f) => f.name.trim() !== "", { message: "file must have a name" }),
 });
 
 export type UploadCsvInput = z.infer<typeof uploadCsvInputSchema>;

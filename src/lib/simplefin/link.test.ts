@@ -121,7 +121,7 @@ describe("setAccountLink", () => {
 
     const result = setAccountLink(acct.id, null, handle.db);
 
-    expect(result.warning).toMatch(/cleared.*1 previously-imported transaction/i);
+    expect(result.warning).toMatch(/1 previously-imported transaction/i);
     expect(result.warning).toMatch(/double-count/i);
     const reread = handle.db
       .select()
@@ -140,7 +140,7 @@ describe("setAccountLink", () => {
 
     const result = setAccountLink(a.id, "ACT-different", handle.db);
 
-    expect(result.warning).toMatch(/cleared.*2 previously-imported transactions/i);
+    expect(result.warning).toMatch(/2 previously-imported transactions/i);
     expect(result.warning).toMatch(/double-count/i);
     const remaining = handle.db
       .select()
@@ -148,6 +148,45 @@ describe("setAccountLink", () => {
       .where(eq(schema.transactions.accountId, a.id))
       .all();
     expect(remaining.every((r) => r.externalId === null)).toBe(true);
+  });
+
+  it("still warns on a second relink even though nothing is left to clear, because rows orphaned by the FIRST relink are still at risk", () => {
+    // Regression test: the warning used to be gated on the UPDATE's own
+    // `changes` count, which is 0 here (everything was already cleared by
+    // the first relink) — so the warning silently vanished on exactly the
+    // unlink/relink loop a troubleshooting user would run, right as the
+    // exposed row count kept growing.
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedTxn({ accountId: a.id, batchId: batch.id, externalId: "ext-1" });
+
+    const first = setAccountLink(a.id, "ACT-different", handle.db);
+    expect(first.warning).toMatch(/1 previously-imported transaction/i);
+
+    const second = setAccountLink(a.id, "ACT-yet-another", handle.db);
+    expect(second.warning).toMatch(/1 previously-imported transaction/i);
+    expect(second.warning).toMatch(/double-count/i);
+  });
+
+  it("relinking back to the account's original feed still warns while at-risk rows remain untagged", () => {
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedTxn({ accountId: a.id, batchId: batch.id, externalId: "ext-1" });
+
+    setAccountLink(a.id, "ACT-different", handle.db);
+    const back = setAccountLink(a.id, "ACT-abc123", handle.db);
+
+    expect(back.warning).toMatch(/1 previously-imported transaction/i);
+    const reread = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, a.id))
+      .all();
+    // Relinking back does not itself re-tag the row — only a resync (which
+    // dedups it by content) would decide whether it stays untagged.
+    expect(reread.every((r) => r.externalId === null)).toBe(true);
   });
 
   it("does not clear external_id or warn when re-saving the same link (idempotent)", () => {
@@ -168,10 +207,10 @@ describe("setAccountLink", () => {
   });
 
   it("re-points a link with no warning when the old link never synced any rows", () => {
-    // clearOrphaned is true (there was an old link), but the orphaned select
-    // comes back empty — exercises the `orphaned.length > 0` guard's false
-    // branch: no UPDATE should run and no warning should be manufactured
-    // just because a link existed.
+    // clearOrphaned is true (there was an old link), but the UPDATE matches
+    // zero rows (no prior sync ever wrote a row on this account) — exercises
+    // the `atRisk.length > 0` guard's false branch: no warning should be
+    // manufactured just because a link existed.
     const acct = seedAccount("Checking");
     setAccountLink(acct.id, "ACT-abc123", handle.db);
 

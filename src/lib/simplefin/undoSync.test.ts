@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { findLastSyncBatch, undoSyncBatch, undoLastSync } from "./undoSync";
 import { linkTransfersByBucket } from "./sync";
+import { deriveBatchLabel } from "@/lib/batchLabel";
 
 let handle: TestDbHandle;
 
@@ -119,7 +120,7 @@ describe("findLastSyncBatch", () => {
 
     const summary = findLastSyncBatch(handle.db);
     expect(summary?.label).toBe(
-      `SimpleFIN sync — ${batch.importedAt.toISOString().slice(0, 16).replace("T", " ")}Z`,
+      deriveBatchLabel("simplefin", batch.importedAt),
     );
   });
 });

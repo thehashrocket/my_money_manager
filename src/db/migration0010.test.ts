@@ -200,3 +200,60 @@ describe("scripts/migrate.mjs against a database with real FK-referencing rows",
     }
   });
 });
+
+/**
+ * `scripts/migrate.mjs`'s whole reason for existing is the `PRAGMA
+ * foreign_key_check` it runs after `migrate()` -- the belt-and-suspenders
+ * catch for a rebuild that silently corrupted a reference. Every test above
+ * only exercises the success path; this proves the alarm itself fires: a
+ * real dangling reference, seeded independently of any pending migration,
+ * must make the script exit non-zero rather than reporting success.
+ */
+describe("scripts/migrate.mjs — foreign_key_check failure path", () => {
+  it("exits non-zero when a real FK violation exists, even with nothing left to migrate", () => {
+    const repoRoot = process.cwd();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mm-migrate-fk-"));
+    try {
+      // Apply every real migration, so there is nothing pending for
+      // migrate() to do -- isolating the FK check from the migration step.
+      const dbPath = path.join(tmpDir, "seeded.db");
+      const seedSqlite = new Database(dbPath);
+      seedSqlite.pragma("foreign_keys = ON");
+      migrate(drizzle(seedSqlite), { migrationsFolder: path.join(repoRoot, "drizzle") });
+
+      seedSqlite.exec(
+        `INSERT INTO accounts (id, name, type, starting_balance_cents, starting_balance_date) VALUES (1, 'Checking', 'checking', 0, '2026-01-01')`,
+      );
+      // A transaction pointing at an import_batch_id that does not exist --
+      // requires foreign_keys off to insert at all, simulating a rebuild
+      // that left a dangling reference behind.
+      seedSqlite.pragma("foreign_keys = OFF");
+      seedSqlite.exec(
+        `INSERT INTO transactions (id, account_id, date, raw_description, raw_memo, normalized_merchant, amount_cents, import_source, import_batch_id, import_row_hash) VALUES
+          (1, 1, '2026-01-05', 'WITHDRAWAL', 'dangling row', 'dangling row', -100, 'csv', 999, 'hash1')`,
+      );
+      seedSqlite.close();
+
+      const workDir = path.join(tmpDir, "project");
+      fs.mkdirSync(path.join(workDir, "data"), { recursive: true });
+      fs.symlinkSync(path.join(repoRoot, "drizzle"), path.join(workDir, "drizzle"), "dir");
+      fs.copyFileSync(dbPath, path.join(workDir, "data", "money.db"));
+
+      let error: (Error & { status?: number; stderr?: Buffer }) | null = null;
+      try {
+        execFileSync("node", [path.join(repoRoot, "scripts", "migrate.mjs")], {
+          cwd: workDir,
+          stdio: "pipe",
+        });
+      } catch (err) {
+        error = err as Error & { status?: number; stderr?: Buffer };
+      }
+
+      expect(error).not.toBeNull();
+      expect(error?.status).toBe(1);
+      expect(error?.stderr?.toString()).toMatch(/foreign_key_check found violations/i);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

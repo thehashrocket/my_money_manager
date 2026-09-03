@@ -1,4 +1,4 @@
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
@@ -65,13 +65,15 @@ export async function listRemoteAccounts(
 
 export type SetAccountLinkResult = {
   /**
-   * Set when re-pointing this account's feed link cleared external_id off
-   * rows already imported under the old link. This fixes the SQL-level crash
-   * (the partial unique index on (account_id, external_id) colliding on
-   * resync) but NOT the double-count risk: sync's content-dedup fallback in
-   * src/lib/simplefin/sync.ts is scoped to the account being synced, so it
-   * cannot see these rows if a different account claims the feed next. The
-   * user is expected to delete or reconcile them manually in that case.
+   * Set whenever this account's feed link changes (unlink or re-point) and
+   * this account currently holds simplefin-sourced rows with no external_id
+   * — whether cleared just now or by an earlier relink. Clearing external_id
+   * fixes the SQL-level crash (the partial unique index on
+   * (account_id, external_id) colliding on resync) but NOT the double-count
+   * risk: sync's content-dedup fallback in src/lib/simplefin/sync.ts is
+   * scoped to the account being synced, so it cannot see these rows if a
+   * different account claims the feed next. The user is expected to delete
+   * or reconcile them manually in that case.
    */
   warning: string | null;
 };
@@ -117,13 +119,11 @@ export function setAccountLink(
     account.simplefinAccountId &&
       account.simplefinAccountId !== simplefinAccountId,
   );
+  const linkChanged = account.simplefinAccountId !== simplefinAccountId;
 
   return db.transaction((tx) => {
-    let warning: string | null = null;
-
     if (clearOrphaned) {
-      const { changes } = tx
-        .update(schema.transactions)
+      tx.update(schema.transactions)
         .set({ externalId: null })
         .where(
           and(
@@ -132,8 +132,33 @@ export function setAccountLink(
           ),
         )
         .run();
+    }
 
-      if (changes > 0) {
+    let warning: string | null = null;
+
+    if (linkChanged) {
+      // Counting rows cleared by the UPDATE above (its `changes`) undercounts
+      // — or misses the warning entirely: a row orphaned by an EARLIER relink
+      // is exactly as exposed as one cleared just now, since neither carries
+      // a tag a future sync can see, but `changes` is 0 for it whenever this
+      // call had nothing new to clear (every row already cleared by a prior
+      // relink, or this call is a fresh link with no clearing to do at all).
+      // Querying the current at-risk set directly, instead of trusting the
+      // UPDATE's own count, means the warning can't silently disappear just
+      // because the clearing work happened to already be done.
+      const atRisk = tx
+        .select({ id: schema.transactions.id })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.accountId, localAccountId),
+            eq(schema.transactions.importSource, "simplefin"),
+            isNull(schema.transactions.externalId),
+          ),
+        )
+        .all();
+
+      if (atRisk.length > 0) {
         // Deliberately NOT "future syncs will dedup these automatically": the
         // content-dedup fallback in src/lib/simplefin/sync.ts is scoped to
         // the account being synced (eq(transactions.accountId, account.id)),
@@ -144,7 +169,8 @@ export function setAccountLink(
         // insert them fresh, double-counting every amount. Clearing
         // external_id only fixes the SQL-level crash (the unique index
         // collision); it does not, by itself, prevent that double-count.
-        warning = `Cleared the SimpleFIN link tag on ${changes} previously-imported transaction${changes === 1 ? "" : "s"} on this account. If a different account links this same feed later, its sync will NOT recognize these as duplicates — delete or reconcile them here first, or you'll double-count them.`;
+        const n = atRisk.length;
+        warning = `${n} previously-imported transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "carries" : "carry"} no SimpleFIN de-dup tag. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as a duplicate — delete or reconcile ${n === 1 ? "it" : "them"} here first, or you'll double-count ${n === 1 ? "it" : "them"}.`;
       }
     }
 

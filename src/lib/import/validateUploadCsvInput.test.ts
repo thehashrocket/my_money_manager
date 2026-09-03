@@ -89,4 +89,20 @@ describe("validateUploadCsvInput — rejections", () => {
     const result = validateUploadCsvInput({ accountId: 1 });
     expect(result.success).toBe(false);
   });
+
+  it("rejects a file with an empty name", () => {
+    const result = validateUploadCsvInput({
+      accountId: 1,
+      file: makeFile(100, ""),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a file with a whitespace-only name", () => {
+    const result = validateUploadCsvInput({
+      accountId: 1,
+      file: makeFile(100, "   "),
+    });
+    expect(result.success).toBe(false);
+  });
 });

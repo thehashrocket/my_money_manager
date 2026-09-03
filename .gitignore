@@ -45,6 +45,7 @@ yarn-error.log*
 /data/*.db-wal
 /data/*.db-shm
 /data/money.db.pre-import-*
+/data/money.db.pre-migrate-*
 /data/.pending-imports/
 
 # typescript

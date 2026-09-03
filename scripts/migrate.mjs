@@ -18,29 +18,74 @@
  *
  * Fix: disable `foreign_keys` on the connection BEFORE calling migrate(), so
  * it's already off when the migrator's BEGIN opens rather than needing to
- * change state mid-transaction.
+ * change state mid-transaction. `foreign_key_check` afterward is a
+ * belt-and-suspenders integrity check -- it works regardless of the
+ * `foreign_keys` pragma setting, so there is nothing to restore on this
+ * connection before it closes.
  */
+import { existsSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { DB_PATH as DB_PATH_REL, MIGRATIONS_FOLDER as MIGRATIONS_FOLDER_REL } from "./db-paths.mjs";
 
-const DB_PATH = path.join(process.cwd(), "data", "money.db");
-const MIGRATIONS_FOLDER = path.join(process.cwd(), "drizzle");
+const DB_PATH = path.join(process.cwd(), DB_PATH_REL);
+const MIGRATIONS_FOLDER = path.join(process.cwd(), MIGRATIONS_FOLDER_REL);
+
+/**
+ * A rebuild migration is at least as destructive as an import (it drops and
+ * recreates a table), so it gets the same pre-write snapshot CLAUDE.md rule
+ * 5 requires elsewhere -- via `VACUUM INTO` through a readonly connection
+ * (matching src/lib/snapshot.ts), not a bare file copy, so a commit resident
+ * only in money.db-wal isn't silently missing from it. Skipped when there's
+ * no database yet (first-ever migrate run): nothing to protect.
+ */
+function snapshotBeforeMigrate(dbPath) {
+  if (!existsSync(dbPath)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const snapshotPath = `${dbPath}.pre-migrate-${stamp}`;
+  const src = new Database(dbPath, { readonly: true });
+  try {
+    src.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+  } finally {
+    src.close();
+  }
+  return snapshotPath;
+}
+
+const snapshotPath = snapshotBeforeMigrate(DB_PATH);
+if (snapshotPath) {
+  console.log(`Snapshot written before migrating: ${snapshotPath}`);
+}
 
 const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = OFF");
 
+let migrationError = null;
 try {
   migrate(drizzle(sqlite), { migrationsFolder: MIGRATIONS_FOLDER });
-  console.log("Migrations applied successfully.");
-} finally {
-  sqlite.pragma("foreign_keys = ON");
-  const violations = sqlite.pragma("foreign_key_check");
+} catch (err) {
+  migrationError = err;
+}
+
+// Always run the integrity check, even after a failed migration -- a
+// partially-applied rebuild is exactly when a dangling reference is most
+// likely. Checked before the process exits so a violation is never left for
+// someone to notice later.
+const violations = sqlite.pragma("foreign_key_check");
+sqlite.close();
+
+if (migrationError) {
+  console.error("Migration failed:", migrationError);
   if (violations.length > 0) {
-    console.error("foreign_key_check found violations after migrating:", violations);
-    process.exitCode = 1;
+    console.error("Additionally, foreign_key_check found violations after the failed migration:", violations);
   }
-  sqlite.close();
+  process.exitCode = 1;
+} else if (violations.length > 0) {
+  console.error("Migrations applied, but foreign_key_check found violations after migrating:", violations);
+  process.exitCode = 1;
+} else {
+  console.log("Migrations applied successfully.");
 }
