@@ -2,7 +2,7 @@
 
 Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** v0.10.0. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. The app also runs in Docker now (still on SQLite — see the [Docker](#docker) section below). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.11.0. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank, and its balance check now tells real drift from a stale bank figure instead of flagging both the same way; `/import` still handles anything the feed's 45-day window no longer reaches, and can now fix a wrong starting-balance anchor inline. The app also runs in Docker now (still on SQLite — see the [Docker](#docker) section below). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
@@ -57,7 +57,7 @@ That runs once. It exchanges the setup token for a long-lived access URL and wri
 
 Then open `/sync`, pick which remote account each local account maps to, and hit **Sync now**. Posted transactions are written straight to the ledger — no preview step — behind a database snapshot taken first. The page also shows:
 
-- **Balance check** — the bank's balance next to the one this ledger computes, with the difference called out when they disagree. Available balance is listed separately; that gap is where pending card holds live.
+- **Balance check** — the bank's balance next to the one this ledger computes. A difference is only flagged as a real drift once the bank's own figure is dated after your newest ledger row; a same-day, older, or dateless bank figure shows as unconfirmed instead, alongside its as-of date, since it may just not have caught up yet. Available balance is listed separately; that gap is where pending card holds live.
 - **Transfers needing review** — the rare same-day, same-amount transfer the matcher can't resolve by counting. Pick the two halves yourself.
 - **Linked transfers** — what got paired automatically, each with a **Not a transfer** button. Pairing hides both rows from every spending view, so this is the way back out when a same-day, same-amount coincidence gets linked by mistake.
 - **Undo this sync** — deletes the last batch's rows and the batch itself, no dev-server restart needed. Only offered while that sync is still the newest import of any kind — a CSV import landed afterward can end up relying on one of its rows, so undo refuses once that's happened rather than deleting silently. The pre-write snapshot stays as the escape hatch.
@@ -67,6 +67,8 @@ SimpleFIN caps history at 90 days — the feed says so itself when you ask for m
 ### CSV import (older history)
 
 Upload a Star One CSV export at `/import`. The preview shows row counts, duplicates, pending rows, and errors; clicking **Confirm import** snapshots the DB, inserts the batch inside a transaction, and links transfer pairs across accounts. If the snapshot degrades to a plain file copy, the import still completes, but the success page shows a warning instead of silently trusting it as a working rollback point. This is the only way to load anything the feed no longer carries.
+
+Each account on `/import` also has an inline "start [balance] on [date]" form — the way to fix a starting-balance anchor that was set wrong (or left at the created-with-$0 default), since a CSV import can only ever move the anchor forward, never correct a too-late one. The date is capped at today.
 
 Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simplefin-sample.json` when you want to inspect what the feed actually returns.
 

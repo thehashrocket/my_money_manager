@@ -516,11 +516,15 @@ pass. What's below is what's left — informational, not blocking, none of it co
 
 - [ ] **P2** — `commitImport`'s `status: "empty"` early return (both brand-new-toInsert
   AND toUpdate empty) still means a file whose every row was already imported can never
-  fix that account's `$0.00` anchor, and `balance_cents` stays NULL forever on rows
-  imported before this column existed. Re-importing the original export to backfill
-  those columns does nothing. Known and deliberate for this ship (no surprising side
-  effect on a "nothing to import" path); revisit if backfilling `balance_cents` on
-  already-imported rows becomes something the UI needs to show.
+  fix that account's `$0.00` anchor via re-import, and `balance_cents` stays NULL forever
+  on rows imported before this column existed. Re-importing the original export to
+  backfill those columns does nothing. Partially superseded by
+  `debug-sync-balance-check`'s inline anchor-edit form on `/import`
+  (`updateAccountAnchorAction`), which fixes the `$0.00`-anchor half of this directly —
+  but the `balance_cents` backfill-on-already-imported-rows gap is untouched. Known and
+  deliberate for this ship (no surprising side effect on a "nothing to import" path);
+  revisit if backfilling `balance_cents` on already-imported rows becomes something the
+  UI needs to show.
 
 - [ ] **P3** — `applyRuleAtImport` (`src/lib/rules.ts`) has zero production callers —
   both write paths call `buildRuleMatcher` directly. It survives only so
