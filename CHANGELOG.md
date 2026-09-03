@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-03
+
+### Fixed
+- **The category picker's search box on `/transactions` and `/categorize` stopped matching anything you typed.** Typing "hotel" (in any case) wouldn't find the "Hotels" category, because the picker's label-lookup function was being handed the wrong shape of data during filtering and always came back empty — every keystroke matched against nothing. Search now works as typed.
+- **The same picker could also lose track of which category was highlighted after searching, then clearing the search text.** A related mismatch meant the currently-selected category and the full category list weren't compared consistently, which could drop the keyboard highlight after backspacing out a search. Fixed alongside the search bug since both traced back to the same root cause.
+
 ## [0.12.0] - 2026-09-03
 
 _A too-broad rule trained today already has 23 seeded siblings from migration 0006 (NETFLIX, SPOTIFY, HULU, and 20 others) — every one of them a candidate for mis-tagging an entire import with no way back short of restoring the whole database. This release closes that gap: import-time categorization gets its own undo, scoped to just the categorization, not the transactions it touched._

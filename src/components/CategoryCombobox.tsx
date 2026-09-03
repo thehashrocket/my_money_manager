@@ -47,6 +47,13 @@ export function CategoryCombobox({
   }));
   const labelFor = (v: string) =>
     items.find((i) => i.value === v)?.label ?? "";
+  // Base UI calls itemToStringLabel/isItemEqualToValue with either the raw
+  // id (string) — e.g. our controlled `value`, or each ComboboxItem's own
+  // `value` prop — or the full `{ value, label }` item from `items` while
+  // filtering/restoring the active item. Both callbacks need to handle both
+  // shapes; this normalizes either one down to the plain id.
+  const idOf = (v: unknown): string =>
+    typeof v === "string" ? v : (v as Item).value;
 
   return (
     <Combobox
@@ -56,7 +63,8 @@ export function CategoryCombobox({
       onValueChange={(next) =>
         onValueChange(typeof next === "string" ? next : "")
       }
-      itemToStringLabel={(v) => labelFor(String(v))}
+      itemToStringLabel={(v) => labelFor(idOf(v))}
+      isItemEqualToValue={(itemValue, val) => idOf(itemValue) === idOf(val)}
       required={required}
       disabled={disabled}
     >
