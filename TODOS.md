@@ -265,16 +265,16 @@ missed):
   code path only exercised later. Worth an esbuild-metafile check that fails the build
   loudly if a second native dependency creeps in — deferred as speculative (no such
   import exists today) rather than blocking this PR.
-- [ ] **P3** — `./backups`'s bind-mount ownership is untested on a real Linux/NAS host.
-  Docker on native Linux auto-creates a missing bind-mount host directory as root-owned;
-  the Dockerfile's `chown` only affects the image filesystem, which the bind mount then
-  shadows. All testing so far has been on macOS Docker Desktop, whose bind-mount layer is
-  more permissive. Workaround documented in CLAUDE.md (`mkdir -p ./backups && chown
-  1000:1000`); a real fix belongs with PR3 (NAS deployment), where there's an actual
-  Linux host to verify against. Surfaced independently by both a Claude adversarial pass
-  and Codex during `/ship`.
-
 Fixed after the adversarial passes (Claude + Codex, both dispatched during `/ship`):
+- [x] **`./backups`'s bind-mount ownership on real Linux hosts** — flagged as "untested"
+  after the adversarial passes, confirmed for real the moment CI (Ubuntu, not macOS
+  Docker Desktop) ran the `docker` job: `EACCES: permission denied` on every snapshot
+  write, container never became healthy. Docker on native Linux auto-creates a missing
+  bind-mount host directory as root-owned; the Dockerfile's `chown` only affects the
+  image filesystem, which the bind mount then shadows. Fixed with `mkdir -p ./backups &&
+  sudo chown 1000:1000 ./backups` before the first `docker compose up` — added as its own
+  CI step, and documented in the README Docker quickstart for real hosts. macOS Docker
+  Desktop never surfaced this; its bind-mount layer is more permissive.
 - [x] `docker/entrypoint.src.mjs`'s `checkTz` only verified `TZ` was non-empty, not that
   it named a real IANA zone. A typo (`America/Los_Angelss`) doesn't throw anywhere on its
   own — Node silently renders as UTC, reintroducing the exact bug this branch exists to
