@@ -28,13 +28,28 @@ import {
 } from "../src/lib/snapshot.ts";
 
 export function checkTz(env = process.env) {
-  if (env.TZ) return { ok: true };
-  return {
-    ok: false,
-    message:
-      "TZ is required — the app derives the current budget month from local time. " +
-      "Set TZ in compose.yaml (e.g. TZ=America/Los_Angeles), or TZ=UTC if that is genuinely what you want.",
-  };
+  if (!env.TZ) {
+    return {
+      ok: false,
+      message:
+        "TZ is required — the app derives the current budget month from local time. " +
+        "Set TZ in compose.yaml (e.g. TZ=America/Los_Angeles), or TZ=UTC if that is genuinely what you want.",
+    };
+  }
+  // A non-empty but invalid IANA zone name (a typo like America/Los_Angelss)
+  // doesn't throw anywhere — Node silently falls back to UTC-like behavior,
+  // reintroducing the exact bug this file exists to prevent, with no signal
+  // that anything is wrong. Intl.DateTimeFormat is the cheap way to ask "is
+  // this actually a zone" without hand-maintaining a list of valid names.
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: env.TZ });
+  } catch {
+    return {
+      ok: false,
+      message: `TZ="${env.TZ}" is not a recognized IANA timezone — Node would silently treat it as UTC, computing the wrong budget month for part of every day. Check for a typo (e.g. "America/Los_Angeles").`,
+    };
+  }
+  return { ok: true };
 }
 
 export function checkCwd(cwd = process.cwd()) {

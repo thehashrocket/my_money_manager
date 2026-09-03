@@ -18,6 +18,15 @@ describe("entrypoint guards", () => {
     expect(checkTz({ TZ: "UTC" })).toEqual({ ok: true });
   });
 
+  it("checkTz fails on a typo'd TZ instead of silently behaving as UTC", () => {
+    // Verified this is a real Node behavior, not a hypothetical: an invalid
+    // IANA zone name doesn't throw anywhere on its own — Node just silently
+    // renders as UTC, reintroducing the exact bug this file exists to catch.
+    const result = checkTz({ TZ: "America/Los_Angelss" });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("not a recognized IANA timezone");
+  });
+
   it("checkCwd fails when process.cwd() is not /app", () => {
     const result = checkCwd("/");
     expect(result.ok).toBe(false);
