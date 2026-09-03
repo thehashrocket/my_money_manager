@@ -42,6 +42,18 @@ export type ImportPreviewRow = {
   isPending: boolean;
   duplicate: boolean;
   duplicateReason: DuplicateReason | null;
+  /**
+   * Set when this row is a content match against an EXISTING PENDING row and
+   * this incoming row is posted (`!isPending`) — the pending row's real-world
+   * counterpart finally arriving. `commitImport` updates that row's id in
+   * place (is_pending, balance_cents, bank_transaction_number,
+   * import_row_hash) instead of just dropping this row as a duplicate.
+   * Without this, a row CSV-imported while pending permanently freezes: the
+   * content pass would otherwise drop its posted re-export forever, leaving
+   * it stuck on Star One's `6098` placeholder — un-pairable by the transfer
+   * matcher and invisible to subscription detection.
+   */
+  updateExistingRowId: number | null;
 };
 
 export type ImportPreview = {
@@ -60,7 +72,7 @@ export type ImportPreview = {
 
 export function transformRow(
   parsed: ParsedRow,
-): Omit<ImportPreviewRow, "duplicate" | "duplicateReason"> {
+): Omit<ImportPreviewRow, "duplicate" | "duplicateReason" | "updateExistingRowId"> {
   const normalizedMerchant = normalizeMerchant(parsed.rawMemo);
   const cardLastFour = extractCardLastFour(parsed.rawMemo);
   const importRowHash = computeImportRowHash({
@@ -121,7 +133,15 @@ export function buildPreview(
   // narrow import does not pay for a full-table scan. No `external_id` filter,
   // unlike sync's version: a CSV re-export legitimately overlaps rows that
   // arrived from a sync, and those need catching too.
-  const contentBudget = new Map<string, number>();
+  //
+  // Candidate LISTS rather than bare counts: a repeated signature is a real
+  // repeat (two identical same-day coffees), so this is a multiset, not a set
+  // — collapsing it would make the second coffee permanently unimportable.
+  // Lists (not just counts) also let a posted incoming row find and update a
+  // PENDING existing candidate specifically, rather than being indifferent to
+  // which copy it "spends" — see the pending-row branch below.
+  type ExistingCandidate = { id: number; isPending: boolean };
+  const contentCandidates = new Map<string, ExistingCandidate[]>();
   if (transformed.length > 0) {
     let minDate = transformed[0].date;
     let maxDate = transformed[0].date;
@@ -132,9 +152,11 @@ export function buildPreview(
 
     const existingInRange = db
       .select({
+        id: schema.transactions.id,
         date: schema.transactions.date,
         amountCents: schema.transactions.amountCents,
         rawMemo: schema.transactions.rawMemo,
+        isPending: schema.transactions.isPending,
       })
       .from(schema.transactions)
       .where(
@@ -146,38 +168,69 @@ export function buildPreview(
       )
       .all();
 
-    // A repeated signature is a real repeat (two identical same-day coffees), so
-    // this counts rather than sets — collapsing it would make the second coffee
-    // permanently unimportable.
     for (const r of existingInRange) {
       const sig = contentSignature(r);
-      contentBudget.set(sig, (contentBudget.get(sig) ?? 0) + 1);
+      const list = contentCandidates.get(sig) ?? [];
+      list.push({ id: r.id, isPending: r.isPending });
+      contentCandidates.set(sig, list);
     }
 
-    // Rows already matched by hash claim their own existing row's budget before
-    // anything else is compared. Without this, an earlier unmatched row in the
-    // file could spend the budget belonging to a row that a later hash match
-    // already accounts for, and a genuinely new transaction would be dropped as
-    // a duplicate.
+    // Rows already matched by hash claim their own existing row's candidate
+    // before anything else is compared. Without this, an earlier unmatched row
+    // in the file could spend the candidate belonging to a row that a later
+    // hash match already accounts for, and a genuinely new transaction would
+    // be dropped as a duplicate.
     transformed.forEach((r, i) => {
       if (!hashDuplicate[i]) return;
       const sig = contentSignature(r);
-      const budget = contentBudget.get(sig) ?? 0;
-      if (budget > 0) contentBudget.set(sig, budget - 1);
+      contentCandidates.get(sig)?.pop();
     });
+  }
+
+  /**
+   * Claim one existing candidate for `r`'s signature, preferring a PENDING
+   * candidate when `r` itself is posted — that pairing is the pending row's
+   * real-world counterpart arriving, not a coincidental repeat, so the caller
+   * updates the existing row in place instead of just dropping this one.
+   */
+  function claimContentCandidate(r: {
+    date: string;
+    amountCents: number;
+    rawMemo: string;
+    isPending: boolean;
+  }): ExistingCandidate | undefined {
+    const sig = contentSignature(r);
+    const list = contentCandidates.get(sig);
+    if (!list || list.length === 0) return undefined;
+
+    if (!r.isPending) {
+      const pendingIndex = list.findIndex((c) => c.isPending);
+      if (pendingIndex !== -1) {
+        return list.splice(pendingIndex, 1)[0];
+      }
+    }
+    return list.pop();
   }
 
   const rows: ImportPreviewRow[] = transformed.map((r, i) => {
     if (hashDuplicate[i]) {
-      return { ...r, duplicate: true, duplicateReason: "hash" as const };
+      return { ...r, duplicate: true, duplicateReason: "hash" as const, updateExistingRowId: null };
     }
-    const sig = contentSignature(r);
-    const budget = contentBudget.get(sig) ?? 0;
-    if (budget > 0) {
-      contentBudget.set(sig, budget - 1);
-      return { ...r, duplicate: true, duplicateReason: "content" as const };
+    const candidate = claimContentCandidate(r);
+    if (candidate !== undefined) {
+      // Only a genuinely pending existing row becomes an update target. An
+      // already-posted candidate (a plain repeat — rule 3's "two identical
+      // coffees") stays a pure duplicate: it must NOT have its
+      // bank_transaction_number/import_row_hash overwritten by an unrelated
+      // second row that merely shares its content signature.
+      return {
+        ...r,
+        duplicate: true,
+        duplicateReason: "content" as const,
+        updateExistingRowId: candidate.isPending ? candidate.id : null,
+      };
     }
-    return { ...r, duplicate: false, duplicateReason: null };
+    return { ...r, duplicate: false, duplicateReason: null, updateExistingRowId: null };
   });
 
   const duplicates = rows.filter((r) => r.duplicate).length;
@@ -226,8 +279,13 @@ export function commitImport(
 ): CommitResult {
   const preview = buildPreview(opts, db);
   const toInsert = preview.rows.filter((r) => !r.duplicate);
+  const toUpdate = preview.rows.filter((r) => r.updateExistingRowId !== null);
 
-  if (toInsert.length === 0) {
+  // A file can carry zero brand-new rows and still have real work to do — a
+  // narrow re-export containing only rows that were pending and have since
+  // posted. Bailing out here on `toInsert.length === 0` alone would silently
+  // skip every pending → posted update this fix exists to make.
+  if (toInsert.length === 0 && toUpdate.length === 0) {
     return {
       status: "empty",
       duplicateCount: preview.totals.duplicates,
@@ -293,10 +351,44 @@ export function commitImport(
       .where(eq(schema.importBatches.id, batch.id))
       .run();
 
+    // The pending row's real-world counterpart finally posting. Updated in
+    // place rather than inserted as a second row — the pending row keeps its
+    // original batch attribution, id, and any category the user already gave
+    // it; only the fields the posted version corrects are overwritten.
+    for (const row of toUpdate) {
+      tx.update(schema.transactions)
+        .set({
+          isPending: false,
+          balanceCents: row.balanceCents,
+          bankTransactionNumber: row.bankTransactionNumber || null,
+          rawMemo: row.rawMemo,
+          normalizedMerchant: row.normalizedMerchant,
+          cardLastFour: row.cardLastFour,
+          importRowHash: row.importRowHash,
+        })
+        .where(eq(schema.transactions.id, row.updateExistingRowId!))
+        .run();
+    }
+
     return batch.id;
   });
 
   const startingBalance = anchorStartingBalance(opts.accountId, preview.rows, db);
+
+  // Persisted onto the batch (not re-derived from the account's current
+  // anchor on every page view) so a later import that moves the anchor again
+  // can't make this batch's success page misattribute the newer value to
+  // itself, and so the tile can be omitted outright when this batch didn't
+  // move the anchor at all.
+  if (startingBalance) {
+    db.update(schema.importBatches)
+      .set({
+        anchoredStartingBalanceCents: startingBalance.startingBalanceCents,
+        anchoredStartingBalanceDate: startingBalance.date,
+      })
+      .where(eq(schema.importBatches.id, batchId))
+      .run();
+  }
 
   // Prune only after the write has committed — pruning before it meant a failed
   // import had already evicted the oldest snapshot to make room for a useless

@@ -638,6 +638,49 @@ describe("commitImport — starting balance anchor", () => {
     return a;
   }
 
+  it("persists the anchor onto the batch it came from, not just the account", () => {
+    const result = commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.anchoredStartingBalanceCents).toBe(100000);
+    expect(batch.anchoredStartingBalanceDate).toBe("2026-04-16");
+  });
+
+  it("leaves the batch's anchor fields null when this import declined to move the anchor", () => {
+    // First import anchors the account at 2026-04-16.
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+
+    // A second, all-new-rows import dated entirely BEFORE the existing anchor
+    // can't move it forward — anchorStartingBalance declines (derived.date <
+    // account.startingBalanceDate) and returns null.
+    const older = { ...COFFEE, txn: "9001", date: "04/01/2026", balance: 5000 };
+    const result = commitImport(
+      { accountId, filename: "second.csv", csvText: starOneCsv([older]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toBeNull();
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.anchoredStartingBalanceCents).toBeNull();
+    expect(batch.anchoredStartingBalanceDate).toBeNull();
+  });
+
   it("persists each row's running balance", () => {
     commitImport(
       { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
@@ -833,6 +876,134 @@ describe("buildPreview — degenerate inputs", () => {
     expect(preview.rows[0].duplicateReason).toBe("content");
     expect(preview.rows[1].duplicate).toBe(false);
     expect(preview.totals.newRows).toBe(1);
+  });
+});
+
+describe("commitImport — a pending row's posted re-export updates it in place", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  const pending = {
+    txn: "6098",
+    date: "04/19/2026",
+    memo: "   PENDING DEPOSIT",
+    amount: 25,
+    balance: 0,
+  };
+  const posted = {
+    txn: "1099",
+    date: "04/19/2026",
+    memo: "PENDING DEPOSIT",
+    amount: 25,
+    balance: 125,
+  };
+
+  it("flips is_pending, and fills balance/txn-number/hash from the posted row — without inserting a second row", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, pending]) },
+      handle.db,
+    );
+    const [beforePending] = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.isPending, true))
+      .all();
+    expect(beforePending.bankTransactionNumber).toBe("6098");
+
+    const result = commitImport(
+      { accountId, filename: "second.csv", csvText: starOneCsv([COFFEE, posted]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    // The posted row content-matched the pending one and was never inserted —
+    // still one row for this transaction, not two.
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
+
+    const updated = rows.find((r) => r.id === beforePending.id)!;
+    expect(updated.isPending).toBe(false);
+    expect(updated.balanceCents).toBe(12500);
+    expect(updated.bankTransactionNumber).toBe("1099");
+    // The pending row keeps its ORIGINAL id and batch attribution — it was
+    // updated, not replaced.
+    expect(updated.importBatchId).toBe(beforePending.importBatchId);
+  });
+
+  it("survives an all-updates file that inserts nothing new — the empty-batch early return must not skip the update", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([pending]) },
+      handle.db,
+    );
+
+    // Second file re-exports ONLY the now-posted row — zero brand-new rows.
+    const result = commitImport(
+      { accountId, filename: "second.csv", csvText: starOneCsv([posted]) },
+      handle.db,
+    );
+
+    if (result.status !== "committed") {
+      throw new Error(
+        `expected the update to still commit, got status=${result.status}`,
+      );
+    }
+    const [row] = handle.db.select().from(schema.transactions).all();
+    expect(row.isPending).toBe(false);
+    expect(row.balanceCents).toBe(12500);
+  });
+
+  it("leaves a genuinely repeated posted duplicate alone — does not overwrite an unrelated row's identity", () => {
+    // Rule 3: two rows that happen to share a content signature but are BOTH
+    // already posted are a real repeat, not a pending→posted transition. The
+    // second one must stay a plain duplicate — it must not steal the first
+    // row's bank_transaction_number or import_row_hash.
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([posted]) },
+      handle.db,
+    );
+    const [original] = handle.db.select().from(schema.transactions).all();
+
+    // A different leading row shifts `posted`'s row index between files, so it
+    // content-matches (same date|amount|memo) without also hash-matching —
+    // exercising the branch this test is actually about.
+    const preview = buildPreview(
+      { accountId, filename: "second.csv", csvText: starOneCsv([GAS, posted]) },
+      handle.db,
+    );
+    const postedPreviewRow = preview.rows.find((r) => r.amountCents > 0)!;
+    expect(postedPreviewRow.duplicate).toBe(true);
+    expect(postedPreviewRow.duplicateReason).toBe("content");
+    expect(postedPreviewRow.updateExistingRowId).toBeNull();
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(original);
   });
 });
 

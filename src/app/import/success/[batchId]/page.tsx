@@ -50,18 +50,27 @@ export default async function SuccessPage({
   // A CSV import can move the account's starting-balance anchor onto a real
   // bank balance read from the file's running-balance column. That rewrites the
   // number every displayed balance is computed from, so it is shown rather than
-  // changed silently.
-  const [anchored] = db
-    .select({
-      name: schema.accounts.name,
-      startingBalanceCents: schema.accounts.startingBalanceCents,
-      startingBalanceDate: schema.accounts.startingBalanceDate,
-    })
-    .from(schema.transactions)
-    .innerJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
-    .where(eq(schema.transactions.importBatchId, batchId))
-    .limit(1)
-    .all();
+  // changed silently — but ONLY when this batch actually moved it.
+  // `anchoredStartingBalanceCents`/`Date` are what `commitImport` persisted
+  // onto the batch at commit time, not the account's current anchor: a live
+  // re-read would render on every batch (the derivation can decline for two
+  // ordinary reasons — a non-chaining file, or a date that would move the
+  // anchor backwards) and would attribute a later batch's anchor move to an
+  // earlier one on a revisit.
+  const anchored =
+    batch.anchoredStartingBalanceCents !== null && batch.anchoredStartingBalanceDate !== null
+      ? {
+          startingBalanceCents: batch.anchoredStartingBalanceCents,
+          startingBalanceDate: batch.anchoredStartingBalanceDate,
+          name: db
+            .select({ name: schema.accounts.name })
+            .from(schema.transactions)
+            .innerJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
+            .where(eq(schema.transactions.importBatchId, batchId))
+            .limit(1)
+            .get()?.name,
+        }
+      : null;
 
   return (
     <div className="mx-auto w-full max-w-2xl px-6 py-16 space-y-6">

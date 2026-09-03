@@ -100,6 +100,14 @@ export const importBatches = sqliteTable("import_batches", {
   // page, not just the one right after commit — CLAUDE.md rule 5 requires the
   // degraded flag never be silently dropped.
   snapshotWarning: text("snapshot_warning"),
+  // Non-null only when THIS batch moved the account's starting-balance anchor
+  // (see anchorStartingBalance in importBatch.ts). Persisted rather than
+  // re-derived from the account's current anchor for the same reason as
+  // snapshotWarning above: a later import can move the anchor again, and a
+  // live re-read would then misattribute the newer anchor to this batch's
+  // success page on a revisit.
+  anchoredStartingBalanceCents: integer("anchored_starting_balance_cents"),
+  anchoredStartingBalanceDate: text("anchored_starting_balance_date"),
 });
 
 export const transactions = sqliteTable(
