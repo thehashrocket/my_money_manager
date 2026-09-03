@@ -467,3 +467,91 @@ both of which document auto-categorize-at-commit as shipped behavior that does n
   rule gets trained.** The batch id is already on every row, so recording which rows a
   batch auto-categorized is the cheap version; matching `bulkCategorize`'s snapshot shape
   is the complete one. Depends on T1.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-03)
+
+Seven specialists + Red Team reviewed `thehashrocket/next-todo-priority` before it
+landed. Six CRITICAL findings were fixed on the branch itself (silent-corruption paths
+reachable during the migrate-then-backfill sequence: a migration-journal timestamp bug
+that permanently skips seeding the Subscriptions category, a pending row's posted
+counterpart being dropped forever, the starting-balance tile misattributing an anchor
+move to the wrong batch, sync undo deleting a transaction with no other copy, a computed
+balance overshooting the bank's posted figure, and a backwards cross-source transfer-link
+guard). A handful of mechanical items (unused import, stale docstrings, a missing DB
+transaction, a test that didn't test what its name claimed) were auto-fixed in the same
+pass. What's below is what's left — informational, not blocking, none of it corrupts data.
+
+- [ ] **P1** — Migration 0006 seeds 23 broad `contains` rules for subscription merchants
+  (NETFLIX, SPOTIFY, HULU, etc). CLAUDE.md rule 6's documented revisit trigger for
+  import-time-categorization-has-no-undo is "the first `contains` or `regex` rule
+  trained" — that fires the moment `pnpm db:migrate` runs on the real ledger, not at some
+  future point. **Read this before step 9 of `docs/plans/load-the-ledger.md`**: the
+  4.5-month backfill will auto-categorize every subscription merchant with no one-click
+  undo (only the file snapshot, which discards the whole import). The P3 entry above
+  ("Import-time categorization will have no undo") is no longer a someday item once
+  `db:migrate` runs — its revisit trigger already fired. Found by Red Team during the
+  same `/ship` pass.
+
+- [ ] **P2** — `deriveStartingBalance` silently picks the file's own row order when BOTH
+  directions validate the running-balance chain, rather than treating that as ambiguous.
+  Both orders validate exactly when a date's transactions net to zero, which is not rare
+  (e.g. a paycheck and a same-day bill). Verified: the same two rows, file order vs.
+  reversed, produced anchors $100 apart — a real dollar swing decided only by which way
+  Star One happened to write the file, not by any actual evidence. Fix: when both
+  directions validate, compute the anchor for both and refuse (`{ ok: false }`) unless
+  they agree, rather than defaulting to `forward`. (`src/lib/accounts/deriveStartingBalance.ts:90-95`)
+
+- [ ] **P2** — `anchorStartingBalance` (`src/lib/importBatch.ts`) runs outside
+  `commitImport`'s write transaction, mutates the `accounts` row with no record of the
+  prior value, and has no undo path (CSV imports don't have `undoSyncBatch`'s logical
+  undo). A misfiled import against the wrong account silently overwrites a good anchor,
+  recoverable only via a full snapshot restore. Also unvalidated against the same
+  magnitude/date bounds `createAccountInputSchema` enforces on a hand-typed starting
+  balance — a single-row file trivially "validates" (`isValidChain` never executes its
+  loop body at length 1) and would anchor on whatever that one row's Balance cell says,
+  with no corroboration at all. Fix: move the anchor write inside the transaction,
+  persist the account's prior `(starting_balance_cents, starting_balance_date)`
+  somewhere it can be reverted from, and apply the same bounds `createAccountInputSchema`
+  already enforces (`src/lib/accounts/validateCreateAccountInput.ts`).
+
+- [ ] **P2** — `commitImport`'s `status: "empty"` early return (both brand-new-toInsert
+  AND toUpdate empty) still means a file whose every row was already imported can never
+  fix that account's `$0.00` anchor, and `balance_cents` stays NULL forever on rows
+  imported before this column existed. Re-importing the original export to backfill
+  those columns does nothing. Known and deliberate for this ship (no surprising side
+  effect on a "nothing to import" path); revisit if backfilling `balance_cents` on
+  already-imported rows becomes something the UI needs to show.
+
+- [ ] **P3** — `applyRuleAtImport` (`src/lib/rules.ts`) has zero production callers —
+  both write paths call `buildRuleMatcher` directly. It survives only so
+  `rules.test.ts`'s ~14 assertions keep compiling. Flagged independently by both the
+  maintainability and simplification specialists (multi-specialist confirmed): this is
+  the same shape as the bug this whole branch exists to fix (a tested function nobody
+  calls) — a second entry point with self-referential coverage invites the same drift
+  back. Either point the 14 assertions at `buildRuleMatcher` and delete the wrapper, or
+  say plainly in its docstring that nothing calls it in production.
+
+- [ ] **P3** — The content-budget multiset-build (bucket existing rows by
+  `contentSignature`, count as a map) is duplicated verbatim, comment included, between
+  `src/lib/importBatch.ts` and `src/lib/simplefin/sync.ts`. The counting discipline that
+  makes it correct (CLAUDE.md rule 3 — never collapse into a `Set`) is exactly the part
+  most likely to be gotten wrong by a third caller, and it's the part left copy-pasted.
+  Extract a `buildContentBudget` helper into `src/lib/contentSignature.ts`.
+
+- [ ] **P3** — Two design/info-architecture items on the import success page
+  (`src/app/import/success/[batchId]/page.tsx`): the "auto-categorized" / "left to
+  categorize" tiles are live queries, not a record of what the import did — a user who
+  later hand-categorizes the rest via `/categorize` returns to a page claiming the rule
+  engine did all of it. And "already imported" (content match) vs "duplicate" (hash
+  match) on the preview page (`src/app/import/preview/[id]/page.tsx`) are two words for
+  the same fact, split on an implementation detail the user has no reason to care about.
+  Neither is incorrect, both are worth a follow-up pass. The page also still renders in
+  raw Tailwind zinc rather than DESIGN.md's paper/ink tokens, matching the rest of that
+  page (pre-existing, not introduced by this branch, but grown by it).
+
+- [ ] **P4** — `transactions_import_batch_idx` doesn't exist; the success page's two new
+  per-batch queries (`autoCategorized` count, the anchor join) are full table scans, as
+  is the pre-existing `pairsLinked` count on the same page. Sub-millisecond at the
+  current ~1200-row scale — only worth an index if the ledger grows by orders of
+  magnitude. The `autoCategorized`/`pairsLinked` queries could also collapse into one
+  `COUNT(category_id)`/`COUNT(transfer_pair_id)` statement instead of two scans.

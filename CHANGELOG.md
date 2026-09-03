@@ -6,15 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-_Stabilization pass ahead of loading the real ledger — see `docs/plans/load-the-ledger.md`. Three defects, all of which only bite on real data, plus the doc drift that hid the first one._
+## [0.10.0] - 2026-09-03
+
+_Stabilization pass ahead of loading the real ledger — see `docs/plans/load-the-ledger.md`. Three defects, all of which only bite on real data, plus the doc drift that hid the first one; a pre-landing review then found six more, all silent-corruption paths reachable during the same migrate-then-backfill sequence this pass exists to make safe._
 
 ### Added
 - **Imported transactions are now categorized automatically** from the rules you have already trained. `applyRuleAtImport` shipped in 0.3.0 with tests and a changelog entry saying it ran at import — and nothing ever called it, on either the CSV path or SimpleFIN sync. Every import landed 100% uncategorized no matter how many rules existed, which is why the backlog only ever grew. Both write paths now resolve each row through the rules table, and the import success page reports how many rows resolved and how many are left.
-- **An import now sets the account's starting balance** from Star One's running-balance column, which the parser has always read and always discarded. Accounts created with a starting balance of 0 display net-change-since-signup rather than a balance, and `/sync`'s drift check compares that against the bank's real figure and reports a phantom missing row forever. The anchor is only written when the file's running balance forms a consistent chain — a gappy or hand-assembled export leaves it alone rather than guessing — and it only ever moves forward in time.
+- **An import now sets the account's starting balance** from Star One's running-balance column, which the parser has always read and always discarded. Accounts created with a starting balance of 0 display net-change-since-signup rather than a balance, and `/sync`'s drift check compares that against the bank's real figure and reports a phantom missing row forever. The anchor is only written when the file's running balance forms a consistent chain — a gappy or hand-assembled export leaves it alone rather than guessing — and it only ever moves forward in time. The import success page now shows the anchor a batch actually wrote, rather than re-reading the account's current anchor (which could belong to a later import by the time you look).
 
 ### Fixed
 - **A wider CSV re-export no longer imports history twice.** Star One exports an arbitrary date range, and the duplicate check keyed on a hash that includes each row's position in its file — so re-exporting a window that overlapped what you already had shifted every row and matched nothing, silently double-counting the overlap while the preview reported "0 duplicates". Import now also compares on content, the same way sync has since 0.8.0. Two genuinely identical same-day transactions still both import.
 - **Transfers from a backfill can now be reviewed.** The transfer-review list on `/sync` looked back 120 days, which cut off the start of any catch-up import; those pairs stayed unlinked and kept counting as spending with nothing on screen to say so. Widened to 240 days.
+- **A pending row's posted counterpart no longer vanishes into the ledger forever.** The content-dedup pass above had no pending/posted distinction, so a row CSV-imported while pending permanently suppressed its own posted re-export — stuck on Star One's `6098` placeholder, un-pairable by the transfer matcher, invisible to subscription detection. Content dedup now recognizes a pending row's posted arrival and updates it in place.
+- **A migration that seeds the Subscriptions category and its rules was silently skipped** on any database with real history — a journal-timestamp ordering bug meant it could never apply once later migrations landed, though the migration runner reported success either way.
+- **The account balance shown after a sync could read as a phantom missing transaction.** A pending row imported from CSV inflated the computed balance past the bank's own posted figure, which `/sync`'s drift check compares against.
+- **Undoing a sync could delete a transaction with no other copy.** CSV content-dedup has no notion of which source a row came from, so a later CSV import could quietly rely on a sync batch's row already being there. Undo now refuses once a newer import of any kind exists, rather than deleting silently.
+- **A same-day, same-amount coincidence between two CSV rows could get auto-linked as a transfer** instead of being sent to review — backwards from the intent, since both legs having already been examined and declined by the stronger ±1 matcher is the strongest evidence against a real transfer, not the weakest.
 
 ## [0.9.0] - 2026-09-03
 
