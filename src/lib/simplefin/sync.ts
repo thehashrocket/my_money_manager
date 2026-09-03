@@ -441,8 +441,11 @@ function missingAccountWarnings(names: string[]): string[] {
  * never computed.
  *
  * Balance is `starting_balance_cents + SUM(amount_cents WHERE date >
- * starting_balance_date)` per CLAUDE.md rule 1 — strictly greater than, so a row
- * dated exactly on the starting balance date is already counted in it.
+ * starting_balance_date AND NOT is_pending)` per CLAUDE.md rule 1 — strictly
+ * greater than, so a row dated exactly on the starting balance date is
+ * already counted in it. Pending rows are excluded so a CSV-imported pending
+ * row can't inflate the computed balance past SimpleFIN's posted-only
+ * `reportedBalanceCents`, which would otherwise fire a phantom drift warning.
  */
 function finaliseBalances(
   counts: AccountSyncCounts[],
@@ -473,6 +476,7 @@ function finaliseBalances(
         and(
           eq(schema.transactions.accountId, c.accountId),
           sql`${schema.transactions.date} > ${account.startingBalanceDate}`,
+          eq(schema.transactions.isPending, false),
         ),
       )
       .get();

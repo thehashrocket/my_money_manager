@@ -934,6 +934,26 @@ describe("commitImport — anchor edges", () => {
     expect(pendingRow.balanceCents).toBe(0);
   });
 
+  it("does not let a pending row inflate the computed balance past the bank's posted balance", () => {
+    const pending = {
+      txn: "6098",
+      date: "04/19/2026",
+      memo: "PENDING DEPOSIT",
+      amount: 25,
+      balance: 0,
+    };
+    commitImport(
+      { accountId, filename: "pending.csv", csvText: starOneCsv([COFFEE, GAS, pending]) },
+      handle.db,
+    );
+
+    // 94790 is the file's last POSTED running balance (GAS's 947.90) — what
+    // the bank reports as `balance` and what /sync's drift check compares
+    // against. Including the +$25 pending deposit would overshoot it.
+    const [balance] = loadAccountBalances(handle.db);
+    expect(balance.balanceCents).toBe(94790);
+  });
+
   // The guard is `derived.date < account.startingBalanceDate`, not `<=`: an
   // anchor on the same date is refreshed, which matters when a later export
   // reveals a same-day row that was missing when the anchor was first set.
