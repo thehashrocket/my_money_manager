@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { db, schema } from "@/db";
 import { and, eq, isNotNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { resolveBatchLabel } from "@/lib/batchLabel";
 
 export default async function SuccessPage({
   params,
@@ -36,7 +37,7 @@ export default async function SuccessPage({
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Import complete</h1>
         <p className="text-sm text-zinc-500">
-          Batch #{batch.id} — {batch.filename}
+          Batch #{batch.id} — {resolveBatchLabel(batch)}
         </p>
       </header>
 

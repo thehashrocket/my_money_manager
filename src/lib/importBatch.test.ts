@@ -135,6 +135,9 @@ describe("commitImport", () => {
 
     const [batch] = handle.db.select().from(schema.importBatches).all();
     expect(batch.snapshotWarning).toBeNull();
+    // `label` is the renamed, now-nullable former `filename` column — a CSV
+    // batch always carries the real uploaded filename as its label.
+    expect(batch.label).toBe("test.csv");
   });
 
   // TODOS.md P0 / plan T6a — importBatch.ts silently recorded a degraded

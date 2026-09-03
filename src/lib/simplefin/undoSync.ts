@@ -1,11 +1,12 @@
 import { and, desc, eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { resolveBatchLabel } from "@/lib/batchLabel";
 
 type Db = typeof defaultDb;
 
 export type SyncBatchSummary = {
   batchId: number;
-  filename: string;
+  label: string;
   importedAt: Date;
   transactionCount: number;
   /** Rows the user has since categorised — undoing throws that work away. */
@@ -35,7 +36,7 @@ export function findLastSyncBatch(db: Db = defaultDb): SyncBatchSummary | null {
 
   return {
     batchId: batch.id,
-    filename: batch.filename,
+    label: resolveBatchLabel(batch),
     importedAt: batch.importedAt,
     transactionCount: rows.length,
     categorizedCount: rows.filter((r) => r.categoryId !== null).length,

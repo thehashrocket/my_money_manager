@@ -93,7 +93,7 @@ function seedAccount(opts: { simplefinAccountId?: string | null; name?: string }
 function seedBatch(source: "csv" | "simplefin") {
   const [row] = handle.db
     .insert(schema.importBatches)
-    .values({ source, filename: `${source}.seed` })
+    .values({ source, label: `${source}.seed` })
     .returning()
     .all();
   return row;
@@ -616,6 +616,28 @@ describe("syncSimpleFin — snapshot consistency", () => {
       .where(eq(schema.importBatches.id, outcome.batchId))
       .get();
     expect(written?.snapshotWarning).toBeNull();
+  });
+
+  it("writes a sync batch with no label, relying on deriveBatchLabel for display", async () => {
+    // The old synthetic `simplefin ${timestamp}` filename string is gone;
+    // display now derives from source + importedAt (src/lib/batchLabel.ts).
+    // A regression here would mean the sync path silently reintroduces a
+    // stored label, which findLastSyncBatch's null-coalescing would then
+    // never exercise.
+    seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const written = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .get();
+    expect(written?.label).toBeNull();
   });
 });
 

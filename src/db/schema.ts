@@ -85,7 +85,10 @@ export const categoryRules = sqliteTable(
 export const importBatches = sqliteTable("import_batches", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   source: text("source", { enum: ["csv", "simplefin"] }).notNull(),
-  filename: text("filename").notNull(),
+  // The real uploaded filename for a CSV batch. Null for a sync batch — there
+  // is no file, so display code derives a label from `source` + `importedAt`
+  // instead of a synthetic string stored here (see deriveBatchLabel).
+  label: text("label"),
   importedAt: integer("imported_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),

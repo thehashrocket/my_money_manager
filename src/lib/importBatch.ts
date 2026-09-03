@@ -158,7 +158,7 @@ export function commitImport(
       .insert(schema.importBatches)
       .values({
         source: "csv",
-        filename: opts.filename,
+        label: opts.filename,
         snapshotPath: snapshot.snapshotPath,
         snapshotWarning: warnings.length > 0 ? warnings.join(" ") : null,
         transactionCount: 0,
