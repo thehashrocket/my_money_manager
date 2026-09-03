@@ -9,7 +9,11 @@ import {
   findLinkedTransferPairs,
 } from "@/lib/simplefin/sync";
 import { findLastSyncBatch } from "@/lib/simplefin/undoSync";
-import { daysAgoIso } from "@/lib/now";
+import { daysAgoIso, formatLocalDateTime, toLocalIso } from "@/lib/now";
+import {
+  classifyBalanceFreshness,
+  type BalanceFreshness,
+} from "@/lib/simplefin/balanceFreshness";
 import { SyncButton } from "./SyncButton";
 import { ActionForm } from "./ActionForm";
 import {
@@ -41,6 +45,38 @@ export const dynamic = "force-dynamic";
  * eight months, which is the shape of a "catch up on a stale ledger" import.
  */
 const REVIEW_WINDOW_DAYS = 240;
+
+/** Minus sign, not hyphen — matches the tabular figures beside it. */
+function sign(cents: number): string {
+  return cents > 0 ? "+" : "−";
+}
+
+/**
+ * The one line of copy explaining the ledger-vs-bank number. A missing
+ * `balance-date` (SimpleFIN's `bankAsOfDate: null`) is inconclusive for a
+ * different reason than a merely-stale one — there's no date to say "isn't
+ * newer than" — so it gets its own wording rather than inheriting the
+ * dated-and-stale message.
+ */
+function describeDrift(
+  drift: number | null,
+  freshness: BalanceFreshness | null,
+): string {
+  if (drift === null) return "no bank figure to compare";
+  if (freshness?.state === "conclusive") {
+    return drift === 0
+      ? "matches the bank exactly"
+      : `drift ${sign(drift)}${formatCents(Math.abs(drift))} — a row is missing or duplicated, or the starting balance is wrong`;
+  }
+  if (freshness?.bankAsOfDate === null) {
+    return drift === 0
+      ? "matches for now — SimpleFIN reported no balance date for this account, so this can't be confirmed against your ledger"
+      : `differs by ${sign(drift)}${formatCents(Math.abs(drift))} — SimpleFIN reported no balance date for this account, so this can't be attributed to unreported activity or a ledger problem`;
+  }
+  return drift === 0
+    ? `matches for now — the bank's figure isn't newer than your newest ledger row (${freshness?.ledgerAsOfDate}), so this could still be missing today's activity`
+    : `differs by ${sign(drift)}${formatCents(Math.abs(drift))} — the bank's figure isn't newer than your newest ledger row (${freshness?.ledgerAsOfDate}), so some or all of this is activity it hasn't reported yet`;
+}
 
 export default function SyncPage() {
   const accounts = db.select().from(schema.accounts).all();
@@ -269,9 +305,7 @@ async function RemoteSections({ host }: { host: string | null }) {
 
   const accounts = db.select().from(schema.accounts).all();
   const accountsById = new Map(accounts.map((a) => [a.id, a]));
-  const ledgerByAccountId = new Map(
-    loadAccountBalances().map((b) => [b.id, b.balanceCents]),
-  );
+  const ledgerByAccountId = new Map(loadAccountBalances().map((b) => [b.id, b]));
 
   return (
     <>
@@ -356,8 +390,10 @@ async function RemoteSections({ host }: { host: string | null }) {
       <section className="space-y-3">
         <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Balance check</h2>
         <p className="text-sm text-muted-foreground">
-          The bank&apos;s own figure against the one this ledger computes. Any
-          drift means a row is missing or duplicated.
+          The bank&apos;s own figure against the one this ledger computes. A
+          difference means a row is missing or duplicated — but only once the
+          bank&apos;s figure is newer than your newest row, so its as-of time is
+          shown alongside it.
         </p>
         {remote.length === 0 ? (
           <p className="rounded-md border border-border p-4 text-sm text-muted-foreground">
@@ -374,16 +410,25 @@ async function RemoteSections({ host }: { host: string | null }) {
                 const local = accountsById.get(r.linkedAccountId!);
                 const ledger = ledgerByAccountId.get(r.linkedAccountId!) ?? null;
                 const drift =
-                  ledger !== null && r.balanceCents !== null
-                    ? ledger - r.balanceCents
+                  ledger && r.balanceCents !== null
+                    ? ledger.balanceCents - r.balanceCents
                     : null;
+                // The feed's instant collapsed to a local calendar date, so it
+                // is comparable with the ledger's date-only rows.
+                const bankAsOf = r.balanceDate ? new Date(r.balanceDate) : null;
+                const freshness = ledger
+                  ? classifyBalanceFreshness(
+                      bankAsOf ? toLocalIso(bankAsOf) : null,
+                      ledger.ledgerAsOfDate,
+                    )
+                  : null;
                 return (
                   <li key={r.simplefinAccountId} className="px-4 py-3 text-sm">
                     <div className="flex flex-wrap items-baseline justify-between gap-2">
                       <span className="font-medium">{local?.name ?? r.name}</span>
                       <span className="font-mono [font-variant-numeric:tabular-nums] text-muted-foreground">
                         <span className="text-muted-foreground">ledger</span>{" "}
-                        {ledger !== null ? formatCents(ledger) : "—"}
+                        {ledger ? formatCents(ledger.balanceCents) : "—"}
                         <span className="ml-3 text-muted-foreground">bank</span>{" "}
                         {r.balanceCents !== null ? formatCents(r.balanceCents) : "—"}
                       </span>
@@ -393,23 +438,30 @@ async function RemoteSections({ host }: { host: string | null }) {
                         className={
                           drift === null
                             ? "text-muted-foreground"
-                            : drift === 0
-                              ? "text-emerald-700 dark:text-emerald-400"
-                              : "font-medium text-amber-700 dark:text-amber-400"
+                            : freshness?.state === "conclusive"
+                              ? drift === 0
+                                ? "text-emerald-700 dark:text-emerald-400"
+                                : "font-medium text-amber-700 dark:text-amber-400"
+                              : // Not an alarm: the ledger isn't accused of
+                                // anything until the bank figure can settle it —
+                                // including a coincidental zero, which a stale
+                                // figure can't actually confirm.
+                                "text-muted-foreground"
                         }
                       >
-                        {drift === null
-                          ? "no bank figure to compare"
-                          : drift === 0
-                            ? "matches the bank exactly"
-                            : `drift ${drift > 0 ? "+" : "−"}${formatCents(Math.abs(drift))} — a row is missing or duplicated, or the starting balance is wrong`}
+                        {describeDrift(drift, freshness)}
                       </span>
-                      {r.availableBalanceCents !== null &&
-                        r.availableBalanceCents !== r.balanceCents && (
-                          <span className="text-muted-foreground [font-variant-numeric:tabular-nums]">
-                            available {formatCents(r.availableBalanceCents)}
+                      <span className="text-muted-foreground [font-variant-numeric:tabular-nums]">
+                        {r.availableBalanceCents !== null &&
+                          r.availableBalanceCents !== r.balanceCents && (
+                            <>available {formatCents(r.availableBalanceCents)}</>
+                          )}
+                        {bankAsOf && (
+                          <span className="ml-3">
+                            bank figure as of {formatLocalDateTime(bankAsOf)}
                           </span>
                         )}
+                      </span>
                     </div>
                   </li>
                 );
