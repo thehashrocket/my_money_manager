@@ -555,3 +555,41 @@ pass. What's below is what's left — informational, not blocking, none of it co
   current ~1200-row scale — only worth an index if the ledger grows by orders of
   magnitude. The `autoCategorized`/`pairsLinked` queries could also collapse into one
   `COUNT(category_id)`/`COUNT(transfer_pair_id)` statement instead of two scans.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-03, debug-sync-balance-check)
+
+Deferred from this branch's pre-landing review (testing + maintainability specialists).
+Both are pre-existing patterns the new `validateUpdateAnchorInput.ts` deliberately
+mirrors from `validateCreateAccountInput.ts` rather than new bugs this branch
+introduces; the one live UI entry point (`<input type="date">`) already blocks the
+malformed case in every normal browser.
+
+- [ ] **P3** — `validateUpdateAnchorInput.ts` and `validateCreateAccountInput.ts` both
+  validate `startingBalanceDate` with `/^\d{4}-\d{2}-\d{2}$/`, which accepts a
+  syntactically-shaped but calendar-invalid date like `2026-13-40`. Because
+  `loadAccountBalances` compares dates with `gt(transactions.date, account.startingBalanceDate)`
+  as a plain SQLite TEXT (lexicographic) comparison, an anchor date like `2026-13-40`
+  sorts after every real `2026-0X-XX`/`2026-1X-XX` date, so the `WHERE` clause would
+  match zero rows and silently drop the account's entire imported history out of
+  `balanceCents`. Fix: tighten both schemas to reject calendar-invalid dates (e.g. round-trip
+  through `Date.parse` or add `z.iso.date()` if available), and add a regression test to
+  each validator's suite.
+
+- [ ] **P3** — `validateUpdateAnchorInput.ts`'s `startingBalance` bounds
+  (`.min(-1_000_000).max(100_000_000)`) and date regex are copy-pasted verbatim from
+  `validateCreateAccountInput.ts` rather than shared, even though the new file's own
+  docstring warns that letting the two paths disagree about what's a legal anchor "is
+  how one of them becomes the bug." Fix: extract a shared schema (e.g.
+  `src/lib/import/accountAnchorFields.ts`) and have both validators import it.
+
+- [ ] **P3** — `updateAccountAnchorAction` (`src/app/import/actions.ts`) has no
+  stale-write guard: two tabs open on `/import`, both saving an edit to the same
+  account's anchor, race on a plain `WHERE id = accountId` UPDATE — the second save
+  silently overwrites the first with whatever values that tab loaded, no conflict
+  surfaced. Flagged by the Codex adversarial pass as P1; downgraded here because no
+  other action in this codebase guards against stale concurrent writes (not even the
+  pre-existing `createAccountAction`), so fixing only this one action would be a new,
+  inconsistently-applied pattern for a race that needs two simultaneous tabs in a
+  single-user local app. Fix, if ever needed: compare a hidden `updatedAt` field
+  against the row's current value in the `WHERE` clause and surface a "someone else
+  changed this" error on mismatch.

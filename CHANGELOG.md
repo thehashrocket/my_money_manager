@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-09-03
+## [0.11.0] - 2026-09-03
+
+_The `/sync` balance check could only say one thing about a difference: "a row is missing or duplicated." That was wrong whenever the bank's own figure was simply out of date — measured once at +$893.84 of "drift" that was really just a day of activity the bank hadn't reported yet. This release teaches the check to tell the two apart, and gives you a way to fix the one thing that was making the ledger-side comparison untrustworthy in the first place._
+
+### Added
+- **The balance check on `/sync` now distinguishes a real discrepancy from a stale bank figure.** A difference is only reported as "a row is missing or duplicated" once the bank's own figure is dated *after* your newest ledger row — same-day or older figures are shown as unconfirmed instead, alongside the bank figure's as-of date, rather than accusing the ledger of corruption it doesn't have. A bank figure with no date at all is now called out separately, since that's a different reason to withhold judgment than simply being old.
+- **A wrong starting-balance anchor no longer needs raw SQL to fix.** Each account on `/import` has an inline "start [balance] on [date] Save" form — the only way back once an anchor is set too late, since a CSV import can only ever move it forward. The date is capped at today and any future date is rejected outright, since an anchor dated ahead of every real transaction would exclude your entire imported history from the balance and permanently silence the drift check in the same stroke.
 
 _Stabilization pass ahead of loading the real ledger — see `docs/plans/load-the-ledger.md`. Three defects, all of which only bite on real data, plus the doc drift that hid the first one; a pre-landing review then found six more, all silent-corruption paths reachable during the same migrate-then-backfill sequence this pass exists to make safe._
 
