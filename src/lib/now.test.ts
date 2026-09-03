@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { currentMonth, todayIso, daysAgoIso } from "./now";
+import {
+  currentMonth,
+  todayIso,
+  daysAgoIso,
+  toLocalIso,
+  formatLocalDateTime,
+} from "./now";
 
 const ORIGINAL_TZ = process.env.TZ;
 
@@ -65,6 +71,36 @@ describe("now.ts", () => {
 
     it("daysAgoIso crosses back into the prior year", () => {
       expect(daysAgoIso(5)).toBe("2026-12-27");
+    });
+  });
+
+  describe("toLocalIso / formatLocalDateTime on a supplied instant", () => {
+    // These take a Date rather than reading the clock: the caller is a bank
+    // feed's `balance-date`, not "now".
+    const BANK_AS_OF = new Date("2026-09-02T16:52:02Z");
+
+    it("collapses a UTC instant to the local PT calendar date", () => {
+      setTz("America/Los_Angeles");
+      expect(toLocalIso(BANK_AS_OF)).toBe("2026-09-02");
+      expect(formatLocalDateTime(BANK_AS_OF)).toBe("2026-09-02 09:52");
+    });
+
+    it("gives the same instant a different local date across the day boundary", () => {
+      // 2026-09-03T02:30Z is still the 2nd in PT. Comparing this against
+      // date-only ledger rows via `.toISOString()` would read the 3rd and call
+      // a stale bank figure current.
+      const lateEvening = new Date("2026-09-03T02:30:00Z");
+      setTz("America/Los_Angeles");
+      expect(toLocalIso(lateEvening)).toBe("2026-09-02");
+      setTz("UTC");
+      expect(toLocalIso(lateEvening)).toBe("2026-09-03");
+    });
+
+    it("zero-pads single-digit months, days, hours and minutes", () => {
+      setTz("UTC");
+      expect(formatLocalDateTime(new Date("2026-01-05T04:07:00Z"))).toBe(
+        "2026-01-05 04:07",
+      );
     });
   });
 

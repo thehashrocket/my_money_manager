@@ -17,9 +17,30 @@ export function currentMonth(now: Date = new Date()): YearMonth {
   return { year: now.getFullYear(), month: now.getMonth() + 1 };
 }
 
-function toLocalIso(d: Date): string {
-  const pad = (n: number) => n.toString().padStart(2, "0");
+function pad(n: number): string {
+  return n.toString().padStart(2, "0");
+}
+
+/**
+ * A `Date` rendered as its LOCAL calendar date, `YYYY-MM-DD`.
+ *
+ * Exported because comparing a bank-supplied instant against a ledger date
+ * needs exactly this conversion: transactions are stored as local calendar
+ * dates (CLAUDE.md, "Conventions"), so an instant has to be collapsed the same
+ * way before the two can be ordered. `.toISOString().slice(0, 10)` is the wrong
+ * tool — it renders the UTC date, which is off by one for any local evening.
+ */
+export function toLocalIso(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * A `Date` rendered as local `YYYY-MM-DD HH:mm`, for displaying a timestamp
+ * the app did not generate (a feed's `balance-date`). Minute precision: the
+ * question it answers is "how stale is this", not "exactly when".
+ */
+export function formatLocalDateTime(d: Date): string {
+  return `${toLocalIso(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 export function todayIso(now: Date = new Date()): string {
