@@ -129,6 +129,12 @@ export default async function ImportPage() {
               placeholder="0.00"
               className="w-full rounded-md border border-zinc-300 px-3 py-2"
             />
+            <span className="mt-1 block text-xs font-normal text-zinc-500">
+              The balance at the <em>close</em> of the starting balance date —
+              not necessarily today&apos;s balance. A CSV import re-derives this
+              from the file&apos;s running Balance column, so a rough figure is
+              fine.
+            </span>
           </label>
           <label className="block text-sm sm:col-span-1">
             <span className="block mb-1 font-medium">Starting balance date</span>
@@ -139,6 +145,12 @@ export default async function ImportPage() {
               defaultValue={today}
               className="w-full rounded-md border border-zinc-300 px-3 py-2"
             />
+            <span className="mt-1 block text-xs font-normal text-zinc-500">
+              Transactions dated <em>after</em> this day are summed onto the
+              starting balance; anything on or before it counts as already
+              included. Set it on or before your CSV&apos;s earliest row —
+              dating it today leaves the entire import out of your balance.
+            </span>
           </label>
           <div className="sm:col-span-2">
             <button
