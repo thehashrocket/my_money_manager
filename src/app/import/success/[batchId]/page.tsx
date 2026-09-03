@@ -102,7 +102,7 @@ export default async function SuccessPage({
             <dt className="text-[10px] uppercase tracking-wide text-zinc-500">
               {anchored.name} starting balance
             </dt>
-            <dd className="text-sm">
+            <dd className="font-mono text-sm [font-variant-numeric:tabular-nums]">
               {formatCents(anchored.startingBalanceCents)} as of{" "}
               {anchored.startingBalanceDate}
             </dd>

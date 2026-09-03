@@ -121,8 +121,11 @@ export const transactions = sqliteTable(
     amountCents: integer("amount_cents").notNull(),
     // Star One's running account balance immediately after this row, straight
     // from the CSV's Balance column. NULL on SimpleFIN rows (the feed reports a
-    // balance per account, not per transaction) and on pending CSV rows (the
-    // bank leaves the column blank until the row posts). Not used for display:
+    // balance per account, not per transaction), and NULL *or 0* on pending CSV
+    // rows — Star One leaves the cell blank or zero until the row posts, and
+    // parseCsv keys `isPending` on exactly that pair. Also NULL on any posted
+    // row whose Balance cell does not parse. Derivation filters on `isPending`
+    // first, so the 0 case never enters a chain. Not used for display:
     // it exists so an import can derive a real starting-balance anchor for the
     // account instead of leaving it at the fabricated 0 that makes every
     // displayed balance a net-change-since-signup figure.

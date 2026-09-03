@@ -1,4 +1,3 @@
-import { eq } from "drizzle-orm";
 import type { ExtractTablesWithRelations } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { schema } from "@/db";
@@ -23,9 +22,13 @@ type Db = BaseSQLiteDatabase<
  * Tie-breaker (plan Pass 7): ORDER BY priority DESC, updated_at DESC — the
  * most recently updated rule wins at equal priority.
  *
- * Exact matches take the fast path via SQL equality; `contains` and `regex`
- * rules fall back to an in-memory scan (the rules table stays small — dozens,
- * maybe hundreds — and this only runs at import + explicit categorize time).
+ * All match types resolve the same way: the rules table is read in full and
+ * scanned in rank order (it stays small — dozens, maybe hundreds). There is no
+ * SQL-equality fast path for exact matches.
+ *
+ * One-shot form. There are no production callers; both write paths use
+ * `buildRuleMatcher` directly. Kept as the single-merchant convenience the
+ * rule-matching tests are written against.
  */
 export function applyRuleAtImport(
   db: Db,

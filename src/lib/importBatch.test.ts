@@ -443,6 +443,7 @@ describe("commitImport — auto-categorization", () => {
   const COFFEE_MERCHANT = transformRow(
     row({ rawMemo: COFFEE.memo }),
   ).normalizedMerchant;
+  const GAS_MERCHANT = transformRow(row({ rawMemo: GAS.memo })).normalizedMerchant;
 
   beforeEach(() => {
     handle = createTestDb();
@@ -528,14 +529,23 @@ describe("commitImport — auto-categorization", () => {
   });
 
   it("resolves through contains and regex rules, not just exact ones", () => {
+    const regexCategoryId = categoryByName("Groceries");
     handle.db
       .insert(schema.categoryRules)
-      .values({
-        categoryId,
-        matchType: "contains",
-        matchValue: "STARBUCKS",
-        source: "manual",
-      })
+      .values([
+        {
+          categoryId,
+          matchType: "contains",
+          matchValue: "STARBUCKS",
+          source: "manual",
+        },
+        {
+          categoryId: regexCategoryId,
+          matchType: "regex",
+          matchValue: `^${GAS_MERCHANT}$`,
+          source: "manual",
+        },
+      ])
       .run();
 
     commitImport(
@@ -547,8 +557,9 @@ describe("commitImport — auto-categorization", () => {
     expect(
       rows.find((r) => r.normalizedMerchant === COFFEE_MERCHANT)?.categoryId,
     ).toBe(categoryId);
-    expect(rows.find((r) => r.normalizedMerchant !== COFFEE_MERCHANT)?.categoryId)
-      .toBeNull();
+    expect(
+      rows.find((r) => r.normalizedMerchant === GAS_MERCHANT)?.categoryId,
+    ).toBe(regexCategoryId);
   });
 
   it("honours rule priority for a row two rules both match", () => {

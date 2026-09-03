@@ -34,7 +34,10 @@ export type ImportPreviewRow = {
   cardLastFour: string | null;
   bankTransactionNumber: string;
   importRowHash: string;
-  /** Star One's running balance after this row. Null on pending rows. */
+  /**
+   * Star One's running balance after this row. Null or 0 on pending rows, null
+   * on any posted row whose Balance cell does not parse.
+   */
   balanceCents: number | null;
   isPending: boolean;
   duplicate: boolean;
@@ -413,15 +416,22 @@ export function linkTransferPairs(batchId: number, db: Db = defaultDb): number {
 
   const pairs = findTransferPairs(candidates);
 
-  for (const { a, b } of pairs) {
-    db.update(schema.transactions)
-      .set({ transferPairId: b.rowId })
-      .where(eq(schema.transactions.id, a.rowId))
-      .run();
-    db.update(schema.transactions)
-      .set({ transferPairId: a.rowId })
-      .where(eq(schema.transactions.id, b.rowId))
-      .run();
+  // One transaction, not two auto-commits per pair: each bare .run() is a
+  // separate WAL commit with its own fsync on a synchronous driver that blocks
+  // the event loop. Mirrors linkTransfersByBucket in simplefin/sync.ts.
+  if (pairs.length > 0) {
+    db.transaction((tx) => {
+      for (const { a, b } of pairs) {
+        tx.update(schema.transactions)
+          .set({ transferPairId: b.rowId })
+          .where(eq(schema.transactions.id, a.rowId))
+          .run();
+        tx.update(schema.transactions)
+          .set({ transferPairId: a.rowId })
+          .where(eq(schema.transactions.id, b.rowId))
+          .run();
+      }
+    });
   }
 
   return pairs.length;
