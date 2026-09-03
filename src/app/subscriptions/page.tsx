@@ -1,6 +1,7 @@
 import { connection } from "next/server";
 import { loadSubscriptions } from "@/lib/subscriptions/loadSubscriptions";
 import { formatCents } from "@/lib/money";
+import { todayIso } from "@/lib/now";
 import {
   dismissSubscriptionAction,
   restoreSubscriptionAction,
@@ -88,7 +89,7 @@ function SubscriptionRow({
   dismissAction: (formData: FormData) => Promise<void>;
   dismissLabel?: string;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIso();
   const daysUntil = Math.round(
     (Date.parse(sub.nextExpectedDate) - Date.parse(today)) / 86_400_000,
   );

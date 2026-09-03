@@ -9,19 +9,20 @@ import type { ParsedRow } from "./parseCsv";
 // which does not exist in the test environment — stubbed the same way
 // `src/lib/simplefin/sync.test.ts` stubs it, so these tests can drive the
 // `consistent`/`degradedReason` branch without touching disk.
-const { createSnapshotMock } = vi.hoisted(() => ({
+const { createSnapshotMock, pruneSnapshotsMock } = vi.hoisted(() => ({
   createSnapshotMock: vi.fn(() => ({
     snapshotPath: "/tmp/money.db.pre-import-TEST",
     timestamp: "TEST",
     consistent: true,
     degradedReason: null as string | null,
   })),
+  pruneSnapshotsMock: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
 }));
 
 vi.mock("./snapshot", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./snapshot")>()),
   createSnapshot: createSnapshotMock,
-  pruneSnapshots: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
+  pruneSnapshots: pruneSnapshotsMock,
 }));
 
 const STAR_ONE_CSV = [
@@ -188,5 +189,34 @@ describe("commitImport", () => {
     if (result.status !== "committed") throw new Error("unreachable");
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]).not.toMatch(/\(null\)|\(\)/);
+  });
+
+  // Docker PR review finding: commitImport used to cache DB_PATH/SNAPSHOT_DIR
+  // in module-level consts computed once at import time, unlike every other
+  // paths.ts consumer (see src/lib/paths.test.ts — "reads process.env at call
+  // time, no module-level caching"). A snapshot that silently landed back on
+  // DATA_DIR instead of the SNAPSHOT_DIR bind mount would defeat the entire
+  // point of splitting them (CLAUDE.md's Docker section: snapshots must
+  // survive `docker compose down -v`).
+  it("passes the current SNAPSHOT_DIR (not DATA_DIR) to createSnapshot/pruneSnapshots", async () => {
+    process.env.DATA_DIR = "/tmp/mm-test-data";
+    process.env.SNAPSHOT_DIR = "/tmp/mm-test-backups";
+    try {
+      const { dbPath, snapshotDir } = await import("./paths");
+      createSnapshotMock.mockClear();
+      pruneSnapshotsMock.mockClear();
+
+      commitImport(
+        { accountId, filename: "test.csv", csvText: STAR_ONE_CSV },
+        handle.db,
+      );
+
+      expect(createSnapshotMock).toHaveBeenCalledWith(dbPath(), snapshotDir());
+      expect(pruneSnapshotsMock).toHaveBeenCalledWith(snapshotDir());
+      expect(snapshotDir()).not.toBe(dbPath());
+    } finally {
+      delete process.env.DATA_DIR;
+      delete process.env.SNAPSHOT_DIR;
+    }
   });
 });

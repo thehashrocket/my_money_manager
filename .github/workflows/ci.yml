@@ -16,9 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # No `version:` input: package.json's "packageManager" field (added for
+      # Dockerfile corepack determinism) already pins pnpm@10.32.1, and
+      # pnpm/action-setup@v4 reads that on its own. Specifying both throws
+      # "Multiple versions of pnpm specified" and fails the job outright.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v5
         with:
@@ -34,3 +36,135 @@ jobs:
       - run: pnpm db:migrate
 
       - run: pnpm build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # No `version:` input: package.json's "packageManager" field (added for
+      # Dockerfile corepack determinism) already pins pnpm@10.32.1, and
+      # pnpm/action-setup@v4 reads that on its own. Specifying both throws
+      # "Multiple versions of pnpm specified" and fails the job outright.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      # db:export/db:import/seed-volume shell out to `docker` and import
+      # this repo's own src/lib modules directly (Node 24 strips TS types
+      # natively) — installing here gives them the same node_modules the
+      # `docker` CLI commands below don't need but these scripts do.
+      - run: pnpm install --frozen-lockfile
+
+      - name: docker compose build
+        run: docker compose build
+
+      # Must run before ANY docker compose/run command that starts a
+      # container from the `app` service definition — including
+      # db:seed-volume's own verification step below, which does exactly
+      # that. Starting a container materializes every bind mount the
+      # service declares (not just the volume actually being used), and on
+      # real Linux hosts (this runner included) a missing bind-mount host
+      # directory gets auto-created root-owned. Creating it ourselves
+      # first, as the runner's own user, avoids that path entirely — this
+      # was originally placed after db:seed-volume and failed with `chmod:
+      # changing permissions of 'backups': Operation not permitted` because
+      # seed-volume's own docker compose run had already raced it into
+      # existence as root.
+      #
+      # `chmod 777` rather than `chown` to a single uid: TWO different
+      # principals need write access to this directory for different
+      # reasons — the container's `node` user (uid 1000) writing snapshots,
+      # and the host-side CI runner process writing/unlinking during
+      # `docker compose cp`'s copy-out (`pnpm db:export`). Chowning to
+      # 1000:1000 fixes the first and breaks the second (confirmed:
+      # `unlinkat ...: permission denied` from the runner's own non-1000
+      # user on an earlier attempt at this fix). `sudo` on both commands is
+      # defensive: harmless if the directory doesn't exist yet or is
+      # already runner-owned, necessary if some future step's ordering
+      # again lets Docker create it as root first.
+      - name: prepare ./backups (Linux bind-mount permissions)
+        run: sudo mkdir -p backups && sudo chmod 777 backups
+
+      # Seeded BEFORE the container ever starts: db:seed-volume refuses a
+      # volume that already has a money.db, so this has to run first. A test
+      # account gives the later steps something real to verify (dashboard
+      # shows it, export/import round-trips it) instead of an empty ledger
+      # that would pass every check trivially.
+      - name: create a host db with one seed account
+        run: |
+          pnpm db:migrate
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database('data/money.db');
+            db.prepare(
+              'INSERT INTO accounts (name, type, starting_balance_cents, starting_balance_date) VALUES (?, ?, ?, ?)'
+            ).run('CI Seed Account', 'checking', 10000, '2026-01-01');
+            db.close();
+          "
+
+      - name: pnpm db:seed-volume
+        run: pnpm db:seed-volume
+
+      - name: docker compose up (no .env.local — SimpleFIN stays optional)
+        run: docker compose up -d
+
+      - name: wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q app)")
+            if [ "$status" = "healthy" ]; then
+              echo "healthy after $((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::container never became healthy"
+          docker compose logs app
+          exit 1
+
+      - name: dashboard shows the seeded account, not an empty ledger
+        run: curl -sf http://127.0.0.1:3000/ | grep -q "CI Seed Account"
+
+      # F20: the runner image has no src/ tree, so db:export's in-container
+      # half (snapshot-cli.mjs) only exists if the builder stage's esbuild
+      # step actually ran and produced it. This is the smoke test that
+      # catches a missing artifact at build time, not the first time a
+      # rollback is needed.
+      - name: pnpm db:export produces an openable snapshot
+        run: |
+          pnpm db:export
+          exported=$(ls -t backups/money.db.export-* | head -1)
+          node -e "
+            const Database = require('better-sqlite3');
+            const db = new Database(process.argv[1], { readonly: true });
+            db.prepare('select count(*) from accounts').get();
+            db.close();
+            console.log('opened OK:', process.argv[1]);
+          " "$exported"
+          echo "EXPORTED_SNAPSHOT=$exported" >> "$GITHUB_ENV"
+
+      # Round-trips the file db:export just produced: stops the container,
+      # restores it, restarts, and checks the seeded account survived —
+      # exercising db-import.mjs's real docker orchestration end to end, not
+      # just its pure guard functions (which the unit tests already cover).
+      - name: pnpm db:import round-trips the export
+        run: |
+          pnpm db:import "$EXPORTED_SNAPSHOT"
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q app)")
+            if [ "$status" = "healthy" ]; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3000/ | grep -q "CI Seed Account"
+
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs app
+
+      - name: teardown
+        if: always()
+        run: docker compose down -v

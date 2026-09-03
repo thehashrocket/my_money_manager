@@ -1,4 +1,3 @@
-import path from "node:path";
 import { and, eq, gte, inArray, isNull, isNotNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import {
@@ -6,6 +5,7 @@ import {
   pruneSnapshots,
   type SnapshotResult,
 } from "../snapshot";
+import { dbPath, snapshotDir } from "../paths";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
 import { contentSignature, mapTransaction, type MappedRow } from "./mapTransaction";
@@ -14,8 +14,6 @@ import { parseAmountToCents } from "./parseAmount";
 import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
-
-const DB_PATH = path.join(process.cwd(), "data", "money.db");
 
 /**
  * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
@@ -341,7 +339,7 @@ export async function syncSimpleFin(
   }
 
   // ---- write ----
-  const snapshot = createSnapshot(DB_PATH);
+  const snapshot = createSnapshot(dbPath(), snapshotDir());
   let snapshotWarning: string | null = null;
   if (!snapshot.consistent) {
     snapshotWarning = `The pre-sync snapshot fell back to a plain file copy${
@@ -397,7 +395,7 @@ export async function syncSimpleFin(
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
-  const pruned = pruneSnapshots(path.dirname(DB_PATH));
+  const pruned = pruneSnapshots(snapshotDir());
   if (pruned.failedPaths.length > 0) {
     warnings.push(
       `Could not delete ${pruned.failedPaths.length} old snapshot${

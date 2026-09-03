@@ -9,6 +9,7 @@ import {
   findLinkedTransferPairs,
 } from "@/lib/simplefin/sync";
 import { findLastSyncBatch } from "@/lib/simplefin/undoSync";
+import { daysAgoIso } from "@/lib/now";
 import { SyncButton } from "./SyncButton";
 import { ActionForm } from "./ActionForm";
 import {
@@ -32,10 +33,6 @@ export const dynamic = "force-dynamic";
  * they answer different questions.
  */
 const REVIEW_WINDOW_DAYS = 120;
-
-function daysAgoIso(days: number): string {
-  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-}
 
 export default function SyncPage() {
   const accounts = db.select().from(schema.accounts).all();

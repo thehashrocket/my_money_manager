@@ -1,6 +1,7 @@
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   statSync,
   unlinkSync,
@@ -10,6 +11,23 @@ import Database from "better-sqlite3";
 
 export const SNAPSHOT_RETENTION = 10;
 const SNAPSHOT_PREFIX = "money.db.pre-import-";
+/**
+ * A separate pool from SNAPSHOT_PREFIX, matching scripts/migrate.mjs's
+ * naming (CLAUDE.md rule 7) — used by docker/entrypoint.src.mjs, which
+ * snapshots on every container boot. Sharing the pre-import prefix would
+ * mean a restart-happy container (crash loop, `restart: unless-stopped`)
+ * competes with real CSV-import/sync snapshots for the same retention-of-10
+ * slots, silently evicting an actual rollback point a user might need.
+ */
+export const PRE_MIGRATE_PREFIX = "money.db.pre-migrate-";
+/**
+ * A third, separate pool for `pnpm db:export` (scripts/snapshot-cli.src.mjs).
+ * Without its own prefix, a deliberate export would land in — and later be
+ * silently evicted from — the same retention-of-10 pool that `commitImport`/
+ * `syncSimpleFin` prune automatically, indistinguishable from an ordinary
+ * pre-import snapshot. Nothing ever prunes this pool; it's cleaned up by hand.
+ */
+export const EXPORT_PREFIX = "money.db.export-";
 
 export type SnapshotResult = {
   snapshotPath: string;
@@ -34,10 +52,10 @@ function formatTimestamp(d: Date): string {
   );
 }
 
-export function listSnapshots(dataDir: string): string[] {
+export function listSnapshots(dataDir: string, prefix: string = SNAPSHOT_PREFIX): string[] {
   if (!existsSync(dataDir)) return [];
   const entries = readdirSync(dataDir)
-    .filter((name) => name.startsWith(SNAPSHOT_PREFIX))
+    .filter((name) => name.startsWith(prefix))
     .map((name) => ({
       name,
       full: path.join(dataDir, name),
@@ -49,14 +67,26 @@ export function listSnapshots(dataDir: string): string[] {
 
 export function createSnapshot(
   dbPath: string,
+  snapshotDir?: string,
   now: Date = new Date(),
+  prefix: string = SNAPSHOT_PREFIX,
 ): SnapshotResult {
   if (!existsSync(dbPath)) {
     throw new Error(`database file does not exist: ${dbPath}`);
   }
-  const dataDir = path.dirname(dbPath);
+  // Defaults to the db's own directory (today's behavior); callers that want
+  // snapshots split onto a separate volume (see src/lib/paths.ts) pass one.
+  const targetDir = snapshotDir ?? path.dirname(dbPath);
+  // A caller-supplied SNAPSHOT_DIR that doesn't exist yet would otherwise
+  // throw ENOENT here (both VACUUM INTO and the copyFileSync fallback need
+  // the directory to already exist) for the common case of a first run.
+  // Like the missing-dbPath check above, this still throws uncaught if it
+  // can't create the directory at all (e.g. a permission-denied bind mount)
+  // — that failure mode doesn't degrade to `consistent: false`, it aborts
+  // the caller, same as a missing source file does.
+  mkdirSync(targetDir, { recursive: true });
   const ts = formatTimestamp(now);
-  const snapshotPath = path.join(dataDir, `${SNAPSHOT_PREFIX}${ts}`);
+  const snapshotPath = path.join(targetDir, `${prefix}${ts}`);
 
   // The database runs in WAL mode (see src/db/index.ts), so committed
   // transactions can still live in money.db-wal and would be absent from a bare
@@ -95,7 +125,21 @@ export function createSnapshot(
   if (!consistent) {
     // Not a SQLite database, or VACUUM could not run. A plain copy of whatever
     // is there beats no snapshot at all — but the caller is told it degraded.
-    copyFileSync(dbPath, snapshotPath);
+    // This fallback can itself fail (e.g. the exact EACCES-on-bind-mount
+    // scenario that just made VACUUM INTO fail) — caught here rather than
+    // left to throw uncaught, since docker/entrypoint.src.mjs calls this on
+    // every container boot with no surrounding try/catch of its own.
+    try {
+      copyFileSync(dbPath, snapshotPath);
+    } catch (err) {
+      const copyReason = err instanceof Error ? err.message : String(err);
+      return {
+        snapshotPath,
+        timestamp: ts,
+        consistent: false,
+        degradedReason: `VACUUM INTO failed (${degradedReason}), and the fallback copy also failed (${copyReason})`,
+      };
+    }
   }
 
   return { snapshotPath, timestamp: ts, consistent, degradedReason };
@@ -116,10 +160,11 @@ export function createSnapshot(
 export function pruneSnapshots(
   dataDir: string,
   retention: number = SNAPSHOT_RETENTION,
+  prefix: string = SNAPSHOT_PREFIX,
 ): { prunedPaths: string[]; failedPaths: string[] } {
   const prunedPaths: string[] = [];
   const failedPaths: string[] = [];
-  for (const p of listSnapshots(dataDir).slice(retention)) {
+  for (const p of listSnapshots(dataDir, prefix).slice(retention)) {
     try {
       unlinkSync(p);
       prunedPaths.push(p);

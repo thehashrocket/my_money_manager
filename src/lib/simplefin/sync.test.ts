@@ -19,7 +19,7 @@ import { setAccountLink } from "./link";
  * are stubbed: these tests need no network, no SIMPLEFIN_ACCESS_URL and no
  * data/money.db on disk.
  */
-const { fetchAccountsMock, createSnapshotMock } = vi.hoisted(() => ({
+const { fetchAccountsMock, createSnapshotMock, pruneSnapshotsMock } = vi.hoisted(() => ({
   fetchAccountsMock: vi.fn(),
   createSnapshotMock: vi.fn(() => ({
     snapshotPath: "/tmp/money.db.pre-import-TEST",
@@ -28,6 +28,7 @@ const { fetchAccountsMock, createSnapshotMock } = vi.hoisted(() => ({
     consistent: true,
     degradedReason: null as string | null,
   })),
+  pruneSnapshotsMock: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
 }));
 
 vi.mock("./accessUrl", async (importOriginal) => {
@@ -53,7 +54,7 @@ vi.mock("./client", async (importOriginal) => ({
 vi.mock("../snapshot", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../snapshot")>()),
   createSnapshot: createSnapshotMock,
-  pruneSnapshots: vi.fn(() => ({ prunedPaths: [], failedPaths: [] })),
+  pruneSnapshots: pruneSnapshotsMock,
 }));
 
 
@@ -278,6 +279,33 @@ describe("syncSimpleFin dedup", () => {
     expect(outcome).toEqual({ status: "no-linked-accounts" });
     expect(fetchAccountsMock).not.toHaveBeenCalled();
     expect(createSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  // Docker PR review finding: syncSimpleFin used to cache DB_PATH/SNAPSHOT_DIR
+  // in module-level consts computed once at import time, unlike every other
+  // paths.ts consumer (see src/lib/paths.test.ts — "reads process.env at call
+  // time, no module-level caching"). A snapshot that silently landed back on
+  // DATA_DIR instead of the SNAPSHOT_DIR bind mount would defeat the entire
+  // point of splitting them (CLAUDE.md's Docker section: snapshots must
+  // survive `docker compose down -v`).
+  it("passes the current SNAPSHOT_DIR (not DATA_DIR) to createSnapshot/pruneSnapshots", async () => {
+    process.env.DATA_DIR = "/tmp/mm-test-data";
+    process.env.SNAPSHOT_DIR = "/tmp/mm-test-backups";
+    try {
+      const { dbPath, snapshotDir } = await import("../paths");
+      pruneSnapshotsMock.mockClear();
+      seedAccount({ simplefinAccountId: "ACT-1" });
+      respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+      await syncSimpleFin({ now: NOW }, handle.db);
+
+      expect(createSnapshotMock).toHaveBeenCalledWith(dbPath(), snapshotDir());
+      expect(pruneSnapshotsMock).toHaveBeenCalledWith(snapshotDir());
+      expect(snapshotDir()).not.toBe(dbPath());
+    } finally {
+      delete process.env.DATA_DIR;
+      delete process.env.SNAPSHOT_DIR;
+    }
   });
 });
 

@@ -37,6 +37,7 @@ drizzle/           Migration output (committed)
 data/             money.db + pre-import snapshots (gitignored)
 .context/         Design artifacts, CSV samples, deltas (gitignored)
 design_handoff_nav_and_design_system/  Live HTML design specimens + README
+docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuild-bundled, gitignored)
 ```
 
 ## Scripts
@@ -48,6 +49,19 @@ design_handoff_nav_and_design_system/  Live HTML design specimens + README
 - `pnpm db:studio` — Drizzle Studio GUI
 - `pnpm simplefin:claim` — one-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`)
 - `pnpm simplefin:sample` — dump a live `/accounts` payload to `.context/simplefin-sample.json` for analysis
+
+## Docker (SQLite still — no Postgres yet)
+
+`docker compose up` is a second way to run the app, alongside `pnpm dev`, not a replacement — see `docs/plans/dockerize-postgres.md` for the staged Postgres migration this sets up. The ledger lives in a named volume (`mm_data:/app/data`), not a bind mount: SQLite WAL-mode locking over VirtioFS/gRPC-FUSE (macOS bind mounts) is a known corruption hazard class, so `money.db` isn't directly visible on the host under Docker the way it is under `pnpm dev`. Snapshots land on a separate bind mount (`./backups`, `SNAPSHOT_DIR=/app/backups` in `compose.yaml`) so they survive `docker compose down -v`.
+
+- `pnpm db:seed-volume` — **run once, before the first `docker compose up`.** Copies `./data/money.db` into the (currently empty) volume via `createSnapshot`'s `VACUUM INTO`, never a bare `cp` — the host DB runs in WAL mode, and a plain copy can silently drop rows still in `money.db-wal`. Refuses (rather than overwrites) if the volume already has a `money.db`.
+- `pnpm db:export` — snapshots the running container's ledger (via `docker compose exec` + the bundled `scripts/snapshot-cli.mjs`) and copies the result to `./backups/`. Refuses to copy out a degraded (`consistent: false`) snapshot. Uses its own `EXPORT_PREFIX` (`src/lib/snapshot.ts`), not the pre-import prefix rule 5's automatic snapshots use — sharing a prefix would put a deliberate manual backup in the same retention-of-10 pool `commitImport`/`syncSimpleFin` auto-prune, so it could be silently evicted by ordinary use. Nothing prunes the export pool automatically.
+- `pnpm db:import <file>` — stops the container, restores a snapshot file (must have no `-wal` sidecar — see rule 5), restarts.
+- `docker/entrypoint.mjs` and `scripts/snapshot-cli.mjs` are gitignored **build artifacts**: the runner image has no `src/` tree and no devDependencies, so they can't stay thin wrappers around `src/lib/snapshot.ts`/`src/lib/paths.ts`. `scripts/build-docker-artifacts.mjs` (esbuild, `better-sqlite3` external) bundles `docker/entrypoint.src.mjs` and `scripts/snapshot-cli.src.mjs` into them during the Docker builder stage — edit the `.src.mjs` files, not the generated ones.
+- The container refuses to boot without `TZ` set (`compose.yaml` sets `America/Los_Angeles`) — the app derives the current budget month from local time (`src/lib/now.ts`), and Docker's default `TZ=UTC` would silently compute the wrong month for part of every day.
+- The published port is loopback-only (`127.0.0.1:3000:3000`): this app has no auth, so binding `0.0.0.0` would make the ledger LAN-readable.
+- **On real Linux hosts (confirmed via CI, not just theorized), `./backups` needs its permissions fixed BEFORE the first `docker compose run`/`up` of any kind — including `pnpm db:seed-volume`, which starts one itself.** It's a bind mount, and Docker on native Linux auto-creates a missing bind-mount host directory as root-owned; the Dockerfile's `chown` only affects the image filesystem, which the bind mount then shadows. Without this, the container's unprivileged `node` user gets `EACCES` on its first snapshot write and never becomes healthy. Fix: `sudo mkdir -p ./backups && sudo chmod 777 ./backups` on the host, first — before `db:seed-volume`, not after. `chmod`, not `chown` to a single uid: two different principals need write access to this same host directory — the container's `node` user (uid 1000) writing snapshots, and `pnpm db:export` running on the **host** (a different user entirely) copying them out via `docker compose cp`.
+  This took three attempts to get right, each confirmed against a real CI failure (Ubuntu; macOS Docker Desktop's more permissive bind-mount layer never surfaced any of it): (1) no permissions step at all → `EACCES` on the container's snapshot write; (2) `chown 1000:1000` → fixed the container's write, broke the host's own `docker compose cp` copy-out (`unlinkat ...: permission denied`, since the CI runner user isn't uid 1000); (3) `chmod 777`, but placed *after* `db:seed-volume` → `db:seed-volume`'s own verification step starts a container from the full `app` service definition, materializing (and root-owning) the bind mount before the `chmod` step ever got a turn (`chmod: changing permissions of 'backups': Operation not permitted`). CI's `docker` job runs the corrected `sudo mkdir`/`sudo chmod` step first, before anything else touches Docker.
 
 ## Core rules baked into the data model
 
@@ -100,7 +114,7 @@ Constraints that are properties of the feed, not choices:
 
 ## What's NOT in V1 — do not add
 
-Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Deployment. Tests for UI components (categorization logic only).
+Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Cloud/NAS hosting (Docker exists for local self-hosting only — see `docs/plans/dockerize-postgres.md`, PR3). Tests for UI components (categorization logic only).
 
 CI (lint + test + build on PR) is in via `.github/workflows/ci.yml` — gates merges into `main`.
 

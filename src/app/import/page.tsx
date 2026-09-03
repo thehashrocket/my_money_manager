@@ -1,10 +1,18 @@
+import { connection } from "next/server";
 import { db, schema } from "@/db";
 import { formatCents } from "@/lib/money";
+import { todayIso } from "@/lib/now";
 import { createAccountAction, uploadCsvAction } from "./actions";
 
-export default function ImportPage() {
+export default async function ImportPage() {
+  // Without this, Next 16 prerenders the route at build time. On the host
+  // that only freezes the starting-balance date default; inside the Docker
+  // builder stage it is worse — `.dockerignore` excludes `data/`, so the
+  // better-sqlite3 query below throws `SQLITE_CANTOPEN` and the image build
+  // fails outright (see docs/plans/dockerize-postgres.md, F13).
+  await connection();
   const accounts = db.select().from(schema.accounts).all();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayIso();
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-10">

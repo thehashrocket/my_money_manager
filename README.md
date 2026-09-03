@@ -2,7 +2,7 @@
 
 Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** v0.8.3. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.9.0. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank; `/import` still handles anything the feed's 45-day window no longer reaches. The app also runs in Docker now (still on SQLite — see the [Docker](#docker) section below). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
@@ -13,7 +13,7 @@ Local-first, single-user personal budgeting app for Star One Credit Union (check
 - **Vitest** for parser/categorization/sync unit tests · GitHub Actions runs lint + test + build on every PR
 - **pnpm** · **Node 24** (pinned via `.nvmrc`)
 
-No auth. No Plaid. No deployment target — this runs on your machine, and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
+No auth. No Plaid. No cloud — this runs on your machine (or your own Docker host), and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
 
 ## Getting started
 
@@ -23,6 +23,27 @@ pnpm install
 pnpm db:migrate         # applies Drizzle migrations to ./data/money.db
 pnpm dev                # http://localhost:3000 → dashboard
 ```
+
+### Docker
+
+An alternative to `pnpm dev`, still on SQLite — no Postgres yet (see `docs/plans/dockerize-postgres.md`). The ledger lives in a named Docker volume rather than `./data`, so it isn't directly visible on the host; use the scripts below rather than reaching into the volume.
+
+```bash
+sudo mkdir -p backups && sudo chmod 777 backups  # Linux only, and only before the FIRST run — see note below
+pnpm db:seed-volume            # first run only, BEFORE `docker compose up` — copies ./data/money.db
+                                # into the volume so the container doesn't start with an empty ledger
+docker compose up -d           # http://127.0.0.1:3000 — bound to loopback only, this app has no auth
+```
+
+On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount directory as root-owned, which the container's unprivileged user can't write to. The `mkdir`/`chmod` step must come **before** `db:seed-volume` — `db:seed-volume` starts a container of its own to verify the seed, which would otherwise race Docker into auto-creating `./backups` as root first. `chmod` rather than `chown`ing to a specific user: both the container (writing snapshots) and `pnpm db:export` running on the host (copying them out) need write access to the same directory, and they run as different users. Not needed on macOS Docker Desktop, whose bind-mount layer doesn't have this issue.
+
+`.env.local` is optional: SimpleFIN sync degrades to a configuration banner without it, and CSV import works either way. `TZ` is required (`compose.yaml` sets `America/Los_Angeles`; the container refuses to boot without one, since the app derives the current budget month from local time).
+
+| Command | What it does |
+|---|---|
+| `pnpm db:export` | Snapshot the running container's ledger out to `./backups/` |
+| `pnpm db:import <file>` | Stop the container, restore a snapshot file, restart |
+| `pnpm db:seed-volume` | One-time host → volume copy (run before the first `docker compose up`) |
 
 Create an account (name, type, starting balance + date) from `/import`. From there you have two ways to get transactions in.
 
@@ -61,6 +82,7 @@ Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simp
 | `pnpm simplefin:claim` | One-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`) |
 | `pnpm simplefin:sample` | Dump a live `/accounts` payload to `.context/simplefin-sample.json` |
 | `pnpm lint` | ESLint |
+| `pnpm db:export` / `db:import` / `db:seed-volume` | Docker rollback + first-run seed — see [Docker](#docker) above |
 
 ## Layout
 
@@ -80,7 +102,10 @@ src/
                  link/unlink, undo
   lib/subscriptions/ Recurring-charge detection
   lib/trends/    6-month spend by category
-scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs, migrate.mjs
+scripts/         simplefin-claim.mjs, simplefin-fetch-sample.mjs, migrate.mjs,
+                 db-export.mjs, db-import.mjs, seed-volume.mjs (Docker rollback + seed),
+                 build-docker-artifacts.mjs, snapshot-cli.src.mjs
+docker/          entrypoint.src.mjs (committed) + entrypoint.mjs (esbuild-bundled, gitignored)
 drizzle/         Committed migration output
 data/            money.db, pre-import snapshots, pending-import stash (gitignored)
 .context/        Design artifacts, CSV samples, design deltas (gitignored)
@@ -99,7 +124,7 @@ These are load-bearing — the whole app is built around them:
 
 ## What's NOT in V1
 
-Credit cards. Auth. Cloud sync of your data. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions. YNAB-style overspend-shuffle. Deployment.
+Credit cards. Auth. Cloud sync of your data. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions. YNAB-style overspend-shuffle. Cloud/NAS hosting (Docker exists for local self-hosting only — see [docs/plans/dockerize-postgres.md](./docs/plans/dockerize-postgres.md), PR3).
 
 ## Further reading
 

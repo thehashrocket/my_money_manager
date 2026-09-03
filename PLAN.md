@@ -21,9 +21,11 @@ Next.js 16 (App Router, Turbopack) · TypeScript · Tailwind v4 · shadcn/ui · 
 | W5 | Goals / savings + Recharts trend chart | done |
 | S1 | Automated sync from Star One over SimpleFIN (`/sync`): link, pull, balance check, transfer review, undo | done (v0.8.0) |
 
-## Current status (2026-09-02)
+## Current status (2026-09-03)
 
 All five weekends shipped, plus the automated sync that follows them. The app runs end-to-end in a real browser: transactions arrive from `/sync` (or `/import` for older history) → categorize → `/budget` envelope view with live allocate → dashboard, subscriptions, goals and the 6-month trend chart.
+
+v0.9.0 — PR1 of the dockerize-postgres plan ([docs/plans/dockerize-postgres.md](./docs/plans/dockerize-postgres.md)): `docker compose up` starts the app at `localhost:3000` on the existing ledger, still on SQLite. `pnpm dev` is unaffected — Docker is a second way to run the app, not a replacement. Ledger lives in a named volume (WAL-mode SQLite doesn't tolerate bind-mount filesystems reliably), snapshots land on a separate `./backups` bind mount, `pnpm db:seed-volume`/`db:export`/`db:import` cover first-run seeding and rollback, and `/api/health` backs the Compose healthcheck. Also fixed a live bug where the app derived the current budget month through `.toISOString()` in a few places, which ignores the configured timezone — one of those sites fed the transfer-review window, so an ambiguous transfer pair right at the edge could silently drop out of review. PR2 (SQLite → Postgres) is planned but not started. See the Fixed/Added sections of [CHANGELOG.md](./CHANGELOG.md).
 
 v0.8.3 — three fixes from the v0.8.0 ship review: re-pointing a SimpleFIN account link no longer crashes the next sync (`setAccountLink` now clears the old rows' `external_id`, though it still can't rule out a double-count if a different account later claims the same feed — tracked as a follow-up); `import_batches.filename` is now a nullable `label` instead of holding a synthetic non-filename for sync batches, with `deriveBatchLabel`/`resolveBatchLabel` (`src/lib/batchLabel.ts`) computing the display string; and `pnpm db:migrate` runs through `scripts/migrate.mjs` instead of `drizzle-kit migrate`, because the label migration's table rebuild crashed with a foreign-key error against any database with real rows (invisible on an empty dev database). See the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
 
@@ -56,7 +58,7 @@ Weekend 2 — envelope budgeting + bulk categorize:
 
 Next up (see [TODOS.md](./TODOS.md)):
 - v0.8.0 ship-review follow-ups: re-pointing a SimpleFIN link still orphans `external_id`s (open). The dropped sync warnings, the cross-source dedup and snapshot bugs, the sync test gaps, and the CSV-import snapshot-check gap are all closed — see the Fixed section of [CHANGELOG.md](./CHANGELOG.md).
-- Dockerize + Postgres migration (planned in 0.8.1, staged as two PRs — not started)
+- Dockerize + Postgres migration: PR1 (containerize on SQLite) shipped in v0.9.0. PR2 (SQLite → Postgres) is planned in [docs/plans/dockerize-postgres.md](./docs/plans/dockerize-postgres.md) but not started.
 - **Integration checkpoint**: use the app on real data for a week, now with sync doing the loading
 
 ## Cut-line
@@ -76,4 +78,5 @@ Drop the subscriptions tracker (Weekend 4) if behind. Keep goals/savings (Weeken
 | Star One CU labeling quirk | `~/.claude/projects/…/memory/project_star_one_cu_overdraft_labeling.md` |
 | SimpleFIN feed shape (real payload) | `~/.claude/projects/…/memory/project_simplefin_star_one_data_shape.md` |
 | Design system reference | [DESIGN.md](./DESIGN.md) |
+| Dockerize + Postgres plan (PR1 shipped, PR2 not started) | [docs/plans/dockerize-postgres.md](./docs/plans/dockerize-postgres.md) |
 | SimpleFIN credentials | `SIMPLEFIN_ACCESS_URL` in `.env.local` (gitignored; written by `pnpm simplefin:claim`) |

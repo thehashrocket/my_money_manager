@@ -1,4 +1,3 @@
-import path from "node:path";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
@@ -6,10 +5,9 @@ import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
 import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
+import { dbPath, snapshotDir } from "./paths";
 
 type Db = typeof defaultDb;
-
-const DB_PATH = path.join(process.cwd(), "data", "money.db");
 
 export type ImportPreviewRow = {
   rowIndex: number;
@@ -143,7 +141,7 @@ export function commitImport(
     };
   }
 
-  const snapshot = createSnapshot(DB_PATH);
+  const snapshot = createSnapshot(dbPath(), snapshotDir());
   const warnings: string[] = [];
   if (!snapshot.consistent) {
     warnings.push(
@@ -197,7 +195,7 @@ export function commitImport(
   // import had already evicted the oldest snapshot to make room for a useless
   // one. Failures to delete are ignored here rather than aborting an import that
   // has already succeeded.
-  pruneSnapshots(path.dirname(DB_PATH));
+  pruneSnapshots(snapshotDir());
 
   const pairsLinked = linkTransferPairs(batchId, db);
 

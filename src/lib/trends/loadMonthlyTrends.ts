@@ -1,5 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { currentMonth as getCurrentMonth } from "@/lib/now";
 
 type Db = typeof defaultDb;
 
@@ -44,9 +45,7 @@ function monthLabel(year: number, month: number): string {
 }
 
 export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth() + 1;
+  const { year: currentYear, month: currentMonth } = getCurrentMonth();
 
   const [startYear, startMonth] = nMonthsBack(currentYear, currentMonth, monthCount - 1);
   const startDate = monthBoundary(startYear, startMonth);
