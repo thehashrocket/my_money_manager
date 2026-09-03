@@ -268,17 +268,25 @@ missed):
 Fixed after the adversarial passes (Claude + Codex, both dispatched during `/ship`):
 - [x] **`./backups`'s bind-mount permissions on real Linux hosts** — flagged as "untested"
   after the adversarial passes, confirmed for real the moment CI (Ubuntu, not macOS
-  Docker Desktop) ran the `docker` job: `EACCES: permission denied` on every snapshot
-  write, container never became healthy. Docker on native Linux auto-creates a missing
-  bind-mount host directory as root-owned; the Dockerfile's `chown` only affects the
-  image filesystem, which the bind mount then shadows. First fix attempt (`chown
-  1000:1000 ./backups`) traded one failure for another: it let the container's `node`
-  user write snapshots, but then broke `pnpm db:export`'s host-side `docker compose cp`
-  copy-out, which runs as a *different* user (`unlinkat ...: permission denied` on the
-  next CI run). Two principals need write access to the same directory for different
-  reasons, so no single `chown` target works — `chmod 777 ./backups` does. Added as its
-  own CI step, documented in the README Docker quickstart for real hosts. macOS Docker
-  Desktop never surfaced any of this; its bind-mount layer is more permissive.
+  Docker Desktop) ran the `docker` job — three attempts to get right, each confirmed
+  against a real CI failure:
+  1. No permissions step at all → `EACCES: permission denied` on the container's first
+     snapshot write, container never became healthy. Docker on native Linux auto-creates
+     a missing bind-mount host directory as root-owned; the Dockerfile's `chown` only
+     affects the image filesystem, which the bind mount then shadows.
+  2. `chown 1000:1000 ./backups` → fixed the container's write, broke
+     `pnpm db:export`'s host-side `docker compose cp` copy-out, which runs as a
+     *different* user (`unlinkat ...: permission denied` on the next CI run). Two
+     principals need write access to the same directory for different reasons, so no
+     single `chown` target works.
+  3. `chmod 777 ./backups`, placed *after* `pnpm db:seed-volume` → `db:seed-volume`'s own
+     verification step starts a container from the full `app` service definition,
+     materializing (and root-owning) the bind mount before the `chmod` step ever ran
+     (`chmod: changing permissions of 'backups': Operation not permitted`).
+  Fixed: `sudo mkdir -p backups && sudo chmod 777 backups`, moved to run **before**
+  `db:seed-volume` (or anything else that starts a container). Documented the same
+  ordering requirement in the README Docker quickstart. macOS Docker Desktop never
+  surfaced any of this; its bind-mount layer is more permissive.
 - [x] `docker/entrypoint.src.mjs`'s `checkTz` only verified `TZ` was non-empty, not that
   it named a real IANA zone. A typo (`America/Los_Angelss`) doesn't throw anywhere on its
   own — Node silently renders as UTC, reintroducing the exact bug this branch exists to

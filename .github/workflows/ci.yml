@@ -62,6 +62,33 @@ jobs:
       - name: docker compose build
         run: docker compose build
 
+      # Must run before ANY docker compose/run command that starts a
+      # container from the `app` service definition — including
+      # db:seed-volume's own verification step below, which does exactly
+      # that. Starting a container materializes every bind mount the
+      # service declares (not just the volume actually being used), and on
+      # real Linux hosts (this runner included) a missing bind-mount host
+      # directory gets auto-created root-owned. Creating it ourselves
+      # first, as the runner's own user, avoids that path entirely — this
+      # was originally placed after db:seed-volume and failed with `chmod:
+      # changing permissions of 'backups': Operation not permitted` because
+      # seed-volume's own docker compose run had already raced it into
+      # existence as root.
+      #
+      # `chmod 777` rather than `chown` to a single uid: TWO different
+      # principals need write access to this directory for different
+      # reasons — the container's `node` user (uid 1000) writing snapshots,
+      # and the host-side CI runner process writing/unlinking during
+      # `docker compose cp`'s copy-out (`pnpm db:export`). Chowning to
+      # 1000:1000 fixes the first and breaks the second (confirmed:
+      # `unlinkat ...: permission denied` from the runner's own non-1000
+      # user on an earlier attempt at this fix). `sudo` on both commands is
+      # defensive: harmless if the directory doesn't exist yet or is
+      # already runner-owned, necessary if some future step's ordering
+      # again lets Docker create it as root first.
+      - name: prepare ./backups (Linux bind-mount permissions)
+        run: sudo mkdir -p backups && sudo chmod 777 backups
+
       # Seeded BEFORE the container ever starts: db:seed-volume refuses a
       # volume that already has a money.db, so this has to run first. A test
       # account gives the later steps something real to verify (dashboard
@@ -81,20 +108,6 @@ jobs:
 
       - name: pnpm db:seed-volume
         run: pnpm db:seed-volume
-
-      # ./backups is a bind mount, and real Linux hosts (this runner
-      # included) auto-create a missing bind-mount host directory as
-      # root-owned — the Dockerfile's chown only affects the image
-      # filesystem, which the bind mount then shadows. `chmod 777` rather
-      # than `chown 1000:1000`: TWO different principals need write access
-      # to this same host directory — the container's `node` user (uid
-      # 1000) writing snapshots, AND the host-side CI runner process
-      # writing/unlinking during `docker compose cp`'s copy-out (`pnpm
-      # db:export`). Chowning to 1000:1000 fixes the first and breaks the
-      # second (confirmed: `unlinkat ...: permission denied` from the
-      # runner's own non-1000 user). A single uid can't satisfy both.
-      - name: prepare ./backups (Linux bind-mount permissions)
-        run: mkdir -p backups && chmod 777 backups
 
       - name: docker compose up (no .env.local — SimpleFIN stays optional)
         run: docker compose up -d

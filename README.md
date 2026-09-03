@@ -29,13 +29,13 @@ pnpm dev                # http://localhost:3000 → dashboard
 An alternative to `pnpm dev`, still on SQLite — no Postgres yet (see `docs/plans/dockerize-postgres.md`). The ledger lives in a named Docker volume rather than `./data`, so it isn't directly visible on the host; use the scripts below rather than reaching into the volume.
 
 ```bash
+sudo mkdir -p backups && sudo chmod 777 backups  # Linux only, and only before the FIRST run — see note below
 pnpm db:seed-volume            # first run only, BEFORE `docker compose up` — copies ./data/money.db
                                 # into the volume so the container doesn't start with an empty ledger
-mkdir -p backups && chmod 777 backups  # Linux only — see note below
 docker compose up -d           # http://127.0.0.1:3000 — bound to loopback only, this app has no auth
 ```
 
-On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount directory as root-owned, which the container's unprivileged user can't write to — the `chmod` step above fixes that. `chmod` rather than `chown`ing to a specific user: both the container (writing snapshots) and `pnpm db:export` running on the host (copying them out) need write access to the same directory, and they run as different users. Not needed on macOS Docker Desktop, whose bind-mount layer doesn't have this issue.
+On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount directory as root-owned, which the container's unprivileged user can't write to. The `mkdir`/`chmod` step must come **before** `db:seed-volume` — `db:seed-volume` starts a container of its own to verify the seed, which would otherwise race Docker into auto-creating `./backups` as root first. `chmod` rather than `chown`ing to a specific user: both the container (writing snapshots) and `pnpm db:export` running on the host (copying them out) need write access to the same directory, and they run as different users. Not needed on macOS Docker Desktop, whose bind-mount layer doesn't have this issue.
 
 `.env.local` is optional: SimpleFIN sync degrades to a configuration banner without it, and CSV import works either way. `TZ` is required (`compose.yaml` sets `America/Los_Angeles`; the container refuses to boot without one, since the app derives the current budget month from local time).
 
