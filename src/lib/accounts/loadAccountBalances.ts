@@ -8,6 +8,15 @@ export type AccountBalance = {
   name: string;
   type: "checking" | "savings";
   balanceCents: number;
+  /** The anchor this balance was computed from. */
+  startingBalanceDate: string;
+  /**
+   * Newest posted row counted into `balanceCents`, or the anchor date when no
+   * row follows it. The newest date this balance has an opinion about — which
+   * is what decides whether a bank figure is new enough to be compared against
+   * it. See `src/lib/simplefin/balanceFreshness.ts`.
+   */
+  ledgerAsOfDate: string;
 };
 
 /**
@@ -32,6 +41,11 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
     const row = db
       .select({
         delta: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+        // Same aggregate scan as the SUM rather than a second query: MAX over
+        // the identical filtered set is the newest row folded into this total.
+        newestDate: sql<
+          string | null
+        >`MAX(${schema.transactions.date})`,
       })
       .from(schema.transactions)
       .where(
@@ -48,6 +62,8 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
       name: a.name,
       type: a.type,
       balanceCents: a.startingBalanceCents + (row?.delta ?? 0),
+      startingBalanceDate: a.startingBalanceDate,
+      ledgerAsOfDate: row?.newestDate ?? a.startingBalanceDate,
     };
   });
 }
