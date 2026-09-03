@@ -14,7 +14,7 @@ Read `.context/notes.md` first if it is present. `.context/` is gitignored (it h
 - Vitest for categorization/parser tests
 - pnpm, Node 24 (pinned via `.nvmrc`, enforced via `engines` + `engine-strict`)
 
-Recharts (`^3.8.1`) is in, powering `src/components/ledger/trend-chart.tsx` as of v0.7.0. Envelope cards are still plain CSS.
+Recharts (`^3.10.1`) is in, powering `src/components/ledger/trend-chart.tsx` as of v0.7.0. Envelope cards are still plain CSS.
 
 Wrong-Node symptom: any `pnpm` command fails with `ERR_PNPM_UNSUPPORTED_ENGINE` (blocked by `engines` + `engine-strict=true`). Run `nvm use` in the workspace to pick up `.nvmrc`. If you bypass pnpm (e.g., invoke `vitest` directly on Node 22), `better-sqlite3` crashes with a `NODE_MODULE_VERSION` mismatch because its native binding is built against Node 24.
 
