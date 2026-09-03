@@ -15,9 +15,6 @@ import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
 
-const DB_PATH = dbPath();
-const SNAPSHOT_DIR = snapshotDir();
-
 /**
  * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
  * the feed, which returns the error string "Requested date range exceeds limit of
@@ -342,7 +339,7 @@ export async function syncSimpleFin(
   }
 
   // ---- write ----
-  const snapshot = createSnapshot(DB_PATH, SNAPSHOT_DIR);
+  const snapshot = createSnapshot(dbPath(), snapshotDir());
   let snapshotWarning: string | null = null;
   if (!snapshot.consistent) {
     snapshotWarning = `The pre-sync snapshot fell back to a plain file copy${
@@ -398,7 +395,7 @@ export async function syncSimpleFin(
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
-  const pruned = pruneSnapshots(SNAPSHOT_DIR);
+  const pruned = pruneSnapshots(snapshotDir());
   if (pruned.failedPaths.length > 0) {
     warnings.push(
       `Could not delete ${pruned.failedPaths.length} old snapshot${

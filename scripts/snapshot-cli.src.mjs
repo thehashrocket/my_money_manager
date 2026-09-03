@@ -15,11 +15,16 @@
  * exec output, and decides whether to still `docker compose cp` the file
  * out). Exits 1 only when createSnapshot itself throws, e.g. no db file.
  */
-import { createSnapshot } from "../src/lib/snapshot.ts";
+import { createSnapshot, EXPORT_PREFIX } from "../src/lib/snapshot.ts";
 import { dbPath, snapshotDir } from "../src/lib/paths.ts";
 
 try {
-  const result = createSnapshot(dbPath(), snapshotDir());
+  // EXPORT_PREFIX, not the default pre-import- prefix: this is a deliberate,
+  // manually-triggered backup, not an automatic one — sharing the pre-import
+  // pool would make it indistinguishable from (and vulnerable to eviction by)
+  // the retention-of-10 prune that commitImport/syncSimpleFin run on every
+  // write.
+  const result = createSnapshot(dbPath(), snapshotDir(), new Date(), EXPORT_PREFIX);
   console.log(JSON.stringify(result));
 } catch (err) {
   console.log(

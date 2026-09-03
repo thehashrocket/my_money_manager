@@ -29,7 +29,7 @@ services:
       HOSTNAME: "0.0.0.0"
       # Snapshots must land on the separate ./backups bind mount below, not
       # inside the mm_data volume they protect — otherwise `docker compose
-      # down -v` takes the ledger and all ten rollback copies out together.
+      # down -v` takes the ledger and its rollback copies out together.
       SNAPSHOT_DIR: /app/backups
     env_file:
       # SimpleFIN is optional: the app runs CSV-only without it, and /sync
@@ -46,8 +46,9 @@ services:
       - mm_data:/app/data
       # Snapshots on a separate host bind mount so they survive
       # `docker compose down -v` / `docker system prune --volumes`, which
-      # would otherwise take the ledger and all ten rollback copies out in
-      # one command. VACUUM INTO output is written once and never reopened
+      # would otherwise take the ledger and its rollback copies out in one
+      # command (see src/lib/snapshot.ts's SNAPSHOT_RETENTION for the actual
+      # count). VACUUM INTO output is written once and never reopened
       # by a live connection, so the WAL-over-FUSE hazard above doesn't
       # apply to it.
       - ./backups:/app/backups

@@ -42,7 +42,7 @@ On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount direct
 | Command | What it does |
 |---|---|
 | `pnpm db:export` | Snapshot the running container's ledger out to `./backups/` |
-| `pnpm db:import <file>` | Stop the container, restore a snapshot file from `./backups/`, restart |
+| `pnpm db:import <file>` | Stop the container, restore a snapshot file, restart |
 | `pnpm db:seed-volume` | One-time host → volume copy (run before the first `docker compose up`) |
 
 Create an account (name, type, starting balance + date) from `/import`. From there you have two ways to get transactions in.

@@ -26,6 +26,47 @@ function fail(message) {
   process.exit(1);
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * `docker compose up -d` returns as soon as the container is told to start,
+ * not once it's actually healthy — compose.yaml's healthcheck exists
+ * specifically because the entrypoint can refuse to boot (a schema-
+ * incompatible restore failing its migration guard, say). Without this,
+ * `main()` would print "Restored" while the container silently crash-loops
+ * behind it. Timeout/interval mirror the wait loop CI already runs around
+ * this same script (.github/workflows/ci.yml).
+ */
+function waitForHealthy(service, { timeoutMs = 60_000, intervalMs = 2000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const containerId = execFileSync("docker", ["compose", "ps", "-q", service], {
+      encoding: "utf8",
+    }).trim();
+    if (containerId) {
+      const status = execFileSync(
+        "docker",
+        ["inspect", "--format", "{{.State.Health.Status}}", containerId],
+        { encoding: "utf8" },
+      ).trim();
+      if (status === "healthy") return { ok: true };
+      if (status === "unhealthy") {
+        return {
+          ok: false,
+          message: `reported unhealthy — check \`docker compose logs ${service}\`.`,
+        };
+      }
+    }
+    sleepSync(intervalMs);
+  }
+  return {
+    ok: false,
+    message: `did not report healthy within ${timeoutMs}ms — check \`docker compose logs ${service}\`.`,
+  };
+}
+
 export function assertNoWalSidecar(snapshotFilePath) {
   const walPath = `${snapshotFilePath}-wal`;
   if (existsSync(walPath)) {
@@ -136,6 +177,15 @@ export function main(snapshotFilePath) {
 
   console.log(`Starting ${SERVICE}...`);
   execFileSync("docker", ["compose", "up", "-d", SERVICE]);
+
+  const health = waitForHealthy(SERVICE);
+  if (!health.ok) {
+    fail(
+      `The file was restored into the volume, but ${SERVICE} ${health.message} ` +
+        "The restore itself likely succeeded — this means the container's own boot guard " +
+        "(TZ check, migration, or foreign-key check) may be rejecting the restored database.",
+    );
+  }
 
   console.log(`Restored ${path.basename(snapshotFilePath)}.`);
 }

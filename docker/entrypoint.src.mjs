@@ -114,21 +114,30 @@ export async function main() {
     fail(`data directory does not exist: ${DATA_DIR} — is the volume mounted?`);
   }
 
-  if (existsSync(DB_PATH)) {
+  const tookPreMigrateSnapshot = existsSync(DB_PATH);
+  if (tookPreMigrateSnapshot) {
     // PRE_MIGRATE_PREFIX, not the default pre-import- prefix: this runs on
     // every container start (crash loop, `restart: unless-stopped`, a host
     // reboot), which is a fundamentally higher frequency than a human
     // running an import or sync. Sharing the pre-import pool would let
     // restart noise silently evict a real rollback snapshot from CSV import
-    // or /sync the next time THAT retention-of-10 prune runs.
-    const snapshot = createSnapshot(DB_PATH, snapshotDir(), new Date(), PRE_MIGRATE_PREFIX);
-    console.log(
-      `Pre-migrate snapshot: ${snapshot.snapshotPath} (consistent: ${snapshot.consistent})`,
-    );
-    // Prune this pool too — unlike scripts/migrate.mjs (a rare, manual,
-    // developer-invoked command where unbounded accumulation is someone's
-    // problem to notice), this runs unattended and can fire far more often.
-    pruneSnapshots(snapshotDir(), SNAPSHOT_RETENTION, PRE_MIGRATE_PREFIX);
+    // or /sync the next time THAT retention prune runs.
+    let snapshot;
+    try {
+      snapshot = createSnapshot(DB_PATH, snapshotDir(), new Date(), PRE_MIGRATE_PREFIX);
+    } catch (err) {
+      fail(
+        `Pre-migrate snapshot failed — refusing to run a schema migration with no rollback point: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!snapshot.consistent) {
+      console.error(
+        `WARNING: pre-migrate snapshot degraded (${snapshot.degradedReason}) — proceeding with the migration anyway, but ${snapshot.snapshotPath} may not be a usable rollback point.`,
+      );
+    } else {
+      console.log(`Pre-migrate snapshot: ${snapshot.snapshotPath}`);
+    }
   }
 
   const { migrationError, violations } = runMigrations(DB_PATH, "/app/drizzle");
@@ -147,6 +156,16 @@ export async function main() {
   }
 
   console.log("Migrations applied successfully.");
+
+  // Pruned only now that the migration above has succeeded (rule 5: pruning
+  // before the write it protects can evict the one snapshot with real
+  // rollback value to make room for one describing the same unchanged
+  // database). Unlike scripts/migrate.mjs (a rare, manual, developer-invoked
+  // command where unbounded accumulation is someone's problem to notice),
+  // this runs unattended and can fire far more often.
+  if (tookPreMigrateSnapshot) {
+    pruneSnapshots(snapshotDir(), SNAPSHOT_RETENTION, PRE_MIGRATE_PREFIX);
+  }
 
   await import("/app/server.js");
 }

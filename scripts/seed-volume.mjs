@@ -24,7 +24,7 @@
  * 5 requires for every pre-write snapshot, not a weaker one here.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, copyFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, copyFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -225,9 +225,24 @@ function main() {
       ["compose", "run", "--rm", "--entrypoint", "node", SERVICE, "-e", verifyScript],
       { encoding: "utf8" },
     );
-    const { counts: volumeCounts, balances: volumeBalances } = JSON.parse(
-      output.trim().split("\n").pop(),
-    );
+    // `docker compose run` can print image-pull/container-creation lines to
+    // stdout ahead of the script's own JSON — most likely on exactly the
+    // first run this script exists for. By this point the volume has already
+    // been written and chowned above, so a parse failure here means only the
+    // *verification* choked, not that the seed failed — say so explicitly
+    // rather than let a raw SyntaxError read as "seeding failed".
+    let volumeCounts, volumeBalances;
+    try {
+      ({ counts: volumeCounts, balances: volumeBalances } = JSON.parse(
+        output.trim().split("\n").pop(),
+      ));
+    } catch {
+      fail(
+        `The volume was written and chowned, but its verification script's output could not be parsed as JSON: ${JSON.stringify(output)}. ` +
+          "The copy likely succeeded — inspect the volume by hand before assuming otherwise " +
+          `(\`docker run --rm -v ${VOLUME_NAME}:/data busybox ls -la /data\`).`,
+      );
+    }
 
     const verifyResult = verifySeed({
       tables: TABLES,
@@ -254,7 +269,18 @@ function main() {
     if (existingSnapshots.length > 0) {
       execFileSync("mkdir", ["-p", BACKUPS_DIR]);
       for (const p of existingSnapshots) {
-        copyFileSync(p, path.join(BACKUPS_DIR, path.basename(p)));
+        const dest = path.join(BACKUPS_DIR, path.basename(p));
+        const srcStat = statSync(p);
+        copyFileSync(p, dest);
+        // `copyFileSync` does NOT preserve mtime (confirmed: on both macOS
+        // and inside node:24-bookworm-slim, the destination gets the copy
+        // time, not the source's). listSnapshots/pruneSnapshots sort by
+        // mtime, and this loop copies newest-first — without restoring the
+        // real timestamp here, every copy after the first would land with a
+        // *newer* mtime than the original it's replacing, silently reversing
+        // retention order: the next prune would keep the oldest rollback
+        // points and delete the newest.
+        utimesSync(dest, srcStat.atime, srcStat.mtime);
       }
       console.log(`Copied ${existingSnapshots.length} existing snapshot(s) to ${BACKUPS_DIR}`);
     }

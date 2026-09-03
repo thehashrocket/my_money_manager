@@ -9,9 +9,6 @@ import { dbPath, snapshotDir } from "./paths";
 
 type Db = typeof defaultDb;
 
-const DB_PATH = dbPath();
-const SNAPSHOT_DIR = snapshotDir();
-
 export type ImportPreviewRow = {
   rowIndex: number;
   date: string;
@@ -144,7 +141,7 @@ export function commitImport(
     };
   }
 
-  const snapshot = createSnapshot(DB_PATH, SNAPSHOT_DIR);
+  const snapshot = createSnapshot(dbPath(), snapshotDir());
   const warnings: string[] = [];
   if (!snapshot.consistent) {
     warnings.push(
@@ -198,7 +195,7 @@ export function commitImport(
   // import had already evicted the oldest snapshot to make room for a useless
   // one. Failures to delete are ignored here rather than aborting an import that
   // has already succeeded.
-  pruneSnapshots(SNAPSHOT_DIR);
+  pruneSnapshots(snapshotDir());
 
   const pairsLinked = linkTransferPairs(batchId, db);
 

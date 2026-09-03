@@ -310,9 +310,8 @@ Fixed after the adversarial passes (Claude + Codex, both dispatched during `/shi
   host `data/` directory when migrating an existing ledger into Docker. Now copies both
   pools. Found by Codex's structured review (`codex review`).
 
-**Two Codex structured-review findings investigated and disproven, not fixed** (both
-plausible-sounding, both wrong about actual platform behavior — verified empirically
-before deciding, not assumed):
+**One Codex structured-review finding investigated and disproven, not fixed** (verified
+empirically before deciding, not assumed):
 - Claimed a brand-new named Docker volume mounted over `/app/data` stays root-owned even
   though the Dockerfile `chown`s that path before the volume ever attaches, so a fresh
   `docker compose up` (without running `db:seed-volume` first) would fail. Disproven:
@@ -320,8 +319,94 @@ before deciding, not assumed):
   Docker correctly copies the image layer's content *and ownership* into a new volume on
   first mount. Matches every one of this session's successful from-scratch
   `docker compose up` tests, none of which ran `db:seed-volume` first.
-- Claimed `seed-volume.mjs` copies existing snapshot files newest-first, and since
-  `fs.copyFileSync` allegedly doesn't preserve mtime, the copies would end up with
-  reversed retention order (an unrelated later prune could keep the wrong 10). Disproven:
-  ran an actual copy test with distinct source mtimes, on both macOS and Linux (inside the
-  built container image) — `copyFileSync` preserves the source mtime on both.
+
+**Correction (2026-09-02): the other "disproven" Codex finding was wrong to dismiss.** The
+original entry here claimed `fs.copyFileSync` preserves source mtime, "verified... on both
+macOS and Linux." Re-run during the `/pr-review-toolkit:review-pr` pass on PR #25:
+`copyFileSync` does **not** preserve mtime — measured directly on this machine (Node
+v24.16.0) and inside `node:24-bookworm-slim`, a source stamped `2001-09-09` produced a
+destination stamped with the copy time. The original test that produced "disproven" was
+not reproducible; whatever it actually measured, it wasn't this. Codex's original claim was
+correct and is now fixed — see below.
+
+## Follow-ups from the `/pr-review-toolkit:review-pr` pass on PR #25 (2026-09-02)
+
+Four parallel specialist reviews (code-reviewer, pr-test-analyzer, silent-failure-hunter,
+comment-analyzer) against the full PR #25 diff, after it had already been through the
+review chain above. Two findings were verified empirically (the mtime claim above, and the
+`snapshot-cli` prefix collision) before fixing rather than taken on faith. All fixed
+same-branch:
+- [x] **`seed-volume.mjs` reversed snapshot retention order on copy.** `listSnapshots`
+  returns newest-first; the "copy existing snapshots to `./backups`" loop copied in that
+  order, and since `copyFileSync` doesn't preserve mtime, each copy landed with a *fresher*
+  mtime than the last — the next mtime-sorted prune would keep the oldest rollback points
+  and delete the newest. Fixed: `utimesSync` restores the source's real mtime after each
+  copy. (`scripts/seed-volume.mjs`)
+- [x] **`pnpm db:export` wrote into the same retention pool `commitImport`/`syncSimpleFin`
+  auto-prune.** `snapshot-cli.src.mjs` called `createSnapshot` with no prefix, defaulting to
+  the pre-import prefix — a deliberate manual backup was indistinguishable from (and could
+  be silently evicted by) the automatic retention-of-10 prune. Fixed: exports now use their
+  own `EXPORT_PREFIX`, which nothing auto-prunes. (`src/lib/snapshot.ts`,
+  `scripts/snapshot-cli.src.mjs`, CI's `docker` job glob updated to match)
+- [x] **`docker/entrypoint.src.mjs` pruned pre-migrate snapshots *before* running the
+  migration they exist to protect** — the same before-the-write-it-protects bug rule 5
+  already fixed for `commitImport`/`syncSimpleFin`, just not caught here. A routine restart
+  with nothing to migrate still burned a slot and could evict the one snapshot taken before
+  a real schema change. Fixed: prune moved to after the migration/FK-check succeeds.
+- [x] `scripts/db-export.mjs` discarded the actual failure reason from inside the
+  container — `execFileSync`'s thrown `.message` on a `docker compose exec` failure doesn't
+  include the child's stdout, where `snapshot-cli.mjs`'s deliberate JSON-error-on-stdout
+  contract puts the real diagnostic. Now reads `err.stdout` first.
+- [x] `src/lib/snapshot.ts`'s `copyFileSync` fallback (used when `VACUUM INTO` fails) had no
+  try/catch of its own — if the fallback hit the same permission error that made `VACUUM
+  INTO` fail (the exact `EACCES`-on-bind-mount scenario documented elsewhere in this file),
+  it threw uncaught. `docker/entrypoint.src.mjs`'s pre-migrate snapshot call had no
+  surrounding try/catch either, so this could crash-loop the container with a raw stack
+  trace instead of a `fail()`-style message. Both fixed: the copy fallback now returns a
+  combined `degradedReason` instead of throwing, and the entrypoint call is wrapped.
+- [x] `scripts/db-import.mjs` reported "Restored" unconditionally after `docker compose up
+  -d`, which returns as soon as the container is *told* to start, not once it's healthy — a
+  schema-incompatible restore could crash-loop behind a green success message. Now polls
+  `docker inspect`'s health status (mirroring the wait loop CI already runs around this same
+  script) before declaring success.
+- [x] `scripts/seed-volume.mjs`'s parse of the in-container verification script's JSON
+  output had no try/catch, unlike the identical pattern in `db-export.mjs`. By the point
+  this runs the volume has already been written and chowned, so a parse hiccup (e.g. a
+  stray `docker compose run` warning line) would read as "seeding failed" when only the
+  double-check choked. Now caught, with a message clarifying the write likely succeeded.
+- [x] `scripts/db-export.mjs`'s `docker compose cp` copy-out could race itself: with the
+  default `SNAPSHOT_DIR=/app/backups`, the container path and host destination are the same
+  bind-mounted inode, so the copy unlinks/truncates its own source while the daemon may
+  still be reading it. Worked today by timing luck. Now short-circuits with `existsSync`
+  when source and destination are already the same file.
+- [x] `commitImport`/`syncSimpleFin` cached `DB_PATH`/`SNAPSHOT_DIR` in module-level consts
+  computed once at import time — unlike every other `paths.ts` consumer, which reads
+  `process.env` at call time (`src/lib/paths.test.ts`). Harmless in production (env is fixed
+  before Next.js boots) but architecturally inconsistent and untested. Now calls
+  `dbPath()`/`snapshotDir()` per invocation, matching every other consumer; added a
+  regression test in both `importBatch.test.ts` and `sync.test.ts` asserting the snapshot
+  actually goes to the current `SNAPSHOT_DIR`, not `DATA_DIR`. (`src/lib/importBatch.ts`,
+  `src/lib/simplefin/sync.ts`)
+- [x] Minor comment/doc drift: `src/lib/snapshot.ts`'s `mkdirSync` comment claimed a bad
+  `SNAPSHOT_DIR` "degrades the same way" as a missing source file — neither actually
+  degrades, both throw uncaught; comment corrected. `compose.yaml` hardcoded "all ten
+  rollback copies" in prose next to `SNAPSHOT_DIR` (twice) instead of pointing at
+  `SNAPSHOT_RETENTION`; reworded. `README.md`'s `db:import` row implied the file must come
+  from `./backups/`, when any path works; reworded.
+
+Deferred, not fixed (test-coverage gaps, lower stakes, no existing pattern in this codebase
+to build on):
+- [ ] **P3** — `resolveVolumeName`'s `docker compose config` JSON-parse and "volume key
+  missing" branches (`scripts/docker-volume.mjs`) are untested; only the `MM_VOLUME_NAME`
+  override path is. Cheap to add by mocking `node:child_process`, but no script in this repo
+  currently mocks `execFileSync` for its own docker-orchestration paths — CI's real `docker`
+  job round-trip is this project's chosen substitute for that class of test (see the
+  v0.9.0 entry above), and this would be the first exception.
+- [ ] **P3** — No negative-path test proves the *container* actually refuses to boot on a
+  missing/invalid `TZ` — only the pure `checkTz` function is unit-tested. A one-line CI step
+  (`docker compose run --rm -e TZ= app`, expect nonzero) would close the loop cheaply.
+- [ ] **P4** — `seed-volume.mjs`'s `volumeHasDb` (the docker-shell-out check backing
+  `assertVolumeEmpty`) has no test exercising its "already has money.db" or "docker daemon
+  down" branches — CI's `db:seed-volume` step only ever runs against a genuinely empty
+  volume. Low criticality: it's a thin wrapper, and the same mocking-precedent question
+  above applies.

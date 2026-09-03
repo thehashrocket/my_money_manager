@@ -66,7 +66,20 @@ export function main() {
       { encoding: "utf8" },
     );
   } catch (err) {
-    fail(`snapshot-cli.mjs failed inside the container: ${err.message}`);
+    // snapshot-cli.mjs always prints one line of diagnostic JSON to stdout
+    // before exiting non-zero (see its own file comment) — but execFileSync's
+    // thrown error's `.message` is just "Command failed: docker compose exec
+    // ...", not the child's output. The real reason lives on `err.stdout`.
+    const stdout = typeof err.stdout === "string" ? err.stdout.trim() : "";
+    let detail = stdout;
+    if (stdout) {
+      try {
+        detail = JSON.parse(stdout.split("\n").pop()).error ?? stdout;
+      } catch {
+        // stdout wasn't JSON either — fall back to the raw text above.
+      }
+    }
+    fail(`snapshot-cli.mjs failed inside the container: ${detail || err.message}`);
   }
 
   const evaluated = evaluateSnapshotOutput(raw);
@@ -74,20 +87,25 @@ export function main() {
 
   if (!existsSync(BACKUPS_DIR)) mkdirSync(BACKUPS_DIR, { recursive: true });
 
-  const containerPath = evaluated.snapshotPath; // e.g. /app/backups/money.db.pre-import-...
+  const containerPath = evaluated.snapshotPath; // e.g. /app/backups/money.db.export-...
   const filename = path.basename(containerPath);
   const destPath = path.join(BACKUPS_DIR, filename);
 
-  // The snapshot already lives on the ./backups bind mount (SNAPSHOT_DIR is
-  // /app/backups in compose.yaml), so it's usually already at destPath —
-  // this `cp` only matters if SNAPSHOT_DIR was overridden to somewhere else
-  // inside the container.
-  execFileSync("docker", [
-    "compose",
-    "cp",
-    `${SERVICE}:${containerPath}`,
-    destPath,
-  ]);
+  // With the default SNAPSHOT_DIR=/app/backups (compose.yaml), containerPath
+  // and destPath are the same file on the ./backups bind mount — `docker
+  // compose cp` would unlink/truncate destPath while the daemon is still
+  // reading that same inode as its source, a race that only wins by luck.
+  // Skip the copy entirely when it would be a same-file no-op; only actually
+  // shell out when SNAPSHOT_DIR was overridden to somewhere else inside the
+  // container.
+  if (!existsSync(destPath)) {
+    execFileSync("docker", [
+      "compose",
+      "cp",
+      `${SERVICE}:${containerPath}`,
+      destPath,
+    ]);
+  }
 
   console.log(`Exported ${destPath} (consistent: true)`);
   return destPath;

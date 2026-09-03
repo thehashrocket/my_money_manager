@@ -137,7 +137,7 @@ jobs:
       - name: pnpm db:export produces an openable snapshot
         run: |
           pnpm db:export
-          exported=$(ls -t backups/money.db.pre-import-* | head -1)
+          exported=$(ls -t backups/money.db.export-* | head -1)
           node -e "
             const Database = require('better-sqlite3');
             const db = new Database(process.argv[1], { readonly: true });

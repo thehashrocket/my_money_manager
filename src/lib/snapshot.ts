@@ -20,6 +20,14 @@ const SNAPSHOT_PREFIX = "money.db.pre-import-";
  * slots, silently evicting an actual rollback point a user might need.
  */
 export const PRE_MIGRATE_PREFIX = "money.db.pre-migrate-";
+/**
+ * A third, separate pool for `pnpm db:export` (scripts/snapshot-cli.src.mjs).
+ * Without its own prefix, a deliberate export would land in — and later be
+ * silently evicted from — the same retention-of-10 pool that `commitImport`/
+ * `syncSimpleFin` prune automatically, indistinguishable from an ordinary
+ * pre-import snapshot. Nothing ever prunes this pool; it's cleaned up by hand.
+ */
+export const EXPORT_PREFIX = "money.db.export-";
 
 export type SnapshotResult = {
   snapshotPath: string;
@@ -70,9 +78,12 @@ export function createSnapshot(
   // snapshots split onto a separate volume (see src/lib/paths.ts) pass one.
   const targetDir = snapshotDir ?? path.dirname(dbPath);
   // A caller-supplied SNAPSHOT_DIR that doesn't exist yet would otherwise
-  // throw uncaught here (both VACUUM INTO and the copyFileSync fallback need
-  // the directory to already exist) — a misconfiguration should degrade the
-  // same way an unreadable source file does, not crash the caller.
+  // throw ENOENT here (both VACUUM INTO and the copyFileSync fallback need
+  // the directory to already exist) for the common case of a first run.
+  // Like the missing-dbPath check above, this still throws uncaught if it
+  // can't create the directory at all (e.g. a permission-denied bind mount)
+  // — that failure mode doesn't degrade to `consistent: false`, it aborts
+  // the caller, same as a missing source file does.
   mkdirSync(targetDir, { recursive: true });
   const ts = formatTimestamp(now);
   const snapshotPath = path.join(targetDir, `${prefix}${ts}`);
@@ -114,7 +125,21 @@ export function createSnapshot(
   if (!consistent) {
     // Not a SQLite database, or VACUUM could not run. A plain copy of whatever
     // is there beats no snapshot at all — but the caller is told it degraded.
-    copyFileSync(dbPath, snapshotPath);
+    // This fallback can itself fail (e.g. the exact EACCES-on-bind-mount
+    // scenario that just made VACUUM INTO fail) — caught here rather than
+    // left to throw uncaught, since docker/entrypoint.src.mjs calls this on
+    // every container boot with no surrounding try/catch of its own.
+    try {
+      copyFileSync(dbPath, snapshotPath);
+    } catch (err) {
+      const copyReason = err instanceof Error ? err.message : String(err);
+      return {
+        snapshotPath,
+        timestamp: ts,
+        consistent: false,
+        degradedReason: `VACUUM INTO failed (${degradedReason}), and the fallback copy also failed (${copyReason})`,
+      };
+    }
   }
 
   return { snapshotPath, timestamp: ts, consistent, degradedReason };
