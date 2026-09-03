@@ -5,6 +5,7 @@ import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { contentSignature } from "./contentSignature";
 import { buildRuleMatcher } from "./rules";
+import { deriveStartingBalance } from "./accounts/deriveStartingBalance";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
 import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
 import { dbPath, snapshotDir } from "./paths";
@@ -33,6 +34,8 @@ export type ImportPreviewRow = {
   cardLastFour: string | null;
   bankTransactionNumber: string;
   importRowHash: string;
+  /** Star One's running balance after this row. Null on pending rows. */
+  balanceCents: number | null;
   isPending: boolean;
   duplicate: boolean;
   duplicateReason: DuplicateReason | null;
@@ -74,6 +77,7 @@ export function transformRow(
     cardLastFour,
     bankTransactionNumber: parsed.bankTransactionNumber,
     importRowHash,
+    balanceCents: parsed.balanceCents,
     isPending: parsed.isPending,
   };
 }
@@ -206,6 +210,11 @@ export type CommitResult =
       pairsLinked: number;
       snapshot: SnapshotResult;
       warnings: string[];
+      /**
+       * The starting-balance anchor this import wrote onto the account, or null
+       * if it left the existing one alone. See `deriveStartingBalance`.
+       */
+      startingBalance: { date: string; startingBalanceCents: number } | null;
     };
 
 export function commitImport(
@@ -264,6 +273,7 @@ export function commitImport(
           importSource: "csv",
           importBatchId: batch.id,
           importRowHash: row.importRowHash,
+          balanceCents: row.balanceCents,
           isPending: row.isPending,
           // Auto-categorize on the way in. Without this every import lands 100%
           // uncategorized no matter how many rules the user has trained, and
@@ -283,6 +293,8 @@ export function commitImport(
     return batch.id;
   });
 
+  const startingBalance = anchorStartingBalance(opts.accountId, preview.rows, db);
+
   // Prune only after the write has committed — pruning before it meant a failed
   // import had already evicted the oldest snapshot to make room for a useless
   // one. Failures to delete are ignored here rather than aborting an import that
@@ -300,7 +312,50 @@ export function commitImport(
     pairsLinked,
     snapshot,
     warnings,
+    startingBalance,
   };
+}
+
+/**
+ * Move the account's starting-balance anchor onto a real bank balance read from
+ * this file's running-balance column.
+ *
+ * Derived from every parsed row, not just the newly inserted ones: rows already
+ * in the ledger are still links in the running-balance chain, and dropping them
+ * would break it.
+ *
+ * The anchor only ever moves FORWARD in time. Any (date, true closing balance)
+ * pair is a valid anchor, but a later one is strictly safer: the balance rule
+ * sums every row after the anchor date, so the further back the anchor sits,
+ * the more history has to be complete for the total to come out right. Moving
+ * it backwards would trade a known-good anchor for one that depends on more
+ * data being present.
+ */
+function anchorStartingBalance(
+  accountId: number,
+  rows: readonly ImportPreviewRow[],
+  db: Db,
+): { date: string; startingBalanceCents: number } | null {
+  const derived = deriveStartingBalance(rows);
+  if (!derived.ok) return null;
+
+  const account = db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!account || derived.date < account.startingBalanceDate) return null;
+
+  db.update(schema.accounts)
+    .set({
+      startingBalanceCents: derived.startingBalanceCents,
+      startingBalanceDate: derived.date,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.accounts.id, accountId))
+    .run();
+
+  return { date: derived.date, startingBalanceCents: derived.startingBalanceCents };
 }
 
 export function linkTransferPairs(batchId: number, db: Db = defaultDb): number {

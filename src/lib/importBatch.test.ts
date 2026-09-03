@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { buildPreview, commitImport, transformRow } from "./importBatch";
 import { computeImportRowHash } from "./hash";
+import { loadAccountBalances } from "./accounts/loadAccountBalances";
 import type { ParsedRow } from "./parseCsv";
 
 // `commitImport` calls `createSnapshot` against a real `data/money.db` path,
@@ -577,5 +578,161 @@ describe("commitImport — auto-categorization", () => {
       handle.db,
     );
     expect(committedRows()[0].categoryId).toBe(otherId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Starting-balance anchor. Both real accounts were created with
+// starting_balance_cents = 0, so every displayed balance is net-change-since-
+// signup rather than a balance — and once an account is linked, /sync's drift
+// check compares that fabricated figure against the bank's real one and reports
+// a phantom missing row forever. The CSV has carried the answer all along.
+// ---------------------------------------------------------------------------
+describe("commitImport — starting balance anchor", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  function account() {
+    const [a] = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .all();
+    return a;
+  }
+
+  it("persists each row's running balance", () => {
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+
+    const balances = handle.db
+      .select({
+        date: schema.transactions.date,
+        balanceCents: schema.transactions.balanceCents,
+      })
+      .from(schema.transactions)
+      .all()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((r) => r.balanceCents);
+    expect(balances).toEqual([100000, 94790, 214790]);
+  });
+
+  it("anchors the account on the earliest date's closing balance", () => {
+    const result = commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toEqual({
+      date: "2026-04-16",
+      startingBalanceCents: 100000,
+    });
+    expect(account().startingBalanceCents).toBe(100000);
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+  });
+
+  // The point of the whole task: the displayed balance becomes the bank's
+  // balance, so /sync's drift check reads 0 instead of crying wolf.
+  it("makes the computed balance match the file's last running balance", () => {
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+
+    const [balance] = loadAccountBalances(handle.db);
+    expect(balance.balanceCents).toBe(214790);
+  });
+
+  it("reads a newest-first export the same way", () => {
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([PAY, GAS, COFFEE]) },
+      handle.db,
+    );
+    expect(account().startingBalanceCents).toBe(100000);
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+  });
+
+  // Any (date, true closing balance) pair is a valid anchor, but a later one
+  // needs less history to be complete for the sum to come out right.
+  it("never moves the anchor backwards in time", () => {
+    commitImport(
+      { accountId, filename: "recent.csv", csvText: starOneCsv([PAY]) },
+      handle.db,
+    );
+    expect(account().startingBalanceDate).toBe("2026-04-18");
+
+    const older: CsvRow = { ...COFFEE, txn: "900", date: "03/02/2026", balance: 500 };
+    commitImport(
+      { accountId, filename: "older.csv", csvText: starOneCsv([older]) },
+      handle.db,
+    );
+    expect(account().startingBalanceDate).toBe("2026-04-18");
+    expect(account().startingBalanceCents).toBe(214790);
+  });
+
+  it("leaves the anchor alone when the running balance does not chain", () => {
+    const broken = starOneCsv([COFFEE, { ...GAS, balance: 88888 }]);
+    const result = commitImport(
+      { accountId, filename: "broken.csv", csvText: broken },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toBeNull();
+    expect(account().startingBalanceCents).toBe(0);
+    expect(account().startingBalanceDate).toBe("2026-01-01");
+  });
+
+  // Rows already in the ledger are still links in the running-balance chain.
+  // Deriving from only the new rows would break it on every overlapping export.
+  it("derives from every parsed row, including ones already imported", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+
+    const result = commitImport(
+      { accountId, filename: "wider.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.insertedCount).toBe(1);
+    expect(result.startingBalance).toEqual({
+      date: "2026-04-16",
+      startingBalanceCents: 100000,
+    });
+    expect(loadAccountBalances(handle.db)[0].balanceCents).toBe(214790);
   });
 });

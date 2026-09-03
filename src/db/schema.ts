@@ -119,6 +119,14 @@ export const transactions = sqliteTable(
     // CSV rows, which have no such field.
     payee: text("payee"),
     amountCents: integer("amount_cents").notNull(),
+    // Star One's running account balance immediately after this row, straight
+    // from the CSV's Balance column. NULL on SimpleFIN rows (the feed reports a
+    // balance per account, not per transaction) and on pending CSV rows (the
+    // bank leaves the column blank until the row posts). Not used for display:
+    // it exists so an import can derive a real starting-balance anchor for the
+    // account instead of leaving it at the fabricated 0 that makes every
+    // displayed balance a net-change-since-signup figure.
+    balanceCents: integer("balance_cents"),
     bankTransactionNumber: text("bank_transaction_number"),
     cardLastFour: text("card_last_four"),
     categoryId: integer("category_id").references(() => categories.id, {

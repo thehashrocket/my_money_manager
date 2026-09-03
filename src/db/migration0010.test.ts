@@ -127,8 +127,15 @@ describe("scripts/migrate.mjs against a database with real FK-referencing rows",
           "utf8",
         ),
       ) as { entries: { idx: number; tag: string }[] };
-      const pre0010Entries = realJournal.entries.filter((e) => e.tag !== "0010_flat_baron_zemo");
-      expect(pre0010Entries.length).toBe(realJournal.entries.length - 1);
+      // Everything BEFORE 0010, not "everything except 0010". Drizzle's
+      // migrator decides what to apply by timestamp, so leaving a later
+      // migration in this folder would record it as applied and 0010 — the
+      // rebuild this test exists to exercise — would be skipped entirely.
+      const idx0010 = realJournal.entries.findIndex(
+        (e) => e.tag === "0010_flat_baron_zemo",
+      );
+      expect(idx0010).toBeGreaterThan(-1);
+      const pre0010Entries = realJournal.entries.slice(0, idx0010);
 
       const partialDir = path.join(tmpDir, "drizzle-pre0010");
       fs.mkdirSync(path.join(partialDir, "meta"), { recursive: true });

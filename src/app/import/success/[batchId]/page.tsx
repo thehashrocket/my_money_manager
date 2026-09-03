@@ -4,6 +4,7 @@ import { db, schema } from "@/db";
 import { and, eq, isNotNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { resolveBatchLabel } from "@/lib/batchLabel";
+import { formatCents } from "@/lib/money";
 
 export default async function SuccessPage({
   params,
@@ -46,6 +47,22 @@ export default async function SuccessPage({
     )
     .all();
 
+  // A CSV import can move the account's starting-balance anchor onto a real
+  // bank balance read from the file's running-balance column. That rewrites the
+  // number every displayed balance is computed from, so it is shown rather than
+  // changed silently.
+  const [anchored] = db
+    .select({
+      name: schema.accounts.name,
+      startingBalanceCents: schema.accounts.startingBalanceCents,
+      startingBalanceDate: schema.accounts.startingBalanceDate,
+    })
+    .from(schema.transactions)
+    .innerJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
+    .where(eq(schema.transactions.importBatchId, batchId))
+    .limit(1)
+    .all();
+
   return (
     <div className="mx-auto w-full max-w-2xl px-6 py-16 space-y-6">
       <header className="space-y-1">
@@ -80,6 +97,17 @@ export default async function SuccessPage({
             {batch.transactionCount - autoCategorized}
           </dd>
         </div>
+        {anchored && (
+          <div className="col-span-2">
+            <dt className="text-[10px] uppercase tracking-wide text-zinc-500">
+              {anchored.name} starting balance
+            </dt>
+            <dd className="text-sm">
+              {formatCents(anchored.startingBalanceCents)} as of{" "}
+              {anchored.startingBalanceDate}
+            </dd>
+          </div>
+        )}
         {batch.snapshotPath && (
           <div className="col-span-2">
             <dt className="text-[10px] uppercase tracking-wide text-zinc-500">snapshot</dt>
