@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-03
+
+_A too-broad rule trained today already has 23 seeded siblings from migration 0006 (NETFLIX, SPOTIFY, HULU, and 20 others) — every one of them a candidate for mis-tagging an entire import with no way back short of restoring the whole database. This release closes that gap: import-time categorization gets its own undo, scoped to just the categorization, not the transactions it touched._
+
+### Added
+- **Auto-categorization at import can now be undone without discarding the whole import.** Every row a trained rule categorizes on the way in — from a CSV import or a SimpleFIN sync — is now recorded, and an "Undo auto-categorization" button on the import success page (and a link from `/sync` for synced batches) reverts just those rows back to uncategorized. A row you've since categorized yourself, by hand, is left alone even if it happens to land back on the same category a rule originally chose.
+
+### Fixed
+- CLAUDE.md's description of import-time categorization no longer claims it has no undo — corrected to match the behavior above.
+
 ## [0.11.0] - 2026-09-03
 
 _The `/sync` balance check could only say one thing about a difference: "a row is missing or duplicated." That was wrong whenever the bank's own figure was simply out of date — measured once at +$893.84 of "drift" that was really just a day of activity the bank hadn't reported yet. This release teaches the check to tell the two apart, and gives you a way to fix the one thing that was making the ledger-side comparison untrustworthy in the first place._
