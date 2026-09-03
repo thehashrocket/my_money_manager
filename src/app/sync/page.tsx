@@ -31,8 +31,16 @@ export const dynamic = "force-dynamic";
  * same-amount collision in recent history, including ones that predate the first
  * sync and came in from CSV. Do not "fix" this to match MAX_LOOKBACK_DAYS —
  * they answer different questions.
+ *
+ * Widened from 120 to 240 for the load-the-ledger backfill. 120 days back from
+ * the day that backfill ran was 2026-05-05, and it imports from 2026-04-21 — so
+ * the ambiguous buckets from the first two weeks of it landed outside the only
+ * surface that can resolve them, and their rows would have been counted as
+ * spending, invisibly. The window has to cover the oldest history a CSV import
+ * can introduce, which is unbounded by anything in this file; 240 buys roughly
+ * eight months, which is the shape of a "catch up on a stale ledger" import.
  */
-const REVIEW_WINDOW_DAYS = 120;
+const REVIEW_WINDOW_DAYS = 240;
 
 export default function SyncPage() {
   const accounts = db.select().from(schema.accounts).all();

@@ -100,6 +100,14 @@ export const importBatches = sqliteTable("import_batches", {
   // page, not just the one right after commit — CLAUDE.md rule 5 requires the
   // degraded flag never be silently dropped.
   snapshotWarning: text("snapshot_warning"),
+  // Non-null only when THIS batch moved the account's starting-balance anchor
+  // (see anchorStartingBalance in importBatch.ts). Persisted rather than
+  // re-derived from the account's current anchor for the same reason as
+  // snapshotWarning above: a later import can move the anchor again, and a
+  // live re-read would then misattribute the newer anchor to this batch's
+  // success page on a revisit.
+  anchoredStartingBalanceCents: integer("anchored_starting_balance_cents"),
+  anchoredStartingBalanceDate: text("anchored_starting_balance_date"),
 });
 
 export const transactions = sqliteTable(
@@ -119,6 +127,17 @@ export const transactions = sqliteTable(
     // CSV rows, which have no such field.
     payee: text("payee"),
     amountCents: integer("amount_cents").notNull(),
+    // Star One's running account balance immediately after this row, straight
+    // from the CSV's Balance column. NULL on SimpleFIN rows (the feed reports a
+    // balance per account, not per transaction), and NULL *or 0* on pending CSV
+    // rows — Star One leaves the cell blank or zero until the row posts, and
+    // parseCsv keys `isPending` on exactly that pair. Also NULL on any posted
+    // row whose Balance cell does not parse. Derivation filters on `isPending`
+    // first, so the 0 case never enters a chain. Not used for display:
+    // it exists so an import can derive a real starting-balance anchor for the
+    // account instead of leaving it at the fabricated 0 that makes every
+    // displayed balance a net-change-since-signup figure.
+    balanceCents: integer("balance_cents"),
     bankTransactionNumber: text("bank_transaction_number"),
     cardLastFour: text("card_last_four"),
     categoryId: integer("category_id").references(() => categories.id, {

@@ -175,11 +175,15 @@ export function matchTransfers<T extends TransferCandidate>(
         // in a bucket really are transfer legs; it has no way to tell a genuine
         // pair from a same-day, same-amount coincidence. That is an acceptable
         // risk between two feed rows, which is what the 56-pair result was
-        // measured on. It is NOT acceptable when one leg came from CSV and
+        // measured on. It is NOT acceptable when EITHER leg came from CSV and
         // carries a bank transaction number, because the ±1 matcher — a strictly
         // stronger signal — already looked at that row and declined to pair it.
         // Overriding it on a coincidence would silently drop two real
-        // transactions out of every spending view.
+        // transactions out of every spending view. That includes a CSV↔CSV pair
+        // where BOTH legs were examined and declined — the strongest possible
+        // evidence against, not the weakest: an `!==` (XOR) check here would
+        // treat "both adjudicated" the same as "neither adjudicated" and
+        // auto-link exactly the case this guard exists to catch.
         //
         // So an uncorroborated cross-source pair asks instead of guessing. The
         // whole direction is diverted, never a subset: linking some pairs and
@@ -187,7 +191,7 @@ export function matchTransfers<T extends TransferCandidate>(
         // counting argument rests on.
         const uncorroboratedCrossSource = candidates.some(
           ({ a, b }) =>
-            a.adjudicatedByTxnNumber !== b.adjudicatedByTxnNumber &&
+            (a.adjudicatedByTxnNumber || b.adjudicatedByTxnNumber) &&
             !isOverdraftLabeled(a) &&
             !isOverdraftLabeled(b),
         );

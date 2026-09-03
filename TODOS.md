@@ -35,7 +35,7 @@ Spine (sequential):
 - [x] `src/lib/money.ts` — extract `formatCents`, Vitest-cover, swap both import pages
 - [x] `src/lib/test/db.ts` — `:memory:` Drizzle migrator helper
 - [x] `src/lib/budget.ts` — `getEffectiveAllocation` + lazy-persist, `invalidateForwardRollover`, `computeMtdSpent` (DB-backed, Vitest-covered)
-- [x] `src/lib/rules.ts` — `applyRuleAtImport`, `createOrUpdateRule` (Vitest-covered)
+- [x] `src/lib/rules.ts` — `applyRuleAtImport`, `createOrUpdateRule` (Vitest-covered). **This box was wrong from 2026-04-17 until 2026-09-02:** the functions existed and were covered, but `applyRuleAtImport` had zero production callers, so nothing was auto-categorized at import. Wired into both write paths by T1 of `docs/plans/load-the-ledger.md`.
 
 Spine retroactive (do before Track A — locked via `/plan-eng-review` 2026-04-16):
 - [x] `src/lib/budget.ts` — split `getEffectiveAllocation({ persist })`; default `persist: false`. `/budget` reads non-persisting; `upsertBudgetAllocationAction` persists. Update `src/lib/budget.test.ts` to cover both modes.
@@ -410,3 +410,148 @@ to build on):
   down" branches — CI's `db:seed-volume` step only ever runs against a genuinely empty
   volume. Low criticality: it's a thin wrapper, and the same mocking-precedent question
   above applies.
+
+## Follow-ups from the `/plan-eng-review` triage pass (2026-09-02)
+
+A review of "what should we work on next" that started by reading the real ledger
+(`/Users/jasonshultz/Projects/my_money_manager/data/money.db`) rather than this file.
+That inverted the priority order: 1178 transactions frozen at 2026-04-20, **0 rows in
+`budget_periods`** (envelope budgeting had never been used), and 5 of 10 migrations
+unapplied (so the SimpleFIN sync shipped across four releases had never touched real
+data). Every open item below this line was downstream of a working ledger.
+
+The two P1 defects that pass found are **not** listed here — they are the plan, in
+[docs/plans/load-the-ledger.md](./docs/plans/load-the-ledger.md), as T1 (wire
+`applyRuleAtImport`, which has zero production callers) and T2 (CSV dedup keys on
+`row_index`, so a wider re-export double-counts silently — reproduced empirically).
+T6 in that plan corrects the stale `[x]` on line 38 of this file and `CHANGELOG.md:292`,
+both of which document auto-categorize-at-commit as shipped behavior that does not exist.
+
+- [ ] **P2** — `/categorize` and the backlog banner are all-time, with no way to scope to a
+  month. `loadMerchantGroups` (`src/lib/categorize/loadMerchantGroups.ts:33`) and
+  `loadUncategorizedBacklog` (`src/lib/budget/loadMonthView.ts:161`) both query the whole
+  ledger. That makes "categorize the current month, leave the history for later" —
+  the only sane way to start using a ledger that has gone stale — impossible to express:
+  the banner reports the full backlog on `/budget` and `/` no matter how current you are,
+  and the bulk-by-merchant surface offers no filter. The month-scoped path that does exist
+  (`/transactions`, `src/app/transactions/page.tsx:59`) is row-by-row, which is the wrong
+  tool for the head of the distribution. Found by Codex during the outside-voice pass while
+  checking an effort estimate that had assumed a month-scoped bulk screen; it does not
+  exist. Deferred out of `load-the-ledger.md` deliberately: it is a new feature, and that
+  plan is a stabilization pass. The month picker on `/transactions` is the obvious thing to
+  lift into a shared filter component when this is picked up. Depends on nothing.
+
+- [ ] **P3** — `scripts/db-paths.mjs` hardcodes cwd-relative `./data/money.db` and does not
+  read `DATA_DIR`, while the app itself does (`src/lib/paths.ts:9`, `dataDir()`). The two
+  disagree about where the ledger lives, and the failure mode is silent success: running
+  `pnpm db:migrate` from a Conductor worktree migrates that worktree's own empty database
+  and prints "Migrations applied successfully" while the real ledger in the main checkout
+  stays untouched. Nothing is broken today — under Docker the entrypoint runs migrations
+  inside the container, where `DATA_DIR` and cwd agree — but this is the one script that
+  performs the most destructive write in the repo (a schema rebuild, CLAUDE.md rule 7), so
+  a latent path disagreement is worth closing. The catch: `db-paths.mjs` is plain `.mjs`
+  shared with `drizzle.config.ts`, so `DATA_DIR` resolution has to be duplicated rather
+  than imported from `paths.ts`, which cuts against the reason that file exists as a single
+  source of truth — resolve that tension before writing code. Found by Codex, 2026-09-02.
+  Depends on nothing.
+
+- [ ] **P3** — Import-time categorization will have no undo. `bulkCategorize` captures a
+  full prior-state snapshot and `undoBulkCategorize` does a 3-case rule rollback
+  (`src/lib/categorize/`); once `load-the-ledger.md`'s T1 wires `applyRuleAtImport` into
+  `commitImport` and `syncSimpleFin`, the import path will set categories with no
+  equivalent. A `contains` or `regex` rule that matches too broadly would label an entire
+  4-month backfill with no one-click reversal — only the rule 5 file snapshot, which means
+  discarding the whole import. Blast radius is **zero today**: all 73 rules in the real
+  ledger are exact-match, and there are no `contains` or `regex` rules at all. That is why
+  T1 was not blocked on this. **Revisit trigger: the first time a `contains` or `regex`
+  rule gets trained.** The batch id is already on every row, so recording which rows a
+  batch auto-categorized is the cheap version; matching `bulkCategorize`'s snapshot shape
+  is the complete one. Depends on T1.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-03)
+
+Seven specialists + Red Team reviewed `thehashrocket/next-todo-priority` before it
+landed. Six CRITICAL findings were fixed on the branch itself (silent-corruption paths
+reachable during the migrate-then-backfill sequence: a migration-journal timestamp bug
+that permanently skips seeding the Subscriptions category, a pending row's posted
+counterpart being dropped forever, the starting-balance tile misattributing an anchor
+move to the wrong batch, sync undo deleting a transaction with no other copy, a computed
+balance overshooting the bank's posted figure, and a backwards cross-source transfer-link
+guard). A handful of mechanical items (unused import, stale docstrings, a missing DB
+transaction, a test that didn't test what its name claimed) were auto-fixed in the same
+pass. What's below is what's left — informational, not blocking, none of it corrupts data.
+
+- [ ] **P1** — Migration 0006 seeds 23 broad `contains` rules for subscription merchants
+  (NETFLIX, SPOTIFY, HULU, etc). CLAUDE.md rule 6's documented revisit trigger for
+  import-time-categorization-has-no-undo is "the first `contains` or `regex` rule
+  trained" — that fires the moment `pnpm db:migrate` runs on the real ledger, not at some
+  future point. **Read this before step 9 of `docs/plans/load-the-ledger.md`**: the
+  4.5-month backfill will auto-categorize every subscription merchant with no one-click
+  undo (only the file snapshot, which discards the whole import). The P3 entry above
+  ("Import-time categorization will have no undo") is no longer a someday item once
+  `db:migrate` runs — its revisit trigger already fired. Found by Red Team during the
+  same `/ship` pass.
+
+- [ ] **P2** — `deriveStartingBalance` silently picks the file's own row order when BOTH
+  directions validate the running-balance chain, rather than treating that as ambiguous.
+  Both orders validate exactly when a date's transactions net to zero, which is not rare
+  (e.g. a paycheck and a same-day bill). Verified: the same two rows, file order vs.
+  reversed, produced anchors $100 apart — a real dollar swing decided only by which way
+  Star One happened to write the file, not by any actual evidence. Fix: when both
+  directions validate, compute the anchor for both and refuse (`{ ok: false }`) unless
+  they agree, rather than defaulting to `forward`. (`src/lib/accounts/deriveStartingBalance.ts:90-95`)
+
+- [ ] **P2** — `anchorStartingBalance` (`src/lib/importBatch.ts`) runs outside
+  `commitImport`'s write transaction, mutates the `accounts` row with no record of the
+  prior value, and has no undo path (CSV imports don't have `undoSyncBatch`'s logical
+  undo). A misfiled import against the wrong account silently overwrites a good anchor,
+  recoverable only via a full snapshot restore. Also unvalidated against the same
+  magnitude/date bounds `createAccountInputSchema` enforces on a hand-typed starting
+  balance — a single-row file trivially "validates" (`isValidChain` never executes its
+  loop body at length 1) and would anchor on whatever that one row's Balance cell says,
+  with no corroboration at all. Fix: move the anchor write inside the transaction,
+  persist the account's prior `(starting_balance_cents, starting_balance_date)`
+  somewhere it can be reverted from, and apply the same bounds `createAccountInputSchema`
+  already enforces (`src/lib/accounts/validateCreateAccountInput.ts`).
+
+- [ ] **P2** — `commitImport`'s `status: "empty"` early return (both brand-new-toInsert
+  AND toUpdate empty) still means a file whose every row was already imported can never
+  fix that account's `$0.00` anchor, and `balance_cents` stays NULL forever on rows
+  imported before this column existed. Re-importing the original export to backfill
+  those columns does nothing. Known and deliberate for this ship (no surprising side
+  effect on a "nothing to import" path); revisit if backfilling `balance_cents` on
+  already-imported rows becomes something the UI needs to show.
+
+- [ ] **P3** — `applyRuleAtImport` (`src/lib/rules.ts`) has zero production callers —
+  both write paths call `buildRuleMatcher` directly. It survives only so
+  `rules.test.ts`'s ~14 assertions keep compiling. Flagged independently by both the
+  maintainability and simplification specialists (multi-specialist confirmed): this is
+  the same shape as the bug this whole branch exists to fix (a tested function nobody
+  calls) — a second entry point with self-referential coverage invites the same drift
+  back. Either point the 14 assertions at `buildRuleMatcher` and delete the wrapper, or
+  say plainly in its docstring that nothing calls it in production.
+
+- [ ] **P3** — The content-budget multiset-build (bucket existing rows by
+  `contentSignature`, count as a map) is duplicated verbatim, comment included, between
+  `src/lib/importBatch.ts` and `src/lib/simplefin/sync.ts`. The counting discipline that
+  makes it correct (CLAUDE.md rule 3 — never collapse into a `Set`) is exactly the part
+  most likely to be gotten wrong by a third caller, and it's the part left copy-pasted.
+  Extract a `buildContentBudget` helper into `src/lib/contentSignature.ts`.
+
+- [ ] **P3** — Two design/info-architecture items on the import success page
+  (`src/app/import/success/[batchId]/page.tsx`): the "auto-categorized" / "left to
+  categorize" tiles are live queries, not a record of what the import did — a user who
+  later hand-categorizes the rest via `/categorize` returns to a page claiming the rule
+  engine did all of it. And "already imported" (content match) vs "duplicate" (hash
+  match) on the preview page (`src/app/import/preview/[id]/page.tsx`) are two words for
+  the same fact, split on an implementation detail the user has no reason to care about.
+  Neither is incorrect, both are worth a follow-up pass. The page also still renders in
+  raw Tailwind zinc rather than DESIGN.md's paper/ink tokens, matching the rest of that
+  page (pre-existing, not introduced by this branch, but grown by it).
+
+- [ ] **P4** — `transactions_import_batch_idx` doesn't exist; the success page's two new
+  per-batch queries (`autoCategorized` count, the anchor join) are full table scans, as
+  is the pre-existing `pairsLinked` count on the same page. Sub-millisecond at the
+  current ~1200-row scale — only worth an index if the ledger grows by orders of
+  magnitude. The `autoCategorized`/`pairsLinked` queries could also collapse into one
+  `COUNT(category_id)`/`COUNT(transfer_pair_id)` statement instead of two scans.

@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
-import { applyRuleAtImport, createOrUpdateRule } from "./rules";
+import { applyRuleAtImport, buildRuleMatcher, createOrUpdateRule } from "./rules";
 import { createTestDb, type TestDbHandle } from "./test/db";
 
 let handle: TestDbHandle;
@@ -280,5 +280,85 @@ describe("createOrUpdateRule", () => {
     expect(rows).toHaveLength(2);
     expect(rows.some((r) => r.matchType === "exact")).toBe(true);
     expect(rows.some((r) => r.matchType === "contains")).toBe(true);
+  });
+});
+
+// `buildRuleMatcher` is the form both write paths actually call (commitImport
+// and syncSimpleFin); `applyRuleAtImport` is now a one-shot wrapper around it.
+// Its whole reason to exist is reading and ranking the rules table once per
+// batch instead of once per row, so that — and the snapshot semantics it
+// implies — is what these pin.
+describe("buildRuleMatcher", () => {
+  it("returns a matcher that resolves null when the rules table is empty", () => {
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY")).toBeNull();
+    expect(match("")).toBeNull();
+  });
+
+  it("reads the rules table once no matter how many merchants it resolves", () => {
+    const groceries = seedCategory("Groceries");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    const selectSpy = vi.spyOn(handle.db, "select");
+    const match = buildRuleMatcher(handle.db);
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+
+    for (let i = 0; i < 50; i++) match(i % 2 === 0 ? "SAFEWAY" : "TRADER JOES");
+    expect(selectSpy).toHaveBeenCalledTimes(1);
+    selectSpy.mockRestore();
+  });
+
+  // The snapshot is taken when the matcher is built. Documented as safe only
+  // because both callers exclusively insert — pinned so a caller that later
+  // trains a rule mid-batch fails here rather than silently mis-categorizing.
+  it("does not see a rule trained after the matcher was built", () => {
+    const groceries = seedCategory("Groceries");
+    const match = buildRuleMatcher(handle.db);
+
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    expect(match("SAFEWAY")).toBeNull();
+    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(groceries.id);
+  });
+
+  // Ranking must be identical to the wrapper's — a batch import and a one-off
+  // categorize resolving the same merchant to different categories would be
+  // invisible until the numbers stopped adding up.
+  it("ranks by priority then recency, identically to applyRuleAtImport", () => {
+    const low = seedCategory("Low");
+    const high = seedCategory("High");
+    handle.db
+      .insert(schema.categoryRules)
+      .values([
+        {
+          categoryId: low.id,
+          matchType: "contains",
+          matchValue: "SAFE",
+          priority: 10,
+          source: "auto",
+        },
+        {
+          categoryId: high.id,
+          matchType: "exact",
+          matchValue: "SAFEWAY",
+          priority: 90,
+          source: "manual",
+        },
+      ])
+      .run();
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY")).toBe(high.id);
+    expect(match("SAFEWAY")).toBe(applyRuleAtImport(handle.db, "SAFEWAY"));
+    // Only the lower-priority `contains` rule reaches this one.
+    expect(match("SAFEHOUSE")).toBe(low.id);
   });
 });

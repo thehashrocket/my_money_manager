@@ -200,6 +200,55 @@ describe("undoSyncBatch", () => {
     expect(after?.transferPairId).toBeNull();
   });
 
+  it("refuses to undo a sync batch once a later import (of any source) exists", () => {
+    // The scenario this guards: a sync lands, then a CSV import content-dedups
+    // one of its own rows against a row THIS sync batch inserted (no source
+    // filter on that dedup pass). If undo were still allowed, deleting the
+    // sync batch would delete the only surviving copy of that transaction.
+    const account = seedAccount();
+    const batch = seedBatch("simplefin", "simplefin 2026-09-01 10:00Z");
+    seedTxn({ accountId: account.id, batchId: batch.id, amountCents: -200 });
+
+    // Still the newest batch — undo is offered and safe.
+    expect(findLastSyncBatch(handle.db)?.batchId).toBe(batch.id);
+
+    // A later CSV import lands.
+    const laterCsv = seedBatch("csv", "starone.csv");
+    seedTxn({ accountId: account.id, batchId: laterCsv.id, amountCents: -100, source: "csv" });
+
+    // No longer offered at all — the page should not show an undo button.
+    expect(findLastSyncBatch(handle.db)).toBeNull();
+
+    // And even a direct call (stale form resubmission, a second tab) is
+    // refused rather than silently deleting.
+    const result = undoSyncBatch(batch.id, handle.db);
+    expect(result.status).toBe("stale");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+    expect(
+      handle.db
+        .select()
+        .from(schema.importBatches)
+        .where(eq(schema.importBatches.id, batch.id))
+        .get(),
+    ).toBeDefined();
+  });
+
+  it("blocks undo of an older sync batch once a newer sync batch exists, even an empty one", () => {
+    // A later batch of ANY source blocks undo of an earlier one — including
+    // another sync run that landed zero new rows. The guard is "is anything
+    // newer", not "did anything newer actually collide".
+    const account = seedAccount();
+    const older = seedBatch("simplefin", "simplefin 2026-09-01 10:00Z");
+    seedTxn({ accountId: account.id, batchId: older.id, amountCents: -200 });
+
+    const newer = seedBatch("simplefin", "simplefin 2026-09-02 10:00Z");
+
+    // findLastSyncBatch now reports the newer (still-latest) batch, not the
+    // older one — undo stays offered, just for the right batch.
+    expect(findLastSyncBatch(handle.db)?.batchId).toBe(newer.id);
+    expect(undoSyncBatch(older.id, handle.db).status).toBe("stale");
+  });
+
   it("refuses to touch a batch that is not a sync batch, or one that does not exist", () => {
     const account = seedAccount();
     const csv = seedBatch("csv", "starone.csv");

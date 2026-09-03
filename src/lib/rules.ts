@@ -1,4 +1,3 @@
-import { eq } from "drizzle-orm";
 import type { ExtractTablesWithRelations } from "drizzle-orm";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import { schema } from "@/db";
@@ -23,26 +22,42 @@ type Db = BaseSQLiteDatabase<
  * Tie-breaker (plan Pass 7): ORDER BY priority DESC, updated_at DESC — the
  * most recently updated rule wins at equal priority.
  *
- * Exact matches take the fast path via SQL equality; `contains` and `regex`
- * rules fall back to an in-memory scan (the rules table stays small — dozens,
- * maybe hundreds — and this only runs at import + explicit categorize time).
+ * All match types resolve the same way: the rules table is read in full and
+ * scanned in rank order (it stays small — dozens, maybe hundreds). There is no
+ * SQL-equality fast path for exact matches.
+ *
+ * One-shot form. There are no production callers; both write paths use
+ * `buildRuleMatcher` directly. Kept as the single-merchant convenience the
+ * rule-matching tests are written against.
  */
 export function applyRuleAtImport(
   db: Db,
   normalizedMerchant: string,
 ): number | null {
-  const all = db
-    .select()
-    .from(schema.categoryRules)
-    .all();
-  if (all.length === 0) return null;
+  return buildRuleMatcher(db)(normalizedMerchant);
+}
 
-  const sorted = [...all].sort(compareRules);
+/**
+ * Read and rank the rules table once, then resolve many merchants against it.
+ *
+ * Use this over `applyRuleAtImport` inside an insert loop. The rules table is
+ * small, but a 600-row backfill calling `applyRuleAtImport` per row would read
+ * and re-sort all of it 600 times inside a single write transaction.
+ *
+ * The snapshot is taken when this is called, so a caller that trains a rule
+ * mid-loop would not see it. Both current callers (`commitImport`,
+ * `syncSimpleFin`) only insert, so there is nothing to invalidate.
+ */
+export function buildRuleMatcher(db: Db): (normalizedMerchant: string) => number | null {
+  const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
+  if (sorted.length === 0) return () => null;
 
-  for (const rule of sorted) {
-    if (matches(rule, normalizedMerchant)) return rule.categoryId;
-  }
-  return null;
+  return (normalizedMerchant: string) => {
+    for (const rule of sorted) {
+      if (matches(rule, normalizedMerchant)) return rule.categoryId;
+    }
+    return null;
+  };
 }
 
 /**

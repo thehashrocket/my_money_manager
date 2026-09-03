@@ -49,36 +49,6 @@ export function simplefinRowHash(externalId: string): string {
   return createHash("sha1").update(`simplefin|${externalId}`).digest("hex");
 }
 
-/**
- * Memo whitespace differs by source and must not decide a dedup question.
- * Star One's CSV pads pending-row memos with leading spaces and `parseCsv`
- * preserves them verbatim on purpose (`import_row_hash` is derived from the
- * exact bytes, so trimming there would break hash stability). The feed's memo
- * arrives trimmed. Normalising both sides here — rather than changing either
- * source — keeps that hash contract intact while letting the two representations
- * of one transaction compare equal.
- */
-function normalizeMemoForSignature(memo: string): string {
-  return memo.trim().replace(/\s+/g, " ");
-}
-
-/**
- * Content signature for cross-source dedup. The 90 days SimpleFIN returns
- * overlap history already imported from CSV, and those rows have no
- * external_id to match on — so they are compared on content instead.
- *
- * Without the whitespace normalisation this misses exactly the rows it exists
- * for: a row imported from CSV while pending (padded memo) that later posts and
- * comes back on the feed (trimmed memo) would be inserted a second time.
- */
-export function contentSignature(r: {
-  date: string;
-  amountCents: number;
-  rawMemo: string;
-}): string {
-  return `${r.date}|${r.amountCents}|${normalizeMemoForSignature(r.rawMemo)}`;
-}
-
 export function mapTransaction(txn: SimpleFinTransaction): MappedRow {
   // description === memo on 100% of real rows; prefer memo and fall back.
   const rawMemo = (txn.memo ?? txn.description ?? "").trim();

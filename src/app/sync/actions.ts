@@ -132,6 +132,9 @@ export async function undoSyncAction(
       "That sync has already been undone, or is no longer the batch shown here — reload the page.",
     );
   }
+  if (result.status === "stale") {
+    return fail(result.reason);
+  }
   return ok(
     `Undid the sync — removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}.`,
   );

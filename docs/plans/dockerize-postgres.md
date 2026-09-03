@@ -779,8 +779,10 @@ data moved.
 
 Kept alongside as a human-readable sanity layer, because a hash mismatch says *that*
 something differs and not *what*: row count per table, and computed balance per account
-(`starting_balance_cents + SUM(amount_cents WHERE date > starting_balance_date)`,
-CLAUDE.md rule 1) on both sides. On failure the script prints which table's hash diverged
+(`starting_balance_cents + SUM(amount_cents WHERE date > starting_balance_date AND is_pending = false)`,
+CLAUDE.md rule 1 — the `is_pending` filter landed in v0.10.0, after this plan was first
+written; get it wrong here and a pending row makes the two sides disagree on a balance
+that was never actually inconsistent) on both sides. On failure the script prints which table's hash diverged
 and the aggregate deltas, which is enough to find it with two queries by hand.
 
 The reconciliation is not a `--verify` flag. It runs every time, inside the transaction,

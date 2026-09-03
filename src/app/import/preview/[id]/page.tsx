@@ -125,7 +125,11 @@ export default async function PreviewPage({
                   <td className="px-2 py-1 font-mono">{r.cardLastFour ?? "—"}</td>
                   <td className="px-2 py-1">
                     {r.duplicate ? (
-                      <span className="text-zinc-500">duplicate</span>
+                      <span className="text-zinc-500">
+                        {r.duplicateReason === "content"
+                          ? "already imported"
+                          : "duplicate"}
+                      </span>
                     ) : r.isPending ? (
                       <span className="text-amber-700">pending</span>
                     ) : (

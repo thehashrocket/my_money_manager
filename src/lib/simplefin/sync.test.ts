@@ -10,6 +10,7 @@ import {
   findLinkedTransferPairs,
 } from "./sync";
 import { setAccountLink } from "./link";
+import { mapTransaction } from "./mapTransaction";
 
 /**
  * Exercises the dedup and manual-pairing logic against a real :memory: schema.
@@ -754,5 +755,51 @@ describe("syncSimpleFin — cross-account relink double-count (known P1 gap)", (
     const all = handle.db.select().from(schema.transactions).all();
     expect(all).toHaveLength(2);
     expect(all.filter((r) => r.amountCents === -487)).toHaveLength(2);
+  });
+});
+
+// Same gap as the CSV path (see importBatch.test.ts): `applyRuleAtImport` was
+// never called from either write path, so a synced row landed uncategorized
+// even when a rule for that merchant already existed.
+describe("syncSimpleFin — auto-categorization", () => {
+  function categoryByName(name: string): number {
+    const [category] = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, name))
+      .all();
+    if (!category) throw new Error(`seed category "${name}" missing`);
+    return category.id;
+  }
+
+  it("applies a trained rule to rows arriving from the feed", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const categoryId = categoryByName("Dining");
+    // The feed's description is byte-identical in shape to the CSV Memo column,
+    // so a rule trained on CSV history keys straight through — this asserts the
+    // match runs on `normalized_merchant`, never on MX's `payee`.
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId,
+        matchType: "exact",
+        matchValue: mapTransaction(feedTxn("TRN-1", "-4.87")).normalizedMerchant,
+        source: "manual",
+      })
+      .run();
+
+    respondWith("ACT-1", [feedTxn("TRN-1", "-4.87"), feedTxn("TRN-2", "-9.99", "UNKNOWN VENDOR")]);
+
+    const result = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(result.status).toBe("synced");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.externalId === "TRN-1")?.categoryId).toBe(categoryId);
+    expect(rows.find((r) => r.externalId === "TRN-2")?.categoryId).toBeNull();
   });
 });
