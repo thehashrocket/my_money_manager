@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { loadMerchantGroups } from "@/lib/categorize/loadMerchantGroups";
 import { listLeafCategories } from "@/lib/categories";
 import { loadMonthView } from "@/lib/budget/loadMonthView";
+import { currentMonth } from "@/lib/now";
 import { CategorizeUi } from "./_categorize-ui";
 
 /**
@@ -18,12 +19,8 @@ export default async function CategorizePage() {
   await connection();
   const groups = loadMerchantGroups(db);
   const leafCategories = listLeafCategories(db);
-  const now = new Date();
-  const { uncategorizedBacklog } = loadMonthView(
-    db,
-    now.getFullYear(),
-    now.getMonth() + 1,
-  );
+  const { year, month } = currentMonth();
+  const { uncategorizedBacklog } = loadMonthView(db, year, month);
 
   return (
     <main className="mx-auto max-w-4xl p-6 space-y-6">

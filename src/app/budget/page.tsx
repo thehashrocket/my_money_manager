@@ -1,5 +1,6 @@
 import { connection } from "next/server";
 import { redirect } from "next/navigation";
+import { currentMonth } from "@/lib/now";
 
 /**
  * `/budget` is a thin redirect into the canonical `/budget/[year]/[month]`
@@ -13,6 +14,6 @@ import { redirect } from "next/navigation";
  */
 export default async function BudgetIndexPage() {
   await connection();
-  const now = new Date();
-  redirect(`/budget/${now.getFullYear()}/${now.getMonth() + 1}`);
+  const { year, month } = currentMonth();
+  redirect(`/budget/${year}/${month}`);
 }

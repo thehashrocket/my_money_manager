@@ -5,14 +5,13 @@ import { loadAccountBalances, type AccountBalance } from "@/lib/accounts/loadAcc
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
 import { formatCents } from "@/lib/money";
+import { currentMonth } from "@/lib/now";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { TrendChart } from "@/components/ledger/trend-chart";
 
 export default async function Home() {
   await connection();
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+  const { year, month } = currentMonth();
 
   const accounts = loadAccountBalances(db);
   const view = loadMonthView(db, year, month);

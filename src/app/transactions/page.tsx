@@ -5,6 +5,7 @@ import { db } from "@/db";
 import { listLeafCategories, type LeafCategory } from "@/lib/categories";
 import { loadMonthView } from "@/lib/budget/loadMonthView";
 import { loadTransactions } from "@/lib/categorize/loadTransactions";
+import { currentMonth } from "@/lib/now";
 import { TransactionsUi } from "./_transactions-ui";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -64,11 +65,11 @@ export default async function TransactionsPage({
   });
 
   const leafCategories = listLeafCategories(db);
-  const now = new Date();
+  const { year: currentYear, month: currentMonthNum } = currentMonth();
   const { uncategorizedBacklog } = loadMonthView(
     db,
-    now.getFullYear(),
-    now.getMonth() + 1,
+    currentYear,
+    currentMonthNum,
   );
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
