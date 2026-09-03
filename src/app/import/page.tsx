@@ -1,8 +1,11 @@
 import { connection } from "next/server";
 import { db, schema } from "@/db";
-import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
-import { createAccountAction, uploadCsvAction } from "./actions";
+import {
+  createAccountAction,
+  updateAccountAnchorAction,
+  uploadCsvAction,
+} from "./actions";
 
 export default async function ImportPage() {
   // Without this, Next 16 prerenders the route at build time. On the host
@@ -30,22 +33,63 @@ export default async function ImportPage() {
             No accounts yet. Create one below to get started.
           </p>
         ) : (
-          <ul className="divide-y divide-zinc-200 rounded-md border border-zinc-200">
-            {accounts.map((a) => (
-              <li
-                key={a.id}
-                className="flex items-center justify-between px-4 py-2 text-sm"
-              >
-                <div>
-                  <span className="font-medium">{a.name}</span>
-                  <span className="ml-2 text-zinc-500">({a.type})</span>
-                </div>
-                <div className="text-zinc-500 [font-variant-numeric:tabular-nums]">
-                  start {formatCents(a.startingBalanceCents)} on {a.startingBalanceDate}
-                </div>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y divide-zinc-200 rounded-md border border-zinc-200">
+              {accounts.map((a) => (
+                <li key={a.id} className="px-4 py-3 text-sm">
+                  <form
+                    action={updateAccountAnchorAction}
+                    className="flex flex-wrap items-center gap-3"
+                  >
+                    <input type="hidden" name="accountId" value={a.id} />
+                    <div className="min-w-40 flex-1">
+                      <span className="font-medium">{a.name}</span>
+                      <span className="ml-2 text-zinc-500">({a.type})</span>
+                    </div>
+                    <label className="flex items-center gap-1 text-zinc-500">
+                      <span>start</span>
+                      <input
+                        type="number"
+                        name="startingBalance"
+                        step="0.01"
+                        required
+                        // Dollars, matching the create form — the action
+                        // converts to cents. `.toFixed(2)` rather than a bare
+                        // division so a whole-dollar anchor still renders as
+                        // 984.00 in a step=0.01 field.
+                        defaultValue={(a.startingBalanceCents / 100).toFixed(2)}
+                        className="w-28 rounded-md border border-zinc-300 px-2 py-1 [font-variant-numeric:tabular-nums]"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-zinc-500">
+                      <span>on</span>
+                      <input
+                        type="date"
+                        name="startingBalanceDate"
+                        required
+                        max={today}
+                        defaultValue={a.startingBalanceDate}
+                        className="rounded-md border border-zinc-300 px-2 py-1"
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      className="rounded-md border border-zinc-300 px-3 py-1 text-sm hover:bg-zinc-100"
+                    >
+                      Save
+                    </button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-zinc-500">
+              The anchor is the balance at the <em>close</em> of its date; every
+              transaction dated after it is summed on top. A CSV import can only
+              move it <em>forward</em>, so if it is set too late — leaving your
+              imported history out of the balance — this is the only way to move
+              it back.
+            </p>
+          </>
         )}
       </section>
 
