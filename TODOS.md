@@ -481,7 +481,7 @@ guard). A handful of mechanical items (unused import, stale docstrings, a missin
 transaction, a test that didn't test what its name claimed) were auto-fixed in the same
 pass. What's below is what's left — informational, not blocking, none of it corrupts data.
 
-- [ ] **P1** — Migration 0006 seeds 23 broad `contains` rules for subscription merchants
+- [x] **P1** — Migration 0006 seeds 23 broad `contains` rules for subscription merchants
   (NETFLIX, SPOTIFY, HULU, etc). CLAUDE.md rule 6's documented revisit trigger for
   import-time-categorization-has-no-undo is "the first `contains` or `regex` rule
   trained" — that fires the moment `pnpm db:migrate` runs on the real ledger, not at some
@@ -491,6 +491,32 @@ pass. What's below is what's left — informational, not blocking, none of it co
   ("Import-time categorization will have no undo") is no longer a someday item once
   `db:migrate` runs — its revisit trigger already fired. Found by Red Team during the
   same `/ship` pass.
+  Fixed: `commitImport` and `syncSimpleFin` now write an
+  `import_batch_categorizations` row (transaction id, category id, rule id) whenever
+  `buildRuleMatcher` resolves a row — `buildRuleMatcher`'s return type grew from
+  `number | null` to `{ categoryId, ruleId } | null` to carry the rule id;
+  `applyRuleAtImport` still returns a bare category id, so its 14 existing assertions
+  didn't need to change. `undoImportCategorization` (`src/lib/categorize/`) reverts a
+  batch's rows grouped by category in one bulk UPDATE per group, stale-row-safe (a row
+  the user re-categorized since import, including back to NULL, is left alone), and
+  consumes its own audit rows so a second call reports `nothing-to-undo`. Wired to a new
+  "Undo auto-categorization" button on `/import/success/[batchId]`, shown only while the
+  batch still has revertible rows. This is the cheap-version fix the P3 entry above
+  named as sufficient (batch-scoped record, not `bulkCategorize`'s full rule-rollback
+  snapshot — there's no rule creation/mutation on the import path to roll back, only
+  category application). Chosen via `/plan-eng-review` triage 2026-09-03 as the highest-
+  priority open item ahead of running the load-the-ledger backfill itself.
+  A `/ship` Red Team pass the same day caught two real gaps in the initial version, both
+  fixed same-branch: (1) the undo button only ever appeared on `/import/success/[batchId]`,
+  which nothing links to from `/sync` — a sync batch's own auto-categorization audit trail
+  (`syncSimpleFin` writes it too) was reachable only by guessing the batch id in the URL.
+  `/sync` now shows the same revertible-row count with a link to the success page instead
+  of duplicating the undo control. (2) The displayed "N rows auto-categorized" count was a
+  bare `COUNT(*)` over `import_batch_categorizations`, which doesn't fall away when a row
+  is hand-recategorized before undo is ever clicked — so the number could overstate what
+  undo would actually revert. Extracted `countRevertibleCategorizations` (shared by both
+  pages) to mirror `undoImportCategorization`'s own stale-row check exactly, so the two
+  can't drift apart.
 
 - [ ] **P2** — `deriveStartingBalance` silently picks the file's own row order when BOTH
   directions validate the running-balance chain, rather than treating that as ambiguous.
@@ -597,3 +623,43 @@ malformed case in every normal browser.
   single-user local app. Fix, if ever needed: compare a hidden `updatedAt` field
   against the row's current value in the `WHERE` clause and surface a "someone else
   changed this" error on mismatch.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-03, import-time-categorization undo)
+
+Adversarial review (Claude subagent + Codex `codex exec`, both dispatched during `/ship`)
+against the import-time-categorization-undo branch. Two real findings fixed same-branch,
+one Codex claim investigated and found to misattribute cause, one theoretical gap
+documented rather than fixed:
+
+- [x] Both models independently flagged the same class of bug: the pre-existing
+  `autoCategorized` stat tile (`/import/success/[batchId]`) and `categorizedCount`
+  (`/sync`, `src/lib/simplefin/undoSync.ts`) count every transaction with a non-null
+  `category_id` — including ones the user has since hand-recategorized — while the new
+  `revertibleCount` (rule-still-current subset) sits right next to them showing a
+  smaller, disagreeing number with no explanation. Cross-model agreement on the same
+  bug class is strong signal. Fixed: reworded both pages' new paragraph to state
+  `revertibleCount` as an explicit subset ("N of the M auto-categorized/categorised
+  rows are still exactly as a trained rule left them") instead of restating the claim
+  independently. Did not change `autoCategorized`/`categorizedCount`'s own definitions
+  — those are pre-existing, larger blast radius, and out of scope for this branch.
+
+- [ ] **P4** — `undoImportCategorization.ts`'s per-category `inArray(transactionIds)`
+  (used for both the stale-row SELECT and the revert UPDATE) would throw "too many SQL
+  variables" past SQLite's parameter limit — empirically verified at exactly 32,766
+  params on this project's better-sqlite3 (12.9.0). Flagged HIGH by Codex, but
+  unreachable at this app's real scale: the actual ledger has 1,178 transactions total
+  across its entire history, ~28x short of the limit even if every row ever imported
+  landed in one category from one batch. Same unaddressed pattern already exists in
+  `undoBulkCategorize` (`inArray(schema.transactions.id, snapshot.txnIds)`), so fixing
+  only the new code here would be inconsistent; not fixed. Revisit trigger: if this app
+  ever needs to handle an import batch in the tens of thousands of rows, chunk both
+  `inArray` calls (e.g. 500 ids per chunk) in both places.
+
+- Investigated and found to misattribute cause, not fixed: Codex flagged `matches()`'s
+  `new RegExp(rule.matchValue).test(merchant)` (`src/lib/rules.ts`) as newly "wired into
+  both ingestion hot paths" by this branch — verified false by reading `origin/main`
+  directly: that wiring shipped in v0.10.0 (the `load-the-ledger` stabilization pass,
+  T1), and `matches()` itself is untouched by this branch's diff (which only changed
+  `buildRuleMatcher`'s return *type*, not its regex logic). The underlying ReDoS
+  exposure is real but pre-existing and already triaged — see the v0.3.0 ship review
+  entry above ("ReDoS on user-authored regex-type rules... Single-user, low severity").

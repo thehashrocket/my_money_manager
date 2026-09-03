@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import type { ZodError } from "zod";
 import { db, schema } from "@/db";
 import { commitImport } from "@/lib/importBatch";
+import { undoImportCategorization } from "@/lib/categorize/undoImportCategorization";
 import {
   deletePendingImport,
   readPendingImport,
@@ -13,6 +14,7 @@ import {
 } from "@/lib/pendingImport";
 import { validateCreateAccountInput } from "@/lib/import/validateCreateAccountInput";
 import { validateImportIdInput } from "@/lib/import/validateImportIdInput";
+import { validateUndoImportCategorizationInput } from "@/lib/import/validateUndoImportCategorizationInput";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { validateUploadCsvInput } from "@/lib/import/validateUploadCsvInput";
 
@@ -128,6 +130,40 @@ export async function confirmImportAction(formData: FormData): Promise<void> {
   deletePendingImport(id);
   revalidatePath("/import");
   redirect(`/import/success/${result.batchId}`);
+}
+
+/**
+ * Undo everything a batch's rule matching auto-categorized at import time —
+ * the P1 gap CLAUDE.md rule 6 flags: import-time categorization had no undo
+ * of its own, only the full pre-import DB snapshot (which reverts the whole
+ * batch, not just the categorization). See `undoImportCategorization` for the
+ * stale-row-safe revert logic.
+ *
+ * Redirects back to the same success page rather than away from it — this is
+ * a correction to what that page is showing, not a new destination.
+ */
+export async function undoImportCategorizationAction(
+  formData: FormData,
+): Promise<void> {
+  const parsed = validateUndoImportCategorizationInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    throw new Error(`Invalid undo request — ${rejectionMessage(parsed.error)}`);
+  }
+  const { batchId } = parsed.data;
+
+  undoImportCategorization(db, batchId);
+
+  // Includes the success page itself: it was just rendered with the pre-undo
+  // revertibleCount/form, and the redirect below returns to that exact URL —
+  // without this, Next.js can serve the stale pre-undo payload instead of
+  // rendering the undo as having taken effect (Codex structured review,
+  // `/ship` 2026-09-03). `/sync` also shows this batch's revertible count
+  // when it's the SimpleFIN-sourced one.
+  for (const p of ["/import", `/import/success/${batchId}`, "/sync", "/", "/transactions", "/categorize", "/budget"]) {
+    revalidatePath(p);
+  }
+  revalidatePath("/budget/[year]/[month]", "page");
+  redirect(`/import/success/${batchId}`);
 }
 
 export async function cancelImportAction(formData: FormData): Promise<void> {

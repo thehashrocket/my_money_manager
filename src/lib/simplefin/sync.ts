@@ -369,7 +369,10 @@ export async function syncSimpleFin(
 
     for (const { account, rows } of staged) {
       for (const row of rows) {
-        tx.insert(schema.transactions)
+        const match = matchRule(row.normalizedMerchant);
+
+        const [inserted] = tx
+          .insert(schema.transactions)
           .values({
             accountId: account.id,
             date: row.date,
@@ -387,9 +390,23 @@ export async function syncSimpleFin(
             // Always false: pending rows are skipped above, so anything that
             // reaches here has posted.
             isPending: false,
-            categoryId: matchRule(row.normalizedMerchant),
+            categoryId: match?.categoryId ?? null,
           })
-          .run();
+          .returning({ id: schema.transactions.id })
+          .all();
+
+        // Same audit trail as the CSV path (importBatch.ts) — lets a
+        // too-broad rule's auto-categorization be undone per batch.
+        if (match) {
+          tx.insert(schema.importBatchCategorizations)
+            .values({
+              importBatchId: batch.id,
+              transactionId: inserted.id,
+              categoryId: match.categoryId,
+              ruleId: match.ruleId,
+            })
+            .run();
+        }
       }
     }
 

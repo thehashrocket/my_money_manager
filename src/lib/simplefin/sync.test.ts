@@ -802,4 +802,42 @@ describe("syncSimpleFin — auto-categorization", () => {
     expect(rows.find((r) => r.externalId === "TRN-1")?.categoryId).toBe(categoryId);
     expect(rows.find((r) => r.externalId === "TRN-2")?.categoryId).toBeNull();
   });
+
+  // Same audit trail as the CSV path — without it, undoImportCategorization
+  // has no record of which sync-inserted rows a rule touched.
+  it("records an import_batch_categorizations row for the matched sync row, none for the unmatched one", async () => {
+    seedAccount({ simplefinAccountId: "ACT-1" });
+    const categoryId = categoryByName("Dining");
+    const [rule] = handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId,
+        matchType: "exact",
+        matchValue: mapTransaction(feedTxn("TRN-1", "-4.87")).normalizedMerchant,
+        source: "manual",
+      })
+      .returning()
+      .all();
+
+    respondWith("ACT-1", [feedTxn("TRN-1", "-4.87"), feedTxn("TRN-2", "-9.99", "UNKNOWN VENDOR")]);
+
+    const result = await syncSimpleFin({ now: NOW }, handle.db);
+    if (result.status !== "synced") throw new Error("expected synced");
+
+    const audit = handle.db
+      .select()
+      .from(schema.importBatchCategorizations)
+      .where(eq(schema.importBatchCategorizations.importBatchId, result.batchId))
+      .all();
+    expect(audit).toHaveLength(1);
+    expect(audit[0].categoryId).toBe(categoryId);
+    expect(audit[0].ruleId).toBe(rule.id);
+
+    const matchedRow = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "TRN-1"))
+      .get();
+    expect(audit[0].transactionId).toBe(matchedRow?.id);
+  });
 });

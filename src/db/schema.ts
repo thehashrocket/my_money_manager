@@ -255,6 +255,62 @@ export const budgetPeriodsRelations = relations(budgetPeriods, ({ one }) => ({
   }),
 }));
 
+// Records a row a trained rule categorized at import time (CSV or SimpleFIN),
+// so that categorization — unlike a manual `bulkCategorize`, which has
+// `undoBulkCategorize` — can still be reverted per batch. One row per
+// transaction: a transaction is only ever rule-categorized once, at insert.
+// `undoImportCategorization` deletes a batch's rows here once it has run, so
+// their presence also means "this batch's auto-categorization is still
+// revertible."
+export const importBatchCategorizations = sqliteTable(
+  "import_batch_categorizations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    importBatchId: integer("import_batch_id")
+      .notNull()
+      .references(() => importBatches.id, { onDelete: "cascade" }),
+    transactionId: integer("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    // The category the rule assigned. Compared against the transaction's
+    // CURRENT category at undo time — a mismatch means the user categorized
+    // it themselves since, and undo leaves it alone.
+    categoryId: integer("category_id")
+      .notNull()
+      .references(() => categories.id, { onDelete: "cascade" }),
+    ruleId: integer("rule_id").references(() => categoryRules.id, {
+      onDelete: "set null",
+    }),
+    createdAt,
+  },
+  (t) => [
+    uniqueIndex("import_batch_categorizations_transaction_unique").on(t.transactionId),
+    index("import_batch_categorizations_batch_idx").on(t.importBatchId),
+  ],
+);
+
+export const importBatchCategorizationsRelations = relations(
+  importBatchCategorizations,
+  ({ one }) => ({
+    importBatch: one(importBatches, {
+      fields: [importBatchCategorizations.importBatchId],
+      references: [importBatches.id],
+    }),
+    transaction: one(transactions, {
+      fields: [importBatchCategorizations.transactionId],
+      references: [transactions.id],
+    }),
+    category: one(categories, {
+      fields: [importBatchCategorizations.categoryId],
+      references: [categories.id],
+    }),
+    rule: one(categoryRules, {
+      fields: [importBatchCategorizations.ruleId],
+      references: [categoryRules.id],
+    }),
+  }),
+);
+
 export const subscriptionDismissals = sqliteTable(
   "subscription_dismissals",
   {
@@ -281,3 +337,5 @@ export type BudgetPeriod = typeof budgetPeriods.$inferSelect;
 export type NewBudgetPeriod = typeof budgetPeriods.$inferInsert;
 export type SubscriptionDismissal = typeof subscriptionDismissals.$inferSelect;
 export type NewSubscriptionDismissal = typeof subscriptionDismissals.$inferInsert;
+export type ImportBatchCategorization = typeof importBatchCategorizations.$inferSelect;
+export type NewImportBatchCategorization = typeof importBatchCategorizations.$inferInsert;

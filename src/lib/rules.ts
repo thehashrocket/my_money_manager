@@ -34,8 +34,10 @@ export function applyRuleAtImport(
   db: Db,
   normalizedMerchant: string,
 ): number | null {
-  return buildRuleMatcher(db)(normalizedMerchant);
+  return buildRuleMatcher(db)(normalizedMerchant)?.categoryId ?? null;
 }
+
+export type RuleMatch = { categoryId: number; ruleId: number };
 
 /**
  * Read and rank the rules table once, then resolve many merchants against it.
@@ -47,14 +49,22 @@ export function applyRuleAtImport(
  * The snapshot is taken when this is called, so a caller that trains a rule
  * mid-loop would not see it. Both current callers (`commitImport`,
  * `syncSimpleFin`) only insert, so there is nothing to invalidate.
+ *
+ * Returns the winning rule's id alongside its category, not just the
+ * category: both write paths record it onto `import_batch_categorizations` so
+ * the batch's auto-categorization can be undone later.
  */
-export function buildRuleMatcher(db: Db): (normalizedMerchant: string) => number | null {
+export function buildRuleMatcher(
+  db: Db,
+): (normalizedMerchant: string) => RuleMatch | null {
   const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
   if (sorted.length === 0) return () => null;
 
   return (normalizedMerchant: string) => {
     for (const rule of sorted) {
-      if (matches(rule, normalizedMerchant)) return rule.categoryId;
+      if (matches(rule, normalizedMerchant)) {
+        return { categoryId: rule.categoryId, ruleId: rule.id };
+      }
     }
     return null;
   };
