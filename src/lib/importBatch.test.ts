@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { buildPreview, commitImport, transformRow } from "./importBatch";
@@ -423,5 +424,158 @@ describe("buildPreview — dedup across differently-ranged exports", () => {
     );
     expect(preview.totals.duplicates).toBe(0);
     expect(preview.totals.newRows).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-categorization at import. `applyRuleAtImport` shipped in the rule engine
+// with 14 assertions and a CHANGELOG entry, and had zero production callers for
+// six releases — so every import landed 100% uncategorized no matter how many
+// rules were trained, and the backlog only ever grew.
+// ---------------------------------------------------------------------------
+describe("commitImport — auto-categorization", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+  let categoryId: number;
+
+  /** The exact string the rule engine keys on, derived rather than guessed. */
+  const COFFEE_MERCHANT = transformRow(
+    row({ rawMemo: COFFEE.memo }),
+  ).normalizedMerchant;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+    // Migration 0002 seeds Uncategorized + 5 default leaf categories, so these
+    // are looked up rather than inserted.
+    categoryId = categoryByName("Dining");
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  function categoryByName(name: string): number {
+    const [category] = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, name))
+      .all();
+    if (!category) throw new Error(`seed category "${name}" missing`);
+    return category.id;
+  }
+
+  function committedRows() {
+    return handle.db
+      .select({
+        normalizedMerchant: schema.transactions.normalizedMerchant,
+        categoryId: schema.transactions.categoryId,
+      })
+      .from(schema.transactions)
+      .all();
+  }
+
+  it("categorizes a row matched by a trained exact rule", () => {
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId,
+        matchType: "exact",
+        matchValue: COFFEE_MERCHANT,
+        source: "manual",
+      })
+      .run();
+
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+
+    const rows = committedRows();
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.find((r) => r.normalizedMerchant === COFFEE_MERCHANT)?.categoryId,
+    ).toBe(categoryId);
+  });
+
+  // CLAUDE.md rule 6: unmatched rows stay NULL, which is what the dashboard
+  // backlog tile counts. The seeded "Uncategorized" category is for manual
+  // overrides and must never be applied here.
+  it("leaves an unmatched row NULL", () => {
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([GAS]) },
+      handle.db,
+    );
+    expect(committedRows()[0].categoryId).toBeNull();
+  });
+
+  it("resolves through contains and regex rules, not just exact ones", () => {
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId,
+        matchType: "contains",
+        matchValue: "STARBUCKS",
+        source: "manual",
+      })
+      .run();
+
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+
+    const rows = committedRows();
+    expect(
+      rows.find((r) => r.normalizedMerchant === COFFEE_MERCHANT)?.categoryId,
+    ).toBe(categoryId);
+    expect(rows.find((r) => r.normalizedMerchant !== COFFEE_MERCHANT)?.categoryId)
+      .toBeNull();
+  });
+
+  it("honours rule priority for a row two rules both match", () => {
+    const otherId = categoryByName("Groceries");
+    handle.db
+      .insert(schema.categoryRules)
+      .values([
+        {
+          categoryId,
+          matchType: "contains",
+          matchValue: "STARBUCKS",
+          priority: 10,
+          source: "auto",
+        },
+        {
+          categoryId: otherId,
+          matchType: "exact",
+          matchValue: COFFEE_MERCHANT,
+          priority: 90,
+          source: "manual",
+        },
+      ])
+      .run();
+
+    commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE]) },
+      handle.db,
+    );
+    expect(committedRows()[0].categoryId).toBe(otherId);
   });
 });

@@ -32,6 +32,20 @@ export default async function SuccessPage({
     )
     .all();
 
+  // Rows this batch resolved against a trained rule on the way in. Shown so the
+  // rule engine is visible work rather than a silent write — the remainder is
+  // exactly what lands in the /categorize backlog.
+  const [{ autoCategorized }] = db
+    .select({ autoCategorized: sql<number>`COUNT(*)` })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.importBatchId, batchId),
+        isNotNull(schema.transactions.categoryId),
+      ),
+    )
+    .all();
+
   return (
     <div className="mx-auto w-full max-w-2xl px-6 py-16 space-y-6">
       <header className="space-y-1">
@@ -51,6 +65,20 @@ export default async function SuccessPage({
             transfer pairs linked
           </dt>
           <dd className="text-lg font-semibold">{pairsLinked}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-wide text-zinc-500">
+            auto-categorized
+          </dt>
+          <dd className="text-lg font-semibold">{autoCategorized}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-wide text-zinc-500">
+            left to categorize
+          </dt>
+          <dd className="text-lg font-semibold">
+            {batch.transactionCount - autoCategorized}
+          </dd>
         </div>
         {batch.snapshotPath && (
           <div className="col-span-2">

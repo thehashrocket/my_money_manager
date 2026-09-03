@@ -9,6 +9,7 @@ import { dbPath, snapshotDir } from "../paths";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
 import { contentSignature } from "../contentSignature";
+import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
 import { parseAmountToCents } from "./parseAmount";
@@ -350,6 +351,11 @@ export async function syncSimpleFin(
   }
 
   const batchId = db.transaction((tx) => {
+    // Same contract as the CSV path: read the trained rules once for the batch
+    // and resolve every row against them. Keyed on `normalized_merchant`, never
+    // on MX's `payee` — see CLAUDE.md's SimpleFIN section.
+    const matchRule = buildRuleMatcher(tx);
+
     const [batch] = tx
       .insert(schema.importBatches)
       .values({
@@ -381,6 +387,7 @@ export async function syncSimpleFin(
             // Always false: pending rows are skipped above, so anything that
             // reaches here has posted.
             isPending: false,
+            categoryId: matchRule(row.normalizedMerchant),
           })
           .run();
       }

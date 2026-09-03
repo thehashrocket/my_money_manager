@@ -4,6 +4,7 @@ import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
 import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { contentSignature } from "./contentSignature";
+import { buildRuleMatcher } from "./rules";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
 import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
 import { dbPath, snapshotDir } from "./paths";
@@ -233,6 +234,10 @@ export function commitImport(
   }
 
   const batchId = db.transaction((tx) => {
+    // Trained rules are read once for the whole batch, not once per row: a
+    // 4-month backfill is hundreds of rows inside a single write transaction.
+    const matchRule = buildRuleMatcher(tx);
+
     const [batch] = tx
       .insert(schema.importBatches)
       .values({
@@ -260,6 +265,12 @@ export function commitImport(
           importBatchId: batch.id,
           importRowHash: row.importRowHash,
           isPending: row.isPending,
+          // Auto-categorize on the way in. Without this every import lands 100%
+          // uncategorized no matter how many rules the user has trained, and
+          // the backlog only ever grows — which is how 498 rows accumulated
+          // before this was wired up. No match still means NULL, which is what
+          // the dashboard backlog tile counts (CLAUDE.md rule 6).
+          categoryId: matchRule(row.normalizedMerchant),
         })
         .run();
     }

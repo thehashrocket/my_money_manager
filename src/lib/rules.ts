@@ -31,18 +31,30 @@ export function applyRuleAtImport(
   db: Db,
   normalizedMerchant: string,
 ): number | null {
-  const all = db
-    .select()
-    .from(schema.categoryRules)
-    .all();
-  if (all.length === 0) return null;
+  return buildRuleMatcher(db)(normalizedMerchant);
+}
 
-  const sorted = [...all].sort(compareRules);
+/**
+ * Read and rank the rules table once, then resolve many merchants against it.
+ *
+ * Use this over `applyRuleAtImport` inside an insert loop. The rules table is
+ * small, but a 600-row backfill calling `applyRuleAtImport` per row would read
+ * and re-sort all of it 600 times inside a single write transaction.
+ *
+ * The snapshot is taken when this is called, so a caller that trains a rule
+ * mid-loop would not see it. Both current callers (`commitImport`,
+ * `syncSimpleFin`) only insert, so there is nothing to invalidate.
+ */
+export function buildRuleMatcher(db: Db): (normalizedMerchant: string) => number | null {
+  const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
+  if (sorted.length === 0) return () => null;
 
-  for (const rule of sorted) {
-    if (matches(rule, normalizedMerchant)) return rule.categoryId;
-  }
-  return null;
+  return (normalizedMerchant: string) => {
+    for (const rule of sorted) {
+      if (matches(rule, normalizedMerchant)) return rule.categoryId;
+    }
+    return null;
+  };
 }
 
 /**
