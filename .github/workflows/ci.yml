@@ -16,9 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # No `version:` input: package.json's "packageManager" field (added for
+      # Dockerfile corepack determinism) already pins pnpm@10.32.1, and
+      # pnpm/action-setup@v4 reads that on its own. Specifying both throws
+      # "Multiple versions of pnpm specified" and fails the job outright.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v5
         with:
@@ -40,9 +42,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # No `version:` input: package.json's "packageManager" field (added for
+      # Dockerfile corepack determinism) already pins pnpm@10.32.1, and
+      # pnpm/action-setup@v4 reads that on its own. Specifying both throws
+      # "Multiple versions of pnpm specified" and fails the job outright.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v5
         with:
