@@ -9,8 +9,9 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { pendingDir } from "./paths";
 
-const PENDING_DIR = path.join(process.cwd(), "data", ".pending-imports");
+const PENDING_DIR = pendingDir();
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type PendingImport = {

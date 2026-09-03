@@ -1,6 +1,7 @@
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   statSync,
   unlinkSync,
@@ -10,6 +11,15 @@ import Database from "better-sqlite3";
 
 export const SNAPSHOT_RETENTION = 10;
 const SNAPSHOT_PREFIX = "money.db.pre-import-";
+/**
+ * A separate pool from SNAPSHOT_PREFIX, matching scripts/migrate.mjs's
+ * naming (CLAUDE.md rule 7) — used by docker/entrypoint.src.mjs, which
+ * snapshots on every container boot. Sharing the pre-import prefix would
+ * mean a restart-happy container (crash loop, `restart: unless-stopped`)
+ * competes with real CSV-import/sync snapshots for the same retention-of-10
+ * slots, silently evicting an actual rollback point a user might need.
+ */
+export const PRE_MIGRATE_PREFIX = "money.db.pre-migrate-";
 
 export type SnapshotResult = {
   snapshotPath: string;
@@ -34,10 +44,10 @@ function formatTimestamp(d: Date): string {
   );
 }
 
-export function listSnapshots(dataDir: string): string[] {
+export function listSnapshots(dataDir: string, prefix: string = SNAPSHOT_PREFIX): string[] {
   if (!existsSync(dataDir)) return [];
   const entries = readdirSync(dataDir)
-    .filter((name) => name.startsWith(SNAPSHOT_PREFIX))
+    .filter((name) => name.startsWith(prefix))
     .map((name) => ({
       name,
       full: path.join(dataDir, name),
@@ -49,14 +59,23 @@ export function listSnapshots(dataDir: string): string[] {
 
 export function createSnapshot(
   dbPath: string,
+  snapshotDir?: string,
   now: Date = new Date(),
+  prefix: string = SNAPSHOT_PREFIX,
 ): SnapshotResult {
   if (!existsSync(dbPath)) {
     throw new Error(`database file does not exist: ${dbPath}`);
   }
-  const dataDir = path.dirname(dbPath);
+  // Defaults to the db's own directory (today's behavior); callers that want
+  // snapshots split onto a separate volume (see src/lib/paths.ts) pass one.
+  const targetDir = snapshotDir ?? path.dirname(dbPath);
+  // A caller-supplied SNAPSHOT_DIR that doesn't exist yet would otherwise
+  // throw uncaught here (both VACUUM INTO and the copyFileSync fallback need
+  // the directory to already exist) — a misconfiguration should degrade the
+  // same way an unreadable source file does, not crash the caller.
+  mkdirSync(targetDir, { recursive: true });
   const ts = formatTimestamp(now);
-  const snapshotPath = path.join(dataDir, `${SNAPSHOT_PREFIX}${ts}`);
+  const snapshotPath = path.join(targetDir, `${prefix}${ts}`);
 
   // The database runs in WAL mode (see src/db/index.ts), so committed
   // transactions can still live in money.db-wal and would be absent from a bare
@@ -116,10 +135,11 @@ export function createSnapshot(
 export function pruneSnapshots(
   dataDir: string,
   retention: number = SNAPSHOT_RETENTION,
+  prefix: string = SNAPSHOT_PREFIX,
 ): { prunedPaths: string[]; failedPaths: string[] } {
   const prunedPaths: string[] = [];
   const failedPaths: string[] = [];
-  for (const p of listSnapshots(dataDir).slice(retention)) {
+  for (const p of listSnapshots(dataDir, prefix).slice(retention)) {
     try {
       unlinkSync(p);
       prunedPaths.push(p);

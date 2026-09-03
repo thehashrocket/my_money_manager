@@ -1,9 +1,9 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import path from "node:path";
 import * as schema from "./schema";
+import { dbPath } from "@/lib/paths";
 
-const DB_PATH = path.join(process.cwd(), "data", "money.db");
+const DB_PATH = dbPath();
 
 type SqliteDb = ReturnType<typeof drizzle<typeof schema>>;
 
