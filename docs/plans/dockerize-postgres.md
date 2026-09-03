@@ -1,9 +1,10 @@
 # Plan — Containerize my_money_manager, then move to Postgres
 
 **Branch:** `thehashrocket/dockerize-with-postgres`
-**Status:** cleared to implement — `/plan-eng-review` + 3 `/ship` adversarial rounds.
-All plan-level findings folded. One *code* finding stays open by design: F18, a live bug
-on `main`, closes when T6a lands in PR1.
+**Status:** PR1 shipped as v0.9.0 (`thehashrocket/docker-postgres-readiness`, merging to `main`).
+PR2 (SQLite → Postgres) not started. All plan-level findings folded; F18 (the live
+`main` bug, `importBatch.ts` not checking `createSnapshot`'s `consistent` flag) closed
+with T6a in PR1.
 **Decision:** staged delivery — PR1 containerizes on SQLite, PR2 migrates to Postgres.
 Logged as decision `b2fbbb6b`.
 
@@ -990,47 +991,47 @@ Synthesized from this review's findings. Each task derives from a specific findi
 
 ### PR1
 
-- [ ] **T1 (P1, human: ~2min / CC: ~1min)** — compose — bind the published port to loopback
+- [x] **T1 (P1, human: ~2min / CC: ~1min)** — compose — bind the published port to loopback
   - Surfaced by: Architecture — D3.1A, unauthenticated ledger published to `0.0.0.0`
   - Files: `compose.yaml`
   - Verify: `curl` from another LAN device is refused; `localhost:3000` works
-- [ ] **T2 (P1, human: ~1h / CC: ~10min)** — lib — consolidate the 4 path constants into `src/lib/paths.ts`
+- [x] **T2 (P1, human: ~1h / CC: ~10min)** — lib — consolidate the 4 path constants into `src/lib/paths.ts`
   - Surfaced by: Code Quality — D4.1B; `src/db/index.ts:6`, `importBatch.ts:12`, `sync.ts:18`, `pendingImport.ts:13`
   - Files: `src/lib/paths.ts`, `src/db/index.ts`, `src/lib/importBatch.ts`, `src/lib/simplefin/sync.ts`, `src/lib/pendingImport.ts`
   - Verify: `pnpm test` green; host defaults byte-identical to today
-- [ ] **T3 (P1, human: ~3h / CC: ~25min)** — lib+app — `src/lib/now.ts` (`currentMonth`/`todayIso`/`daysAgoIso`), route **8** server sites, add `connection()` to `/import`
+- [x] **T3 (P1, human: ~3h / CC: ~25min)** — lib+app — `src/lib/now.ts` (`currentMonth`/`todayIso`/`daysAgoIso`), route **8** server sites, add `connection()` to `/import`
   - Surfaced by: Architecture — UTC month drift; outside voice #4 (`loadMonthlyTrends.ts:47` missed, `/import` build-frozen); adversarial re-review (`sync/page.tsx:37` missed)
   - Files: `src/lib/now.ts`, `src/app/{page,budget/page,categorize/page,transactions/page,subscriptions/page,import/page}.tsx`, **`src/app/sync/page.tsx`**, `src/lib/trends/loadMonthlyTrends.ts`
   - Verify: V3/V13 in the test table; `spine-month.tsx` left alone
-- [ ] **T4 (P1, human: ~2h / CC: ~15min)** — docker — entrypoint: TZ guard, pragmas, absolute server import, COPY `docker/`, **`WORKDIR /app` + a boot assertion that `process.cwd() === "/app"`**
+- [x] **T4 (P1, human: ~2h / CC: ~15min)** — docker — entrypoint: TZ guard, pragmas, absolute server import, COPY `docker/`, **`WORKDIR /app` + a boot assertion that `process.cwd() === "/app"`**
   - Surfaced by: D4.2B, D4.3B, outside voice #2 (CMD referenced an uncopied file; relative import resolved wrong)
   - Files: `docker/entrypoint.mjs`, `Dockerfile`
   - Verify: V4; container exits 1 with `TZ` unset
-- [ ] **T5 (P1, human: ~4h / CC: ~30min)** — scripts — `seed-volume.mjs`: seed via `createSnapshot` (never a bare `cp`), refuse non-empty, refuse `consistent:false`, verify row counts **and** per-account balance, copy existing snapshot files to `./backups/` (rows left as-is)
+- [x] **T5 (P1, human: ~4h / CC: ~30min)** — scripts — `seed-volume.mjs`: seed via `createSnapshot` (never a bare `cp`), refuse non-empty, refuse `consistent:false`, verify row counts **and** per-account balance, copy existing snapshot files to `./backups/` (rows left as-is)
   - Surfaced by: Outside voice #1 — PR1 served an empty ledger, headline goal unmet
   - Files: `scripts/seed-volume.mjs`, `package.json`
   - Verify: V12
-- [ ] **T6 (P1, human: ~2h / CC: ~15min)** — lib — split `SNAPSHOT_DIR` from `DATA_DIR`, **plus the mandatory retention regression test**
+- [x] **T6 (P1, human: ~2h / CC: ~15min)** — lib — split `SNAPSHOT_DIR` from `DATA_DIR`, **plus the mandatory retention regression test**
   - Surfaced by: D3.3B; `snapshot.ts:57`, `importBatch.ts:190`, `sync.ts:400` all derive the dir from the DB path
   - Files: `src/lib/snapshot.ts`, `src/lib/importBatch.ts`, `src/lib/simplefin/sync.ts`, `src/lib/snapshot.test.ts`
   - Verify: **V1 (regression)** — 12 imports leave exactly 10 snapshots in `SNAPSHOT_DIR`
-- [ ] **T6a (P0, human: ~45min / CC: ~10min)** — lib — `importBatch.ts` must honor `createSnapshot`'s `consistent` flag, the same way `sync.ts` does
+- [x] **T6a (P0, human: ~45min / CC: ~10min)** — lib — `importBatch.ts` must honor `createSnapshot`'s `consistent` flag, the same way `sync.ts` does
   - Surfaced by: adversarial review — **live bug on `main`**, not a containerization one. `src/lib/simplefin/sync.ts:345` checks the flag and pushes a warning; `src/lib/importBatch.ts:145` calls `createSnapshot(DB_PATH)` and goes straight into `db.transaction(…)` with no check at all, so a degraded copy is recorded as `snapshot_path` and the caller is never told. Contradicts CLAUDE.md rule 5. **The fix is to warn, not to abort** — matching `sync.ts`'s warn-and-proceed exactly is the actual mirror of existing behavior; making CSV import abort on a condition sync.ts merely warns on would be a new, undecided stricter policy, not a bug fix.
   - Files: `src/lib/importBatch.ts` (add `warnings: string[]` to `CommitResult`'s `committed` variant), `src/lib/importBatch.test.ts`, `src/app/import/success/[batchId]/page.tsx` (render the warning the way `src/app/sync/ActionForm.tsx:51-61` renders `state.warnings`)
   - Verify: **V6b** — `consistent:false` still commits the batch and records `snapshot_path`, and the returned `CommitResult` carries a warning matching `sync.ts:346`'s message shape
-- [ ] **T7 (P1, human: ~4h / CC: ~30min)** — scripts — `snapshot-cli.mjs` (**esbuild-bundled from `src/lib/snapshot.ts` in the builder stage** — the runner has no `src/`) + `db:export`/`db:import`; `db:import` stops the container and refuses a `money.db` with a `-wal` beside it
+- [x] **T7 (P1, human: ~4h / CC: ~30min)** — scripts — `snapshot-cli.mjs` (**esbuild-bundled from `src/lib/snapshot.ts` in the builder stage** — the runner has no `src/`) + `db:export`/`db:import`; `db:import` stops the container and refuses a `money.db` with a `-wal` beside it
   - Surfaced by: D3.2B (bare `cp` of a live WAL DB); outside voice #2 (no callable helper in the runner); adversarial review — `db:import` had no owning file, task, or test despite being CLAUDE.md rule 5's actual rollback path under the named-volume topology
   - Files: `scripts/snapshot-cli.mjs`, `scripts/db-export.mjs`, `scripts/db-import.mjs`, `scripts/db-import.test.mjs`, `package.json`
   - Verify: V6 — `consistent:false` exits 1; exported file opens in `sqlite3`. **V6c** — `db:import` refuses a `-wal`-shadowed `money.db`, restores a clean snapshot file
-- [ ] **T8 (P2, human: ~1h / CC: ~10min)** — app — `/api/health`
+- [x] **T8 (P2, human: ~1h / CC: ~10min)** — app — `/api/health`
   - Surfaced by: Architecture — compose healthcheck; `/` is too heavy to probe
   - Files: `src/app/api/health/route.ts`
   - Verify: V5
-- [ ] **T9 (P2, human: ~4h / CC: ~20min)** — docker — Dockerfile, compose, `.dockerignore`, `output: "standalone"`, `packageManager`, optional `env_file`
+- [x] **T9 (P2, human: ~4h / CC: ~20min)** — docker — Dockerfile, compose, `.dockerignore`, `output: "standalone"`, `packageManager`, optional `env_file`
   - Surfaced by: Step 0 (no container infra); outside voice #3 (`env_file` made SimpleFIN mandatory)
   - Files: `Dockerfile`, `compose.yaml`, `.dockerignore`, `next.config.ts`, `package.json`
   - Verify: `docker compose up` serves the dashboard; no `.env.local` still boots
-- [ ] **T10 (P2, human: ~1h / CC: ~10min)** — ci — docker build job
+- [x] **T10 (P2, human: ~1h / CC: ~10min)** — ci — docker build job
   - Surfaced by: Step 0 distribution check
   - Files: `.github/workflows/ci.yml`
   - Verify: CI green on PR

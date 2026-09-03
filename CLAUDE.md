@@ -112,7 +112,7 @@ Constraints that are properties of the feed, not choices:
 
 ## What's NOT in V1 — do not add
 
-Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Deployment. Tests for UI components (categorization logic only).
+Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Cloud/NAS hosting (Docker exists for local self-hosting only — see `docs/plans/dockerize-postgres.md`, PR3). Tests for UI components (categorization logic only).
 
 CI (lint + test + build on PR) is in via `.github/workflows/ci.yml` — gates merges into `main`.
 
