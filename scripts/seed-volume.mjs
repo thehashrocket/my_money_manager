@@ -29,10 +29,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
-import { createSnapshot, listSnapshots } from "../src/lib/snapshot.ts";
+import { createSnapshot, listSnapshots, PRE_MIGRATE_PREFIX } from "../src/lib/snapshot.ts";
 import { dbPath, snapshotDir } from "../src/lib/paths.ts";
+import { resolveVolumeName } from "./docker-volume.mjs";
 
-const VOLUME_NAME = process.env.MM_VOLUME_NAME ?? "my_money_manager_mm_data";
 const SERVICE = process.env.MM_COMPOSE_SERVICE ?? "app";
 const BACKUPS_DIR = path.join(process.cwd(), "backups");
 
@@ -81,7 +81,7 @@ const TABLES = [
   "budget_periods",
 ];
 
-function volumeHasDb() {
+function volumeHasDb(volumeName) {
   try {
     execFileSync(
       "docker",
@@ -89,7 +89,7 @@ function volumeHasDb() {
         "run",
         "--rm",
         "-v",
-        `${VOLUME_NAME}:/data`,
+        `${volumeName}:/data`,
         "busybox",
         "test",
         "-e",
@@ -109,7 +109,7 @@ export function assertVolumeEmpty(hasDb) {
     return {
       ok: false,
       message:
-        `${VOLUME_NAME} already has a money.db — refusing to overwrite it. ` +
+        "The volume already has a money.db — refusing to overwrite it. " +
         "If you mean to replace a live containerized ledger, use `pnpm db:import` (which takes an explicit snapshot file and a stopped container), not this script.",
     };
   }
@@ -157,7 +157,14 @@ function main() {
     return;
   }
 
-  const emptyCheck = assertVolumeEmpty(volumeHasDb());
+  // Resolved from `docker compose config`, not hardcoded: COMPOSE_PROJECT_NAME
+  // overrides compose.yaml's pinned `name:` field, and the bare `docker run -v`
+  // calls below bypass docker compose entirely — a mismatch would silently
+  // write the user's ledger into a different, orphaned, auto-created volume
+  // that `docker compose down -v` would never even know to remove.
+  const VOLUME_NAME = resolveVolumeName();
+
+  const emptyCheck = assertVolumeEmpty(volumeHasDb(VOLUME_NAME));
   if (!emptyCheck.ok) fail(emptyCheck.message);
 
   const tmpDir = mktempSeedDir();
@@ -235,10 +242,15 @@ function main() {
     // import_batches.snapshot_path rows are left exactly as they are (they
     // are absolute host paths, display-only — rewriting them to a container
     // path that was never true would trade a true-but-stale string for a
-    // false one).
-    const existingSnapshots = listSnapshots(snapshotDir()).filter(
-      (p) => p !== snapshot.snapshotPath,
-    );
+    // false one). Both pools: pre-import (CSV import / sync) AND pre-migrate
+    // (scripts/migrate.mjs's host-side rebuild snapshots, CLAUDE.md rule 7) —
+    // listSnapshots defaults to the pre-import prefix only, and missing the
+    // second pool here would silently leave a user's schema-migration
+    // rollback history behind in the old host data/ directory.
+    const existingSnapshots = [
+      ...listSnapshots(snapshotDir()),
+      ...listSnapshots(snapshotDir(), PRE_MIGRATE_PREFIX),
+    ].filter((p) => p !== snapshot.snapshotPath);
     if (existingSnapshots.length > 0) {
       execFileSync("mkdir", ["-p", BACKUPS_DIR]);
       for (const p of existingSnapshots) {

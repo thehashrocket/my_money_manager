@@ -17,8 +17,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
+import { resolveVolumeName } from "./docker-volume.mjs";
 
-const VOLUME_NAME = process.env.MM_VOLUME_NAME ?? "my_money_manager_mm_data";
 const SERVICE = process.env.MM_COMPOSE_SERVICE ?? "app";
 
 function fail(message) {
@@ -88,6 +88,13 @@ export function assertValidImportArgs(snapshotFilePath) {
 export function main(snapshotFilePath) {
   const guard = assertValidImportArgs(snapshotFilePath);
   if (!guard.ok) fail(guard.message);
+
+  // Resolved from `docker compose config`, not hardcoded: COMPOSE_PROJECT_NAME
+  // overrides compose.yaml's pinned `name:` field, and the bare `docker run -v`
+  // calls below bypass docker compose entirely — a mismatch here would silently
+  // touch a different, empty, auto-created volume instead of the real one
+  // `docker compose cp` above already restored into.
+  const VOLUME_NAME = resolveVolumeName();
 
   console.log(`Stopping ${SERVICE}...`);
   execFileSync("docker", ["compose", "stop", SERVICE]);
