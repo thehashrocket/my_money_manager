@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+_Stabilization pass ahead of loading the real ledger — see `docs/plans/load-the-ledger.md`. Three defects, all of which only bite on real data, plus the doc drift that hid the first one._
+
+### Added
+- **Imported transactions are now categorized automatically** from the rules you have already trained. `applyRuleAtImport` shipped in 0.3.0 with tests and a changelog entry saying it ran at import — and nothing ever called it, on either the CSV path or SimpleFIN sync. Every import landed 100% uncategorized no matter how many rules existed, which is why the backlog only ever grew. Both write paths now resolve each row through the rules table, and the import success page reports how many rows resolved and how many are left.
+- **An import now sets the account's starting balance** from Star One's running-balance column, which the parser has always read and always discarded. Accounts created with a starting balance of 0 display net-change-since-signup rather than a balance, and `/sync`'s drift check compares that against the bank's real figure and reports a phantom missing row forever. The anchor is only written when the file's running balance forms a consistent chain — a gappy or hand-assembled export leaves it alone rather than guessing — and it only ever moves forward in time.
+
+### Fixed
+- **A wider CSV re-export no longer imports history twice.** Star One exports an arbitrary date range, and the duplicate check keyed on a hash that includes each row's position in its file — so re-exporting a window that overlapped what you already had shifted every row and matched nothing, silently double-counting the overlap while the preview reported "0 duplicates". Import now also compares on content, the same way sync has since 0.8.0. Two genuinely identical same-day transactions still both import.
+- **Transfers from a backfill can now be reviewed.** The transfer-review list on `/sync` looked back 120 days, which cut off the start of any catch-up import; those pairs stayed unlinked and kept counting as spending with nothing on screen to say so. Widened to 240 days.
+
 ## [0.9.0] - 2026-09-03
 
 _PR1 of the dockerize-postgres plan: the app now runs in Docker, still on SQLite. `pnpm dev` is unaffected — this is a second way to run the app, not a replacement._
@@ -289,7 +301,7 @@ _Weekend 2 complete — envelope budgeting is live. `/budget` shows per-category
   - `getEffectiveAllocation({ persist })` — reads `effective_allocation_cents` cache; recomputes from carryover if missing. `persist: false` for read paths, `persist: true` for writes.
   - `invalidateForwardRollover` — clears cached `effective_allocation_cents` on every `budget_periods` row at or after a given (category, year, month). Fires on allocation edits, transaction categorize/re-categorize, and `carryover_policy` changes.
   - `computeMtdSpent` — DB-backed signed-sum of `amount_cents` for a category within a month, refunds net against spend.
-- **Rule engine** (`src/lib/rules.ts`): `applyRuleAtImport` (auto-categorize during commit if an exact match exists) + `createOrUpdateRule` (idempotent upsert).
+- **Rule engine** (`src/lib/rules.ts`): `applyRuleAtImport` + `createOrUpdateRule` (idempotent upsert). **Correction:** this entry originally described `applyRuleAtImport` as auto-categorizing during commit. It did not — the function was written and tested but never called from either write path, so every import landed uncategorized until that was wired up (see Unreleased).
 - **Track A — `/budget`** (envelope cards):
   - `/budget/page.tsx` — `await connection()` + redirect to current month.
   - `/budget/[year]/[month]/page.tsx` — Zod-parse params, `notFound()` on invalid.

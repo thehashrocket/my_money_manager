@@ -35,7 +35,7 @@ Spine (sequential):
 - [x] `src/lib/money.ts` — extract `formatCents`, Vitest-cover, swap both import pages
 - [x] `src/lib/test/db.ts` — `:memory:` Drizzle migrator helper
 - [x] `src/lib/budget.ts` — `getEffectiveAllocation` + lazy-persist, `invalidateForwardRollover`, `computeMtdSpent` (DB-backed, Vitest-covered)
-- [x] `src/lib/rules.ts` — `applyRuleAtImport`, `createOrUpdateRule` (Vitest-covered)
+- [x] `src/lib/rules.ts` — `applyRuleAtImport`, `createOrUpdateRule` (Vitest-covered). **This box was wrong from 2026-04-17 until 2026-09-02:** the functions existed and were covered, but `applyRuleAtImport` had zero production callers, so nothing was auto-categorized at import. Wired into both write paths by T1 of `docs/plans/load-the-ledger.md`.
 
 Spine retroactive (do before Track A — locked via `/plan-eng-review` 2026-04-16):
 - [x] `src/lib/budget.ts` — split `getEffectiveAllocation({ persist })`; default `persist: false`. `/budget` reads non-persisting; `upsertBudgetAllocationAction` persists. Update `src/lib/budget.test.ts` to cover both modes.
@@ -410,3 +410,60 @@ to build on):
   down" branches — CI's `db:seed-volume` step only ever runs against a genuinely empty
   volume. Low criticality: it's a thin wrapper, and the same mocking-precedent question
   above applies.
+
+## Follow-ups from the `/plan-eng-review` triage pass (2026-09-02)
+
+A review of "what should we work on next" that started by reading the real ledger
+(`/Users/jasonshultz/Projects/my_money_manager/data/money.db`) rather than this file.
+That inverted the priority order: 1178 transactions frozen at 2026-04-20, **0 rows in
+`budget_periods`** (envelope budgeting had never been used), and 5 of 10 migrations
+unapplied (so the SimpleFIN sync shipped across four releases had never touched real
+data). Every open item below this line was downstream of a working ledger.
+
+The two P1 defects that pass found are **not** listed here — they are the plan, in
+[docs/plans/load-the-ledger.md](./docs/plans/load-the-ledger.md), as T1 (wire
+`applyRuleAtImport`, which has zero production callers) and T2 (CSV dedup keys on
+`row_index`, so a wider re-export double-counts silently — reproduced empirically).
+T6 in that plan corrects the stale `[x]` on line 38 of this file and `CHANGELOG.md:292`,
+both of which document auto-categorize-at-commit as shipped behavior that does not exist.
+
+- [ ] **P2** — `/categorize` and the backlog banner are all-time, with no way to scope to a
+  month. `loadMerchantGroups` (`src/lib/categorize/loadMerchantGroups.ts:33`) and
+  `loadUncategorizedBacklog` (`src/lib/budget/loadMonthView.ts:161`) both query the whole
+  ledger. That makes "categorize the current month, leave the history for later" —
+  the only sane way to start using a ledger that has gone stale — impossible to express:
+  the banner reports the full backlog on `/budget` and `/` no matter how current you are,
+  and the bulk-by-merchant surface offers no filter. The month-scoped path that does exist
+  (`/transactions`, `src/app/transactions/page.tsx:59`) is row-by-row, which is the wrong
+  tool for the head of the distribution. Found by Codex during the outside-voice pass while
+  checking an effort estimate that had assumed a month-scoped bulk screen; it does not
+  exist. Deferred out of `load-the-ledger.md` deliberately: it is a new feature, and that
+  plan is a stabilization pass. The month picker on `/transactions` is the obvious thing to
+  lift into a shared filter component when this is picked up. Depends on nothing.
+
+- [ ] **P3** — `scripts/db-paths.mjs` hardcodes cwd-relative `./data/money.db` and does not
+  read `DATA_DIR`, while the app itself does (`src/lib/paths.ts:9`, `dataDir()`). The two
+  disagree about where the ledger lives, and the failure mode is silent success: running
+  `pnpm db:migrate` from a Conductor worktree migrates that worktree's own empty database
+  and prints "Migrations applied successfully" while the real ledger in the main checkout
+  stays untouched. Nothing is broken today — under Docker the entrypoint runs migrations
+  inside the container, where `DATA_DIR` and cwd agree — but this is the one script that
+  performs the most destructive write in the repo (a schema rebuild, CLAUDE.md rule 7), so
+  a latent path disagreement is worth closing. The catch: `db-paths.mjs` is plain `.mjs`
+  shared with `drizzle.config.ts`, so `DATA_DIR` resolution has to be duplicated rather
+  than imported from `paths.ts`, which cuts against the reason that file exists as a single
+  source of truth — resolve that tension before writing code. Found by Codex, 2026-09-02.
+  Depends on nothing.
+
+- [ ] **P3** — Import-time categorization will have no undo. `bulkCategorize` captures a
+  full prior-state snapshot and `undoBulkCategorize` does a 3-case rule rollback
+  (`src/lib/categorize/`); once `load-the-ledger.md`'s T1 wires `applyRuleAtImport` into
+  `commitImport` and `syncSimpleFin`, the import path will set categories with no
+  equivalent. A `contains` or `regex` rule that matches too broadly would label an entire
+  4-month backfill with no one-click reversal — only the rule 5 file snapshot, which means
+  discarding the whole import. Blast radius is **zero today**: all 73 rules in the real
+  ledger are exact-match, and there are no `contains` or `regex` rules at all. That is why
+  T1 was not blocked on this. **Revisit trigger: the first time a `contains` or `regex`
+  rule gets trained.** The batch id is already on every row, so recording which rows a
+  batch auto-categorized is the cheap version; matching `bulkCategorize`'s snapshot shape
+  is the complete one. Depends on T1.
