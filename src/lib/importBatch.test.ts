@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { commitImport, transformRow } from "./importBatch";
+import { buildPreview, commitImport, transformRow } from "./importBatch";
 import { computeImportRowHash } from "./hash";
 import type { ParsedRow } from "./parseCsv";
 
@@ -218,5 +218,210 @@ describe("commitImport", () => {
       delete process.env.DATA_DIR;
       delete process.env.SNAPSHOT_DIR;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content-overlap dedup. `import_row_hash` mixes in the row's index within its
+// source file, and Star One exports an arbitrary date range — so a wider
+// re-export of history already in the ledger changes every hash and the
+// hash-only dedup sees nothing. Reproduced during the load-the-ledger review:
+// 10 parsed, 10 new, 0 duplicates, 5 transactions counted twice.
+// ---------------------------------------------------------------------------
+
+type CsvRow = {
+  txn: string;
+  date: string;
+  memo: string;
+  /** Signed dollars. Negative lands in Amount Debit, positive in Amount Credit. */
+  amount: number;
+  balance: number;
+};
+
+function starOneCsv(rows: CsvRow[]): string {
+  const header =
+    "Transaction Number,Date,Description,Memo,Amount Debit,Amount Credit,Balance,Check Number,Fees";
+  const lines = rows.map((r) =>
+    [
+      r.txn,
+      r.date,
+      r.amount < 0 ? "WITHDRAWAL" : "DEPOSIT",
+      `"${r.memo}"`,
+      r.amount < 0 ? r.amount.toFixed(2) : "",
+      r.amount > 0 ? r.amount.toFixed(2) : "",
+      r.balance.toFixed(2),
+      "",
+      "",
+    ].join(","),
+  );
+  return [header, ...lines].join("\n");
+}
+
+const COFFEE: CsvRow = {
+  txn: "1001",
+  date: "04/16/2026",
+  memo: "STARBUCKS STORE 1234 MANTECA CA",
+  amount: -4.87,
+  balance: 1000,
+};
+const GAS: CsvRow = {
+  txn: "1002",
+  date: "04/17/2026",
+  memo: "CHEVRON 00201234 MANTECA CA",
+  amount: -52.1,
+  balance: 947.9,
+};
+const PAY: CsvRow = {
+  txn: "1003",
+  date: "04/18/2026",
+  memo: "DIRECT DEPOSIT PAYROLL",
+  amount: 1200,
+  balance: 2147.9,
+};
+
+describe("buildPreview — dedup across differently-ranged exports", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  function newAccount(name: string): number {
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name,
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    return account.id;
+  }
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    accountId = newAccount("Checking");
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  it("flags a wider re-export of already-imported rows as duplicates", () => {
+    commitImport(
+      { accountId, filename: "narrow.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+
+    // The same two transactions, now at row indices 1 and 2 because a newer row
+    // was exported above them. Every hash differs from the committed ones.
+    const wider = starOneCsv([PAY, COFFEE, GAS]);
+    const preview = buildPreview(
+      { accountId, filename: "wide.csv", csvText: wider },
+      handle.db,
+    );
+
+    expect(preview.totals.parsedRows).toBe(3);
+    expect(preview.totals.duplicates).toBe(2);
+    expect(preview.totals.newRows).toBe(1);
+    expect(preview.rows.map((r) => r.duplicateReason)).toEqual([
+      null,
+      "content",
+      "content",
+    ]);
+  });
+
+  it("still reports an identical re-import as a hash duplicate", () => {
+    const csvText = starOneCsv([COFFEE, GAS]);
+    commitImport({ accountId, filename: "a.csv", csvText }, handle.db);
+
+    const preview = buildPreview(
+      { accountId, filename: "a.csv", csvText },
+      handle.db,
+    );
+    expect(preview.totals.duplicates).toBe(2);
+    expect(preview.totals.newRows).toBe(0);
+    expect(preview.rows.every((r) => r.duplicateReason === "hash")).toBe(true);
+  });
+
+  // CLAUDE.md rule 3: two genuinely identical same-day coffees are two
+  // transactions, not one. The content pass counts signatures as a multiset for
+  // exactly this reason — collapsing them into a Set would make the second one
+  // permanently unimportable.
+  it("keeps a second genuinely identical same-day row importable", () => {
+    const preview = buildPreview(
+      { accountId, filename: "two-coffees.csv", csvText: starOneCsv([COFFEE, COFFEE]) },
+      handle.db,
+    );
+    expect(preview.totals.newRows).toBe(2);
+    expect(preview.totals.duplicates).toBe(0);
+
+    const result = commitImport(
+      { accountId, filename: "two-coffees.csv", csvText: starOneCsv([COFFEE, COFFEE]) },
+      handle.db,
+    );
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.insertedCount).toBe(2);
+  });
+
+  // The ordering guard: a hash-matched row claims its own existing row's budget
+  // before any content comparison runs. Without that, the file's first row
+  // matches by hash, the second identical row then spends the budget belonging
+  // to that same already-accounted-for ledger row, and a real second coffee is
+  // silently dropped as a duplicate.
+  it("does not let a hash-matched row's budget swallow a real second occurrence", () => {
+    commitImport(
+      { accountId, filename: "one-coffee.csv", csvText: starOneCsv([COFFEE]) },
+      handle.db,
+    );
+
+    const preview = buildPreview(
+      { accountId, filename: "two-coffees.csv", csvText: starOneCsv([COFFEE, COFFEE]) },
+      handle.db,
+    );
+
+    expect(preview.rows[0].duplicateReason).toBe("hash");
+    expect(preview.rows[1].duplicate).toBe(false);
+    expect(preview.totals.newRows).toBe(1);
+  });
+
+  it("matches a padded pending memo against the posted row's trimmed one", () => {
+    commitImport(
+      {
+        accountId,
+        filename: "pending.csv",
+        csvText: starOneCsv([{ ...COFFEE, memo: `   ${COFFEE.memo}` }]),
+      },
+      handle.db,
+    );
+
+    const preview = buildPreview(
+      { accountId, filename: "posted.csv", csvText: starOneCsv([PAY, COFFEE]) },
+      handle.db,
+    );
+    expect(preview.rows[1].duplicateReason).toBe("content");
+    expect(preview.totals.newRows).toBe(1);
+  });
+
+  it("does not treat another account's identical row as a duplicate", () => {
+    const savingsId = newAccount("Savings");
+    commitImport(
+      { accountId: savingsId, filename: "savings.csv", csvText: starOneCsv([COFFEE]) },
+      handle.db,
+    );
+
+    const preview = buildPreview(
+      { accountId, filename: "checking.csv", csvText: starOneCsv([COFFEE]) },
+      handle.db,
+    );
+    expect(preview.totals.duplicates).toBe(0);
+    expect(preview.totals.newRows).toBe(1);
   });
 });

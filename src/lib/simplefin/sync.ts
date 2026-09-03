@@ -8,7 +8,8 @@ import {
 import { dbPath, snapshotDir } from "../paths";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
-import { contentSignature, mapTransaction, type MappedRow } from "./mapTransaction";
+import { contentSignature } from "../contentSignature";
+import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
 import { parseAmountToCents } from "./parseAmount";
 import type { SimpleFinAccount } from "./types";
