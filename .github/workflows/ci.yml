@@ -85,12 +85,16 @@ jobs:
       # ./backups is a bind mount, and real Linux hosts (this runner
       # included) auto-create a missing bind-mount host directory as
       # root-owned — the Dockerfile's chown only affects the image
-      # filesystem, which the bind mount then shadows. Without this, the
-      # container's unprivileged `node` user gets EACCES on its first
-      # snapshot write and never becomes healthy. See CLAUDE.md's Docker
-      # section for the same workaround documented for real NAS hosts.
-      - name: prepare ./backups (Linux bind-mount ownership)
-        run: mkdir -p backups && sudo chown 1000:1000 backups
+      # filesystem, which the bind mount then shadows. `chmod 777` rather
+      # than `chown 1000:1000`: TWO different principals need write access
+      # to this same host directory — the container's `node` user (uid
+      # 1000) writing snapshots, AND the host-side CI runner process
+      # writing/unlinking during `docker compose cp`'s copy-out (`pnpm
+      # db:export`). Chowning to 1000:1000 fixes the first and breaks the
+      # second (confirmed: `unlinkat ...: permission denied` from the
+      # runner's own non-1000 user). A single uid can't satisfy both.
+      - name: prepare ./backups (Linux bind-mount permissions)
+        run: mkdir -p backups && chmod 777 backups
 
       - name: docker compose up (no .env.local — SimpleFIN stays optional)
         run: docker compose up -d

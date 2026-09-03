@@ -31,11 +31,11 @@ An alternative to `pnpm dev`, still on SQLite — no Postgres yet (see `docs/pla
 ```bash
 pnpm db:seed-volume            # first run only, BEFORE `docker compose up` — copies ./data/money.db
                                 # into the volume so the container doesn't start with an empty ledger
-mkdir -p backups && sudo chown 1000:1000 backups  # Linux only — see note below
+mkdir -p backups && chmod 777 backups  # Linux only — see note below
 docker compose up -d           # http://127.0.0.1:3000 — bound to loopback only, this app has no auth
 ```
 
-On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount directory as root-owned, which the container's unprivileged user can't write to — the `chown` step above fixes that. Not needed on macOS Docker Desktop, whose bind-mount layer doesn't have this issue.
+On real Linux hosts, Docker auto-creates a missing `./backups` bind-mount directory as root-owned, which the container's unprivileged user can't write to — the `chmod` step above fixes that. `chmod` rather than `chown`ing to a specific user: both the container (writing snapshots) and `pnpm db:export` running on the host (copying them out) need write access to the same directory, and they run as different users. Not needed on macOS Docker Desktop, whose bind-mount layer doesn't have this issue.
 
 `.env.local` is optional: SimpleFIN sync degrades to a configuration banner without it, and CSV import works either way. `TZ` is required (`compose.yaml` sets `America/Los_Angeles`; the container refuses to boot without one, since the app derives the current budget month from local time).
 
