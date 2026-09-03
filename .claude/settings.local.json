@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun run *)",
+      "Bash(gbrain sources *)",
+      "Read(//Users/jasonshultz/.gstack/**)",
+      "Bash(~/.claude/skills/gstack/bin/gstack-config get *)",
+      "Bash(~/.claude/skills/gstack/bin/gstack-brain-sync --discover-new)",
+      "Bash(~/.claude/skills/gstack/bin/gstack-brain-sync --once)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git check-ignore *)",
+      "Bash(git push *)",
+      "Bash(gh api *)",
+      "Bash(node -e \"console.log\\(require\\('./node_modules/next/package.json'\\).version\\)\")",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\({deps:p.dependencies, devDeps:p.devDependencies}\\)\")",
+      "Bash(pnpm outdated *)",
+      "Bash(npm view *)",
+      "Bash(pnpm why *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm test *)",
+      "Bash(node *)",
+      "Bash(grep -v 'main$')",
+      "Bash(git fetch *)",
+      "Bash(git branch *)",
+      "Bash(gh pr *)",
+      "Bash(git ls-remote *)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm build *)",
+      "Bash(git stash *)"
+    ]
+  }
+}
