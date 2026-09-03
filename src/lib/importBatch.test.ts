@@ -736,3 +736,226 @@ describe("commitImport — starting balance anchor", () => {
     expect(loadAccountBalances(handle.db)[0].balanceCents).toBe(214790);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Coverage audit additions: branches the load-the-ledger change introduced but
+// left unpinned — the empty-file short-circuit, the cross-source reason the
+// content pass deliberately omits an `external_id` filter, the all-duplicate
+// early return that skips the anchor write, and the two anchor edges (pending
+// rows, an anchor refreshed on its own date).
+// ---------------------------------------------------------------------------
+describe("buildPreview — degenerate inputs", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  // `transformed.length > 0` guards the whole content pass — a header-only
+  // export (Star One returns one for an empty date range) must not read
+  // `transformed[0].date` off an empty array.
+  it("returns zeroed totals for a header-only export without touching the content pass", () => {
+    const preview = buildPreview(
+      { accountId, filename: "empty.csv", csvText: starOneCsv([]) },
+      handle.db,
+    );
+    expect(preview.rows).toEqual([]);
+    expect(preview.totals).toEqual({
+      parsedRows: 0,
+      newRows: 0,
+      duplicates: 0,
+      errors: 0,
+      pendingRows: 0,
+    });
+  });
+
+  // The content pass deliberately omits sync's `external_id` filter: a CSV
+  // re-export legitimately overlaps rows that arrived from a SimpleFIN sync,
+  // and those carry no comparable `import_row_hash` at all (it is derived from
+  // the feed id, never a row index). This is the stated reason for the whole
+  // second pass on the CSV side and was the one path with no test.
+  it("flags a row already imported by a SimpleFIN sync as a content duplicate", () => {
+    const [batch] = handle.db
+      .insert(schema.importBatches)
+      .values({ source: "simplefin", transactionCount: 1 })
+      .returning()
+      .all();
+    handle.db
+      .insert(schema.transactions)
+      .values({
+        accountId,
+        date: "2026-04-16",
+        rawDescription: "WITHDRAWAL",
+        // The feed sends this trimmed; the CSV pads it. Both normalise here.
+        rawMemo: COFFEE.memo,
+        normalizedMerchant: transformRow(row({ rawMemo: COFFEE.memo }))
+          .normalizedMerchant,
+        amountCents: -487,
+        importSource: "simplefin",
+        importBatchId: batch.id,
+        importRowHash: "feed-derived-hash",
+        externalId: "TRN-1",
+      })
+      .run();
+
+    const preview = buildPreview(
+      { accountId, filename: "overlap.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+
+    expect(preview.rows[0].duplicateReason).toBe("content");
+    expect(preview.rows[1].duplicate).toBe(false);
+    expect(preview.totals.newRows).toBe(1);
+  });
+});
+
+describe("commitImport — anchor edges", () => {
+  let handle: TestDbHandle;
+  let accountId: number;
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name: "Checking",
+        type: "checking",
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    accountId = account.id;
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  function account() {
+    const [a] = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .all();
+    return a;
+  }
+
+  // Known and deliberate, pinned so it is a decision rather than an accident:
+  // the all-duplicate short-circuit returns before `createSnapshot` AND before
+  // `anchorStartingBalance`, so a re-export carrying a strictly better (later)
+  // anchor does not move it if every row in it is already in the ledger.
+  it("skips the anchor write — and the snapshot — when every row is a duplicate", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+    createSnapshotMock.mockClear();
+
+    // GAS alone: a different row index, so its hash differs and the content
+    // pass catches it. Nothing new to insert, but the file on its own would
+    // derive the later, strictly safer anchor 2026-04-17 / 94790.
+    const result = commitImport(
+      { accountId, filename: "gas-only.csv", csvText: starOneCsv([GAS]) },
+      handle.db,
+    );
+
+    expect(result.status).toBe("empty");
+    if (result.status !== "empty") throw new Error("unreachable");
+    expect(result.duplicateCount).toBe(1);
+    expect(createSnapshotMock).not.toHaveBeenCalled();
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+    expect(account().startingBalanceCents).toBe(100000);
+  });
+
+  // Pending rows are excluded from the chain, and `parseCsv` flags a `6098`
+  // row with a 0 balance as pending — a non-null 0 that would break the chain
+  // outright if the filter keyed on the balance column alone.
+  it("excludes a pending row carrying a 0 balance from the chain", () => {
+    const pending = {
+      txn: "6098",
+      date: "04/19/2026",
+      memo: "PENDING DEPOSIT",
+      amount: 25,
+      balance: 0,
+    };
+    const result = commitImport(
+      { accountId, filename: "pending.csv", csvText: starOneCsv([COFFEE, GAS, pending]) },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toEqual({
+      date: "2026-04-16",
+      startingBalanceCents: 100000,
+    });
+
+    const [pendingRow] = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.isPending, true))
+      .all();
+    expect(pendingRow.balanceCents).toBe(0);
+  });
+
+  // The guard is `derived.date < account.startingBalanceDate`, not `<=`: an
+  // anchor on the same date is refreshed, which matters when a later export
+  // reveals a same-day row that was missing when the anchor was first set.
+  it("refreshes the anchor when a later export changes its own date's close", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, GAS]) },
+      handle.db,
+    );
+    expect(account().startingBalanceCents).toBe(100000);
+
+    // A same-day row that the first export missed, so 04/16 now closes 20.00
+    // lower and every downstream balance shifts with it.
+    const lateSameDay = {
+      txn: "1001b",
+      date: "04/16/2026",
+      memo: "ATM WITHDRAWAL",
+      amount: -20,
+      balance: 980,
+    };
+    const result = commitImport(
+      {
+        accountId,
+        filename: "corrected.csv",
+        csvText: starOneCsv([COFFEE, lateSameDay, { ...GAS, balance: 927.9 }]),
+      },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.insertedCount).toBe(1);
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+    expect(account().startingBalanceCents).toBe(98000);
+    expect(loadAccountBalances(handle.db)[0].balanceCents).toBe(92790);
+  });
+});

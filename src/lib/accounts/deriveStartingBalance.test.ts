@@ -122,4 +122,34 @@ describe("deriveStartingBalance", () => {
       reason: "running balance column does not form a consistent chain",
     });
   });
+
+  // `parseCsv` flags a `6098` row as pending when its Balance column is blank
+  // OR zero, so a pending row can carry a non-null 0. The filter keys on
+  // `isPending`, not on the balance — keying on the balance alone would let
+  // that 0 into the chain and break it for the whole file.
+  it("excludes a pending row carrying a non-null zero balance", () => {
+    expect(
+      deriveStartingBalance([
+        ...OLDEST_FIRST,
+        row("2026-04-19", 2500, 0, true),
+      ]),
+    ).toEqual({ ok: true, date: "2026-04-16", startingBalanceCents: 100000 });
+  });
+
+  // A posted row with no balance is a hole in the chain, not something to skip
+  // past: the rows either side of it no longer chain, so no anchor is derived.
+  // Guessing here would rewrite the number every balance in the app is
+  // computed from on incomplete data.
+  it("refuses when a posted row in the middle has no balance", () => {
+    expect(
+      deriveStartingBalance([
+        row("2026-04-16", -487, 100000),
+        row("2026-04-17", -5210, null),
+        row("2026-04-18", 120000, 214790),
+      ]),
+    ).toEqual({
+      ok: false,
+      reason: "running balance column does not form a consistent chain",
+    });
+  });
 });
