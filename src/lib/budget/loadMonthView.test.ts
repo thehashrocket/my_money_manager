@@ -577,6 +577,42 @@ describe("loadMonthView — income band (TC6, TC7)", () => {
       .some((c) => c.name.startsWith("Paycheck-"));
     expect(leaksIntoExpense).toBe(false);
   });
+
+  it("(IncomeLeafRow.pendingCents) reflects a pending deposit's amount, unnegated, excluded from receivedCents", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const paycheck = seedCategory("Paycheck", { kind: "income" });
+    seedAllocation(paycheck.id, 2026, 4, 200000);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: paycheck.id,
+      date: "2026-04-05",
+      amountCents: 200000,
+      isPending: true,
+    });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const row = view.incomeSections[0].categories.find((c) => c.name.startsWith("Paycheck-"))!;
+    // TS2: pending is excluded from receivedCents, and pendingCents itself
+    // carries the deposit's own (positive) sign — the opposite convention
+    // from an expense row's pendingCents, which is negated.
+    expect(row.pendingCents).toBe(200000);
+    expect(row.receivedCents).toBe(0);
+  });
+
+  it("(IncomeLeafRow.hasAllocation) is true only when a budget_periods row exists this month", () => {
+    clearSeedCategories();
+    const paycheck = seedCategory("Paycheck", { kind: "income" });
+    seedAllocation(paycheck.id, 2026, 4, 200000);
+    const unbudgeted = seedCategory("Side gig", { kind: "income" });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const rows = view.incomeSections.flatMap((s) => s.categories);
+    expect(rows.find((c) => c.categoryId === paycheck.id)?.hasAllocation).toBe(true);
+    expect(rows.find((c) => c.categoryId === unbudgeted.id)?.hasAllocation).toBe(false);
+  });
 });
 
 describe("loadMonthView — leftToBudgetCents (TC9)", () => {

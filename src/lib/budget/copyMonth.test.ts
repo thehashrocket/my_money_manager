@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { copyPreviousMonth } from "./copyMonth";
+import { copyPreviousMonth, hasAnyAllocations } from "./copyMonth";
 
 let handle: TestDbHandle;
 
@@ -78,6 +78,24 @@ describe("copyPreviousMonth — TC24 (DS12)", () => {
     expect(result).toEqual({ copied: 1, skipped: 0, skippedArchived: 1 });
     expect(readAllocation(active.id, 2026, 9)?.allocatedCents).toBe(40000);
     expect(readAllocation(archived.id, 2026, 9)).toBeUndefined();
+  });
+});
+
+describe("hasAnyAllocations (DS7)", () => {
+  it("returns false when the month has no budget_periods rows", () => {
+    expect(hasAnyAllocations(handle.db, 2026, 9)).toBe(false);
+  });
+
+  it("returns true when the month has at least one budget_periods row", () => {
+    const cat = seedCategory("Groceries");
+    seedAllocation(cat.id, 2026, 9, 40000);
+    expect(hasAnyAllocations(handle.db, 2026, 9)).toBe(true);
+  });
+
+  it("is scoped to the exact year/month — a row in an adjacent month doesn't count", () => {
+    const cat = seedCategory("Groceries");
+    seedAllocation(cat.id, 2026, 8, 40000);
+    expect(hasAnyAllocations(handle.db, 2026, 9)).toBe(false);
   });
 });
 

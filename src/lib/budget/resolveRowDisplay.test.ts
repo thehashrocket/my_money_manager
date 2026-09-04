@@ -250,3 +250,52 @@ describe("resolveRowDisplay — T28/A8/DS23: looksLikeIncome hint", () => {
     expect(result.looksLikeIncome).toBe(false);
   });
 });
+
+describe("resolveRowDisplay — expense tone/badge boundaries not covered above", () => {
+  it("carries a pending badge for an expense row with pending activity", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 4000, pendingCents: 1500 }),
+      "expense",
+      "open",
+    );
+    expect(result.badges).toContainEqual({ type: "pending", amountCents: 1500 });
+  });
+
+  it("does not carry a pending badge when pendingCents is 0", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 4000, pendingCents: 0 }),
+      "expense",
+      "open",
+    );
+    expect(result.badges.some((b) => b.type === "pending")).toBe(false);
+  });
+
+  it("is 'neutral' when spent exactly equals effective (remaining === 0)", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 10000 }),
+      "expense",
+      "open",
+    );
+    expect(result.tone).toBe("neutral");
+  });
+
+  it("is 'positive' when spent is less than effective (remaining > 0)", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 4000 }),
+      "expense",
+      "open",
+    );
+    expect(result.tone).toBe("positive");
+  });
+});
+
+describe("resolveRowDisplay — income tone at the exact plan boundary", () => {
+  it("is 'positive' when varianceCents is exactly 0 (met plan exactly)", () => {
+    const result = resolveRowDisplay(
+      incomeRow({ plannedCents: 10000, receivedCents: 10000, varianceCents: 0 }),
+      "income",
+      "open",
+    );
+    expect(result.tone).toBe("positive");
+  });
+});

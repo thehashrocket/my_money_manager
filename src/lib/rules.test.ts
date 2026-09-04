@@ -429,6 +429,25 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     expect(match("MECHANIC", -30000)?.categoryId).toBe(fund.id);
   });
 
+  it("a zero-amount row is not blocked by either sign guard (both use strict < / >)", () => {
+    const paycheck = seedCategory("Paycheck", "income");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "EMPLOYER",
+      categoryId: paycheck.id,
+      source: "manual",
+    });
+    const fund = seedCategory("Car Repair", "fund");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "TRANSFER",
+      categoryId: fund.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("EMPLOYER", 0)?.categoryId).toBe(paycheck.id);
+    expect(match("TRANSFER", 0)?.categoryId).toBe(fund.id);
+  });
+
   it("never blocks a match into an ordinary expense category, either sign", () => {
     const groceries = seedCategory("Groceries", "expense");
     createOrUpdateRule(handle.db, {

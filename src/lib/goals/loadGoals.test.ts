@@ -197,3 +197,46 @@ describe("loadGoals — kind is authoritative, not is_savings_goal (E6 drift)", 
     expect(view.goals).toHaveLength(0);
   });
 });
+
+describe("loadGoals — progressPct clamp boundaries", () => {
+  it("clamps progressPct to 100 when withdrawals plus contributions exceed the target", () => {
+    const cat = seedFundCategory("Overfunded", { targetCents: 10000 });
+    seedAllocation(cat.id, 2026, 3, 15000); // 150% of target, pre-clamp
+
+    const view = loadGoals(handle.db);
+    expect(view.goals[0].progressCents).toBe(15000);
+    expect(view.goals[0].progressPct).toBe(100);
+  });
+
+  it("clamps progressPct to 0 when withdrawals exceed contributions (negative pre-clamp)", () => {
+    const cat = seedFundCategory("Drained", { targetCents: 10000 });
+    seedAllocation(cat.id, 2026, 3, 2000);
+    const account = seedAccount();
+    const batch = seedBatch();
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-10",
+      amountCents: -9000, // withdrew more than was ever contributed
+    });
+
+    const view = loadGoals(handle.db);
+    expect(view.goals[0].progressCents).toBe(-7000);
+    expect(view.goals[0].progressPct).toBe(0);
+  });
+
+  it("treats a null targetCents as 0 and reports progressPct 0 rather than dividing by zero", () => {
+    const cat = seedFundCategory("No target set", { targetCents: undefined });
+    handle.db
+      .update(schema.categories)
+      .set({ targetCents: null })
+      .where(eq(schema.categories.id, cat.id))
+      .run();
+    seedAllocation(cat.id, 2026, 3, 5000);
+
+    const view = loadGoals(handle.db);
+    expect(view.goals[0].targetCents).toBe(0);
+    expect(view.goals[0].progressPct).toBe(0);
+  });
+});

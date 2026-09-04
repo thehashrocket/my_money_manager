@@ -20,7 +20,7 @@ export type LeftToBudgetProps = {
   noIncomeCta?: React.ReactNode;
 };
 
-type LeftToBudgetState =
+export type LeftToBudgetState =
   | { kind: "no-income" }
   | { kind: "progress"; assignedPct: number }
   | { kind: "unassigned"; assignedPct: number }
@@ -31,8 +31,13 @@ type LeftToBudgetState =
  * DS6′: `leftToBudget === 0` alone is satisfied by a virgin month's
  * `0 − 0 − 0` — never render that as success. `plannedIncomeCents === 0`
  * is checked first and wins outright, whatever `leftToBudgetCents` says.
+ *
+ * Exported (not component-private) so this decision — the same
+ * "pure state-resolution function" shape as `resolveRowDisplay` (T9/C1) —
+ * can be unit tested without a DOM/component-testing harness, which this
+ * repo doesn't have (CLAUDE.md: no UI component tests in V1).
  */
-function resolveState({
+export function resolveState({
   plannedIncomeCents,
   allocatedCents,
   plannedFundCents,

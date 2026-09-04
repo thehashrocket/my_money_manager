@@ -168,6 +168,15 @@ describe("setCarryoverPolicy", () => {
   it("throws CategoryNotFoundError for an unknown id", () => {
     expect(() => setCarryoverPolicy(handle.db, 999_999, "rollover")).toThrow(CategoryNotFoundError);
   });
+
+  it("updates the policy without error when the category has no budget_periods row yet", () => {
+    // earliestPeriod is null here — invalidateForwardRollover must be
+    // skipped entirely rather than throwing on a nonexistent starting point.
+    const cat = seedCategory("Gifts");
+    const result = setCarryoverPolicy(handle.db, cat.id, "rollover");
+    expect(result).toEqual({ categoryId: cat.id, carryoverPolicy: "rollover" });
+    expect(readCategory(cat.id).carryoverPolicy).toBe("rollover");
+  });
 });
 
 describe("moveCategory (T29/§6.4)", () => {
@@ -231,5 +240,18 @@ describe("moveCategory (T29/§6.4)", () => {
 
   it("throws CategoryNotFoundError for an unknown id", () => {
     expect(() => moveCategory(handle.db, 999_999, "up")).toThrow(CategoryNotFoundError);
+  });
+
+  it("breaks a sort_order tie by name (the documented secondary sort key)", () => {
+    const group = seedCategory("Group");
+    // Same sort_order on purpose — the tie-break must fall back to name ASC,
+    // matching the order `loadMonthView` itself renders in.
+    const alpha = seedCategory("Alpha", { parentId: group.id, sortOrder: 5 });
+    const bravo = seedCategory("Bravo", { parentId: group.id, sortOrder: 5 });
+
+    // With the tie broken by name, Alpha is first and Bravo is second —
+    // moving Alpha "down" should swap it with Bravo.
+    const result = moveCategory(handle.db, alpha.id, "down");
+    expect(result.swappedWithId).toBe(bravo.id);
   });
 });
