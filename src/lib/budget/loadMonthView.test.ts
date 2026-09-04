@@ -770,12 +770,12 @@ describe("loadMonthView — TC25a, TC25b, TC26", () => {
     expect(inSections).toBe(false);
   });
 
-  it("regression: Uncategorized is excluded from incomeSections/fundRows too, not just expense sections, if its kind is ever income or fund", () => {
+  it("regression: Uncategorized is excluded from incomeSections too, not just expense sections, if its kind is ever income", () => {
     // `setCategoryKind` refuses to ever put Uncategorized in this state
     // (it's excluded from the reclassify picker), but `loadMonthView` must
     // not rely on that as its only defense — a direct DB write (or a future
     // bug in that refusal) must not double-count Uncategorized as a real
-    // income/fund row on top of its dedicated `uncategorizedRow`.
+    // income row on top of its dedicated `uncategorizedRow`.
     clearSeedCategories();
     const uncategorized = handle.db
       .select()
@@ -789,6 +789,20 @@ describe("loadMonthView — TC25a, TC25b, TC26", () => {
       .flatMap((s) => s.categories)
       .some((c) => c.categoryId === uncategorized.id);
     expect(inIncomeSections).toBe(false);
+  });
+
+  it("regression: Uncategorized is excluded from fundRows too, if its kind is ever fund", () => {
+    clearSeedCategories();
+    const uncategorized = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Uncategorized"))
+      .get()!;
+    handle.db.update(schema.categories).set({ kind: "fund" }).where(eq(schema.categories.id, uncategorized.id)).run();
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const inFundRows = view.fundRows.some((f) => f.categoryId === uncategorized.id);
+    expect(inFundRows).toBe(false);
   });
 
   it("(TC26, DS12) groups order by the parent's sort_order, not alphabetically by name", () => {
