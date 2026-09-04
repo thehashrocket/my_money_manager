@@ -61,7 +61,7 @@ export const categories = sqliteTable(
     sortOrder: integer("sort_order").notNull().default(0),
     // Nullable, no backfill (migration 0017). Matches nothing until PR2b's
     // archiveCategoryAction exists.
-    archivedAt: integer("archived_at"),
+    archivedAt: integer("archived_at", { mode: "timestamp" }),
     isSavingsGoal: integer("is_savings_goal", { mode: "boolean" })
       .notNull()
       .default(false),

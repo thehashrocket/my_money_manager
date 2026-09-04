@@ -3,8 +3,7 @@ import { connection } from "next/server";
 import { db } from "@/db";
 import { loadMerchantGroups } from "@/lib/categorize/loadMerchantGroups";
 import { listLeafCategories } from "@/lib/categories";
-import { loadMonthView } from "@/lib/budget/loadMonthView";
-import { currentMonth } from "@/lib/now";
+import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 import { CategorizeUi } from "./_categorize-ui";
 
 /**
@@ -12,15 +11,15 @@ import { CategorizeUi } from "./_categorize-ui";
  *
  * Server renders the initial grouped list + leaf dropdown options; the client
  * island (`CategorizeUi`) holds the live backlog counter + per-row submit
- * state for Sonner toast + Undo. The shared backlog number is derived from
- * `loadMonthView` to stay consistent with `/budget`'s banner.
+ * state for Sonner toast + Undo. E5: calls `loadUncategorizedBacklog`
+ * directly (unscoped — all-time, matching this page's existing behavior)
+ * instead of building and discarding a full `loadMonthView` for one COUNT(*).
  */
 export default async function CategorizePage() {
   await connection();
   const groups = loadMerchantGroups(db);
   const leafCategories = listLeafCategories(db);
-  const { year, month } = currentMonth();
-  const { uncategorizedBacklog } = loadMonthView(db, year, month);
+  const uncategorizedBacklog = loadUncategorizedBacklog(db);
 
   return (
     <main className="mx-auto max-w-4xl p-6 space-y-6">

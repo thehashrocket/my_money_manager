@@ -3,9 +3,8 @@ import { connection } from "next/server";
 import { z } from "zod";
 import { db } from "@/db";
 import { listLeafCategories, type LeafCategory } from "@/lib/categories";
-import { loadMonthView } from "@/lib/budget/loadMonthView";
+import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 import { loadTransactions } from "@/lib/categorize/loadTransactions";
-import { currentMonth } from "@/lib/now";
 import { TransactionsUi } from "./_transactions-ui";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -65,12 +64,9 @@ export default async function TransactionsPage({
   });
 
   const leafCategories = listLeafCategories(db);
-  const { year: currentYear, month: currentMonthNum } = currentMonth();
-  const { uncategorizedBacklog } = loadMonthView(
-    db,
-    currentYear,
-    currentMonthNum,
-  );
+  // E5: unscoped (all-time), matching this page's existing behavior — only
+  // /budget's own banner is month-scoped (X4).
+  const uncategorizedBacklog = loadUncategorizedBacklog(db);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const activeCategoryName = resolveActiveCategoryName(categoryId, leafCategories);
