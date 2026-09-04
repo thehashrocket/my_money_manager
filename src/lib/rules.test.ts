@@ -487,6 +487,30 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     const match = buildRuleMatcher(handle.db);
     expect(match("GROCERY STORE", -2000)?.categoryId).toBe(groceries.id);
   });
+
+  it("a $0.00 row matches an income rule — the guard only rejects a negative sign, not a missing one", () => {
+    const paycheck = seedCategory("Paycheck", "income");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "EMPLOYER",
+      categoryId: paycheck.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("EMPLOYER", 0)?.categoryId).toBe(paycheck.id);
+  });
+
+  it("a $0.00 row matches a fund rule too, for the same reason", () => {
+    const fund = seedCategory("Car Repair", "fund");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "TRANSFER",
+      categoryId: fund.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("TRANSFER", 0)?.categoryId).toBe(fund.id);
+  });
 });
 
 // TC31b (X3, PR2b): an archived category's rules must stop firing — the

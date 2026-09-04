@@ -13,6 +13,35 @@ PR1a↔PR1b, and read the migration SQL against the live schema. **PR1a is no lo
 claimed to be invisible** (`E1`), `0017` now creates the two columns it was already
 writing to (`E2`, `E7`), and migration `0018` is deleted — `archived_at` moves
 forward with it, so PR2a ships no schema change at all.
+**Post-landing review round (2026-09-04, branch `thehashrocket/envelope-budgeting-plan-fixes`,
+a 5-agent review of PR #35 plus two follow-up adversarial passes) found real
+defects this plan's SQL and prose still show as originally specced — this doc's
+code samples are historical, the shipped code is corrected:**
+- `0017`'s `INSERT OR IGNORE` group seed (§4.1) could silently annex a
+  pre-existing user category sharing a group name (e.g. a savings goal named
+  "Travel") as a taxonomy GROUP parent, dropping its money out of every band
+  total. The shipped migration adds a temp-table collision guard: each reparent
+  `UPDATE` now refuses to run for any of the 10 group names that already
+  existed before the `INSERT OR IGNORE`, rather than trusting `INSERT OR
+  IGNORE`'s no-op as proof nothing collided.
+- `setCategoryKind` (§5.5, D9A/X1) now unconditionally refuses to change
+  `Uncategorized`'s kind, checked at the write boundary itself — exclusion from
+  the reclassify picker (`listExpenseLeafCategories`) was UI-layer only, and
+  `Uncategorized` is typically "used" with zero rows actually pointed at its
+  own id (NULL is the real default, CLAUDE.md rule 6), so the ordinary
+  `isUsed` refusal never caught it either.
+- `ReclassifyCandidate` (§5.5, DS32) now carries `budgetPeriodCount` so a
+  used-and-X1-eligible category with budget history shows a stronger warning
+  in the confirmation dialog before reclassifying — it is disclosed, not
+  blocked, since correcting the miscount is X1's whole point.
+- Every remaining route `error.tsx` (§5.3, T14/T17c) now goes through a
+  shared `RouteErrorCard` (`src/app/_components/RouteErrorCard.tsx`) instead
+  of duplicating `StateCard` wiring per file — see `DESIGN.md`'s StateCard
+  section.
+See the branch's commit messages for the full list (a data-loss bug in
+`AllocateFormTrigger` after Copy Previous Month, an a11y gap on the reclassify
+combobox, and several test-coverage and type-design fixes are not repeated
+here).
 
 Goal: make `my_money_manager` a zero-based budget in the EveryDollar sense — every
 dollar of expected income is assigned a job before the month starts, and the app

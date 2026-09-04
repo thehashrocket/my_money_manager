@@ -79,7 +79,11 @@ export function AllocateFormTrigger(props: AllocateFormTriggerProps) {
         // this, opening the dialog after the row's inline `CurrencyInput`
         // already committed a new value would show the STALE number this
         // component's `useState` initializer captured at first mount —
-        // reset it from the current prop on every open instead.
+        // reset it from the current prop on every open instead. Same root
+        // cause hits any revalidation that changes `allocatedCents` behind
+        // an already-mounted trigger even without T18's editor (e.g. Copy
+        // Previous Month) — Save would otherwise write the stale $0.00
+        // default back over the just-copied amount.
         if (open) setExplicitDollars(defaultDollars);
       }}
     >

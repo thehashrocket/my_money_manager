@@ -13,7 +13,11 @@ import {
 } from "@/lib/budget/upsertAllocation";
 import type { EffectiveAllocation } from "@/lib/budget";
 import { AmountParseError, parseAmountToCents } from "@/lib/money";
-import { CategoryKindChangeRefusedError, setCategoryKind } from "@/lib/budget/setCategoryKind";
+import {
+  CategoryKindChangeRefusedError,
+  ProtectedCategoryKindError,
+  setCategoryKind,
+} from "@/lib/budget/setCategoryKind";
 import { copyPreviousMonth, type CopyPreviousMonthResult } from "@/lib/budget/copyMonth";
 import {
   createCategory,
@@ -32,6 +36,10 @@ import {
   CategoryNameTakenError,
   UncategorizedArchiveError,
 } from "@/lib/categoryErrors";
+
+function formatZodIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
+}
 
 /**
  * Create or update a single leaf category's allocation for a given month.
@@ -67,17 +75,17 @@ export async function upsertBudgetAllocationAction(
 
   const parsed = validateAllocateInput(raw);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`)
-      .join("; ");
-    throw new Error(`Invalid allocation input — ${issues}`);
+    throw new Error(`Invalid allocation input — ${formatZodIssues(parsed.error)}`);
   }
 
   upsertAllocation(db, parsed.data);
 
   const { year, month } = parsed.data;
   revalidatePath("/budget");
-  revalidatePath(`/budget/${year}/${month}`);
+  // Pattern form, not the literal path: `upsertAllocation`'s rollover
+  // invalidation can touch every month forward of this one, and the literal
+  // form only ever revalidates the one month just submitted.
+  revalidatePath("/budget/[year]/[month]", "page");
   redirect(`/budget/${year}/${month}`);
 }
 
@@ -104,21 +112,36 @@ export async function setCategoryKindAction(
 ): Promise<SetCategoryKindActionState> {
   const parsed = setCategoryKindInputSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
-    return { status: "error", message: `Invalid reclassify request — ${issues}` };
+    return { status: "error", message: `Invalid reclassify request — ${formatZodIssues(parsed.error)}` };
   }
 
   try {
     setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
   } catch (err) {
-    if (err instanceof CategoryKindChangeRefusedError || err instanceof CategoryNotFoundError) {
+    // Only the three failures reachable from ordinary use are downgraded to
+    // state (DS32 wants the refusal inline, next to the category the user
+    // was looking at). Anything else — a locked DB, a driver error — rethrows
+    // to `error.tsx`, which is the actual backstop this comment promises.
+    if (
+      err instanceof CategoryKindChangeRefusedError ||
+      err instanceof CategoryNotFoundError ||
+      err instanceof ProtectedCategoryKindError
+    ) {
       return { status: "error", message: err.message };
     }
     throw err;
   }
 
+  // setCategoryKind's own docstring says the blast radius includes the
+  // trend chart, goal inclusion, and categorize eligibility — revalidating
+  // only /budget left "/", "/goals", and "/categorize" free to keep serving
+  // a stale RSC payload with the category's old kind until an unrelated
+  // mutation or a hard refresh (caught by Codex adversarial review via /ship).
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
+  revalidatePath("/");
+  revalidatePath("/goals");
+  revalidatePath("/categorize");
   return { status: "ok", categoryId: parsed.data.categoryId };
 }
 
@@ -196,8 +219,11 @@ const copyPreviousMonthInputSchema = z.object({
  * generic ok/error union.
  */
 export async function copyPreviousMonthAction(year: number, month: number): Promise<CopyPreviousMonthResult> {
-  const parsed = copyPreviousMonthInputSchema.parse({ year, month });
-  const result = copyPreviousMonth(db, parsed.year, parsed.month);
+  const parsed = copyPreviousMonthInputSchema.safeParse({ year, month });
+  if (!parsed.success) {
+    throw new Error(`Invalid copy-month request — ${formatZodIssues(parsed.error)}`);
+  }
+  const result = copyPreviousMonth(db, parsed.data.year, parsed.data.month);
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
   return result;

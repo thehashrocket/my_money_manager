@@ -1,4 +1,4 @@
-import { eq, isNull, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
