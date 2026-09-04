@@ -107,6 +107,16 @@ describe("createCategory (T25/DS20)", () => {
     expect(readCategory(leaf.id).parentId).toBeNull();
   });
 
+  it("(T5/D1B/A2) dual-writes is_savings_goal to true when creating a fund-kind category", () => {
+    const leaf = createCategory(handle.db, { name: "Zz New Fund", kind: "fund", parentId: null });
+    expect(readCategory(leaf.id).isSavingsGoal).toBe(true);
+  });
+
+  it("(T5/D1B/A2) leaves is_savings_goal false for a non-fund category", () => {
+    const leaf = createCategory(handle.db, { name: "Zz Utilities Bill", kind: "expense", parentId: null });
+    expect(readCategory(leaf.id).isSavingsGoal).toBe(false);
+  });
+
   it("throws CategoryNotFoundError when parentId doesn't exist", () => {
     expect(() => createCategory(handle.db, { name: "Zz Rent", kind: "expense", parentId: 999_999 })).toThrow(
       CategoryNotFoundError,

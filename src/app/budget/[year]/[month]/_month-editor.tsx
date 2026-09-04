@@ -190,6 +190,16 @@ export function MonthEditor(props: MonthEditorProps) {
 
   const commit = useCallback(
     async (categoryId: number, cents: number): Promise<CurrencyInputCommitResult> => {
+      // Set BEFORE the await, not after: the wrapper `<div onBlur>` below
+      // fires `revalidate()` synchronously, in the same focusout dispatch
+      // as `CurrencyInput`'s own `onBlur` — which starts this commit but
+      // doesn't wait for it. Setting the flag only after
+      // `commitAllocationAction` resolves meant a single edit followed by a
+      // click elsewhere in the page (no route change, so the unmount
+      // fallback below never fires either) checked `dirtyRef.current` while
+      // it was still `false` from before this write started, silently
+      // skipping the revalidate this exact write existed to trigger.
+      dirtyRef.current = true;
       const result = await commitAllocationAction(categoryId, year, month, cents);
       if (result.status === "error") {
         return { ok: false, message: result.message };
@@ -199,7 +209,6 @@ export function MonthEditor(props: MonthEditorProps) {
         next.set(categoryId, result.allocation);
         return next;
       });
-      dirtyRef.current = true;
       return { ok: true };
     },
     [year, month],

@@ -73,8 +73,8 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
   // Enter commits AND immediately calls `advanceFocus`, which focuses the
   // next input — that triggers THIS input's own `onBlur` synchronously,
   // before the Enter-triggered commit's `await onCommit(cents)` has
-  // resolved. Without this guard, `onBlur`'s `commitIfDirty()` re-enters
-  // with the same (still-uncommitted) `draft`/`committedCents` and fires a
+  // resolved. Without a guard, `onBlur`'s `commitIfDirty()` would re-enter
+  // with the same (still-uncommitted) `draft`/`committedCents` and fire a
   // second, redundant `commitAllocationAction` call with identical
   // arguments. Harmless to the DATA (`upsertAllocation`'s upsert is
   // idempotent), but wasteful on the app's highest-frequency interaction
@@ -83,6 +83,26 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
   // happens synchronously within the same call stack as `advanceFocus`, not
   // on a later microtask — is guaranteed to see it already `true`.
   const isCommittingRef = useRef(false);
+  // The cents value the in-flight commit is actually writing — lets a
+  // re-entrant call (above) tell "the same edit, re-entering via blur" apart
+  // from "a genuinely newer edit typed into this field before the first
+  // commit finished." Only the latter needs to survive.
+  const inFlightCentsRef = useRef<number | null>(null);
+  // Set when a re-entrant call carries a newer edit. Retried via the
+  // `retrySignal` effect below rather than called directly from the
+  // in-flight commit's own `finally` — that `finally` runs synchronously
+  // right after `await onCommit(cents)` resolves, before React has
+  // necessarily re-rendered with the value `onCommit` just wrote (`commit`
+  // in `_month-editor.tsx` calls `setAllocations` before returning, but
+  // that's a scheduled update, not an applied one). A direct recursive call
+  // would still be the SAME closure from the render that started the
+  // original commit, so its `committedCents` would be one write behind —
+  // exactly the value that write just changed. `useEffect` only runs after
+  // the render (and its props) are current, so retrying there is the only
+  // way to guarantee the retry sees the just-committed value.
+  const recommitPendingRef = useRef(false);
+  const draftRef = useRef(committedCents === null ? "" : formatDollars(committedCents));
+  const [retrySignal, setRetrySignal] = useState(0);
 
   // Re-sync the displayed value when the committed value changes from
   // outside this input (the `⋯` dialog committed the same category-month
@@ -91,7 +111,7 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
   // keystroke.
   useEffect(() => {
     if (document.activeElement !== inputRef.current) {
-      setDraft(committedCents === null ? "" : formatDollars(committedCents));
+      setDraftBoth(committedCents === null ? "" : formatDollars(committedCents));
     }
   }, [committedCents]);
 
@@ -99,18 +119,36 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
     if (settleTimer.current) clearTimeout(settleTimer.current);
   }, []);
 
+  useEffect(() => {
+    if (retrySignal === 0) return; // skip on mount
+    if (recommitPendingRef.current) {
+      recommitPendingRef.current = false;
+      void commitIfDirty();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retrySignal]);
+
+  function setDraftBoth(value: string) {
+    draftRef.current = value;
+    setDraft(value);
+  }
+
   function revertToCommitted() {
-    setDraft(committedCents === null ? "" : formatDollars(committedCents));
+    setDraftBoth(committedCents === null ? "" : formatDollars(committedCents));
   }
 
   async function commitIfDirty() {
-    if (isCommittingRef.current) return;
+    // Any invocation that reaches here — manual or a queued retry — is about
+    // to act on the current draft, so it supersedes whatever earlier call
+    // (if any) set this.
+    recommitPendingRef.current = false;
+
     if (settleTimer.current) {
       clearTimeout(settleTimer.current);
       settleTimer.current = null;
     }
 
-    const trimmed = draft.trim();
+    const trimmed = draftRef.current.trim();
     if (trimmed === "") {
       // No delete-to-clear flow in PR2a (§6.1 scopes this to entry, not
       // unset) — an emptied field reverts rather than erroring.
@@ -135,27 +173,58 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
       return;
     }
 
+    // Checked BEFORE the "unchanged" shortcut below, and against the value
+    // actually in flight rather than `committedCents` — a retype back to
+    // the pre-edit `committedCents` while a different value is still being
+    // written would otherwise look like a no-op and skip queuing a retry,
+    // leaving the server holding the in-flight value while the UI shows the
+    // one the user actually wanted.
+    if (isCommittingRef.current) {
+      if (inFlightCentsRef.current === cents) {
+        // The same edit, re-entering via the Enter-triggered blur above —
+        // already covered by the in-flight commit, nothing new to do.
+        return;
+      }
+      // A genuinely different value than what's in flight. Queue it rather
+      // than starting a second concurrent request (which could resolve out
+      // of order) or silently dropping it (which used to happen here — the
+      // in-flight commit's own success handler would overwrite this newer,
+      // uncommitted draft with its own stale value once it resolved).
+      recommitPendingRef.current = true;
+      return;
+    }
+
     if (committedCents !== null && cents === committedCents) {
-      setDraft(formatDollars(cents));
+      setDraftBoth(formatDollars(cents));
       return; // unchanged — no network round trip
     }
 
     setStatus("saving");
     setError(null);
     isCommittingRef.current = true;
+    inFlightCentsRef.current = cents;
     try {
       const result = await onCommit(cents);
+      // A recommit was queued while this commit was in flight — its result
+      // is about to be superseded, so don't let it stomp the newer draft;
+      // the retry (triggered below) will set the draft to whatever it
+      // actually saves, using a render where `committedCents` reflects
+      // THIS commit's write.
       if (result.ok) {
-        setDraft(formatDollars(cents));
+        if (!recommitPendingRef.current) setDraftBoth(formatDollars(cents));
         setStatus("saved");
         settleTimer.current = setTimeout(() => setStatus("idle"), 240);
       } else {
-        revertToCommitted();
+        if (!recommitPendingRef.current) revertToCommitted();
         setStatus("failed");
         setError(result.message);
       }
     } finally {
       isCommittingRef.current = false;
+      inFlightCentsRef.current = null;
+      if (recommitPendingRef.current) {
+        setRetrySignal((n) => n + 1);
+      }
     }
   }
 
@@ -176,7 +245,7 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
           setError(null);
           e.currentTarget.select();
         }}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => setDraftBoth(e.target.value)}
         onBlur={() => {
           void commitIfDirty();
         }}

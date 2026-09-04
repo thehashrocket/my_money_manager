@@ -83,7 +83,13 @@ export function createCategory(
     const sortOrder = nextSortOrder(tx, parentId);
     const [row] = tx
       .insert(schema.categories)
-      .values({ name, kind, parentId, carryoverPolicy, sortOrder })
+      // Dual-write (T5, D1B/A2): matches `createGoalAction` and
+      // `setCategoryKind`'s existing convention of keeping `is_savings_goal`
+      // truthful alongside `kind` until PR3 drops the column. Nothing in
+      // this call chain restricts `kind` to non-fund, so leaving this out
+      // would let a fund category be created here with the shadow column
+      // silently `false`.
+      .values({ name, kind, parentId, carryoverPolicy, sortOrder, isSavingsGoal: kind === "fund" })
       .returning({ id: schema.categories.id, name: schema.categories.name, kind: schema.categories.kind })
       .all();
     return { id: row.id, name: row.name, kind: row.kind, parentId, sortOrder };
