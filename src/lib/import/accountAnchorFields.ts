@@ -24,9 +24,14 @@ export const startingBalanceDollarsSchema = z.coerce
   .min(STARTING_BALANCE_DOLLARS_MIN)
   .max(STARTING_BALANCE_DOLLARS_MAX);
 
-export const startingBalanceDateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
+/**
+ * `z.iso.date()` (not a plain YYYY-MM-DD regex) so a syntactically-shaped
+ * but calendar-invalid date like `2026-13-40` is rejected here rather than
+ * reaching `loadAccountBalances`'s lexicographic TEXT comparison, where it
+ * would sort after every real date in the year and silently drop an
+ * account's entire imported history out of the balance sum.
+ */
+export const startingBalanceDateSchema = z.iso.date();
 
 /** True when a CSV-derived anchor (already in cents) is inside the legal range. */
 export function isStartingBalanceCentsInBounds(cents: number): boolean {

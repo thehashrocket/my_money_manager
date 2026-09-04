@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-09-04
+
+### Fixed
+- **A transfer whose pending leg posted via a narrow re-export (no new rows, just an existing pending row flipping to posted) could never get matched to its real counterpart on the other account.** Transfer-pair matching only re-checked rows carrying the current import's own batch id, and a posted-in-place row keeps its original batch id by design — so the real pairing opportunity was silently skipped every time. Re-checking now also covers rows that just posted, not just newly-inserted ones. The import success page's "transfer pairs linked" count is fixed to match: it previously recomputed from the current batch's rows only, which would show 0 in exactly this case even though the pairing succeeded.
+- **A hand-edited or corrupted account starting-balance date like `2026-13-40` was silently accepted** and could drop an account's entire imported history out of its displayed balance. Calendar-invalid dates are now rejected wherever a starting-balance anchor is set — account creation, the manual anchor-edit form, and CSV-derived anchoring alike.
+- **Running `pnpm db:migrate` from the wrong working directory (e.g. a second local checkout) could silently migrate an unrelated, empty database and report success**, leaving the real ledger's schema out of date with no warning. The migration script and Drizzle Studio config now respect the same `DATA_DIR` override the rest of the app already does.
+
 ## [0.12.2] - 2026-09-03
 
 ### Fixed

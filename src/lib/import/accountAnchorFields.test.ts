@@ -22,6 +22,14 @@ describe("startingBalanceDateSchema", () => {
   it("rejects an empty string", () => {
     expect(startingBalanceDateSchema.safeParse("").success).toBe(false);
   });
+
+  it("rejects a calendar-invalid month", () => {
+    expect(startingBalanceDateSchema.safeParse("2026-13-40").success).toBe(false);
+  });
+
+  it("rejects a calendar-invalid day (Feb 30th)", () => {
+    expect(startingBalanceDateSchema.safeParse("2026-02-30").success).toBe(false);
+  });
 });
 
 describe("isStartingBalanceCentsInBounds", () => {

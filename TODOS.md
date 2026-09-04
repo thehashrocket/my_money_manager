@@ -441,19 +441,20 @@ both of which document auto-categorize-at-commit as shipped behavior that does n
   plan is a stabilization pass. The month picker on `/transactions` is the obvious thing to
   lift into a shared filter component when this is picked up. Depends on nothing.
 
-- [ ] **P3** — `scripts/db-paths.mjs` hardcodes cwd-relative `./data/money.db` and does not
+- [x] **P3** — `scripts/db-paths.mjs` hardcoded cwd-relative `./data/money.db` and did not
   read `DATA_DIR`, while the app itself does (`src/lib/paths.ts:9`, `dataDir()`). The two
-  disagree about where the ledger lives, and the failure mode is silent success: running
-  `pnpm db:migrate` from a Conductor worktree migrates that worktree's own empty database
-  and prints "Migrations applied successfully" while the real ledger in the main checkout
-  stays untouched. Nothing is broken today — under Docker the entrypoint runs migrations
-  inside the container, where `DATA_DIR` and cwd agree — but this is the one script that
-  performs the most destructive write in the repo (a schema rebuild, CLAUDE.md rule 7), so
-  a latent path disagreement is worth closing. The catch: `db-paths.mjs` is plain `.mjs`
-  shared with `drizzle.config.ts`, so `DATA_DIR` resolution has to be duplicated rather
-  than imported from `paths.ts`, which cuts against the reason that file exists as a single
-  source of truth — resolve that tension before writing code. Found by Codex, 2026-09-02.
-  Depends on nothing.
+  disagreed about where the ledger lives, and the failure mode was silent success: running
+  `pnpm db:migrate` from a Conductor worktree migrated that worktree's own empty database
+  and printed "Migrations applied successfully" while the real ledger in the main checkout
+  stayed untouched. Found by Codex, 2026-09-02. Fixed: `db-paths.mjs` now exports a
+  `dbPath()` function that reads `process.env.DATA_DIR` at call time, matching
+  `paths.ts`'s `dataDir()` logic — duplicated rather than imported, since both of this
+  file's consumers (`drizzle.config.ts` via drizzle-kit, `scripts/migrate.mjs` via plain
+  `node`) run with no TS loader, unlike the esbuild-bundled Docker entrypoint that can
+  import `paths.ts` directly. `drizzle.config.ts` and `migrate.mjs` both updated to call
+  `dbPath()` instead of reading the old `DB_PATH` constant. Verified live: `DATA_DIR=/tmp/...
+  node scripts/migrate.mjs` now writes to the overridden path. New test:
+  `scripts/db-paths.test.mjs`.
 
 - [ ] **P3** — Import-time categorization will have no undo. `bulkCategorize` captures a
   full prior-state snapshot and `undoBulkCategorize` does a 3-case rule rollback
@@ -605,16 +606,18 @@ mirrors from `validateCreateAccountInput.ts` rather than new bugs this branch
 introduces; the one live UI entry point (`<input type="date">`) already blocks the
 malformed case in every normal browser.
 
-- [ ] **P3** — `validateUpdateAnchorInput.ts` and `validateCreateAccountInput.ts` both
-  validate `startingBalanceDate` with `/^\d{4}-\d{2}-\d{2}$/`, which accepts a
+- [x] **P3** — `validateUpdateAnchorInput.ts` and `validateCreateAccountInput.ts` both
+  validated `startingBalanceDate` with `/^\d{4}-\d{2}-\d{2}$/`, which accepted a
   syntactically-shaped but calendar-invalid date like `2026-13-40`. Because
   `loadAccountBalances` compares dates with `gt(transactions.date, account.startingBalanceDate)`
   as a plain SQLite TEXT (lexicographic) comparison, an anchor date like `2026-13-40`
   sorts after every real `2026-0X-XX`/`2026-1X-XX` date, so the `WHERE` clause would
   match zero rows and silently drop the account's entire imported history out of
-  `balanceCents`. Fix: tighten both schemas to reject calendar-invalid dates (e.g. round-trip
-  through `Date.parse` or add `z.iso.date()` if available), and add a regression test to
-  each validator's suite.
+  `balanceCents`. Fixed: the shared `startingBalanceDateSchema` (`accountAnchorFields.ts`,
+  used by both validators plus the CSV-derived anchor path in `importBatch.ts`) now uses
+  `z.iso.date()` instead of the regex — confirmed it rejects both `2026-13-40` and
+  `2026-02-30` (Feb 30th) while still accepting real dates. Regression tests added to
+  `accountAnchorFields.test.ts`.
 
 - [x] **P3** — `validateUpdateAnchorInput.ts`'s `startingBalance` bounds
   (`.min(-1_000_000).max(100_000_000)`) and date regex were copy-pasted verbatim from
@@ -733,7 +736,7 @@ independently confirmed by all three passes; two more came from Codex alone:
   of a formatted dollar amount — flagged separately by the Claude adversarial pass as a
   minor readability issue now that the message is actually user-visible.
   (`src/lib/importBatch.ts`)
-- [ ] **P1, pre-existing, NOT fixed on this branch (out of scope)** — Codex flagged that
+- [x] **P1, pre-existing, NOT fixed on this branch (out of scope)** — Codex flagged that
   `commitImport`'s pending-row-becomes-posted path (`toUpdate`, pre-existing feature, not
   touched by this branch — confirmed via `git diff origin/main` showing zero changes to
   that code) never re-runs transfer pairing for the row it just updated in place.
@@ -746,3 +749,109 @@ independently confirmed by all three passes; two more came from Codex alone:
   stated scope (starting-balance correctness + a chart tooltip bug), and fixing it
   properly means auditing `linkTransferPairs`'s row-selection query rather than a
   one-line patch. (`src/lib/importBatch.ts` — `linkTransferPairs`, the `toUpdate` loop)
+
+## Follow-ups from the `/plan-eng-review` triage pass (2026-09-03, TODOS-cross-reference)
+
+Picked up the correctness gaps flagged as ready-to-start with no dependencies:
+
+- [x] **P3** — `scripts/db-paths.mjs`'s missing `DATA_DIR` support (flagged above,
+  2026-09-02). Fixed: see the entry under "Follow-ups from the `/plan-eng-review` triage
+  pass (2026-09-02)" above, updated in place.
+- [x] **P3** — the anchor-date regex's calendar-invalid-date gap (flagged above,
+  2026-09-03, debug-sync-balance-check). Fixed: see that entry, updated in place.
+- [x] **P1** — the `linkTransferPairs` `toUpdate` gap above, fixed properly rather than
+  with a one-line patch as anticipated. `linkTransferPairs` no longer takes a `batchId`
+  and queries by `importBatchId` (which a `toUpdate` row never carries — it keeps its
+  original batch's id by design, so the success page can attribute it correctly).
+  It now takes an explicit `seedRowIds: number[]`, and `commitImport` passes BOTH the
+  ids of rows it just inserted AND the ids of rows it just flipped from pending to
+  posted (`toUpdate.map(r => r.updateExistingRowId!)`). Verified the fix actually closes
+  the gap, not just moves it: reverted the fix locally, confirmed the new regression
+  test fails against the old code (`pairsLinked` came back `0` instead of `1`), then
+  restored it. New tests in `importBatch.test.ts` (`commitImport — transfer pairing
+  re-checks toUpdate rows`): a baseline two-fresh-inserts-across-accounts case, and the
+  actual toUpdate regression — a pending deposit posts via a narrow re-export with zero
+  new rows, and its real transfer leg (already sitting on the other account, previously
+  un-pairable because the pending placeholder transaction number never matches anything)
+  is now found and linked. `linkTransferPairs` had zero test coverage in this repo before
+  this pass. (`src/lib/importBatch.ts`)
+  A `/ship` testing-specialist pass the same day found two more real coverage gaps in the
+  same fix, both closed same-branch: no test exercised `commitImport`'s
+  `seedRowIds = [...insertedIds, ...toUpdate.map(...)]` merge with BOTH arrays non-empty in
+  one call (added a case with a fresh insert and a pending-to-posted update in the same
+  file, two separate transfer pairs, asserting both link — a fix that seeded from only one
+  array would have found just one pair, not two), and the exported `linkTransferPairs([])`
+  early-return had no direct unit test (added one asserting it returns `0`).
+
+- [x] **P2** — Codex adversarial review (same `/ship` pass) found that
+  `/import/success/[batchId]` (`src/app/import/success/[batchId]/page.tsx`) recomputed its
+  "transfer pairs linked" tile with `COUNT(*) WHERE import_batch_id = batchId` — accurate
+  before this branch, because the old buggy `linkTransferPairs` could only ever link rows
+  carrying the current batch's id anyway. This branch's own fix breaks that invariant on
+  purpose (a `toUpdate` row keeps its ORIGINAL batch id), so the page would now silently
+  undercount: a toUpdate-only import that successfully links a pair reports
+  `pairsLinked: 1` from `commitImport`, but the success page — which discards that return
+  value and redirects, then independently recomputes on its own GET — would show `0`, on
+  the exact page meant to confirm the fix worked. Fixed same-branch (not deferred, unlike
+  the Red Team findings below): `import_batches` gained a nullable `pairs_linked_count`
+  column (migration `0015_early_stardust.sql`, plain `ALTER TABLE ADD COLUMN`, no rebuild),
+  written unconditionally by `commitImport` right after computing `pairsLinked` — matching
+  the existing `anchoredStartingBalanceCents`/`snapshotWarning` persist-don't-recompute
+  pattern in the same table. The success page now reads `batch.pairsLinkedCount` and only
+  falls back to the old `COUNT(*)` query when it's `null` (a batch written before this
+  column existed, or a sync batch — `syncSimpleFin`'s matcher has no `toUpdate` concept, so
+  the batch-scoped count stays exact for it forever and needed no change).
+  `importBatch.test.ts`'s toUpdate-gap and combined-merge tests both gained an assertion
+  that `pairsLinkedCount` matches the true link count even when zero of the linked
+  transactions carry the current batch's id — making the exact bug Codex found
+  irreproducible. (`src/db/schema.ts`, `src/lib/importBatch.ts`,
+  `src/app/import/success/[batchId]/page.tsx`)
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-04, Red Team pass)
+
+Red Team ran because the diff was 270 lines (over the 200-line threshold). Both findings
+below are pre-existing — verified against `origin/main` directly, neither is a regression
+from this branch — and were deliberately deferred rather than fixed, to keep this branch's
+diff matched to its stated scope (the three fixes above). Confirmed via `/ship` triage
+2026-09-04.
+
+- [ ] **P3** — `linkTransferPairs` (`src/lib/importBatch.ts`) never filters candidate rows
+  on `is_pending`, so a still-`PENDING` row carrying Star One's shared placeholder
+  transaction number (`6098`, reused across unrelated pending deposits — CLAUDE.md rule 3)
+  is a legitimate ±1 bank-transaction-number match candidate like any real row. If an
+  unrelated, already-posted, correctly-unpaired transaction on a different account that
+  same date happens to have the same absolute amount, opposite sign, and a real
+  `bank_transaction_number` one off from `6098` (plausible under Star One's per-day
+  sequential numbering), `findTransferPairs` links them as a false pair — even though
+  `6098` was never this row's real sequence position. Once linked, `transferPairId` is
+  non-null, so the `isNull(transferPairId)` guard this same function uses for candidacy
+  silently excludes the row from ever being re-evaluated once its real posted counterpart
+  arrives later — the wrong pairing persists with nothing flagging it as lower-confidence
+  than a real match, and both unrelated transactions drop out of every
+  `transferPairId`-filtered spend total (`budget.ts`, `loadMonthView.ts`,
+  `loadMonthlyTrends.ts`). Never observed in this app's real data — the failure requires an
+  unlucky coincidence between an unrelated transaction's real bank transaction number and
+  the placeholder value. This exact code shape (no `is_pending` filter on either
+  `newRows` or `sameDayUnpaired`) predates this branch; confirmed via
+  `git show origin/main:src/lib/importBatch.ts`. Found by Red Team during `/ship`
+  2026-09-04. Fix: add `isPending` to both select lists and either exclude pending rows
+  from candidacy outright (mirroring the balance-sum rule's `is_pending = false` filter) or
+  exclude the known placeholder value from `bankTransactionNumber` parsing before it
+  reaches `findTransferPairs`. (`src/lib/importBatch.ts` — `linkTransferPairs`)
+
+- [ ] **P3** — `parseCsv.ts`'s `mmddyyyyToIso` only range-checks the day as 1-31, not
+  calendar-aware per month, so a corrupted or hand-edited Star One export row dated e.g.
+  `04/31/2026` (April has 30 days) produces the calendar-invalid ISO string `2026-04-31`
+  and that row is still inserted into `transactions.date` — unvalidated. This is the same
+  class of bug the starting-balance anchor fix above (`z.iso.date()`) closed, but only for
+  the one date value used as an account anchor; every other transaction row's date, from
+  the same untrusted CSV source, has no equivalent guard. `new Date('2026-04-31')` silently
+  rolls over to May 1 rather than throwing, so any code that re-parses the stored string
+  via `new Date(...)` would compute a different date than what's stored/displayed, and the
+  row would sort inconsistently relative to real dates in a full-date comparison. Not
+  touched by this branch (`parseCsv.ts` has zero changes in this diff — confirmed via
+  `git diff origin/main --name-only`). Never observed in real Star One exports. Found by
+  Red Team during `/ship` 2026-09-04. Fix: validate each parsed row's derived ISO date with
+  `startingBalanceDateSchema` (or an equivalent `z.iso.date()` check) inside
+  `mmddyyyyToIso`/`parseStarOneCsv`, pushing a `ParseError` for a calendar-invalid date
+  instead of accepting it as a normal row. (`src/lib/parseCsv.ts`)

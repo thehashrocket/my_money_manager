@@ -24,16 +24,26 @@ export default async function SuccessPage({
     .all();
   if (!batch) notFound();
 
-  const [{ pairsLinked }] = db
-    .select({ pairsLinked: sql<number>`COUNT(*)` })
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.importBatchId, batchId),
-        isNotNull(schema.transactions.transferPairId),
-      ),
-    )
-    .all();
+  // `batch.pairsLinkedCount` is what `commitImport`/`syncSimpleFin` actually
+  // linked as part of THIS batch, including a pair that links a `toUpdate`
+  // row (a pending row posting), which keeps its ORIGINAL batch's id — a
+  // `COUNT(*) WHERE import_batch_id = batchId` query would miss that pair
+  // entirely. Only null for a batch written before this column existed (a
+  // sync batch never sets it either, since its matcher has no `toUpdate`
+  // concept and the batch-scoped count is exact for it by construction), so
+  // the query below is a fallback, not the primary source.
+  const pairsLinked =
+    batch.pairsLinkedCount ??
+    db
+      .select({ pairsLinked: sql<number>`COUNT(*)` })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.importBatchId, batchId),
+          isNotNull(schema.transactions.transferPairId),
+        ),
+      )
+      .all()[0].pairsLinked;
 
   // Rows this batch resolved against a trained rule on the way in. Shown so the
   // rule engine is visible work rather than a silent write — the remainder is
