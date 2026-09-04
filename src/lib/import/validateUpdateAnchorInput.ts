@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { todayIso } from "@/lib/now";
+import {
+  startingBalanceDateSchema,
+  startingBalanceDollarsSchema,
+} from "./accountAnchorFields";
 
 /**
  * Pure validation for `updateAccountAnchorAction`. DB-free; the Server Action
@@ -17,9 +21,10 @@ import { todayIso } from "@/lib/now";
  * was raw SQL against the container's volume. That is not an escape hatch a
  * single-user local app should require.
  *
- * The bounds mirror `validateCreateAccountInput` deliberately: this writes the
- * same two columns, and letting the two paths disagree about what is a legal
- * anchor is how one of them becomes the bug.
+ * The bounds come from the shared `accountAnchorFields.ts` deliberately: this
+ * writes the same two columns `validateCreateAccountInput` does, and letting
+ * the two paths disagree about what is a legal anchor is how one of them
+ * becomes the bug.
  *
  * ## Why a future date is rejected outright (unlike the create-account path)
  *
@@ -36,10 +41,8 @@ import { todayIso } from "@/lib/now";
  */
 export const updateAnchorInputSchema = z.object({
   accountId: z.coerce.number().int().positive(),
-  startingBalance: z.coerce.number().finite().min(-1_000_000).max(100_000_000),
-  startingBalanceDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD"),
+  startingBalance: startingBalanceDollarsSchema,
+  startingBalanceDate: startingBalanceDateSchema,
 });
 
 export type UpdateAnchorInput = z.infer<typeof updateAnchorInputSchema>;
