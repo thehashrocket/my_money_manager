@@ -94,11 +94,16 @@ export const importBatches = sqliteTable("import_batches", {
     .default(sql`(unixepoch())`),
   transactionCount: integer("transaction_count").notNull().default(0),
   snapshotPath: text("snapshot_path"),
-  // Non-null only when createSnapshot() reported `consistent: false` for this
-  // batch's pre-write snapshot. Persisted (not just redirected as a query
+  // A general per-batch warning channel, despite the name: non-null when
+  // createSnapshot() reported `consistent: false` for this batch's pre-write
+  // snapshot (CLAUDE.md rule 5), OR when anchorStartingBalance declined to
+  // move the account's anchor (CLAUDE.md rule 1) — the two reasons are joined
+  // with a space if both fire. Persisted (not just redirected as a query
   // param) so the warning survives a later visit to this batch's success
-  // page, not just the one right after commit — CLAUDE.md rule 5 requires the
-  // degraded flag never be silently dropped.
+  // page, not just the one right after commit. Do not treat a non-null value
+  // here as meaning "this batch's snapshot specifically is unsafe to
+  // restore" — check `snapshotPath`/the commit result's `snapshot.consistent`
+  // for that.
   snapshotWarning: text("snapshot_warning"),
   // Non-null only when THIS batch moved the account's starting-balance anchor
   // (see anchorStartingBalance in importBatch.ts). Persisted rather than
@@ -108,6 +113,14 @@ export const importBatches = sqliteTable("import_batches", {
   // success page on a revisit.
   anchoredStartingBalanceCents: integer("anchored_starting_balance_cents"),
   anchoredStartingBalanceDate: text("anchored_starting_balance_date"),
+  // The account's anchor immediately before this batch moved it, captured in
+  // the same write transaction as the move itself. `anchorStartingBalance`
+  // (importBatch.ts) is the only writer of these two columns outside account
+  // creation, and until this existed a bad automatic move had no record of
+  // what to revert to — only a full snapshot restore. Null whenever this
+  // batch didn't move the anchor.
+  priorStartingBalanceCents: integer("prior_starting_balance_cents"),
+  priorStartingBalanceDate: text("prior_starting_balance_date"),
 });
 
 export const transactions = sqliteTable(

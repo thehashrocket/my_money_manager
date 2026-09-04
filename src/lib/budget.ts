@@ -1,20 +1,5 @@
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
-import type { ExtractTablesWithRelations } from "drizzle-orm";
-import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import { schema } from "@/db";
-
-/**
- * Structural DB type — accepts both the singleton `better-sqlite3`
- * database and a transaction handle (`db.transaction((tx) => …)`). Both
- * derive from `BaseSQLiteDatabase` and expose the same query-builder API
- * used here.
- */
-type Db = BaseSQLiteDatabase<
-  "sync",
-  unknown,
-  typeof schema,
-  ExtractTablesWithRelations<typeof schema>
->;
+import { schema, type AnyDb } from "@/db";
 
 export type EffectiveAllocation = {
   allocatedCents: number;
@@ -49,7 +34,7 @@ export type GetEffectiveAllocationOptions = {
  * row contributes 0 (natural floor).
  */
 export function getEffectiveAllocation(
-  db: Db,
+  db: AnyDb,
   categoryId: number,
   year: number,
   month: number,
@@ -125,7 +110,7 @@ export function getEffectiveAllocation(
  *    category (or any month <= the earliest that matters).
  */
 export function invalidateForwardRollover(
-  db: Db,
+  db: AnyDb,
   categoryId: number,
   fromYear: number,
   fromMonth: number,
@@ -148,7 +133,7 @@ export function invalidateForwardRollover(
  * Refunds (positive amount_cents on a spend category) net against debits.
  */
 export function computeMtdSpent(
-  db: Db,
+  db: AnyDb,
   categoryId: number,
   year: number,
   month: number,

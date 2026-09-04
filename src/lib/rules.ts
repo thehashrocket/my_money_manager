@@ -1,19 +1,5 @@
-import type { ExtractTablesWithRelations } from "drizzle-orm";
-import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import { schema } from "@/db";
+import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
-
-/**
- * Structural DB type — accepts both the singleton `better-sqlite3`
- * database and a transaction handle. Matches the pattern in
- * `src/lib/budget.ts`.
- */
-type Db = BaseSQLiteDatabase<
-  "sync",
-  unknown,
-  typeof schema,
-  ExtractTablesWithRelations<typeof schema>
->;
 
 /**
  * Resolve a normalized merchant string to a category via the rules table.
@@ -31,7 +17,7 @@ type Db = BaseSQLiteDatabase<
  * rule-matching tests are written against.
  */
 export function applyRuleAtImport(
-  db: Db,
+  db: AnyDb,
   normalizedMerchant: string,
 ): number | null {
   return buildRuleMatcher(db)(normalizedMerchant)?.categoryId ?? null;
@@ -55,7 +41,7 @@ export type RuleMatch = { categoryId: number; ruleId: number };
  * the batch's auto-categorization can be undone later.
  */
 export function buildRuleMatcher(
-  db: Db,
+  db: AnyDb,
 ): (normalizedMerchant: string) => RuleMatch | null {
   const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
   if (sorted.length === 0) return () => null;
@@ -83,7 +69,7 @@ export function buildRuleMatcher(
  * a lower value.
  */
 export function createOrUpdateRule(
-  db: Db,
+  db: AnyDb,
   params: {
     normalizedMerchant: string;
     categoryId: number;

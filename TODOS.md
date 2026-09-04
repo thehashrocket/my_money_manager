@@ -518,27 +518,38 @@ pass. What's below is what's left — informational, not blocking, none of it co
   pages) to mirror `undoImportCategorization`'s own stale-row check exactly, so the two
   can't drift apart.
 
-- [ ] **P2** — `deriveStartingBalance` silently picks the file's own row order when BOTH
-  directions validate the running-balance chain, rather than treating that as ambiguous.
+- [x] **P2** — `deriveStartingBalance` silently picked the file's own row order when BOTH
+  directions validated the running-balance chain, rather than treating that as ambiguous.
   Both orders validate exactly when a date's transactions net to zero, which is not rare
   (e.g. a paycheck and a same-day bill). Verified: the same two rows, file order vs.
-  reversed, produced anchors $100 apart — a real dollar swing decided only by which way
-  Star One happened to write the file, not by any actual evidence. Fix: when both
-  directions validate, compute the anchor for both and refuse (`{ ok: false }`) unless
-  they agree, rather than defaulting to `forward`. (`src/lib/accounts/deriveStartingBalance.ts:90-95`)
+  reversed, produced anchors that disagreed — a real dollar swing decided only by which
+  way Star One happened to write the file, not by any actual evidence. Fixed: when both
+  directions validate, `chronologicalAscending` now computes the anchor both ways and
+  refuses (`{ ok: false, reason: "...disagreeing anchors..." }`) unless they agree, rather
+  than defaulting to `forward`. Regression test in `deriveStartingBalance.test.ts` pins
+  the exact paycheck/bill scenario. (`src/lib/accounts/deriveStartingBalance.ts`)
 
-- [ ] **P2** — `anchorStartingBalance` (`src/lib/importBatch.ts`) runs outside
-  `commitImport`'s write transaction, mutates the `accounts` row with no record of the
-  prior value, and has no undo path (CSV imports don't have `undoSyncBatch`'s logical
-  undo). A misfiled import against the wrong account silently overwrites a good anchor,
-  recoverable only via a full snapshot restore. Also unvalidated against the same
-  magnitude/date bounds `createAccountInputSchema` enforces on a hand-typed starting
-  balance — a single-row file trivially "validates" (`isValidChain` never executes its
-  loop body at length 1) and would anchor on whatever that one row's Balance cell says,
-  with no corroboration at all. Fix: move the anchor write inside the transaction,
-  persist the account's prior `(starting_balance_cents, starting_balance_date)`
-  somewhere it can be reverted from, and apply the same bounds `createAccountInputSchema`
-  already enforces (`src/lib/accounts/validateCreateAccountInput.ts`).
+- [x] **P2** — `anchorStartingBalance` (`src/lib/importBatch.ts`) ran outside
+  `commitImport`'s write transaction, mutated the `accounts` row with no record of the
+  prior value, and had no undo path (CSV imports don't have `undoSyncBatch`'s logical
+  undo). A misfiled import against the wrong account could silently overwrite a good
+  anchor, recoverable only via a full snapshot restore. It was also unvalidated against
+  the same magnitude/date bounds `createAccountInputSchema` enforces on a hand-typed
+  starting balance — a single-row file trivially "validates" (`isValidChain` never
+  executes its loop body at length 1) and would anchor on whatever that one row's Balance
+  cell says, with no corroboration at all. Fixed: `anchorStartingBalance` now takes the
+  transaction handle and runs inside `commitImport`'s existing `db.transaction`, so the
+  row inserts and the anchor move commit or fail together. `import_batches` gained
+  `prior_starting_balance_cents`/`prior_starting_balance_date` (migration
+  `0014_modern_virginia_dare.sql`), written in the same transaction as the move — the
+  record that lets a bad automatic move be corrected via `updateAccountAnchorAction`
+  without guessing what the old value was; the import success page now shows the prior
+  value next to the new one. Bounds now come from a new shared
+  `src/lib/import/accountAnchorFields.ts` (dollar min/max + date-format schemas), imported
+  by both `validateCreateAccountInput.ts` and `validateUpdateAnchorInput.ts` too — closing
+  the adjacent P3 below about those two copy-pasting the same bounds. A derived anchor
+  outside the range is declined (not written) and surfaced via `CommitResult.warnings`.
+  (`src/lib/importBatch.ts`, `src/lib/import/accountAnchorFields.ts`, `src/db/schema.ts`)
 
 - [ ] **P2** — `commitImport`'s `status: "empty"` early return (both brand-new-toInsert
   AND toUpdate empty) still means a file whose every row was already imported can never
@@ -605,12 +616,13 @@ malformed case in every normal browser.
   through `Date.parse` or add `z.iso.date()` if available), and add a regression test to
   each validator's suite.
 
-- [ ] **P3** — `validateUpdateAnchorInput.ts`'s `startingBalance` bounds
-  (`.min(-1_000_000).max(100_000_000)`) and date regex are copy-pasted verbatim from
+- [x] **P3** — `validateUpdateAnchorInput.ts`'s `startingBalance` bounds
+  (`.min(-1_000_000).max(100_000_000)`) and date regex were copy-pasted verbatim from
   `validateCreateAccountInput.ts` rather than shared, even though the new file's own
-  docstring warns that letting the two paths disagree about what's a legal anchor "is
-  how one of them becomes the bug." Fix: extract a shared schema (e.g.
-  `src/lib/import/accountAnchorFields.ts`) and have both validators import it.
+  docstring warned that letting the two paths disagree about what's a legal anchor "is
+  how one of them becomes the bug." Fixed while closing the `anchorStartingBalance`
+  bounds-check P2 above, which needed the same bounds a third time: extracted
+  `src/lib/import/accountAnchorFields.ts` and pointed all three writers at it.
 
 - [ ] **P3** — `updateAccountAnchorAction` (`src/app/import/actions.ts`) has no
   stale-write guard: two tabs open on `/import`, both saving an edit to the same
@@ -663,3 +675,74 @@ documented rather than fixed:
   `buildRuleMatcher`'s return *type*, not its regex logic). The underlying ReDoS
   exposure is real but pre-existing and already triaged — see the v0.3.0 ship review
   entry above ("ReDoS on user-authored regex-type rules... Single-user, low severity").
+
+## Follow-ups from the 2026-09-03 `/plan-eng-review` triage (starting-balance correctness + tooltip overlap)
+
+Triaged via `/plan-eng-review`: user reported the dashboard trend-chart tooltip
+overlapping its own legend (screenshot), then chose to prioritize the two
+already-tracked P2 starting-balance correctness bugs above over new
+`/categorize` month-scoping work, on the grounds that CLAUDE.md rule 1's money
+invariant outranks UX feature work. All three fixed same-session:
+
+- [x] Dashboard "Spending — Last 6 Months" trend chart: hovering a bar showed a
+  tooltip that rendered on top of the chart's own Legend when a month had many
+  categories (13 in the reported case) — the tooltip's height grew with the row
+  count while its vertical position tracked the cursor, with nothing keeping
+  the two out of each other's way. Not previously tracked in this file. Fixed:
+  `CustomTooltip` (`src/components/ledger/trend-chart.tsx`) now caps itself at
+  5 rows plus a "+N more" summary line, and `<Tooltip>` is given `position={{
+  y: 8 }}` so it stays pinned near the top of the plot area regardless of
+  which bar is hovered (x still tracks the cursor). A second screenshot from
+  the same user report caught a related bug in the same component: Recharts'
+  default hover-highlight rectangle behind the active bar rendered with its
+  stock light-theme fill — a stark white box against this app's dark
+  background. Fixed in the same pass: `<Tooltip cursor={{ fill: "var(--border)",
+  opacity: 0.5 }}>` reuses the chart's own subtle grid-line color instead of
+  Recharts' default. Verified live via `pnpm dev` + browser automation with a
+  14-category seeded month: tooltip no longer touches the legend at any hover
+  position, and the cursor highlight now reads as a subtle dark tint.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-03, starting-balance anchor branch)
+
+Claude structured review, Claude adversarial subagent, and Codex adversarial + structured
+review (`codex review --base main`) all ran against the branch above. One finding was
+independently confirmed by all three passes; two more came from Codex alone:
+
+- [x] **Cross-model confirmed** — anchor-decline warnings were computed but never reached
+  the user. `anchorStartingBalance`'s `"rejected"` reason was pushed onto the in-memory
+  `warnings` array *after* `import_batches.snapshotWarning` had already been written in
+  the same `INSERT`, with no follow-up `UPDATE`. `confirmImportAction` also never reads
+  `CommitResult.warnings` — it redirects straight to `/import/success/[batchId]`, which
+  only renders the persisted `snapshotWarning` column. Net effect: the exact "silent
+  wrong balance" failure mode this session's fix was built to eliminate was still fully
+  reachable, just with zero warning instead of a misleading one — and every test in the
+  first version of this fix asserted `result.warnings`, never the persisted column,
+  which is exactly why it wasn't caught earlier. Fixed: `anchorStartingBalance` now runs
+  *before* the batch `INSERT` (it only needs `preview.rows`, already computed outside
+  the transaction) so a decline reason folds into the same `snapshotWarning` value the
+  insert writes, instead of arriving after that row is already committed. Regression
+  tests added asserting `batch.snapshotWarning` directly, not just `result.warnings`,
+  for all three warn-and-decline cases. (`src/lib/importBatch.ts`)
+- [x] **Codex-only** — the CSV-derived anchor path had no future-date guard, unlike
+  `validateUpdateAnchorInput`'s hand-typed-anchor path. A real Star One export can't
+  produce a future transaction date, but nothing upstream of `anchorStartingBalance`
+  guaranteed that, and a future anchor permanently freezes `loadAccountBalances` (sums
+  only rows strictly after the anchor) and silences `/sync`'s drift check for that
+  account. Fixed in the same pass as the above, reusing `todayIso()`. Also fixed in the
+  same pass: the bounds-rejected warning showed raw cents (`20000000000 cents`) instead
+  of a formatted dollar amount — flagged separately by the Claude adversarial pass as a
+  minor readability issue now that the message is actually user-visible.
+  (`src/lib/importBatch.ts`)
+- [ ] **P1, pre-existing, NOT fixed on this branch (out of scope)** — Codex flagged that
+  `commitImport`'s pending-row-becomes-posted path (`toUpdate`, pre-existing feature, not
+  touched by this branch — confirmed via `git diff origin/main` showing zero changes to
+  that code) never re-runs transfer pairing for the row it just updated in place.
+  `linkTransferPairs(batchId, db)` seeds its search exclusively from rows carrying that
+  batch's id among `toInsert`-inserted rows; a re-export whose only new information is a
+  pending row posting (`toUpdate`, no `toInsert` rows) never calls it with anything to
+  pair, so a real transfer that only became pairable once the pending leg posted can
+  stay permanently unpaired and keep showing up as spend in `/budget` and the trend
+  chart. Confirmed real by reading the code, not fixed here — unrelated to this branch's
+  stated scope (starting-balance correctness + a chart tooltip bug), and fixing it
+  properly means auditing `linkTransferPairs`'s row-selection query rather than a
+  one-line patch. (`src/lib/importBatch.ts` — `linkTransferPairs`, the `toUpdate` loop)
