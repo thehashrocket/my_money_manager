@@ -815,7 +815,7 @@ from this branch — and were deliberately deferred rather than fixed, to keep t
 diff matched to its stated scope (the three fixes above). Confirmed via `/ship` triage
 2026-09-04.
 
-- [ ] **P3** — `linkTransferPairs` (`src/lib/importBatch.ts`) never filters candidate rows
+- [x] **P3** — `linkTransferPairs` (`src/lib/importBatch.ts`) never filters candidate rows
   on `is_pending`, so a still-`PENDING` row carrying Star One's shared placeholder
   transaction number (`6098`, reused across unrelated pending deposits — CLAUDE.md rule 3)
   is a legitimate ±1 bank-transaction-number match candidate like any real row. If an
@@ -834,12 +834,38 @@ diff matched to its stated scope (the three fixes above). Confirmed via `/ship` 
   the placeholder value. This exact code shape (no `is_pending` filter on either
   `newRows` or `sameDayUnpaired`) predates this branch; confirmed via
   `git show origin/main:src/lib/importBatch.ts`. Found by Red Team during `/ship`
-  2026-09-04. Fix: add `isPending` to both select lists and either exclude pending rows
-  from candidacy outright (mirroring the balance-sum rule's `is_pending = false` filter) or
-  exclude the known placeholder value from `bankTransactionNumber` parsing before it
-  reaches `findTransferPairs`. (`src/lib/importBatch.ts` — `linkTransferPairs`)
+  2026-09-04. Fixed via `/plan-eng-review` triage 2026-09-04: added
+  `eq(schema.transactions.isPending, false)` to the `sameDayUnpaired` candidate query,
+  excluding pending rows from candidacy outright — sufficient on its own to close this bug,
+  since a pending row can now never become a pair member regardless of how it entered the
+  scan. New regression test in `importBatch.test.ts` (`linkTransferPairs` — "never pairs a
+  still-pending row carrying the 6098 placeholder...") pins down the exact scenario: a
+  pending `6098` deposit and an unrelated posted withdrawal one bank-transaction-number
+  away, same date, same `|amount|`, opposite signs, different accounts — asserts neither
+  gets a `transferPairId`.
+  The initial version of this fix also added the same filter to the `newRows` seed query,
+  reasoned as "redundant defense in depth" and shipped with a code comment naming it as an
+  intentional, deliberately-undertested coverage gap (chosen over writing a test for it via
+  `/plan-eng-review` triage, since the only observable difference was a contrived
+  unrelated-pair-links-one-commit-early scenario). Codex adversarial review during the same
+  `/ship` run correctly identified that scenario as a real regression, not a contrived one:
+  a still-pending seed making `newRows` empty short-circuits the function via the very next
+  line (`if (newRows.length === 0) return 0`) **before the date scan ever runs** — silently
+  losing the only mechanism that re-checks a date once its own legs' original imports failed
+  to pair them (e.g. two rows manually unlinked via "Not a transfer", or any other historical
+  gap). That repair trigger is not a one-commit delay, as the original comment assumed — for
+  a date nothing else ever touches again, it is permanent. Fixed: removed the `newRows`
+  filter, keeping only `sameDayUnpaired`'s. A pending seed can still trigger the same-day
+  scan (preserving the repair trigger); it just can never itself be selected as a pair
+  member (still closing the original bug). New regression test in `importBatch.test.ts`
+  (`linkTransferPairs` — "a pending row's import still triggers repair-linking of two
+  unrelated already-posted, previously-unpaired rows sharing its date") reproduces the
+  historical-gap scenario via `unlinkTransferPair` and pins the fix: reverting to the
+  seed-filtered version makes this test fail (`pairsLinked` 0 instead of 1), confirmed by
+  deliberately reintroducing the regression and re-running before restoring the fix.
+  (`src/lib/importBatch.ts` — `linkTransferPairs`)
 
-- [ ] **P3** — `parseCsv.ts`'s `mmddyyyyToIso` only range-checks the day as 1-31, not
+- [x] **P3** — `parseCsv.ts`'s `mmddyyyyToIso` only range-checks the day as 1-31, not
   calendar-aware per month, so a corrupted or hand-edited Star One export row dated e.g.
   `04/31/2026` (April has 30 days) produces the calendar-invalid ISO string `2026-04-31`
   and that row is still inserted into `transactions.date` — unvalidated. This is the same
@@ -851,7 +877,206 @@ diff matched to its stated scope (the three fixes above). Confirmed via `/ship` 
   row would sort inconsistently relative to real dates in a full-date comparison. Not
   touched by this branch (`parseCsv.ts` has zero changes in this diff — confirmed via
   `git diff origin/main --name-only`). Never observed in real Star One exports. Found by
-  Red Team during `/ship` 2026-09-04. Fix: validate each parsed row's derived ISO date with
-  `startingBalanceDateSchema` (or an equivalent `z.iso.date()` check) inside
-  `mmddyyyyToIso`/`parseStarOneCsv`, pushing a `ParseError` for a calendar-invalid date
-  instead of accepting it as a normal row. (`src/lib/parseCsv.ts`)
+  Red Team during `/ship` 2026-09-04. Fixed via `/plan-eng-review` triage 2026-09-04:
+  `mmddyyyyToIso` now validates its candidate ISO string against the shared
+  `startingBalanceDateSchema` (`z.iso.date()`, `src/lib/import/accountAnchorFields.ts`) and
+  returns `null` on a calendar-invalid result, which the existing caller already turns into
+  a `ParseError` ("invalid date: ..."). Regression tests added to `parseCsv.test.ts`: a
+  rejected `04/31` (April has 30 days), and a `02/29` that's rejected on a non-leap year but
+  accepted on a leap year (confirms the fix doesn't over-reject). (`src/lib/parseCsv.ts`)
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-04, second Red Team pass)
+
+The diff above grew past 200 lines once the `linkTransferPairs` fix was corrected in
+response to Codex adversarial review, which re-triggered Red Team dispatch. It found a
+real gap the five specialists, the Claude adversarial subagent, and both Codex passes had
+all missed — fixed same-branch, via `/plan-eng-review` triage 2026-09-04:
+
+- [x] **P2** — `unlinkTransferPair` ("Not a transfer" — `src/lib/simplefin/sync.ts`) only
+  ever cleared `transferPairId` to `null` on both legs, with nothing else recorded. Every
+  automatic matcher (`linkTransferPairs` in `importBatch.ts`, `linkTransfersByBucket`,
+  `findAmbiguousTransfers` in `sync.ts`) uses `transferPairId IS NULL` as its sole
+  eligibility signal for "unpaired, candidate for auto-linking" — so a row the user
+  explicitly rejected as a false-positive transfer match was indistinguishable from a row
+  that had simply never been evaluated. The very repair-scan mechanism the previous fix in
+  this same `/ship` run deliberately preserved (an unrelated row landing on a shared date
+  re-triggers a same-day scan) could therefore silently RE-LINK a pair the user had just
+  told the app was not a transfer, with zero notification — reversing an explicit user
+  correction and quietly excluding both transactions from spending totals again. Confirmed
+  pre-existing and unrelated to any earlier fix in this branch: `main`'s `linkTransferPairs`
+  had no `is_pending` filter at all (identical risk surface), and `unlinkTransferPair` is
+  untouched by every other commit on this branch (`git diff origin/main -- src/lib/simplefin/sync.ts`
+  showed nothing before this fix). Found by Red Team during `/ship` 2026-09-04.
+  First fix attempt (superseded within the same `/ship` run — see the correction below):
+  `transactions` gained a nullable `transfer_rejected_at` timestamp, TRANSACTION-scoped —
+  set on both legs, and every automatic matcher excluded any row carrying it. Re-running
+  Codex structured review against the grown diff caught a real [P1] in that design before
+  it shipped: transaction-scoped rejection means rejecting ONE false-positive match
+  permanently blacklists that row from EVER pairing with anything again — including its
+  actual correct counterpart, if one exists. Worse, `linkTransferPairManually` (the only
+  escape hatch) is reachable exclusively from `findAmbiguousTransfers`'s review queue, and
+  the transaction-scoped filter excluded a rejected row from that queue too — so an
+  ordinary correction became unrecoverable without a direct DB edit.
+  Corrected: replaced the timestamp with a nullable, self-referencing
+  `transfer_rejected_partner_id` (migration `0016_tired_thing.sql`, same plain
+  `ALTER TABLE ADD COLUMN` shape, no rebuild) — PAIR-scoped, not transaction-scoped.
+  `unlinkTransferPair` stamps both legs pointed at EACH OTHER specifically.
+  `linkTransferPairManually` clears it on both legs on explicit re-link, same as before.
+  The automatic matchers no longer filter CANDIDACY on it (a rejected row stays eligible to
+  match something else) — instead, the matching functions themselves take an `isRejected`
+  predicate and skip only that exact combination while still searching for a different
+  valid partner: `findTransferPairs` (`src/lib/transferPair.ts`, CSV path) checks it
+  BEFORE committing a candidate (not after), since a post-filter would still let its greedy
+  `used`-tracking consume a row on the rejected match before ever trying the real partner
+  sitting right after it in the same bucket. `matchTransfers` (`src/lib/simplefin/matchTransfers.ts`,
+  SimpleFIN path) got the same treatment via a new bounded-backtracking
+  `assignAvoidingRejections` helper, since its bijection-based bucket matching has an
+  equivalent problem at bucket scale (a rejected edge in a balanced 2-vs-2+ bucket could
+  silently drop an otherwise-valid bijection for the OTHER rows too) — falls back to
+  `ambiguous` only when literally every possible bijection hits a rejection.
+  `findAmbiguousTransfers` deliberately does NOT filter the SELECT on the marker (a
+  previously-rejected row is allowed to resurface there against a different candidate —
+  a human reviewing that queue is not a silent re-link) but DOES pass `isRejected` into
+  `matchTransfers`, so the buckets it shows match what `linkTransfersByBucket` actually
+  computed at sync time, and a 1-vs-1 bucket whose only pairing was rejected still surfaces
+  as ambiguous (not silently dropped) — restoring the one working path back to
+  `linkTransferPairManually`. Found by Red Team, then corrected per Codex structured
+  review re-run against the grown diff, both during `/ship` 2026-09-04.
+  New/updated regression tests: `importBatch.test.ts` ("never re-pairs two rows the user
+  explicitly rejected..." — updated for the new field name; "a row rejected against one
+  false-positive match can still auto-pair with its real counterpart" — the exact Codex
+  scenario, new), `transferPair.test.ts` (`isRejected` skips a combination without
+  consuming the row; finds a different valid candidate in the same bucket; default omitted
+  parameter rejects nothing), `matchTransfers.test.ts` (1-vs-1 rejected-only bucket becomes
+  ambiguous; 2-vs-2 finds the non-rejected bijection instead of dropping everything; 2-vs-2
+  where every bijection is rejected becomes fully ambiguous; default parameter unaffected),
+  and `sync.test.ts` (`unlinkTransferPair` stamps the marker pair-wise; manual re-link
+  clears it; `linkTransfersByBucket` respects it; `findAmbiguousTransfers` still surfaces a
+  rejected row when it's the only candidate, and the manual-relink escape hatch still
+  works). (`src/db/schema.ts`, `src/lib/simplefin/sync.ts`, `src/lib/simplefin/matchTransfers.ts`,
+  `src/lib/importBatch.ts`, `src/lib/transferPair.ts`, `drizzle/0016_tired_thing.sql`)
+
+- [x] **P2** — Re-running Codex structured review against the corrected (pair-scoped) fix
+  above found one more real gap: `linkTransferPairManually`'s clear of
+  `transferRejectedPartnerId` on explicit re-link was unconditional, so linking A to a
+  THIRD row C would also erase A's memory of having rejected B specifically — not just
+  clear the A↔B rejection this link doesn't even concern. If B later has its own marker
+  independently cleared the same way (linked to some other row D), and either C's or D's
+  link is later undone, A and B could end up back at fully-unpaired with neither side
+  remembering the original rejection, silently reopening the exact false-relink risk the
+  whole feature exists to close. (Also flagged: a `[P1]` claiming the `0016_tired_thing.sql`
+  migration was missing from the diff — investigated and found to be a review-tool
+  artifact, not a real gap: `codex review`'s `git diff <base>` only sees tracked changes,
+  and the migration file was genuinely present on disk with real content, just not yet
+  `git add`ed at review time; resolves once `/ship`'s own commit step stages it.) Fixed:
+  the clear is now conditional — `transferRejectedPartnerId` is nulled only when it
+  currently equals the specific row being linked, otherwise left untouched. New regression
+  test in `sync.test.ts` ("manual link to a different row does NOT clear a rejection
+  recorded against a third row"), mutation-verified: reverting to the unconditional clear
+  makes it fail (`null` instead of the third row's id), confirmed by deliberately
+  reintroducing the bug and re-running before restoring the fix. Found by Codex structured
+  review during `/ship` 2026-09-04. (`src/lib/simplefin/sync.ts`)
+
+- [x] **P3** — A fresh testing-specialist pass over the full grown diff found that
+  `assignAvoidingRejections`'s actual backtracking path (undoing a locally-successful
+  assignment because a later positive turns out to have no valid partner) was never
+  exercised — every existing test used bucket sizes ≤2, which resolve via a single
+  try-next-candidate step and never reach the `assignment.pop(); remaining.splice(k, 0, b)`
+  undo lines. Added a 3-vs-3 `matchTransfers` test where the first positive's preferred
+  partner succeeds locally but forces the second positive into a dead end, so a valid
+  assignment only exists by backtracking off that first choice. Mutation-verified: removing
+  the `remaining.splice(k, 0, b)` restore line makes the test fail, confirmed by
+  deliberately reintroducing the bug and re-running before restoring the fix.
+  (`src/lib/simplefin/matchTransfers.test.ts`)
+
+## Follow-ups from the `/pr-review-toolkit:review-pr` pass on PR #34 (2026-09-04)
+
+Four specialist agents (code-reviewer, pr-test-analyzer, silent-failure-hunter,
+comment-analyzer) reviewed the full PR #34 diff. All findings fixed same-branch:
+
+- [x] **P1** — `drizzle/0016_tired_thing.sql` added `transfer_rejected_partner_id` via
+  plain `ALTER TABLE ADD COLUMN ... REFERENCES transactions(id)` with NO `ON DELETE`
+  clause, so SQLite defaulted it to `NO ACTION` — even though `schema.ts` declares
+  `{ onDelete: "set null" }` and the Drizzle snapshot agreed with `schema.ts`, only the
+  actual migration SQL was wrong (apparent drizzle-kit generation gap for FK-bearing
+  `ADD COLUMN`, since a FK declared inline on `CREATE TABLE` — e.g. `transfer_pair_id` in
+  `0000_thin_mandroid.sql` — does get the clause correctly). Reproduced directly against a
+  real migrated in-memory DB: `PRAGMA foreign_key_list` showed `on_delete: 'NO ACTION'` for
+  the new column, and deleting a batch containing a row referenced by a surviving row's
+  `transfer_rejected_partner_id` threw `FOREIGN KEY constraint failed` instead of nulling
+  the survivor's marker. Hits `undoSyncBatch` (`src/lib/simplefin/undoSync.ts`), whose own
+  comment claims reliance on `SET NULL` (same pattern as the pre-existing `transfer_pair_id`
+  column) — trigger sequence: sync auto-links a feed row to an older CSV row → user clicks
+  "Not a transfer" → user clicks "Undo this sync" → throw, taking the undo button and
+  balance check down with it (violates the CLAUDE.md `/sync` rule that every sync action
+  returns state rather than throwing). Not caught by any existing test: nothing combined
+  `unlinkTransferPair` with a cross-batch `undoSyncBatch`. Fixed by adding
+  `ON UPDATE no action ON DELETE set null` to the migration SQL directly (safe to edit in
+  place rather than issue a corrective migration — confirmed this migration had not yet been
+  applied to any local `data/money.db`). SQLite does support an inline `ON DELETE` clause on
+  `ALTER TABLE ADD COLUMN` (verified directly), so no table rebuild via `scripts/migrate.mjs`
+  was needed here, unlike CLAUDE.md rule 7's `NOT NULL`-relaxation case. New regression test
+  in `undoSync.test.ts` ("undoing a sync batch nulls a surviving row's rejection marker
+  instead of throwing a FK violation"), confirmed failing against the original migration SQL
+  before the fix and passing after, via a temporary `git stash` of just that file.
+  (`drizzle/0016_tired_thing.sql`, `src/lib/simplefin/undoSync.test.ts`)
+
+- [x] **P3** — `isRejectedPair` (`sync.ts`) and the equivalent inline lambda
+  (`importBatch.ts`) both check `a.marker === b.id || b.marker === a.id`, but every existing
+  test seeded the rejection via `unlinkTransferPair`, which always writes both legs
+  symmetrically — so no test could tell the OR apart from either half alone; a future
+  refactor could silently drop one clause with all 642 tests still green. Added two tests
+  per call site, each seeding the marker directly on only ONE leg (bypassing
+  `unlinkTransferPair`) to isolate each half of the OR. Mutation-verified all four: reverting
+  each predicate to only one clause makes exactly the test for the OTHER clause fail, the
+  matching one stays green — confirmed by deliberately weakening each clause and re-running
+  before restoring. (`src/lib/importBatch.test.ts`, `src/lib/simplefin/sync.test.ts`)
+
+- [x] **P3** — A rejected pair becomes a permanent, unresolvable-looking item in the
+  "Transfers needing review" queue: `findAmbiguousTransfers` deliberately doesn't filter its
+  SELECT on the marker (by design — a human reviewing that queue is not a silent re-link),
+  but the review UI (`app/sync/page.tsx`) offered only one action ("Link as transfer") and
+  one static explanation ("the counts don't balance") for every bucket — wrong copy for a
+  rejection-derived bucket, where the counts balance fine and the actual reason is the
+  user's own earlier correction. Added a `reason: "contested" | "unbalanced" | "rejected" |
+  "cross-source"` field to `AmbiguousBucket` (`matchTransfers.ts`), set at each of the four
+  push sites (the fourth, "cross-source", was an existing but previously-unlabeled case: the
+  cross-source adjudication guard). The review page now renders per-bucket copy keyed on
+  `reason`, and the button reads "Link as transfer anyway" specifically for the rejected
+  case. Deliberately did NOT add a dismiss/acknowledge action — that would contradict the
+  already-established design (this same PR's own regression test, "findAmbiguousTransfers
+  still surfaces a rejected row when it's the only candidate pairing available") that a
+  rejected row must stay visible in case a different real candidate ever appears; accurate
+  copy addresses the confusion without reopening that design decision. New assertions added
+  to the existing tests covering each of the four reasons in `matchTransfers.test.ts`.
+  (`src/lib/simplefin/matchTransfers.ts`, `src/app/sync/page.tsx`, `src/lib/simplefin/matchTransfers.test.ts`)
+
+- [x] **P4** — Two stale comments left over from earlier iterations of this same PR (it went
+  through ~6 rounds of review): the `schema.ts` comment on `transferRejectedPartnerId`
+  claimed `linkTransferPairManually` "clears it on both legs" unconditionally — actually
+  conditional (only when it currently points at the partner being relinked), contradicting
+  the correct inline comment in `sync.ts` and its own dedicated test. And
+  `importBatch.test.ts` referenced a nonexistent `transferRejectedAt` column name (predates
+  the pair-scoped rename to `transferRejectedPartnerId`). Both fixed. Also fixed: a
+  misplaced comment in `transferPair.test.ts` justifying "row 3" backtracking-avoidance that
+  was attached to the wrong test (a 2-row test with no row 3 — the row-3 scenario is the
+  *next* test); and `matchTransfers.ts`'s `assignAvoidingRejections` docstring misattributed
+  its algorithmic safety to the "3+ accounts" guard, which bounds distinct accounts per
+  bucket, not rows per direction — the real reason backtracking stays fast is that the
+  rejection marker is single-valued (out-degree ≤ 1 per row), noted explicitly so the
+  comment doesn't go stale if that column is ever made multi-valued (see the P3 below).
+  (`src/db/schema.ts`, `src/lib/importBatch.test.ts`, `src/lib/transferPair.test.ts`,
+  `src/lib/simplefin/matchTransfers.ts`)
+
+- [ ] **P3** — `transfer_rejected_partner_id` is single-valued, so a row remembers only its
+  MOST RECENT rejection. If a row is later paired-then-rejected against a different partner,
+  the earlier rejection is silently overwritten; after both legs of an original A↔B
+  rejection have each independently been re-rejected against something else, the original
+  correction is gone entirely and the automatic matchers can re-link A↔B. Needs four
+  rejections across two rows to hit — low probability for a single-user app — and a
+  multi-valued rejection store (join table) is likely overkill for the value it adds, so
+  documented rather than fixed: see the `KNOWN LIMITATION` comment on the schema column and
+  the caveat added to CLAUDE.md rule 4. Revisit if this is ever actually hit in practice, or
+  if `assignAvoidingRejections`'s near-linear-backtracking assumption (which depends on this
+  column staying single-valued) is ever challenged by real bucket sizes growing past 2-3 rows
+  per direction. (`src/db/schema.ts`, `CLAUDE.md`)

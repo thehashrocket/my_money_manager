@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-09-04
+
+### Fixed
+- **A still-pending deposit carrying the bank's shared placeholder transaction number could get coincidentally matched to an unrelated, already-posted transaction as a false transfer pair**, silently dropping both from spending totals with no way to tell it apart from a real match. Pending transactions can no longer be selected as a transfer-pair match while still pending.
+- **A corrupted or hand-edited CSV row with a calendar-invalid date (like April 31st, or February 29th outside a leap year) was silently accepted into the ledger.** Every imported transaction's date is now validated the same way an account's starting-balance date already was, and a calendar-invalid row is rejected with a clear error instead of being imported.
+- **Marking a transfer pair as "Not a transfer" could later be silently reversed** by an unrelated future import landing on the same date, quietly reopening the exact mismatch that was just corrected with no notification. That correction now sticks — while still allowing either of the two transactions to pair correctly with a *different*, genuinely matching transaction later, and without losing the app's other self-healing behavior that occasionally catches an unrelated missed transfer pair.
+
 ## [0.12.3] - 2026-09-04
 
 ### Fixed

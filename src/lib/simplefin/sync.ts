@@ -99,7 +99,14 @@ type TransferRow = {
   rawMemo: string;
   /** Carries a bank transaction number, so the CSV ±1 matcher already saw it. */
   adjudicatedByTxnNumber: boolean;
+  /** See the `transferRejectedPartnerId` schema comment. */
+  transferRejectedPartnerId: number | null;
 };
+
+/** True when this specific proposed pair was previously rejected by either leg. */
+function isRejectedPair(a: TransferRow, b: TransferRow): boolean {
+  return a.transferRejectedPartnerId === b.id || b.transferRejectedPartnerId === a.id;
+}
 
 function isoDaysAgo(days: number, now: Date): string {
   return new Date(now.getTime() - days * DAY_SECONDS * 1000)
@@ -530,6 +537,7 @@ export function linkTransfersByBucket(
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
+      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -544,7 +552,13 @@ export function linkTransfersByBucket(
       adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
     }));
 
-  const { pairs: allPairs, ambiguous } = matchTransfers(unlinked);
+  // A manually-unlinked row ("Not a transfer") must never be silently
+  // re-linked to the SAME partner it was rejected against — see
+  // unlinkTransferPair's docstring. Passed into matchTransfers itself (not a
+  // post-filter): see assignAvoidingRejections for why a post-filter would
+  // still lose an otherwise-valid pairing for the OTHER members of the same
+  // balanced bucket.
+  const { pairs: allPairs, ambiguous } = matchTransfers(unlinked, isRejectedPair);
 
   // Only persist a pair that involves at least one row from THIS batch.
   // matchTransfers sees every unlinked row in the window, so it can legitimately
@@ -621,12 +635,27 @@ export function linkTransferPairManually(
   }
 
   db.transaction((tx) => {
+    // Clears transferRejectedPartnerId ONLY when it currently points at the
+    // OTHER leg of THIS link — clearing it unconditionally would also erase
+    // a rejection recorded against a third row. Example: A was rejected
+    // against B; A is later manually linked to C. If A's marker were blindly
+    // nulled here, A would forget it ever rejected B — and if C's link is
+    // later undone, A and B (assuming B's own marker was independently
+    // cleared the same way by its own future manual link) could silently
+    // auto-re-link with no trace either side ever objected. Found by Codex
+    // structured review during `/ship` 2026-09-04.
     tx.update(schema.transactions)
-      .set({ transferPairId: b.id })
+      .set({
+        transferPairId: b.id,
+        transferRejectedPartnerId: a.transferRejectedPartnerId === b.id ? null : a.transferRejectedPartnerId,
+      })
       .where(eq(schema.transactions.id, a.id))
       .run();
     tx.update(schema.transactions)
-      .set({ transferPairId: a.id })
+      .set({
+        transferPairId: a.id,
+        transferRejectedPartnerId: b.transferRejectedPartnerId === a.id ? null : b.transferRejectedPartnerId,
+      })
       .where(eq(schema.transactions.id, b.id))
       .run();
   });
@@ -647,6 +676,19 @@ export function linkTransferPairManually(
  * Both legs are cleared in one transaction: leaving one side pointing at a row
  * that no longer points back is exactly the dangling state that
  * `linkTransferPairManually` refuses to create.
+ *
+ * Also stamps `transferRejectedPartnerId` on both legs, pointed at each
+ * other. `transferPairId IS NULL` alone doesn't distinguish "never
+ * evaluated" from "user explicitly rejected this specific match" —
+ * without a separate marker, every automatic matcher (`linkTransferPairs`,
+ * `linkTransfersByBucket`) would treat a just-unlinked row as an ordinary
+ * unpaired candidate again, and an unrelated future import landing on the
+ * same date could silently re-link the exact pair the user just rejected,
+ * with no notification. Deliberately PAIR-scoped, not transaction-scoped —
+ * see the schema comment on `transferRejectedPartnerId` for why a
+ * transaction-scoped flag was tried first and reverted. Found by Red Team,
+ * then corrected per Codex structured review, both during `/ship`
+ * 2026-09-04.
  */
 export function unlinkTransferPair(id: number, db: Db = defaultDb): void {
   const row = db
@@ -662,8 +704,12 @@ export function unlinkTransferPair(id: number, db: Db = defaultDb): void {
   const partnerId = row.transferPairId;
   db.transaction((tx) => {
     tx.update(schema.transactions)
-      .set({ transferPairId: null })
-      .where(inArray(schema.transactions.id, [id, partnerId]))
+      .set({ transferPairId: null, transferRejectedPartnerId: partnerId })
+      .where(eq(schema.transactions.id, id))
+      .run();
+    tx.update(schema.transactions)
+      .set({ transferPairId: null, transferRejectedPartnerId: id })
+      .where(eq(schema.transactions.id, partnerId))
       .run();
   });
 }
@@ -689,6 +735,7 @@ export function findLinkedTransferPairs(
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
       transferPairId: schema.transactions.transferPairId,
+      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -728,6 +775,19 @@ export function findAmbiguousTransfers(
   sinceIso: string,
   db: Db = defaultDb,
 ): AmbiguousBucket<TransferRow>[] {
+  // The select itself does NOT filter on transferRejectedPartnerId: this is
+  // a human-review surface, not an auto-link path, so a previously-rejected
+  // row is allowed to resurface here against a DIFFERENT candidate — the
+  // human decides, they aren't silently re-linked. Excluding the ROW would
+  // repeat the mistake `linkTransferPairManually` is the fix for (see the
+  // schema comment on `transferRejectedPartnerId`): it's the only UI entry
+  // point to `linkTransferPairManually`, so hiding a row here would leave no
+  // way to ever manually pair it again. isRejectedPair IS still passed to
+  // matchTransfers below, purely so this page shows the same buckets
+  // linkTransfersByBucket actually computed at sync time — a bucket that
+  // fails rejection-avoidance during sync becomes ambiguous there, and
+  // should show as ambiguous here too, not silently omitted OR silently
+  // shown as already resolved.
   const unlinked: TransferRow[] = db
     .select({
       id: schema.transactions.id,
@@ -736,6 +796,7 @@ export function findAmbiguousTransfers(
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
+      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -750,7 +811,7 @@ export function findAmbiguousTransfers(
       adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
     }));
 
-  return matchTransfers(unlinked).ambiguous;
+  return matchTransfers(unlinked, isRejectedPair).ambiguous;
 }
 
 export type { TransferRow };

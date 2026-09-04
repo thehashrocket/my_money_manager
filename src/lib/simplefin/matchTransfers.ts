@@ -62,6 +62,19 @@ export type AmbiguousBucket<T extends TransferCandidate> = {
   absAmountCents: number;
   positives: T[];
   negatives: T[];
+  /**
+   * Why this bucket couldn't auto-link, for accurate review-queue copy:
+   * "contested" — 3+ accounts, more than one plausible counterpart account.
+   * "unbalanced" — the counts genuinely don't match (N positives vs M negatives).
+   * "rejected" — counts DO balance, but every valid bijection hits a pairing
+   * the user already rejected via "Not a transfer"; nothing here is actually
+   * undecidable in the counting-argument sense, it's just blocked.
+   * "cross-source" — counts balance and nothing here was rejected, but a leg
+   * carries a bank transaction number the stronger CSV ±1 matcher already
+   * examined and declined to pair, so the weaker counting argument alone
+   * isn't corroboration enough to auto-link it.
+   */
+  reason: "contested" | "unbalanced" | "rejected" | "cross-source";
 };
 
 export type MatchResult<T extends TransferCandidate> = {
@@ -87,8 +100,55 @@ export function isAtmWithdrawal(row: TransferCandidate): boolean {
   return ATM_PREFIX.test((row.rawMemo ?? "").trim());
 }
 
+/**
+ * Finds a bijection between `positives` and `negativesPreferred` (already
+ * ordered by display preference) with zero rejected edges, preferring the
+ * given order and falling back to alternate assignments only where a
+ * preferred slot is rejected. Naive backtracking over an arbitrary rejection
+ * set is worst-case O(n!) — the "3+ accounts" guard above bounds distinct
+ * ACCOUNTS per bucket, not rows per direction, so it doesn't cap n. What
+ * actually keeps this fast is that the rejection marker is a single column
+ * (`transferRejectedPartnerId`): every row has out-degree <= 1 in the
+ * rejected-edge relation, so the search is really over a near-linear partial
+ * matching, not a dense one. Re-check this comment if that column ever
+ * becomes multi-valued. Returns `null` when NO
+ * valid full assignment exists (every arrangement hits at least one
+ * rejection) — the caller treats that the same as an unbalanced bucket:
+ * ambiguous, not guessed.
+ */
+function assignAvoidingRejections<T extends TransferCandidate>(
+  positives: T[],
+  negativesPreferred: T[],
+  isRejected: (a: T, b: T) => boolean,
+): { a: T; b: T }[] | null {
+  const remaining = [...negativesPreferred];
+  const assignment: { a: T; b: T }[] = [];
+
+  function backtrack(i: number): boolean {
+    if (i === positives.length) return true;
+    const a = positives[i];
+    for (let k = 0; k < remaining.length; k++) {
+      const b = remaining[k];
+      if (isRejected(a, b)) continue;
+      remaining.splice(k, 1);
+      assignment.push({ a, b });
+      if (backtrack(i + 1)) return true;
+      assignment.pop();
+      remaining.splice(k, 0, b);
+    }
+    return false;
+  }
+
+  return backtrack(0) ? assignment : null;
+}
+
 export function matchTransfers<T extends TransferCandidate>(
   rows: T[],
+  // See findTransferPairs' parameter of the same shape and purpose
+  // (src/lib/transferPair.ts) — same fix, same reasoning, ported here so a
+  // rejected pair inside a balanced 2+/2+ bucket doesn't silently drop its
+  // OTHER, non-rejected members out of a would-be-valid assignment either.
+  isRejected: (a: T, b: T) => boolean = () => false,
 ): MatchResult<T> {
   const buckets = new Map<string, T[]>();
   for (const r of rows) {
@@ -136,6 +196,7 @@ export function matchTransfers<T extends TransferCandidate>(
         absAmountCents,
         positives: bucket.filter((r) => r.amountCents > 0),
         negatives: bucket.filter((r) => r.amountCents < 0),
+        reason: "contested",
       });
       continue;
     }
@@ -159,17 +220,27 @@ export function matchTransfers<T extends TransferCandidate>(
         if (positives.length === 0 || negatives.length === 0) continue;
 
         if (positives.length !== negatives.length) {
-          ambiguous.push({ date, absAmountCents, positives, negatives });
+          ambiguous.push({ date, absAmountCents, positives, negatives, reason: "unbalanced" });
           continue;
         }
 
         // Counts balance, so every bijection is financially identical. Order the
         // overdraft-labelled legs first purely so the stored pairing reads
-        // sensibly to a human later.
+        // sensibly to a human later — assignAvoidingRejections treats this as
+        // the PREFERRED order and only deviates from it where a preferred
+        // slot hits a rejected edge.
         const ordered = [...negatives].sort(
           (x, y) => Number(isOverdraftLabeled(y)) - Number(isOverdraftLabeled(x)),
         );
-        const candidates = positives.map((a, i) => ({ a, b: ordered[i] }));
+        const assignment = assignAvoidingRejections(positives, ordered, isRejected);
+        if (assignment === null) {
+          // Every possible bijection hits at least one rejected edge — fail
+          // safe to human review rather than guess, same as the unbalanced-
+          // count case above.
+          ambiguous.push({ date, absAmountCents, positives, negatives, reason: "rejected" });
+          continue;
+        }
+        const candidates = assignment;
 
         // Cross-source guard. The counting argument is sound only when the rows
         // in a bucket really are transfer legs; it has no way to tell a genuine
@@ -196,7 +267,7 @@ export function matchTransfers<T extends TransferCandidate>(
             !isOverdraftLabeled(b),
         );
         if (uncorroboratedCrossSource) {
-          ambiguous.push({ date, absAmountCents, positives, negatives });
+          ambiguous.push({ date, absAmountCents, positives, negatives, reason: "cross-source" });
           continue;
         }
 

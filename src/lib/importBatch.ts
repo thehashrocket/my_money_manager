@@ -647,6 +647,25 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
 
   const dates = Array.from(new Set(newRows.map((r) => r.date)));
 
+  // newRows deliberately does NOT filter isPending: a still-pending seed row
+  // still contributes its date here, so its import can trigger a same-day
+  // scan that opportunistically links two UNRELATED already-posted rows
+  // sharing that date — the only mechanism that ever re-checks a date once
+  // its own legs' original imports failed to pair them. Filtering isPending
+  // on this query too was tried and reverted: it made a pending-only import
+  // return 0 immediately, permanently losing that self-heal trigger for
+  // dates with no other pending/posted activity ever again. Found by Codex
+  // adversarial review during `/ship` 2026-09-04.
+  //
+  // is_pending = false, mirroring the balance-sum rule (CLAUDE.md rule 1): a
+  // still-pending row can carry Star One's shared placeholder transaction
+  // number (6098, reused across unrelated pending deposits), which is a
+  // legitimate-looking ±1 match candidate for an unrelated real transaction
+  // and would link a false pair with no signal it's lower-confidence. This
+  // filter alone (without also filtering newRows above) is sufficient: a
+  // pending seed can still trigger the scan, but can never itself become a
+  // pair member.
+  //
   const sameDayUnpaired = db
     .select({
       id: schema.transactions.id,
@@ -655,18 +674,20 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
       amountCents: schema.transactions.amountCents,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
       rawMemo: schema.transactions.rawMemo,
+      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
       and(
         inArray(schema.transactions.date, dates),
         isNull(schema.transactions.transferPairId),
+        eq(schema.transactions.isPending, false),
       ),
     )
     .all();
 
-  const candidates: (PairCandidate & { rowId: number })[] = sameDayUnpaired.map(
-    (r) => ({
+  const candidates: (PairCandidate & { rowId: number; transferRejectedPartnerId: number | null })[] =
+    sameDayUnpaired.map((r) => ({
       id: r.id,
       rowId: r.id,
       accountId: r.accountId,
@@ -674,10 +695,25 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
       amountCents: r.amountCents,
       bankTransactionNumber: r.bankTransactionNumber ?? "",
       rawMemo: r.rawMemo,
-    }),
-  );
+      transferRejectedPartnerId: r.transferRejectedPartnerId,
+    }));
 
-  const pairs = findTransferPairs(candidates);
+  // A row manually unlinked via "Not a transfer" must never be silently
+  // re-linked to the SAME partner it was rejected against — see
+  // unlinkTransferPair's docstring. Passed into findTransferPairs itself
+  // (not a post-filter over its result): a post-filter would still let the
+  // matcher's greedy `used` tracking consume a row on the rejected match
+  // before ever trying its real partner in the same bucket. Not select-time
+  // candidacy either — the row itself stays eligible to match something
+  // else, only this exact combination is blocked. A transaction-scoped
+  // candidacy filter was tried first and reverted — see the schema comment
+  // on `transferRejectedPartnerId`. Found by Red Team, then corrected per
+  // Codex structured review, both during `/ship` 2026-09-04.
+  const pairs = findTransferPairs(
+    candidates,
+    undefined,
+    (a, b) => a.transferRejectedPartnerId === b.rowId || b.transferRejectedPartnerId === a.rowId,
+  );
 
   // One transaction, not two auto-commits per pair: each bare .run() is a
   // separate WAL commit with its own fsync on a synchronous driver that blocks

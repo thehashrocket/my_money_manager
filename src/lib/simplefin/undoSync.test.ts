@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { findLastSyncBatch, undoSyncBatch, undoLastSync } from "./undoSync";
-import { linkTransfersByBucket } from "./sync";
+import { linkTransfersByBucket, unlinkTransferPair } from "./sync";
 import { deriveBatchLabel } from "@/lib/batchLabel";
 
 let handle: TestDbHandle;
@@ -311,5 +311,36 @@ describe("undo completeness — links a sync creates must not outlive it", () =>
       .select().from(schema.transactions)
       .where(eq(schema.transactions.id, owned.id)).get();
     expect(linked?.transferPairId).toBe(a.id);
+  });
+
+  it("undoing a sync batch nulls a surviving row's rejection marker instead of throwing a FK violation", () => {
+    // A cross-source pair -- one leg CSV, one leg the sync batch about to be
+    // undone -- that the user then rejected via "Not a transfer". transfer_
+    // rejected_partner_id must be declared ON DELETE SET NULL, same as
+    // transfer_pair_id, or deleting the sync leg here throws instead of
+    // clearing the surviving CSV leg's marker.
+    const chk = seedAccount("Checking");
+    const sav = seedAccount("Savings");
+    const csv = seedBatch("csv", "old.csv");
+    const syncBatch = seedBatch("simplefin", "simplefin 2026-09-02");
+
+    const csvLeg = seedTxn({ accountId: chk.id, batchId: csv.id, amountCents: 10000 });
+    const syncLeg = seedTxn({ accountId: sav.id, batchId: syncBatch.id, amountCents: -10000 });
+
+    handle.db.update(schema.transactions)
+      .set({ transferPairId: syncLeg.id })
+      .where(eq(schema.transactions.id, csvLeg.id)).run();
+    handle.db.update(schema.transactions)
+      .set({ transferPairId: csvLeg.id })
+      .where(eq(schema.transactions.id, syncLeg.id)).run();
+
+    unlinkTransferPair(csvLeg.id, handle.db);
+
+    expect(() => undoSyncBatch(syncBatch.id, handle.db)).not.toThrow();
+
+    const survivor = handle.db
+      .select().from(schema.transactions)
+      .where(eq(schema.transactions.id, csvLeg.id)).get();
+    expect(survivor?.transferRejectedPartnerId).toBeNull();
   });
 });
