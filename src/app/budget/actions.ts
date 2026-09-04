@@ -110,10 +110,10 @@ export async function setCategoryKindAction(
   try {
     setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
   } catch (err) {
-    if (err instanceof CategoryKindChangeRefusedError) {
+    if (err instanceof CategoryKindChangeRefusedError || err instanceof CategoryNotFoundError) {
       return { status: "error", message: err.message };
     }
-    return { status: "error", message: err instanceof Error ? err.message : String(err) };
+    throw err;
   }
 
   revalidatePath("/budget");
@@ -298,14 +298,32 @@ export type SetCarryoverPolicyActionResult =
   | { status: "ok"; categoryId: number; carryoverPolicy: "none" | "rollover" | "reset" }
   | { status: "error"; message: string };
 
+const setCarryoverPolicyInputSchema = z.object({
+  categoryId: z.number().int().positive(),
+  carryoverPolicy: z.enum(["none", "rollover", "reset"]),
+});
+
 export async function setCarryoverPolicyAction(
   categoryId: number,
   carryoverPolicy: "none" | "rollover" | "reset",
 ): Promise<SetCarryoverPolicyActionResult> {
+  // Unlike `createCategoryAction`/`renameCategoryAction`/`setCategoryKindAction`
+  // above, this took its enum param on trust — a plain callable Server
+  // Action is a network-reachable endpoint regardless of what the
+  // TypeScript signature says, so an out-of-band request with a string
+  // outside the enum would have reached `setCarryoverPolicy`'s DB write
+  // unvalidated (Drizzle's `text(..., {enum:[...]})` is TypeScript-only,
+  // no SQL CHECK constraint).
+  const parsed = setCarryoverPolicyInputSchema.safeParse({ categoryId, carryoverPolicy });
+  if (!parsed.success) {
+    return { status: "error", message: parsed.error.issues[0]?.message ?? "Invalid carryover policy" };
+  }
   try {
-    const result = setCarryoverPolicy(db, categoryId, carryoverPolicy);
-    revalidatePath("/budget");
-    revalidatePath("/budget/[year]/[month]", "page");
+    const result = setCarryoverPolicy(db, parsed.data.categoryId, parsed.data.carryoverPolicy);
+    // `revalidateCategorySurfaces` (not a hand-rolled 2-of-5 subset, which
+    // this used to be): `/budget/categories` renders `carryoverPolicy`
+    // directly and was left stale by the previous, narrower revalidate.
+    revalidateCategorySurfaces();
     return { status: "ok", ...result };
   } catch (err) {
     if (err instanceof CategoryNotFoundError) return { status: "error", message: err.message };
@@ -350,14 +368,23 @@ export type MoveCategoryActionResult =
   | { status: "ok"; result: MoveCategoryResult }
   | { status: "error"; message: string };
 
+const moveCategoryInputSchema = z.object({
+  categoryId: z.number().int().positive(),
+  direction: z.enum(["up", "down"]),
+});
+
 /**
  * T29: one parameterized action rather than the plan's literal
  * `moveCategoryUpAction`/`moveCategoryDownAction` pair — same behavior,
  * one Zod schema and one error-mapping block instead of two copies of both.
  */
 export async function moveCategoryAction(categoryId: number, direction: MoveDirection): Promise<MoveCategoryActionResult> {
+  const parsed = moveCategoryInputSchema.safeParse({ categoryId, direction });
+  if (!parsed.success) {
+    return { status: "error", message: parsed.error.issues[0]?.message ?? "Invalid move request" };
+  }
   try {
-    const result = moveCategory(db, categoryId, direction);
+    const result = moveCategory(db, parsed.data.categoryId, parsed.data.direction);
     revalidatePath("/budget");
     revalidatePath("/budget/[year]/[month]", "page");
     revalidatePath("/budget/categories");
