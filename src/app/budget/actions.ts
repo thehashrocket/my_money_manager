@@ -6,6 +6,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { validateAllocateInput } from "@/lib/budget/validateAllocateInput";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
   upsertAllocation,
@@ -157,7 +158,11 @@ export async function commitAllocationAction(
     const allocation = upsertAllocation(db, parsed.data);
     return { status: "ok", allocation };
   } catch (err) {
-    if (err instanceof ParentAllocationError || err instanceof CategoryNotFoundError) {
+    if (
+      err instanceof ParentAllocationError ||
+      err instanceof CategoryNotFoundError ||
+      err instanceof CategoryArchivedError
+    ) {
       return { status: "error", message: err.message };
     }
     throw err;

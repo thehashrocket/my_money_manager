@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
   upsertAllocation,
@@ -42,6 +43,7 @@ function seedCategory(
     parentId?: number | null;
     carryoverPolicy?: "none" | "rollover" | "reset";
     isSavingsGoal?: boolean;
+    archivedAt?: Date;
   } = {},
 ) {
   catCounter += 1;
@@ -52,6 +54,7 @@ function seedCategory(
       parentId: opts.parentId ?? null,
       carryoverPolicy: opts.carryoverPolicy ?? "none",
       isSavingsGoal: opts.isSavingsGoal ?? false,
+      archivedAt: opts.archivedAt,
     })
     .returning()
     .all();
@@ -331,6 +334,19 @@ describe("upsertAllocation — rejections", () => {
         allocatedCents: 100,
       }),
     ).toThrow(ParentAllocationError);
+  });
+
+  it("(X3) throws CategoryArchivedError for an archived category — a stale/second-tab commit must not silently revive it", () => {
+    const archived = seedCategory("Old Category", { archivedAt: new Date("2026-01-01") });
+
+    expect(() =>
+      upsertAllocation(handle.db, {
+        categoryId: archived.id,
+        year: 2026,
+        month: 4,
+        allocatedCents: 100,
+      }),
+    ).toThrow(CategoryArchivedError);
   });
 
   it("does not insert a row when the call rejects (parent category)", () => {

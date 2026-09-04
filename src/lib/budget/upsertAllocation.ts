@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { getEffectiveAllocation, invalidateForwardRollover, type EffectiveAllocation } from "@/lib/budget";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
 } from "@/lib/categoryErrors";
@@ -9,7 +10,7 @@ import type { AllocateInput } from "./validateAllocateInput";
 
 type Db = typeof defaultDb;
 
-export { CategoryNotFoundError, ParentAllocationError };
+export { CategoryArchivedError, CategoryNotFoundError, ParentAllocationError };
 
 /**
  * Upsert a single `budget_periods` row (unique on `category_id, year, month`)
@@ -19,6 +20,10 @@ export { CategoryNotFoundError, ParentAllocationError };
  * DB-bound invariants enforced here (the pure `validateAllocateInput` has
  * already checked the shape/range):
  * - Category must exist.
+ * - Category must not be archived (X3: the same stale-tab/second-tab gap
+ *   `categorizeTransaction`/`bulkCategorize` close — a still-open
+ *   `<MonthEditor>` tab can commit an allocation for a category archived
+ *   from elsewhere mid-session, silently reviving it in the month view).
  * - Parent categories (those referenced by at least one child's `parent_id`)
  *   are header-only and reject allocations.
  *
@@ -41,11 +46,12 @@ export function upsertAllocation(db: Db, input: AllocateInput): EffectiveAllocat
   const { categoryId, year, month, allocatedCents } = input;
 
   const category = db
-    .select({ id: schema.categories.id, name: schema.categories.name })
+    .select({ id: schema.categories.id, name: schema.categories.name, archivedAt: schema.categories.archivedAt })
     .from(schema.categories)
     .where(eq(schema.categories.id, categoryId))
     .get();
   if (!category) throw new CategoryNotFoundError(categoryId);
+  if (category.archivedAt !== null) throw new CategoryArchivedError(category.id, category.name);
 
   const firstChild = db
     .select({ id: schema.categories.id })

@@ -43,14 +43,16 @@ export class NotASavingsGoalError extends Error {
 /** X3/T27: `listLeafCategories`'s default excludes archived categories from
  * every picker — but that's a client-side hint, not enforcement. A stale
  * tab (loaded before an archive), or a second tab that archives the
- * category mid-session, can still submit a categorize request naming it.
- * Both categorize write paths check this server-side so the picker's
- * exclusion isn't the only thing standing between "archived" and "still
- * silently receiving new transactions" (the exact failure X3 exists to
- * close on the automatic-rule side). */
+ * category mid-session, can still submit a request naming it. Every write
+ * path that could otherwise silently re-activate an archived category —
+ * both categorize paths, and `upsertAllocation` (a stale/second-tab
+ * allocation commit is the identical shape of gap) — checks this
+ * server-side, so the picker's exclusion isn't the only thing standing
+ * between "archived" and "still silently receiving new activity." Message
+ * stays action-agnostic since it's shared across categorize and allocate. */
 export class CategoryArchivedError extends Error {
   constructor(readonly categoryId: number, readonly categoryName: string) {
-    super(`"${categoryName}" is archived and cannot receive new categorizations. Unarchive it first.`);
+    super(`"${categoryName}" is archived. Unarchive it first.`);
     this.name = "CategoryArchivedError";
   }
 }

@@ -123,16 +123,33 @@ export function NewCategoryRow({
   );
 }
 
-/** DS20 — the Expenses band footer's "+ Add a group." Plain text input +
+/**
+ * DS20 — the Expenses band footer's "+ Add a group." Plain text input +
  * button rather than the row's inline-on-Enter pattern: a group is created
  * far less often than a leaf, so a small deliberate confirm step (the
- * button) is the right amount of friction, not a footgun to avoid. */
+ * button) is the right amount of friction, not a footgun to avoid.
+ *
+ * A group with zero children is invisible as a group: `loadMonthView.ts`'s
+ * `groupIntoSections` only emits a section for a `parent_id` that some
+ * EXISTING leaf already references, so a just-created empty group renders
+ * (indistinguishably from a real category) as an ordinary top-level expense
+ * leaf, complete with its own `CurrencyInput` — there is no schema column
+ * marking "this row is a group," only "something points at it as a parent."
+ * Rather than add one, this flow never lets that state persist unattended:
+ * a successful group creation immediately becomes a "+ Add a line to
+ * {group}" step for the SAME parent id, so the group has ≥1 real child by
+ * the time the user is done here. Abandoning that second step (navigating
+ * away) still leaves an empty, leaf-shaped group behind — recoverable via
+ * archive (F4 allows archiving a childless, zero-allocation category) — but
+ * completing the flow as designed never produces one.
+ */
 export function NewGroupRow() {
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingGroup, setPendingGroup] = useState<{ id: number; name: string } | null>(null);
 
-  async function submit() {
+  async function submitGroup() {
     const trimmed = name.trim();
     if (trimmed === "") return;
     setPending(true);
@@ -144,7 +161,82 @@ export function NewGroupRow() {
       return;
     }
     setName("");
-    toast.success(`Added "${result.category.name}".`);
+    setPendingGroup({ id: result.category.id, name: result.category.name });
+  }
+
+  if (pendingGroup) {
+    return (
+      <FirstLeafForm
+        parentId={pendingGroup.id}
+        parentName={pendingGroup.name}
+        onDone={() => {
+          setPendingGroup(null);
+          toast.success(`Added "${pendingGroup.name}".`);
+        }}
+      />
+    );
+  }
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submitGroup();
+      }}
+      className="flex items-center gap-2 pt-1"
+    >
+      <input
+        value={name}
+        onChange={(e) => {
+          setName(e.target.value);
+          setError(null);
+        }}
+        placeholder="+ Add a group"
+        disabled={pending}
+        className="h-8 w-48 rounded-sm border border-[var(--rule-faint)] bg-transparent px-2 text-sm text-ink-2 outline-none placeholder:text-ink-3 focus-visible:border-[var(--rule-regular)] focus-visible:ring-2 focus-visible:ring-ring/50"
+      />
+      <button
+        type="submit"
+        disabled={pending || name.trim() === ""}
+        className="text-sm text-terracotta underline-offset-4 hover:underline disabled:pointer-events-none disabled:opacity-50"
+      >
+        Add
+      </button>
+      {error ? <span className="text-[10px] text-money-neg">{error}</span> : null}
+    </form>
+  );
+}
+
+/** The forced second step of `NewGroupRow` — same create-a-leaf mechanics as
+ * `NewCategoryRow`, but not that component itself: `NewCategoryRow` only
+ * ever mounts for a parent `groupIntoSections` already recognizes (one that
+ * already has a child), which a just-created group by definition doesn't
+ * yet, and it has no "I'm done" callback to return to `NewGroupRow`'s idle
+ * state. */
+function FirstLeafForm({ parentId, parentName, onDone }: { parentId: number; parentName: string; onDone: () => void }) {
+  const [name, setName] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const cancelWaitRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => cancelWaitRef.current?.(), []);
+
+  async function submit() {
+    const trimmed = name.trim();
+    if (trimmed === "") return;
+    setPending(true);
+    setError(null);
+    const result = await createCategoryAction({ name: trimmed, kind: "expense", parentId });
+    setPending(false);
+    if (result.status === "error") {
+      setError(result.message);
+      return;
+    }
+    cancelWaitRef.current?.();
+    cancelWaitRef.current = waitForCategoryInput(result.category.id, () => {
+      cancelWaitRef.current = null;
+    });
+    onDone();
   }
 
   return (
@@ -156,12 +248,13 @@ export function NewGroupRow() {
       className="flex items-center gap-2 pt-1"
     >
       <input
+        autoFocus
         value={name}
         onChange={(e) => {
           setName(e.target.value);
           setError(null);
         }}
-        placeholder="+ Add a group"
+        placeholder={`+ Add a line to ${parentName}`}
         disabled={pending}
         className="h-8 w-48 rounded-sm border border-[var(--rule-faint)] bg-transparent px-2 text-sm text-ink-2 outline-none placeholder:text-ink-3 focus-visible:border-[var(--rule-regular)] focus-visible:ring-2 focus-visible:ring-ring/50"
       />
