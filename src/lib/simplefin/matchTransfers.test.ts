@@ -84,6 +84,7 @@ describe("matchTransfers", () => {
     expect(ambiguous[0].absAmountCents).toBe(10000);
     expect(ambiguous[0].positives).toHaveLength(2);
     expect(ambiguous[0].negatives).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("unbalanced");
   });
 
   it("ignores a same-account charge that merely shares the sweep's amount", () => {
@@ -164,6 +165,7 @@ describe("matchTransfers", () => {
     expect(ambiguous).toHaveLength(1);
     expect(ambiguous[0].positives).toHaveLength(1);
     expect(ambiguous[0].negatives).toHaveLength(2);
+    expect(ambiguous[0].reason).toBe("contested");
   });
 
   it("refuses to guess when two accounts both could have funded one withdrawal", () => {
@@ -180,6 +182,7 @@ describe("matchTransfers", () => {
     expect(ambiguous).toHaveLength(1);
     expect(ambiguous[0].positives).toHaveLength(2);
     expect(ambiguous[0].negatives).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("contested");
   });
 
   it("ignores zero-amount rows", () => {
@@ -233,6 +236,7 @@ describe("cross-source candidacy guard", () => {
     ]);
     expect(pairs).toHaveLength(0);
     expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("cross-source");
   });
 
   it("asks instead of guessing when BOTH legs are CSV-adjudicated and uncorroborated — the strongest evidence against, not the weakest", () => {
@@ -247,6 +251,7 @@ describe("cross-source candidacy guard", () => {
     ]);
     expect(pairs).toHaveLength(0);
     expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("cross-source");
   });
 
   it("still auto-links a cross-source pair the memo corroborates", () => {
@@ -293,6 +298,7 @@ describe("matchTransfers — isRejected", () => {
     expect(ambiguous).toHaveLength(1);
     expect(ambiguous[0].positives.map((r) => r.id)).toEqual([b.id]);
     expect(ambiguous[0].negatives.map((r) => r.id)).toEqual([a.id]);
+    expect(ambiguous[0].reason).toBe("rejected");
   });
 
   it("a 2-vs-2 balanced bucket finds the non-rejected bijection instead of dropping everything", () => {
@@ -329,6 +335,7 @@ describe("matchTransfers — isRejected", () => {
     );
     expect(pairs).toHaveLength(0);
     expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("rejected");
   });
 
   it("default isRejected (omitted) never rejects anything — existing callers unaffected", () => {

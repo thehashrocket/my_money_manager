@@ -988,3 +988,95 @@ all missed — fixed same-branch, via `/plan-eng-review` triage 2026-09-04:
   the `remaining.splice(k, 0, b)` restore line makes the test fail, confirmed by
   deliberately reintroducing the bug and re-running before restoring the fix.
   (`src/lib/simplefin/matchTransfers.test.ts`)
+
+## Follow-ups from the `/pr-review-toolkit:review-pr` pass on PR #34 (2026-09-04)
+
+Four specialist agents (code-reviewer, pr-test-analyzer, silent-failure-hunter,
+comment-analyzer) reviewed the full PR #34 diff. All findings fixed same-branch:
+
+- [x] **P1** — `drizzle/0016_tired_thing.sql` added `transfer_rejected_partner_id` via
+  plain `ALTER TABLE ADD COLUMN ... REFERENCES transactions(id)` with NO `ON DELETE`
+  clause, so SQLite defaulted it to `NO ACTION` — even though `schema.ts` declares
+  `{ onDelete: "set null" }` and the Drizzle snapshot agreed with `schema.ts`, only the
+  actual migration SQL was wrong (apparent drizzle-kit generation gap for FK-bearing
+  `ADD COLUMN`, since a FK declared inline on `CREATE TABLE` — e.g. `transfer_pair_id` in
+  `0000_thin_mandroid.sql` — does get the clause correctly). Reproduced directly against a
+  real migrated in-memory DB: `PRAGMA foreign_key_list` showed `on_delete: 'NO ACTION'` for
+  the new column, and deleting a batch containing a row referenced by a surviving row's
+  `transfer_rejected_partner_id` threw `FOREIGN KEY constraint failed` instead of nulling
+  the survivor's marker. Hits `undoSyncBatch` (`src/lib/simplefin/undoSync.ts`), whose own
+  comment claims reliance on `SET NULL` (same pattern as the pre-existing `transfer_pair_id`
+  column) — trigger sequence: sync auto-links a feed row to an older CSV row → user clicks
+  "Not a transfer" → user clicks "Undo this sync" → throw, taking the undo button and
+  balance check down with it (violates the CLAUDE.md `/sync` rule that every sync action
+  returns state rather than throwing). Not caught by any existing test: nothing combined
+  `unlinkTransferPair` with a cross-batch `undoSyncBatch`. Fixed by adding
+  `ON UPDATE no action ON DELETE set null` to the migration SQL directly (safe to edit in
+  place rather than issue a corrective migration — confirmed this migration had not yet been
+  applied to any local `data/money.db`). SQLite does support an inline `ON DELETE` clause on
+  `ALTER TABLE ADD COLUMN` (verified directly), so no table rebuild via `scripts/migrate.mjs`
+  was needed here, unlike CLAUDE.md rule 7's `NOT NULL`-relaxation case. New regression test
+  in `undoSync.test.ts` ("undoing a sync batch nulls a surviving row's rejection marker
+  instead of throwing a FK violation"), confirmed failing against the original migration SQL
+  before the fix and passing after, via a temporary `git stash` of just that file.
+  (`drizzle/0016_tired_thing.sql`, `src/lib/simplefin/undoSync.test.ts`)
+
+- [x] **P3** — `isRejectedPair` (`sync.ts`) and the equivalent inline lambda
+  (`importBatch.ts`) both check `a.marker === b.id || b.marker === a.id`, but every existing
+  test seeded the rejection via `unlinkTransferPair`, which always writes both legs
+  symmetrically — so no test could tell the OR apart from either half alone; a future
+  refactor could silently drop one clause with all 642 tests still green. Added two tests
+  per call site, each seeding the marker directly on only ONE leg (bypassing
+  `unlinkTransferPair`) to isolate each half of the OR. Mutation-verified all four: reverting
+  each predicate to only one clause makes exactly the test for the OTHER clause fail, the
+  matching one stays green — confirmed by deliberately weakening each clause and re-running
+  before restoring. (`src/lib/importBatch.test.ts`, `src/lib/simplefin/sync.test.ts`)
+
+- [x] **P3** — A rejected pair becomes a permanent, unresolvable-looking item in the
+  "Transfers needing review" queue: `findAmbiguousTransfers` deliberately doesn't filter its
+  SELECT on the marker (by design — a human reviewing that queue is not a silent re-link),
+  but the review UI (`app/sync/page.tsx`) offered only one action ("Link as transfer") and
+  one static explanation ("the counts don't balance") for every bucket — wrong copy for a
+  rejection-derived bucket, where the counts balance fine and the actual reason is the
+  user's own earlier correction. Added a `reason: "contested" | "unbalanced" | "rejected" |
+  "cross-source"` field to `AmbiguousBucket` (`matchTransfers.ts`), set at each of the four
+  push sites (the fourth, "cross-source", was an existing but previously-unlabeled case: the
+  cross-source adjudication guard). The review page now renders per-bucket copy keyed on
+  `reason`, and the button reads "Link as transfer anyway" specifically for the rejected
+  case. Deliberately did NOT add a dismiss/acknowledge action — that would contradict the
+  already-established design (this same PR's own regression test, "findAmbiguousTransfers
+  still surfaces a rejected row when it's the only candidate pairing available") that a
+  rejected row must stay visible in case a different real candidate ever appears; accurate
+  copy addresses the confusion without reopening that design decision. New assertions added
+  to the existing tests covering each of the four reasons in `matchTransfers.test.ts`.
+  (`src/lib/simplefin/matchTransfers.ts`, `src/app/sync/page.tsx`, `src/lib/simplefin/matchTransfers.test.ts`)
+
+- [x] **P4** — Two stale comments left over from earlier iterations of this same PR (it went
+  through ~6 rounds of review): the `schema.ts` comment on `transferRejectedPartnerId`
+  claimed `linkTransferPairManually` "clears it on both legs" unconditionally — actually
+  conditional (only when it currently points at the partner being relinked), contradicting
+  the correct inline comment in `sync.ts` and its own dedicated test. And
+  `importBatch.test.ts` referenced a nonexistent `transferRejectedAt` column name (predates
+  the pair-scoped rename to `transferRejectedPartnerId`). Both fixed. Also fixed: a
+  misplaced comment in `transferPair.test.ts` justifying "row 3" backtracking-avoidance that
+  was attached to the wrong test (a 2-row test with no row 3 — the row-3 scenario is the
+  *next* test); and `matchTransfers.ts`'s `assignAvoidingRejections` docstring misattributed
+  its algorithmic safety to the "3+ accounts" guard, which bounds distinct accounts per
+  bucket, not rows per direction — the real reason backtracking stays fast is that the
+  rejection marker is single-valued (out-degree ≤ 1 per row), noted explicitly so the
+  comment doesn't go stale if that column is ever made multi-valued (see the P3 below).
+  (`src/db/schema.ts`, `src/lib/importBatch.test.ts`, `src/lib/transferPair.test.ts`,
+  `src/lib/simplefin/matchTransfers.ts`)
+
+- [ ] **P3** — `transfer_rejected_partner_id` is single-valued, so a row remembers only its
+  MOST RECENT rejection. If a row is later paired-then-rejected against a different partner,
+  the earlier rejection is silently overwritten; after both legs of an original A↔B
+  rejection have each independently been re-rejected against something else, the original
+  correction is gone entirely and the automatic matchers can re-link A↔B. Needs four
+  rejections across two rows to hit — low probability for a single-user app — and a
+  multi-valued rejection store (join table) is likely overkill for the value it adds, so
+  documented rather than fixed: see the `KNOWN LIMITATION` comment on the schema column and
+  the caveat added to CLAUDE.md rule 4. Revisit if this is ever actually hit in practice, or
+  if `assignAvoidingRejections`'s near-linear-backtracking assumption (which depends on this
+  column staying single-valued) is ever challenged by real bucket sizes growing past 2-3 rows
+  per direction. (`src/db/schema.ts`, `CLAUDE.md`)

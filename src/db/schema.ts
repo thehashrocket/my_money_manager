@@ -188,14 +188,25 @@ export const transactions = sqliteTable(
     // is only reachable from `findAmbiguousTransfers`'s review queue, so a
     // transaction excluded there had no UI path back at all. Found by Codex
     // structured review during `/ship` 2026-09-04. The automatic matchers
-    // (`linkTransferPairs`, `linkTransfersByBucket`) filter proposed pairs
-    // against this AFTER matching, not as select-time candidacy — the row
-    // itself stays eligible to match something else, only this exact
-    // combination is blocked. `findAmbiguousTransfers` deliberately does NOT
-    // filter on this: a human reviewing that queue is not a silent
-    // re-link, so a rejected row is allowed to resurface there against a
-    // different candidate. `linkTransferPairManually` clears it on both
-    // legs — explicit human consent overrides any earlier rejection.
+    // (`linkTransferPairs`, `linkTransfersByBucket`) check this while
+    // proposing each candidate pair, before committing to it — not as
+    // select-time SQL candidacy and not as a `.filter()` over the finished
+    // result — so the row itself stays eligible to match something else,
+    // only this exact combination is blocked. `findAmbiguousTransfers`
+    // deliberately does NOT filter on this: a human reviewing that queue is
+    // not a silent re-link, so a rejected row is allowed to resurface there
+    // against a different candidate. `linkTransferPairManually` clears it
+    // only when it currently points at the specific partner being linked
+    // now — a rejection recorded against a different (third) row is left
+    // alone, since clearing unconditionally would silently erase evidence
+    // of an unrelated correction.
+    // KNOWN LIMITATION: this is a single column, so a row remembers only its
+    // MOST RECENT rejection. If a row is later paired-then-rejected against a
+    // DIFFERENT partner, the earlier rejection is silently overwritten — see
+    // TODOS.md. A multi-valued rejection store would close this but is
+    // likely overkill for a single-user app; documented here rather than
+    // fixed so a future reader doesn't mistake the single-slot behavior for
+    // a bug in `unlinkTransferPair` itself.
     transferRejectedPartnerId: integer("transfer_rejected_partner_id").references(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },

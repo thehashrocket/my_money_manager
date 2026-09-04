@@ -1657,8 +1657,8 @@ describe("linkTransferPairs", () => {
       expect(legA.transferPairId).not.toBeNull();
 
       // ...then land back in an unpaired state WITHOUT going through
-      // unlinkTransferPair (which now also stamps transferRejectedAt — see
-      // the "never re-pairs a rejected pair" test below). This simulates a
+      // unlinkTransferPair (which now also stamps transferRejectedPartnerId
+      // — see the "never re-pairs a rejected pair" test below). This simulates a
       // historical gap instead: e.g. rows imported before this pairing logic
       // existed, or a `transferPairId` cleared by some other pre-existing
       // path, never an explicit "Not a transfer" rejection.
@@ -1782,6 +1782,134 @@ describe("linkTransferPairs", () => {
       ];
       expect(finalLegA.transferPairId).toBeNull();
       expect(finalLegB.transferPairId).toBeNull();
+    } finally {
+      handle.close();
+    }
+  });
+
+  // The rejection check is `a.transferRejectedPartnerId === b.rowId ||
+  // b.transferRejectedPartnerId === a.rowId`. unlinkTransferPair always
+  // writes both legs symmetrically, so every other test in this file has
+  // both halves of that OR true at once and can't tell it apart from either
+  // half alone. These two tests seed the marker on only ONE leg directly
+  // (bypassing unlinkTransferPair) to prove each half is independently
+  // load-bearing — dropping either clause would silently re-link a pair the
+  // user rejected under a partial-write or future-refactor scenario.
+  it("refuses to link when only the FIRST-inserted leg's rejection marker points at its partner", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const savingsId = newAccount(handle.db, "Savings", "savings");
+
+      commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking.csv",
+          csvText: starOneCsv([
+            { txn: "8101", date: "04/25/2026", memo: "TRANSFER TO SAVINGS", amount: -60, balance: 940 },
+          ]),
+        },
+        handle.db,
+      );
+      commitImport(
+        {
+          accountId: savingsId,
+          filename: "savings.csv",
+          csvText: starOneCsv([
+            { txn: "8102", date: "04/25/2026", memo: "TRANSFER FROM CHECKING", amount: 60, balance: 1060 },
+          ]),
+        },
+        handle.db,
+      );
+      const [legA, legB] = handle.db.select().from(schema.transactions).all();
+      expect(legA.transferPairId).toBe(legB.id);
+
+      // Clear the auto-link on BOTH legs, but set the marker on legA only —
+      // legB's own field is left null, so only the LEFT half of the OR can
+      // catch this.
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: null })
+        .where(inArray(schema.transactions.id, [legA.id, legB.id]))
+        .run();
+      handle.db
+        .update(schema.transactions)
+        .set({ transferRejectedPartnerId: legB.id })
+        .where(eq(schema.transactions.id, legA.id))
+        .run();
+
+      const linked = linkTransferPairs([legA.id, legB.id], handle.db);
+      expect(linked).toBe(0);
+
+      const rows = handle.db.select().from(schema.transactions).all();
+      expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("refuses to link when only the SECOND-inserted leg's rejection marker points at its partner", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const savingsId = newAccount(handle.db, "Savings", "savings");
+
+      commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking.csv",
+          csvText: starOneCsv([
+            { txn: "8201", date: "04/25/2026", memo: "TRANSFER TO SAVINGS", amount: -60, balance: 940 },
+          ]),
+        },
+        handle.db,
+      );
+      commitImport(
+        {
+          accountId: savingsId,
+          filename: "savings.csv",
+          csvText: starOneCsv([
+            { txn: "8202", date: "04/25/2026", memo: "TRANSFER FROM CHECKING", amount: 60, balance: 1060 },
+          ]),
+        },
+        handle.db,
+      );
+      const [legA, legB] = handle.db.select().from(schema.transactions).all();
+      expect(legA.transferPairId).toBe(legB.id);
+
+      // Clear the auto-link on BOTH legs, but set the marker on legB only —
+      // legA's own field is left null, so only the RIGHT half of the OR can
+      // catch this.
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: null })
+        .where(inArray(schema.transactions.id, [legA.id, legB.id]))
+        .run();
+      handle.db
+        .update(schema.transactions)
+        .set({ transferRejectedPartnerId: legA.id })
+        .where(eq(schema.transactions.id, legB.id))
+        .run();
+
+      const linked = linkTransferPairs([legA.id, legB.id], handle.db);
+      expect(linked).toBe(0);
+
+      const rows = handle.db.select().from(schema.transactions).all();
+      expect(rows.every((r) => r.transferPairId === null)).toBe(true);
     } finally {
       handle.close();
     }

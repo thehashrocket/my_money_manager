@@ -679,6 +679,83 @@ describe("transferRejectedPartnerId — automatic matchers never resurface a rej
     // And the escape hatch actually works: explicit re-link is still allowed.
     expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
   });
+
+  // isRejectedPair is `a.transferRejectedPartnerId === b.id || b.
+  // transferRejectedPartnerId === a.id`. unlinkTransferPair always writes
+  // both legs symmetrically, so every other test here has both halves of
+  // that OR true at once and can't tell it apart from either half alone.
+  // Inside matchTransfers' backtracking, `a` is always the POSITIVE-signed
+  // candidate and `b` the NEGATIVE-signed one (see assignAvoidingRejections),
+  // so these two tests seed the marker on only one sign's leg directly
+  // (bypassing unlinkTransferPair) to prove each half of the OR is
+  // independently load-bearing.
+  it("does not re-link when only the POSITIVE leg's rejection marker points at its partner", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("simplefin");
+    const negativeLeg = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -3000,
+      rawMemo: "TRANSFER TO SAVINGS",
+      date: "2026-09-07",
+    });
+    const positiveLeg = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 3000,
+      rawMemo: "TRANSFER FROM CHECKING",
+      date: "2026-09-07",
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferRejectedPartnerId: negativeLeg.id })
+      .where(eq(schema.transactions.id, positiveLeg.id))
+      .run();
+
+    const { pairsLinked } = linkTransfersByBucket("2026-01-01", handle.db);
+    expect(pairsLinked).toBe(0);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [negativeLeg.id, positiveLeg.id]))
+      .all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  it("does not re-link when only the NEGATIVE leg's rejection marker points at its partner", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("simplefin");
+    const negativeLeg = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -3000,
+      rawMemo: "TRANSFER TO SAVINGS",
+      date: "2026-09-07",
+    });
+    const positiveLeg = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 3000,
+      rawMemo: "TRANSFER FROM CHECKING",
+      date: "2026-09-07",
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferRejectedPartnerId: positiveLeg.id })
+      .where(eq(schema.transactions.id, negativeLeg.id))
+      .run();
+
+    const { pairsLinked } = linkTransfersByBucket("2026-01-01", handle.db);
+    expect(pairsLinked).toBe(0);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [negativeLeg.id, positiveLeg.id]))
+      .all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
 });
 
 /**

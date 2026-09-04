@@ -1,1 +1,1 @@
-ALTER TABLE `transactions` ADD `transfer_rejected_partner_id` integer REFERENCES transactions(id);
+ALTER TABLE `transactions` ADD `transfer_rejected_partner_id` integer REFERENCES transactions(id) ON UPDATE no action ON DELETE set null;

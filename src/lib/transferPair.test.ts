@@ -138,11 +138,9 @@ describe("findTransferPairs", () => {
     expect(pairs).toEqual([]);
   });
 
-  // Codex structured review (`/ship` 2026-09-04): checked BEFORE committing
-  // to a candidate, not filtered afterward — a post-filter would still let
-  // the greedy `used` tracking consume row 1 on the rejected match, so its
-  // real partner (row 3, right after row 2 in the same bucket) would never
-  // even be tried.
+  // Codex structured review (`/ship` 2026-09-04): isRejected is checked
+  // BEFORE committing to a candidate, not filtered afterward. See the next
+  // test for why a post-filter wouldn't be equivalent.
   it("isRejected with no alternative candidate leaves both rows unpaired, not force-matched", () => {
     const pairs = findTransferPairs(
       [
@@ -155,6 +153,10 @@ describe("findTransferPairs", () => {
     expect(pairs).toEqual([]);
   });
 
+  // A post-filter over the finished result wouldn't be equivalent: the
+  // greedy `used` tracking would still consume row 1 on the rejected match
+  // against row 2, so row 1's real partner (row 3, right after row 2 in the
+  // same bucket) would never even be tried.
   it("isRejected: a rejected combination doesn't block the SAME row from pairing with a different valid candidate", () => {
     const pairs = findTransferPairs(
       [

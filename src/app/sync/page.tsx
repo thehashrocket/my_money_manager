@@ -152,9 +152,9 @@ export default function SyncPage() {
             Transfers needing review ({ambiguous.length})
           </h2>
           <p className="text-sm text-muted-foreground">
-            Same day, same amount, opposite signs — but the counts don&apos;t
-            balance, so which row pairs with which changes the budget. Pick the
-            two halves of each transfer.
+            Same day, same amount, opposite signs, but not auto-linked — see
+            each item below for why. Pick the two halves of each transfer, or
+            leave it if it isn&apos;t actually one.
           </p>
           {ambiguous.map((bucket) => (
             <ActionForm
@@ -164,6 +164,15 @@ export default function SyncPage() {
             >
               <p className="font-mono text-sm font-medium [font-variant-numeric:tabular-nums]">
                 {bucket.date} · {formatCents(bucket.absAmountCents)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {bucket.reason === "rejected"
+                  ? "You previously marked this pairing “not a transfer.” It stays here in case a different match ever shows up on this date and amount — link it below only if you've changed your mind."
+                  : bucket.reason === "contested"
+                    ? "This date and amount has candidates in more than one other account, so which one it moved to is ambiguous."
+                    : bucket.reason === "cross-source"
+                      ? "One of these rows was already examined for a Star One transaction-number match and declined, so this same-day/same-amount coincidence isn't enough on its own to auto-link."
+                      : "The counts don't balance, so which row pairs with which changes the budget."}
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block text-sm">
@@ -201,7 +210,7 @@ export default function SyncPage() {
                 type="submit"
                 className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
               >
-                Link as transfer
+                {bucket.reason === "rejected" ? "Link as transfer anyway" : "Link as transfer"}
               </button>
             </ActionForm>
           ))}
