@@ -2156,7 +2156,7 @@ PR2b  Lane I:  S12                         (single lane)
   - **E13:** fold `loadPendingByCategory` into the spend `GROUP BY` (same window, same grouping, two aggregates) and compute fund rows from the `categories` + `budget_periods` reads already in memory. Four queries, plus two when a rollover category exists.
   - Files: `src/lib/budget/loadMonthView.ts`, `src/lib/budget.ts`
   - Verify: **TC30 (mandatory oracle + E4's skip-month fixture)**, TC29 invariance, TC12; closes `TODOS.md:197`
-- [ ] **T9 (P1, human: ~5h / CC: ~45min)** — display rules — pure `resolveRowDisplay`, signature **`(row, kind, phase)`** where `phase` comes from `monthPhase` (E12)
+- [x] **T9 (P1, human: ~5h / CC: ~45min)** — display rules — pure `resolveRowDisplay`, signature **`(row, kind, phase)`** where `phase` comes from `monthPhase` (E12)
   - Surfaced by: C1 — **five** copies of the tone ladder across two color systems (E11); `CLAUDE.md` bans UI component tests, so rules in JSX are untestable. **DS35 — the original signature could not express DS21, one of the four rules this function owns. DS33 — income pending disclosure is a fifth rule and belongs here, not in JSX. E12 — the boolean pair DS35 arrived at had no producer anywhere in `src/` and admitted an impossible fourth state (`started=false && ended=true`). E11 — the desktop table's own bar (`page.tsx:292-296`, raw Tailwind palette) was missing from C1's inventory, and it is the copy DS40 must change**
   - `barTone` is returned as a token name. Neither renderer writes a color.
   - Files: `src/lib/budget/resolveRowDisplay.ts` + test
