@@ -24,7 +24,10 @@ export { CategoryNotFoundError, ParentAllocationError };
  *
  * Upsert + invalidation run inside a single `db.transaction` so an error
  * between steps never leaves a stale cache pointing at a mutated
- * `allocated_cents`. The cache rebuilds lazily on the next read.
+ * `allocated_cents`. Nothing rebuilds it, though (T8/TS1 deleted the only
+ * writer, `getEffectiveAllocation`'s `persist` option) — it just stays NULL,
+ * which every real reader (`loadMonthView`'s set-based path) already
+ * ignores. See `invalidateForwardRollover`'s own docstring in `budget.ts`.
  */
 export function upsertAllocation(db: Db, input: AllocateInput): void {
   const { categoryId, year, month, allocatedCents } = input;

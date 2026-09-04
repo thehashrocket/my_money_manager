@@ -112,12 +112,30 @@ export type MonthView = {
 /**
  * Assemble the read model for `/budget/[year]/[month]`.
  *
- * Structure (A1): top-level bands come from `kind` — INCOME, EXPENSES,
- * FUNDS. Groups within a band come from `parent_id`. An unparented category
- * renders directly under its band; there is no synthetic "Ungrouped" header.
+ * Structure (A1, E9): two independent axes, easy to conflate because both
+ * ultimately come from the same `categories` table.
  *
- * `Uncategorized` is excluded from `sections` and returned as its own field
- * (X5); DS26 makes it conditional (see `UncategorizedRow`'s docstring).
+ *   BAND       ← categories.kind ('income' | 'expense' | 'fund')
+ *     │          Decides which top-level field a category's row lands on:
+ *     │          incomeSections | sections | fundRows. Never rendered as
+ *     │          a group header — it is the SHAPE of MonthView itself.
+ *     │
+ *     └── GROUP ← categories.parent_id, WITHIN one band only
+ *           │      A `SectionGroup.parentName`. Two categories in
+ *           │      different bands are never compared for grouping even
+ *           │      if one happens to reference the other's id (doesn't
+ *           │      happen today, but nothing stops it schema-wise).
+ *           │
+ *           └── LEAF ← any category that is not itself a parent_id target
+ *                        The row a user actually allocates against
+ *                        (LeafRow | IncomeLeafRow | FundRow). A GROUP
+ *                        never carries an allocation.
+ *
+ * `Uncategorized` fits neither GROUP nor LEAF cleanly — it is `kind`
+ * `'expense'` but excluded from `sections` and returned as its own field
+ * instead (X5); DS26 makes it conditional (see `UncategorizedRow`'s
+ * docstring). An unparented category within a band renders directly under
+ * that band; there is no synthetic "Ungrouped" GROUP header.
  *
  * Every read here is read-only (TS1 deleted `getEffectiveAllocation`'s
  * `persist` option), so this function is safe to call from a Server
