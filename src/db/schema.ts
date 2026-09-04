@@ -108,6 +108,14 @@ export const importBatches = sqliteTable("import_batches", {
   // success page on a revisit.
   anchoredStartingBalanceCents: integer("anchored_starting_balance_cents"),
   anchoredStartingBalanceDate: text("anchored_starting_balance_date"),
+  // The account's anchor immediately before this batch moved it, captured in
+  // the same write transaction as the move itself. `anchorStartingBalance`
+  // (importBatch.ts) is the only writer of these two columns outside account
+  // creation, and until this existed a bad automatic move had no record of
+  // what to revert to — only a full snapshot restore. Null whenever this
+  // batch didn't move the anchor.
+  priorStartingBalanceCents: integer("prior_starting_balance_cents"),
+  priorStartingBalanceDate: text("prior_starting_balance_date"),
 });
 
 export const transactions = sqliteTable(
