@@ -12,6 +12,7 @@ import {
   invalidateForwardRollover,
 } from "@/lib/budget";
 import { validateAllocateInput } from "@/lib/budget/validateAllocateInput";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 
 /**
  * Integration tests for the `upsertBudgetAllocationAction` wrapper.
@@ -67,6 +68,10 @@ function seedAllocation(
     .insert(schema.budgetPeriods)
     .values({ categoryId, year, month, allocatedCents })
     .run();
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function readAllocation(categoryId: number, year: number, month: number) {
@@ -136,7 +141,7 @@ describe("upsertAllocation — update", () => {
     seedAllocation(cat.id, 2026, 3, 5000);
     seedAllocation(cat.id, 2026, 4, 1000);
     // Prime the April cache.
-    getEffectiveAllocation(handle.db, cat.id, 2026, 4, { persist: true });
+    primeCache(cat.id, 2026, 4);
     expect(readAllocation(cat.id, 2026, 4)?.effectiveAllocationCents).toBe(6000);
 
     upsertAllocation(handle.db, {
@@ -176,7 +181,8 @@ describe("upsertAllocation — forward invalidation", () => {
     seedAllocation(cat.id, 2026, 4, 1000);
     seedAllocation(cat.id, 2026, 5, 1000);
     seedAllocation(cat.id, 2026, 6, 1000);
-    getEffectiveAllocation(handle.db, cat.id, 2026, 6, { persist: true });
+    primeCache(cat.id, 2026, 5);
+    primeCache(cat.id, 2026, 6);
 
     expect(readAllocation(cat.id, 2026, 5)?.effectiveAllocationCents).not.toBeNull();
     expect(readAllocation(cat.id, 2026, 6)?.effectiveAllocationCents).not.toBeNull();
@@ -198,7 +204,9 @@ describe("upsertAllocation — forward invalidation", () => {
     seedAllocation(cat.id, 2026, 2, 2000);
     seedAllocation(cat.id, 2026, 3, 2000);
     seedAllocation(cat.id, 2026, 4, 1000);
-    getEffectiveAllocation(handle.db, cat.id, 2026, 4, { persist: true });
+    primeCache(cat.id, 2026, 2);
+    primeCache(cat.id, 2026, 3);
+    primeCache(cat.id, 2026, 4);
 
     upsertAllocation(handle.db, {
       categoryId: cat.id,
@@ -207,7 +215,7 @@ describe("upsertAllocation — forward invalidation", () => {
       allocatedCents: 5000,
     });
 
-    // Feb and March caches from the persist above survive.
+    // Feb and March caches from the primeCache above survive.
     expect(readAllocation(cat.id, 2026, 2)?.effectiveAllocationCents).toBe(2000);
     expect(readAllocation(cat.id, 2026, 3)?.effectiveAllocationCents).toBe(4000);
     // April was edited → its cache is cleared.
@@ -221,8 +229,8 @@ describe("upsertAllocation — forward invalidation", () => {
     seedAllocation(a.id, 2026, 5, 1000);
     seedAllocation(b.id, 2026, 4, 2000);
     seedAllocation(b.id, 2026, 5, 2000);
-    getEffectiveAllocation(handle.db, a.id, 2026, 5, { persist: true });
-    getEffectiveAllocation(handle.db, b.id, 2026, 5, { persist: true });
+    primeCache(a.id, 2026, 5);
+    primeCache(b.id, 2026, 5);
 
     upsertAllocation(handle.db, {
       categoryId: a.id,
@@ -233,7 +241,7 @@ describe("upsertAllocation — forward invalidation", () => {
 
     expect(readAllocation(a.id, 2026, 5)?.effectiveAllocationCents).toBeNull();
     // b is rollover; April had $20 allocated, 0 spent → $20 rolls into May.
-    // May effective = 20 + 20 = 40 (persist cached this before the upsert).
+    // May effective = 20 + 20 = 40 (primeCache cached this before the upsert).
     expect(readAllocation(b.id, 2026, 5)?.effectiveAllocationCents).toBe(4000);
   });
 
@@ -241,7 +249,8 @@ describe("upsertAllocation — forward invalidation", () => {
     const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
     seedAllocation(cat.id, 2026, 12, 3000);
     seedAllocation(cat.id, 2027, 1, 1000);
-    getEffectiveAllocation(handle.db, cat.id, 2027, 1, { persist: true });
+    primeCache(cat.id, 2026, 12);
+    primeCache(cat.id, 2027, 1);
 
     upsertAllocation(handle.db, {
       categoryId: cat.id,

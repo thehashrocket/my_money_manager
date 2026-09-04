@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
   CategoryNotFoundError,
   ParentAllocationError,
@@ -68,6 +68,10 @@ function seedCategory(
     .returning()
     .all();
   return row;
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -351,7 +355,9 @@ describe("bulkCategorize — forward invalidation", () => {
         { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
       ])
       .run();
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 2);
+    primeCache(groceries.id, 2026, 3);
+    primeCache(groceries.id, 2026, 4);
 
     // Earliest txn is Feb 2026.
     seedTxn({
@@ -383,7 +389,7 @@ describe("bulkCategorize — forward invalidation", () => {
       .insert(schema.budgetPeriods)
       .values({ categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 })
       .run();
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
 
     bulkCategorize(handle.db, {
       normalizedMerchant: "NONE",

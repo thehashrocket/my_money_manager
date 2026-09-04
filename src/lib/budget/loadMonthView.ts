@@ -1,6 +1,6 @@
-import { and, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { computeMtdReceived, computeMtdSpent, getEffectiveAllocation } from "@/lib/budget";
+import { computeEffectiveAllocationsForRollover, periodKey, type RolloverPeriod } from "@/lib/budget";
 import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
 import { loadUncategorizedBacklog, type UncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 
@@ -119,9 +119,10 @@ export type MonthView = {
  * `Uncategorized` is excluded from `sections` and returned as its own field
  * (X5); DS26 makes it conditional (see `UncategorizedRow`'s docstring).
  *
- * All reads use `getEffectiveAllocation({ persist: false })` so this function
- * is safe to call from a Server Component render path: no writes during
- * prefetch, no double-fire hazard (review decision 7 / T2A).
+ * Every read here is read-only (TS1 deleted `getEffectiveAllocation`'s
+ * `persist` option), so this function is safe to call from a Server
+ * Component render path: no writes during prefetch, no double-fire hazard
+ * (review decision 7 / T2A).
  *
  * Sorting: within an expense section, leaves sort by `sort_order ASC, name
  * ASC` (DS29 — replaces B4's `spentCents DESC`, which reshuffled rows as you
@@ -153,15 +154,58 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   const incomeLeaves = categories.filter((c) => c.kind === "income" && !parentIds.has(c.id));
   const fundLeaves = categories.filter((c) => c.kind === "fund" && !parentIds.has(c.id));
 
-  const pendingByCategory = loadPendingByCategory(db, year, month);
+  // T8/T11: bounded set of queries for the whole month, not 2 per leaf plus
+  // unbounded backward recursion. #1 categories (above), #2 this month's
+  // budget_periods (all kinds — expense/income/fund/Uncategorized all read
+  // allocated_cents from the same rows), #3 this month's transaction sums
+  // (E13: total + pending in one pass), #4/#5 the rollover range — only
+  // when a rollover expense category exists.
+  const { allocatedByCategoryId, hasPeriodRow } = loadAllocationsForMonth(db, year, month);
+  const { totalByCategoryId, pendingTotalByCategoryId } = loadSpendForMonth(db, year, month);
 
-  const leafRows: LeafRow[] = expenseLeaves.map((leaf) =>
-    buildLeafRow(db, leaf, year, month, pendingByCategory),
-  );
+  const rolloverCategoryIds = expenseLeaves
+    .filter((c) => c.carryoverPolicy === "rollover")
+    .map((c) => c.id);
+  const effectiveByCategoryId =
+    rolloverCategoryIds.length > 0
+      ? loadRolloverEffectiveByCategory(db, rolloverCategoryIds, year, month)
+      : new Map<number, Map<string, number>>();
+
+  const targetKey = periodKey(year, month);
+
+  const leafRows: LeafRow[] = expenseLeaves.map((leaf) => {
+    const allocatedCents = allocatedByCategoryId.get(leaf.id) ?? 0;
+    let allocation: LeafAllocation | null = null;
+    if (hasPeriodRow.has(leaf.id)) {
+      const effectiveCents =
+        leaf.carryoverPolicy === "rollover"
+          ? (effectiveByCategoryId.get(leaf.id)?.get(targetKey) ?? allocatedCents)
+          : allocatedCents;
+      allocation = { allocatedCents, rolloverCents: effectiveCents - allocatedCents, effectiveCents };
+    }
+
+    const spentCents = 0 - (totalByCategoryId.get(leaf.id) ?? 0);
+    const pendingCents = 0 - (pendingTotalByCategoryId.get(leaf.id) ?? 0);
+    const effective = allocation?.effectiveCents ?? 0;
+    const remainingCents = effective - spentCents;
+    return {
+      categoryId: leaf.id,
+      name: leaf.name,
+      parentId: leaf.parentId,
+      carryoverPolicy: leaf.carryoverPolicy,
+      allocation,
+      spentCents,
+      pendingCents,
+      remainingCents,
+      isOverspent: remainingCents < 0,
+    };
+  });
 
   const incomeRows: IncomeLeafRow[] = incomeLeaves.map((leaf) => {
-    const plannedCents = getEffectiveAllocation(db, leaf.id, year, month)?.allocatedCents ?? 0;
-    const receivedCents = computeMtdReceived(db, leaf.id, year, month);
+    const plannedCents = allocatedByCategoryId.get(leaf.id) ?? 0;
+    // TS2: pending EXCLUDED, sum NOT negated (computeMtdReceived's convention).
+    const receivedCents =
+      (totalByCategoryId.get(leaf.id) ?? 0) - (pendingTotalByCategoryId.get(leaf.id) ?? 0);
     return {
       categoryId: leaf.id,
       name: leaf.name,
@@ -176,14 +220,14 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
     .map((leaf) => ({
       categoryId: leaf.id,
       name: leaf.name,
-      plannedCents: getEffectiveAllocation(db, leaf.id, year, month)?.allocatedCents ?? 0,
+      plannedCents: allocatedByCategoryId.get(leaf.id) ?? 0,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const uncategorizedBacklog = loadUncategorizedBacklog(db, { year, month });
   let uncategorizedRow: UncategorizedRow | null = null;
   if (uncategorizedCategory) {
-    const spentCents = computeMtdSpent(db, uncategorizedCategory.id, year, month);
+    const spentCents = 0 - (totalByCategoryId.get(uncategorizedCategory.id) ?? 0);
     if (spentCents !== 0 || uncategorizedBacklog.count > 0) {
       uncategorizedRow = {
         categoryId: uncategorizedCategory.id,
@@ -219,36 +263,42 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   };
 }
 
-function buildLeafRow(
+/** Query #2: every category's `budget_periods` row for exactly this month. */
+function loadAllocationsForMonth(
   db: Db,
-  leaf: typeof schema.categories.$inferSelect,
   year: number,
   month: number,
-  pendingByCategory: Map<number, number>,
-): LeafRow {
-  const allocation = getEffectiveAllocation(db, leaf.id, year, month);
-  const spentCents = computeMtdSpent(db, leaf.id, year, month);
-  const pendingCents = pendingByCategory.get(leaf.id) ?? 0;
-  const effective = allocation?.effectiveCents ?? 0;
-  const remainingCents = effective - spentCents;
-  return {
-    categoryId: leaf.id,
-    name: leaf.name,
-    parentId: leaf.parentId,
-    carryoverPolicy: leaf.carryoverPolicy,
-    allocation,
-    spentCents,
-    pendingCents,
-    remainingCents,
-    isOverspent: remainingCents < 0,
-  };
+): { allocatedByCategoryId: Map<number, number>; hasPeriodRow: Set<number> } {
+  const rows = db
+    .select({
+      categoryId: schema.budgetPeriods.categoryId,
+      allocatedCents: schema.budgetPeriods.allocatedCents,
+    })
+    .from(schema.budgetPeriods)
+    .where(and(eq(schema.budgetPeriods.year, year), eq(schema.budgetPeriods.month, month)))
+    .all();
+
+  const allocatedByCategoryId = new Map<number, number>();
+  const hasPeriodRow = new Set<number>();
+  for (const row of rows) {
+    allocatedByCategoryId.set(row.categoryId, row.allocatedCents);
+    hasPeriodRow.add(row.categoryId);
+  }
+  return { allocatedByCategoryId, hasPeriodRow };
 }
 
-function loadPendingByCategory(
+/**
+ * Query #3 (E13): every category's transaction sum for exactly this month,
+ * in one pass — `total` (pending included, the spend/received convention)
+ * and `pendingTotal` (the subset from pending rows). Folds in what used to
+ * be a separate `loadPendingByCategory` query: `received` (TS2) is then
+ * `total - pendingTotal` over the SAME snapshot, not a second read.
+ */
+function loadSpendForMonth(
   db: Db,
   year: number,
   month: number,
-): Map<number, number> {
+): { totalByCategoryId: Map<number, number>; pendingTotalByCategoryId: Map<number, number> } {
   const firstDay = monthBoundary(year, month);
   const { year: nextYear, month: nextMonth } = nextMonthOf(year, month);
   const firstDayNext = monthBoundary(nextYear, nextMonth);
@@ -257,11 +307,11 @@ function loadPendingByCategory(
     .select({
       categoryId: schema.transactions.categoryId,
       total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+      pendingTotal: sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.isPending} THEN ${schema.transactions.amountCents} ELSE 0 END), 0)`,
     })
     .from(schema.transactions)
     .where(
       and(
-        eq(schema.transactions.isPending, true),
         isNull(schema.transactions.transferPairId),
         gte(schema.transactions.date, firstDay),
         sql`${schema.transactions.date} < ${firstDayNext}`,
@@ -270,12 +320,93 @@ function loadPendingByCategory(
     .groupBy(schema.transactions.categoryId)
     .all();
 
-  const map = new Map<number, number>();
+  const totalByCategoryId = new Map<number, number>();
+  const pendingTotalByCategoryId = new Map<number, number>();
   for (const row of rows) {
     if (row.categoryId === null) continue;
-    map.set(row.categoryId, 0 - row.total);
+    totalByCategoryId.set(row.categoryId, row.total);
+    pendingTotalByCategoryId.set(row.categoryId, row.pendingTotal);
   }
-  return map;
+  return { totalByCategoryId, pendingTotalByCategoryId };
+}
+
+/**
+ * Queries #4 + #5 (P1 + E4): the clamped prefix scan, set-based across every
+ * rollover expense category at once instead of one backward recursion per
+ * leaf. #4 is each category's ENTIRE `budget_periods` history through this
+ * month (sparse — only months with a real row); #5 is their spend, GROUP BY
+ * (category, year, month) via `strftime`, over the same span. Both queries
+ * run once regardless of how many rollover categories exist.
+ */
+function loadRolloverEffectiveByCategory(
+  db: Db,
+  categoryIds: number[],
+  year: number,
+  month: number,
+): Map<number, Map<string, number>> {
+  const { year: nextYear, month: nextMonth } = nextMonthOf(year, month);
+  const firstDayNext = monthBoundary(nextYear, nextMonth);
+
+  const periodRows = db
+    .select({
+      categoryId: schema.budgetPeriods.categoryId,
+      year: schema.budgetPeriods.year,
+      month: schema.budgetPeriods.month,
+      allocatedCents: schema.budgetPeriods.allocatedCents,
+    })
+    .from(schema.budgetPeriods)
+    .where(
+      and(
+        inArray(schema.budgetPeriods.categoryId, categoryIds),
+        sql`(${schema.budgetPeriods.year} < ${year} OR (${schema.budgetPeriods.year} = ${year} AND ${schema.budgetPeriods.month} <= ${month}))`,
+      ),
+    )
+    .all();
+
+  const spendRows = db
+    .select({
+      categoryId: schema.transactions.categoryId,
+      yr: sql<string>`strftime('%Y', ${schema.transactions.date})`,
+      mo: sql<string>`strftime('%m', ${schema.transactions.date})`,
+      total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        inArray(schema.transactions.categoryId, categoryIds),
+        isNull(schema.transactions.transferPairId),
+        sql`${schema.transactions.date} < ${firstDayNext}`,
+      ),
+    )
+    .groupBy(
+      schema.transactions.categoryId,
+      sql`strftime('%Y', ${schema.transactions.date})`,
+      sql`strftime('%m', ${schema.transactions.date})`,
+    )
+    .all();
+
+  const periodsByCategory = new Map<number, RolloverPeriod[]>();
+  for (const row of periodRows) {
+    const list = periodsByCategory.get(row.categoryId) ?? [];
+    list.push({ year: row.year, month: row.month, allocatedCents: row.allocatedCents });
+    periodsByCategory.set(row.categoryId, list);
+  }
+
+  const spentByCategory = new Map<number, Map<string, number>>();
+  for (const row of spendRows) {
+    if (row.categoryId === null) continue;
+    const map = spentByCategory.get(row.categoryId) ?? new Map<string, number>();
+    map.set(periodKey(Number(row.yr), Number(row.mo)), 0 - row.total);
+    spentByCategory.set(row.categoryId, map);
+  }
+
+  const effectiveByCategoryId = new Map<number, Map<string, number>>();
+  for (const categoryId of categoryIds) {
+    const periods = periodsByCategory.get(categoryId) ?? [];
+    const spent = spentByCategory.get(categoryId) ?? new Map<string, number>();
+    effectiveByCategoryId.set(categoryId, computeEffectiveAllocationsForRollover(periods, spent));
+  }
+  return effectiveByCategoryId;
 }
 
 export function groupIntoSections<T extends { parentId: number | null; name: string }>(

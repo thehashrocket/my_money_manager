@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import { categorizeTransaction } from "./categorizeTransaction";
 import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
 
@@ -62,6 +62,10 @@ function seedCategory(
     .returning()
     .all();
   return row;
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -358,7 +362,7 @@ describe("undoCategorizeTransaction — invalidation", () => {
     });
 
     // Re-persist to verify undo re-clears.
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
 
     undoCategorizeTransaction(handle.db, snapshot);
 
@@ -395,7 +399,7 @@ describe("undoCategorizeTransaction — invalidation", () => {
       applyToPast: false,
     });
 
-    getEffectiveAllocation(handle.db, household.id, 2026, 4, { persist: true });
+    primeCache(household.id, 2026, 4);
 
     undoCategorizeTransaction(handle.db, snapshot);
 

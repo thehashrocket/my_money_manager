@@ -8,26 +8,20 @@ export type EffectiveAllocation = {
   effectiveCents: number;
 };
 
-export type GetEffectiveAllocationOptions = {
-  /**
-   * Write the computed `effective_allocation_cents` back to the row.
-   *
-   * Default `false` (read-only). Server Component render paths must stay
-   * read-only: writing during render + React 19 prefetch can double-fire or
-   * persist stale values. Server Actions that own the mutation should pass
-   * `true` inside the same transaction that writes the user's change.
-   */
-  persist?: boolean;
-};
-
 /**
  * Return the effective allocation for a category in a given month, or `null`
  * if no budget_periods row exists for that month.
  *
- * Cached `effective_allocation_cents` is preferred when present. When absent,
- * the value is computed from the prior month's state but NOT written back
- * unless `{ persist: true }` is passed. Invalidation (see
- * {@link invalidateForwardRollover}) clears cached values on upstream edits.
+ * Read-only single-row API — kept for the allocate dialog's one-field
+ * breakdown read. `loadMonthView`'s per-month render path does NOT call
+ * this per leaf; it uses the set-based `computeEffectiveAllocationsForRollover`
+ * prefix scan instead (T8/P1), which is what `persist` existed to make fast
+ * before this rewrite. TS1: `persist` is deleted — its only production
+ * caller was this function's own prior-month recursion, and no production
+ * code ever passed `{ persist: true }` at the top of that recursion (B5),
+ * so deleting it changes no real behavior. `effective_allocation_cents`
+ * stays in the schema and this function still prefers a cached non-NULL
+ * value if one is ever present, but nothing writes one anymore.
  *
  * Rollover math: when the category's `carryover_policy = 'rollover'`, the
  * prior month's remaining budget (effective − MTD spent, floored at 0) is
@@ -39,10 +33,7 @@ export function getEffectiveAllocation(
   categoryId: number,
   year: number,
   month: number,
-  options?: GetEffectiveAllocationOptions,
 ): EffectiveAllocation | null {
-  const persist = options?.persist ?? false;
-
   const row = db
     .select()
     .from(schema.budgetPeriods)
@@ -78,9 +69,7 @@ export function getEffectiveAllocation(
   let rolloverCents = 0;
   if (category?.carryoverPolicy === "rollover" && category?.kind !== "income") {
     const { year: priorYear, month: priorMonth } = previousMonth(year, month);
-    const prior = getEffectiveAllocation(db, categoryId, priorYear, priorMonth, {
-      persist,
-    });
+    const prior = getEffectiveAllocation(db, categoryId, priorYear, priorMonth);
     if (prior) {
       const priorSpent = computeMtdSpent(db, categoryId, priorYear, priorMonth);
       rolloverCents = Math.max(0, prior.effectiveCents - priorSpent);
@@ -89,14 +78,70 @@ export function getEffectiveAllocation(
 
   const effectiveCents = allocatedCents + rolloverCents;
 
-  if (persist) {
-    db.update(schema.budgetPeriods)
-      .set({ effectiveAllocationCents: effectiveCents })
-      .where(eq(schema.budgetPeriods.id, row.id))
-      .run();
+  return { allocatedCents, rolloverCents, effectiveCents };
+}
+
+export type RolloverPeriod = {
+  year: number;
+  month: number;
+  allocatedCents: number;
+};
+
+/**
+ * Set-based replacement for the per-category backward recursion in
+ * {@link getEffectiveAllocation} (P1): given one category's ENTIRE
+ * `budget_periods` history (ascending, sparse — only months with a real
+ * row) and its spend per month, returns `effectiveCents` for every month
+ * that has a row, keyed `"year-month"`.
+ *
+ * This is a clamped PREFIX scan, not a running SUM — `effective(N) =
+ * allocated(N) + max(0, effective(N−1) − spent(N−1))`, and that clamp is
+ * exactly what makes it non-decomposable into one SQL running total: every
+ * month's contribution depends on the previous month's CLAMPED result, not
+ * just its allocation.
+ *
+ * E4: `effective(N-1)` only contributes rollover when N−1's row is the
+ * literal calendar month immediately before N — a scan that just walks
+ * `periods` in order without checking adjacency would wrongly carry
+ * rollover across a gap (Jan $200 · Feb no row · Mar $200 must produce
+ * `effective(Mar) = 200`, not 400). The chain's rollover resets to 0 at any
+ * gap, which is equivalent to "only the earliest CONTIGUOUS run of months
+ * ending at the target matters" without needing to search backward for it.
+ */
+export function computeEffectiveAllocationsForRollover(
+  periods: RolloverPeriod[],
+  spentCentsByMonth: Map<string, number>,
+): Map<string, number> {
+  const sorted = [...periods].sort((a, b) => a.year - b.year || a.month - b.month);
+  const effectiveByKey = new Map<string, number>();
+
+  let prevKey: string | null = null;
+  let prevYear = 0;
+  let prevMonth = 0;
+  let prevEffective = 0;
+
+  for (const period of sorted) {
+    const key = periodKey(period.year, period.month);
+    const { year: expectedYear, month: expectedMonth } = nextMonthOf(prevYear, prevMonth);
+    const isConsecutive = prevKey !== null && expectedYear === period.year && expectedMonth === period.month;
+
+    const rollover = isConsecutive
+      ? Math.max(0, prevEffective - (spentCentsByMonth.get(prevKey!) ?? 0))
+      : 0;
+    const effective = period.allocatedCents + rollover;
+
+    effectiveByKey.set(key, effective);
+    prevKey = key;
+    prevYear = period.year;
+    prevMonth = period.month;
+    prevEffective = effective;
   }
 
-  return { allocatedCents, rolloverCents, effectiveCents };
+  return effectiveByKey;
+}
+
+export function periodKey(year: number, month: number): string {
+  return `${year}-${month}`;
 }
 
 /**

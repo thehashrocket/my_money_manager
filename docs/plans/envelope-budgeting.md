@@ -2150,7 +2150,7 @@ PR2b  Lane I:  S12                         (single lane)
   - **Also carries E1's regression pin:** `TC2b` asserts the four structural consequences of PR1a rendering through un-updated JSX.
   - Files: `src/lib/budget/loadMonthView.ts` + test, `src/lib/budget/loadUncategorizedBacklog.ts` + test (new — E5), `src/app/categorize/page.tsx`, `src/app/transactions/page.tsx`
   - Verify: TC6, TC7, TC9, TC10, TC17, TC17b, TC19, TC21, TC25a, TC25b, TC26, **TC27 (in its new home)**, **TC31**, **TC35b**, **TC36**, **TC2b**, **TC22b**
-- [ ] **T8 (P1, human: ~4h / CC: ~40min)** — perf — set-based `loadMonthView` with **P1's clamped prefix scan and E4's stated base case**; delete `getEffectiveAllocation`'s `persist`; keep it as the single-row API; **E13's query merge**
+- [x] **T8 (P1, human: ~4h / CC: ~40min)** — perf — set-based `loadMonthView` with **P1's clamped prefix scan and E4's stated base case**; delete `getEffectiveAllocation`'s `persist`; keep it as the single-row API; **E13's query merge**
   - Surfaced by: §2 B5; D7A′; **P1 — a prior-month lookup is wrong past two months**; TS1; **E4 — P1 never said what a gap month does, and the behavior it must reproduce (chain terminates, `budget.ts:56`/`:80`) is not in TC30's oracle set**; **E13 — the six-query list held two derivable queries**
   - **E4:** the scan starts at the earliest *contiguous* row before the target, not the earliest row. Jan $200 · Feb no row · Mar $200 → `effective(Mar) = 200`.
   - **E13:** fold `loadPendingByCategory` into the spend `GROUP BY` (same window, same grouping, two aggregates) and compute fund rows from the `categories` + `budget_periods` reads already in memory. Four queries, plus two when a rollover category exists.

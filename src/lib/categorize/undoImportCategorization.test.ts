@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import { countRevertibleCategorizations, undoImportCategorization } from "./undoImportCategorization";
 
 let handle: TestDbHandle;
@@ -55,6 +55,10 @@ function seedCategory(
     .returning()
     .all();
   return row;
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 /** A rule-categorized row, as `commitImport`/`syncSimpleFin` write it: the
@@ -296,8 +300,8 @@ describe("undoImportCategorization — invalidation", () => {
       date: "2026-03-10",
     });
 
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
-    getEffectiveAllocation(handle.db, gas.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
+    primeCache(gas.id, 2026, 4);
 
     undoImportCategorization(handle.db, b.id);
 
@@ -337,7 +341,7 @@ describe("undoImportCategorization — invalidation", () => {
       date: "2026-02-10",
     });
 
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
     const beforeApril = handle.db
       .select()
       .from(schema.budgetPeriods)
@@ -382,7 +386,7 @@ describe("undoImportCategorization — invalidation", () => {
       .where(eq(schema.transactions.id, t1.id))
       .run();
 
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
     const before = handle.db
       .select()
       .from(schema.budgetPeriods)

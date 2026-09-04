@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache } from "@/lib/test/primeCache";
 import { bulkCategorize } from "./bulkCategorize";
 import { undoBulkCategorize } from "./undoBulkCategorize";
 
@@ -340,7 +340,7 @@ describe("undoBulkCategorize — invalidation", () => {
     });
 
     // Re-prime the cache so we can observe the invalidation from the undo.
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(handle.db, groceries.id, 2026, 4);
     const beforeApril = handle.db
       .select()
       .from(schema.budgetPeriods)

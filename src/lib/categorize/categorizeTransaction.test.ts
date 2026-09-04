@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
   CategoryNotFoundError,
   ParentAllocationError,
@@ -72,6 +72,10 @@ function seedCategory(
     .returning()
     .all();
   return row;
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -407,7 +411,7 @@ describe("categorizeTransaction — forward invalidation", () => {
         { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
       ])
       .run();
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
 
     // target is Apr; applyToPast sibling is Feb → earliest = Feb.
     const target = seedTxn({
@@ -450,7 +454,8 @@ describe("categorizeTransaction — forward invalidation", () => {
         { categoryId: household.id, year: 2026, month: 4, allocatedCents: 1000 },
       ])
       .run();
-    getEffectiveAllocation(handle.db, household.id, 2026, 4, { persist: true });
+    primeCache(household.id, 2026, 3);
+    primeCache(household.id, 2026, 4);
 
     // target had household; re-cat to groceries; only Apr (target.date) onward.
     const target = seedTxn({
@@ -501,7 +506,7 @@ describe("categorizeTransaction — forward invalidation", () => {
       .insert(schema.budgetPeriods)
       .values({ categoryId: other.id, year: 2026, month: 4, allocatedCents: 1000 })
       .run();
-    getEffectiveAllocation(handle.db, other.id, 2026, 4, { persist: true });
+    primeCache(other.id, 2026, 4);
 
     const target = seedTxn({ accountId: a.id, batchId: b.id });
 

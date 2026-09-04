@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, ne } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { groupIntoSections, loadMonthView } from "./loadMonthView";
+import { upsertAllocation } from "./upsertAllocation";
 
 let handle: TestDbHandle;
 
@@ -932,5 +933,91 @@ describe("loadMonthView — uncategorizedRow visibility (TC35b, DS26)", () => {
     const view = loadMonthView(handle.db, 2026, 4);
     expect(view.uncategorizedRow).not.toBeNull();
     expect(view.uncategorizedRow?.spentCents).toBe(0);
+  });
+});
+
+describe("loadMonthView — query-count invariance (TC29, TS5 + E13)", () => {
+  it("issues the same number of statements for a 5-category and a 50-category fixture, both rollover-enabled", () => {
+    function countSelectCalls(categoryCount: number): number {
+      handle.close();
+      handle = createTestDb();
+      clearSeedCategories();
+      const account = seedAccount();
+      const batch = seedBatch();
+      for (let i = 0; i < categoryCount; i++) {
+        const cat = seedCategory(`Cat${i}`, { carryoverPolicy: "rollover" });
+        seedAllocation(cat.id, 2026, 3, 1000);
+        seedAllocation(cat.id, 2026, 4, 1000);
+        seedTxn({
+          accountId: account.id,
+          batchId: batch.id,
+          categoryId: cat.id,
+          date: "2026-03-10",
+          amountCents: -500,
+        });
+      }
+
+      const selectSpy = vi.spyOn(handle.db, "select");
+      loadMonthView(handle.db, 2026, 4);
+      const count = selectSpy.mock.calls.length;
+      selectSpy.mockRestore();
+      return count;
+    }
+
+    const small = countSelectCalls(5);
+    const large = countSelectCalls(50);
+    // Deliberately not asserting a literal number here (TS5): whoever adds
+    // the next query should not need to update this file to make it pass.
+    expect(large).toBe(small);
+  });
+
+  it("costs exactly two more statements when a rollover category exists vs. when none do", () => {
+    function countSelectCalls(withRollover: boolean): number {
+      handle.close();
+      handle = createTestDb();
+      clearSeedCategories();
+      if (withRollover) {
+        seedCategory("Gifts", { carryoverPolicy: "rollover" });
+      } else {
+        seedCategory("Gifts");
+      }
+
+      const selectSpy = vi.spyOn(handle.db, "select");
+      loadMonthView(handle.db, 2026, 4);
+      const count = selectSpy.mock.calls.length;
+      selectSpy.mockRestore();
+      return count;
+    }
+
+    const without = countSelectCalls(false);
+    const withRollover = countSelectCalls(true);
+    expect(withRollover).toBe(without + 2);
+  });
+});
+
+describe("loadMonthView — TC12 (INVERTED A4): effective_allocation_cents stays NULL, figures still correct", () => {
+  it("upsertAllocation never writes effective_allocation_cents, and loadMonthView is unaffected by that", () => {
+    clearSeedCategories();
+    const income = seedCategory("Paycheck", { kind: "income" });
+    seedAllocation(income.id, 2026, 4, 100000);
+    const cat = seedCategory("Groceries", { carryoverPolicy: "rollover" });
+    seedAllocation(cat.id, 2026, 3, 5000);
+
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 1000 });
+
+    const row = handle.db
+      .select()
+      .from(schema.budgetPeriods)
+      .where(eq(schema.budgetPeriods.categoryId, cat.id))
+      .all()
+      .find((r) => r.month === 4);
+    expect(row?.effectiveAllocationCents).toBeNull();
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const leaf = view.sections.flatMap((s) => s.categories).find((c) => c.name.startsWith("Groceries-"))!;
+    // March allocated 50, spent 0 -> rollover 50; April = 10 + 50 = 60.
+    expect(leaf.allocation?.effectiveCents).toBe(6000);
+    // leftToBudget uses allocated (10_00), not effective (60_00): 1000_00 - 10_00 = 990_00.
+    expect(view.summary.leftToBudgetCents).toBe(99000);
   });
 });
