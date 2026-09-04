@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-04
+
+_Zero-based budgeting, EveryDollar-style: every dollar of expected income gets
+assigned a job before the month starts, and the app tells you when the
+assignment is complete. This is the first release where categories have a
+`kind` — income, expense, or fund — rather than being an undifferentiated
+list, which is what makes "Left to Budget" and rollover-aware envelopes
+possible at all._
+
+### Added
+- **The `/budget/[year]/[month]` surface is now a real budget, not a read-only summary.** Every expense and fund category shows a Left to Budget total, planned vs. spent/received, and rollover carried forward from prior months; income and fund categories are grouped into their own bands instead of being mixed in with spending categories.
+- **Every planned-amount cell is editable in place.** Type a dollar amount, press Enter to commit and jump to the next field (wrapping across income/expense sections in document order), or Escape to revert — no separate save step, no page reload. A border-color state (saving/saved/failed, with inline retry) is the only feedback, matching the rest of the app's no-toast-for-routine-saves convention.
+- **Copy last month's budget into this one** with one click — every category's planned amount carries forward, skipping anything already set or archived this month. Reflects immediately in the open editor without a page reload.
+- **Categories can be created, renamed, archived, and reorganized without leaving the budget screen.** "+ Add a group" and "+ Add a line to {group}" create new structure inline; a category menu on each row handles renaming, setting its rollover policy (carry over / reset to zero), reordering within its group, and archiving. Archiving refuses a category that still has children, still has a planned or spent amount this month, or is the built-in "Uncategorized" bucket — each with a specific reason, not a generic error. An archived category is hidden from every budget view and picker but stays intact for historical reporting; `/budget/categories` is the one place it can be brought back with "Unarchive."
+- **A category that was actually always income, but got named or categorized like an expense, can be reclassified** — with a confirmation dialog that states the exact transaction count, date range, and a same-signs check up front, not just a rejection after you try. Reclassifying a category that already has real activity is refused outright in every other direction; this is the one deliberate exception, since a mislabeled income category otherwise has no way back once "Left to Budget" depends on at least one income category existing.
+
 ## [0.12.4] - 2026-09-04
 
 ### Fixed

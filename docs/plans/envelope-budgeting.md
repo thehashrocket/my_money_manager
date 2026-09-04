@@ -1,6 +1,6 @@
 # Plan — zero-based (EveryDollar-style) budgeting
 
-Status: **reviewed, ready to implement**
+Status: **PR1 (PR1a+PR1b) and PR2 (PR2a+PR2b) shipped in v0.13.0. PR3 (fund unification) deferred — see TODOS.md.**
 Branch: `thehashrocket/envelope-budgeting-plan`
 Scope decided 2026-09-04 (decision `0e52e0af`): **PR1 + PR2 now, PR3 deferred.**
 Scope refined 2026-09-04 (eng review round 2, decisions `D1` and `X6`):
