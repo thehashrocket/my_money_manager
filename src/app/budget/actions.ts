@@ -118,7 +118,7 @@ export async function setCategoryKindAction(
   try {
     setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
   } catch (err) {
-    // Only the two failures reachable from ordinary use are downgraded to
+    // Only the three failures reachable from ordinary use are downgraded to
     // state (DS32 wants the refusal inline, next to the category the user
     // was looking at). Anything else — a locked DB, a driver error — rethrows
     // to `error.tsx`, which is the actual backstop this comment promises.
@@ -132,8 +132,16 @@ export async function setCategoryKindAction(
     throw err;
   }
 
+  // setCategoryKind's own docstring says the blast radius includes the
+  // trend chart, goal inclusion, and categorize eligibility — revalidating
+  // only /budget left "/", "/goals", and "/categorize" free to keep serving
+  // a stale RSC payload with the category's old kind until an unrelated
+  // mutation or a hard refresh (caught by Codex adversarial review via /ship).
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
+  revalidatePath("/");
+  revalidatePath("/goals");
+  revalidatePath("/categorize");
   return { status: "ok", categoryId: parsed.data.categoryId };
 }
 
