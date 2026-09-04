@@ -87,7 +87,7 @@ describe("deriveStartingBalance", () => {
     ];
     expect(deriveStartingBalance(broken)).toEqual({
       ok: false,
-      reason: "running balance column does not form a consistent chain",
+      reason: "chain-broken",
     });
   });
 
@@ -97,13 +97,13 @@ describe("deriveStartingBalance", () => {
         row("2026-04-16", -487, null),
         row("2026-04-17", -5210, null),
       ]),
-    ).toEqual({ ok: false, reason: "no posted rows with a running balance" });
+    ).toEqual({ ok: false, reason: "no-balance-data" });
   });
 
   it("refuses on an empty file", () => {
     expect(deriveStartingBalance([])).toEqual({
       ok: false,
-      reason: "no posted rows with a running balance",
+      reason: "no-balance-data",
     });
   });
 
@@ -119,7 +119,7 @@ describe("deriveStartingBalance", () => {
       ]),
     ).toEqual({
       ok: false,
-      reason: "running balance column does not form a consistent chain",
+      reason: "chain-broken",
     });
   });
 
@@ -149,7 +149,7 @@ describe("deriveStartingBalance", () => {
       ]),
     ).toEqual({
       ok: false,
-      reason: "running balance column does not form a consistent chain",
+      reason: "chain-broken",
     });
   });
 
@@ -165,14 +165,35 @@ describe("deriveStartingBalance", () => {
     ];
     expect(deriveStartingBalance(paycheckThenBill)).toEqual({
       ok: false,
-      reason:
-        "running balance validates in both directions with disagreeing anchors — refusing to guess",
+      reason: "chain-ambiguous",
     });
     // Same ambiguity, either way it's handed in.
     expect(deriveStartingBalance([...paycheckThenBill].reverse())).toEqual({
       ok: false,
-      reason:
-        "running balance validates in both directions with disagreeing anchors — refusing to guess",
+      reason: "chain-ambiguous",
+    });
+  });
+
+  // The disagree case above refuses; when both directions happen to validate
+  // AND agree on the resulting (date, balance) pair — e.g. a same-day sequence
+  // whose first and last balances coincide — there's no real ambiguity, and
+  // this should succeed rather than trip the ambiguous-refusal path.
+  it("succeeds when both directions validate and agree on the anchor", () => {
+    const sameDayRoundTrip: StartingBalanceRow[] = [
+      row("2026-04-16", -50000, 100000),
+      row("2026-04-16", 50000, 150000),
+      row("2026-04-16", -50000, 100000),
+    ];
+    expect(deriveStartingBalance(sameDayRoundTrip)).toEqual({
+      ok: true,
+      date: "2026-04-16",
+      startingBalanceCents: 100000,
+    });
+    // Same agreement, either way it's handed in.
+    expect(deriveStartingBalance([...sameDayRoundTrip].reverse())).toEqual({
+      ok: true,
+      date: "2026-04-16",
+      startingBalanceCents: 100000,
     });
   });
 });

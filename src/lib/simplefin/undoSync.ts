@@ -4,10 +4,6 @@ import { resolveBatchLabel } from "@/lib/batchLabel";
 
 type Db = typeof defaultDb;
 
-// Structural type, unlike `Db` above — accepts both the singleton database
-// and a transaction handle, so `isLatestBatch` can be re-checked from inside
-// `db.transaction((tx) => ...)`.
-
 export type SyncBatchSummary = {
   batchId: number;
   label: string;
@@ -37,6 +33,9 @@ export type UndoResult =
  * Whether `batchId` is still the most recently created import batch of ANY
  * source. Undo is only safe while that holds — see the `stale` UndoResult
  * variant above.
+ *
+ * Takes `AnyDb`, not `Db`, so this can be re-checked from inside
+ * `db.transaction((tx) => ...)` as well as against the singleton database.
  */
 function isLatestBatch(batchId: number, db: AnyDb): boolean {
   const latest = db

@@ -94,11 +94,16 @@ export const importBatches = sqliteTable("import_batches", {
     .default(sql`(unixepoch())`),
   transactionCount: integer("transaction_count").notNull().default(0),
   snapshotPath: text("snapshot_path"),
-  // Non-null only when createSnapshot() reported `consistent: false` for this
-  // batch's pre-write snapshot. Persisted (not just redirected as a query
+  // A general per-batch warning channel, despite the name: non-null when
+  // createSnapshot() reported `consistent: false` for this batch's pre-write
+  // snapshot (CLAUDE.md rule 5), OR when anchorStartingBalance declined to
+  // move the account's anchor (CLAUDE.md rule 1) — the two reasons are joined
+  // with a space if both fire. Persisted (not just redirected as a query
   // param) so the warning survives a later visit to this batch's success
-  // page, not just the one right after commit — CLAUDE.md rule 5 requires the
-  // degraded flag never be silently dropped.
+  // page, not just the one right after commit. Do not treat a non-null value
+  // here as meaning "this batch's snapshot specifically is unsafe to
+  // restore" — check `snapshotPath`/the commit result's `snapshot.consistent`
+  // for that.
   snapshotWarning: text("snapshot_warning"),
   // Non-null only when THIS batch moved the account's starting-balance anchor
   // (see anchorStartingBalance in importBatch.ts). Persisted rather than

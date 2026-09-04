@@ -1,4 +1,4 @@
-import { schema, type AnyDb as Db } from "@/db";
+import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
 
 /**
@@ -17,7 +17,7 @@ import type { CategoryRule } from "@/db/schema";
  * rule-matching tests are written against.
  */
 export function applyRuleAtImport(
-  db: Db,
+  db: AnyDb,
   normalizedMerchant: string,
 ): number | null {
   return buildRuleMatcher(db)(normalizedMerchant)?.categoryId ?? null;
@@ -41,7 +41,7 @@ export type RuleMatch = { categoryId: number; ruleId: number };
  * the batch's auto-categorization can be undone later.
  */
 export function buildRuleMatcher(
-  db: Db,
+  db: AnyDb,
 ): (normalizedMerchant: string) => RuleMatch | null {
   const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
   if (sorted.length === 0) return () => null;
@@ -69,7 +69,7 @@ export function buildRuleMatcher(
  * a lower value.
  */
 export function createOrUpdateRule(
-  db: Db,
+  db: AnyDb,
   params: {
     normalizedMerchant: string;
     categoryId: number;

@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
-import { db as defaultDb, schema, type AnyDb as DbOrTx } from "@/db";
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
 import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
@@ -7,8 +7,7 @@ import { contentSignature } from "./contentSignature";
 import { buildRuleMatcher } from "./rules";
 import {
   deriveStartingBalance,
-  CHAIN_AMBIGUOUS_REASON,
-  CHAIN_BROKEN_REASON,
+  STARTING_BALANCE_DERIVATION_MESSAGES,
 } from "./accounts/deriveStartingBalance";
 import {
   isStartingBalanceCentsInBounds,
@@ -504,21 +503,27 @@ type AnchorResult =
 function anchorStartingBalance(
   accountId: number,
   rows: readonly ImportPreviewRow[],
-  tx: DbOrTx,
+  tx: AnyDb,
 ): AnchorResult {
   const derived = deriveStartingBalance(rows);
   if (!derived.ok) {
-    // Only the two "we had running-balance data but it didn't resolve"
-    // reasons are worth a warning — the far more common "no posted rows
-    // carried a balance" case (an all-pending or Balance-less import) isn't
-    // evidence of a problem, so it stays silent like it always has.
-    if (derived.reason === CHAIN_BROKEN_REASON || derived.reason === CHAIN_AMBIGUOUS_REASON) {
-      return {
-        status: "rejected",
-        reason: `Declined to move the starting-balance anchor: ${derived.reason}.`,
-      };
+    // A switch (not an `||` chain over string constants) so a future new
+    // reason value fails typechecking here instead of silently falling into
+    // the wrong branch — see `StartingBalanceDerivationReason`'s doc comment.
+    switch (derived.reason) {
+      case "chain-broken":
+      case "chain-ambiguous":
+        // Only these two "we had running-balance data but it didn't resolve"
+        // reasons are worth a warning — the far more common "no posted rows
+        // carried a balance" case (an all-pending or Balance-less import)
+        // isn't evidence of a problem, so it stays silent like it always has.
+        return {
+          status: "rejected",
+          reason: `Declined to move the starting-balance anchor: ${STARTING_BALANCE_DERIVATION_MESSAGES[derived.reason]}.`,
+        };
+      case "no-balance-data":
+        return { status: "unchanged" };
     }
-    return { status: "unchanged" };
   }
 
   if (!isStartingBalanceCentsInBounds(derived.startingBalanceCents)) {
@@ -551,7 +556,16 @@ function anchorStartingBalance(
     .from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
-  if (!account || derived.date < account.startingBalanceDate) {
+  if (!account) {
+    // Unreachable in practice: `transactions.accountId` has a FK to
+    // `accounts.id` (`PRAGMA foreign_keys = ON`), so a nonexistent accountId
+    // would already have thrown on this same transaction's row inserts.
+    // Thrown explicitly rather than folded into the "doesn't move forward"
+    // branch below, so this function's own contract doesn't depend on a
+    // downstream constraint to turn a silent no-op into a loud failure.
+    throw new Error(`anchorStartingBalance: account ${accountId} does not exist`);
+  }
+  if (derived.date < account.startingBalanceDate) {
     return { status: "unchanged" };
   }
 

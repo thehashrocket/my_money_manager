@@ -51,18 +51,39 @@ export type StartingBalanceRow = {
   isPending: boolean;
 };
 
+// A closed set rather than a bare `string` so a caller that needs to
+// distinguish reasons (`anchorStartingBalance` in importBatch.ts) does it with
+// a `switch`/literal comparison TypeScript can check for exhaustiveness — a
+// bare `string` let that caller's `||` chain silently miss a future 4th
+// reason with no compiler help.
+export type StartingBalanceDerivationReason =
+  | "no-balance-data"
+  | "chain-broken"
+  | "chain-ambiguous";
+
 export type StartingBalanceDerivation =
   | { ok: true; date: string; startingBalanceCents: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: StartingBalanceDerivationReason };
 
 // Named so callers can distinguish "we had running-balance data but it didn't
 // resolve" (worth telling the user about) from "no posted rows carried a
 // balance at all" (the ordinary case for an all-pending or Balance-less
 // import — not evidence anything is wrong). See `anchorStartingBalance` in
 // importBatch.ts, the one caller that makes this distinction.
-export const CHAIN_BROKEN_REASON = "running balance column does not form a consistent chain";
-export const CHAIN_AMBIGUOUS_REASON =
-  "running balance validates in both directions with disagreeing anchors — refusing to guess";
+export const NO_BALANCE_DATA_REASON: StartingBalanceDerivationReason = "no-balance-data";
+export const CHAIN_BROKEN_REASON: StartingBalanceDerivationReason = "chain-broken";
+export const CHAIN_AMBIGUOUS_REASON: StartingBalanceDerivationReason = "chain-ambiguous";
+
+/** Human-readable text for a decline reason, for callers that display it. */
+export const STARTING_BALANCE_DERIVATION_MESSAGES: Record<
+  StartingBalanceDerivationReason,
+  string
+> = {
+  "no-balance-data": "no posted rows with a running balance",
+  "chain-broken": "running balance column does not form a consistent chain",
+  "chain-ambiguous":
+    "running balance validates in both directions with disagreeing anchors — refusing to guess",
+};
 
 export function deriveStartingBalance(
   rows: readonly StartingBalanceRow[],
@@ -77,7 +98,7 @@ export function deriveStartingBalance(
   );
 
   if (usable.length === 0) {
-    return { ok: false, reason: "no posted rows with a running balance" };
+    return { ok: false, reason: NO_BALANCE_DATA_REASON };
   }
 
   const chain = chronologicalAscending(usable);
@@ -102,7 +123,9 @@ function anchorFromOrderedRows<
   return { ok: true, date: anchorDate, startingBalanceCents: closingBalanceCents };
 }
 
-type ChainResult<T> = { ok: true; rows: T[] } | { ok: false; reason: string };
+type ChainResult<T> =
+  | { ok: true; rows: T[] }
+  | { ok: false; reason: StartingBalanceDerivationReason };
 
 /**
  * Return the rows in true chronological order, or a failure reason if that
