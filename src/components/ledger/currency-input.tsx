@@ -64,6 +64,27 @@ function formatDollars(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
+/*
+ * commitIfDirty's async machinery, as one picture (see the refs' individual
+ * comments below for the "why" of each):
+ *
+ *   isCommittingRef   — a commit is in flight right now
+ *   inFlightCentsRef  — the value THAT commit is writing
+ *   recommitPendingRef — a newer edit arrived while it was in flight
+ *   retrySignal        — bumped to re-run commitIfDirty from a FRESH render
+ *                         once the in-flight commit finishes, so the retry's
+ *                         `committedCents`/`onCommit` aren't one write stale
+ *   draftRef           — `draft` state mirrored into a ref, because the
+ *                         in-flight call and its retry both need to read
+ *                         "what's in the box right now" from a closure that
+ *                         may predate the user's latest keystroke
+ *
+ * The invariant this all protects: `commitIfDirty` must only ever act on the
+ * CURRENT draft and CURRENT committed value, even when a second edit lands
+ * mid-flight. If you add a new early return or a new field read from the
+ * `draft`/`committedCents` closure variables (not the refs), re-check it
+ * against a mid-flight edit before assuming it's safe.
+ */
 export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, className, categoryId }: CurrencyInputProps) {
   const [status, setStatus] = useState<CurrencyInputStatus>("idle");
   const [draft, setDraft] = useState(committedCents === null ? "" : formatDollars(committedCents));
@@ -228,6 +249,15 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
         setStatus("failed");
         setError(result.message);
       }
+    } catch {
+      // `onCommit` is typed to always resolve with a result, never reject —
+      // but a genuinely unexpected failure (network drop, an uncaught
+      // exception in the Server Action) would otherwise leave `status`
+      // stuck on "saving" forever with no way back except a reload. Treat
+      // it the same as an `{ok: false}` result.
+      if (!recommitPendingRef.current) revertToCommitted();
+      setStatus("failed");
+      setError("Something went wrong saving this. Try again.");
     } finally {
       isCommittingRef.current = false;
       inFlightCentsRef.current = null;

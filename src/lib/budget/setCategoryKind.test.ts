@@ -38,11 +38,15 @@ function seedBatch() {
 }
 
 let categoryCounter = 0;
-function seedCategory(name: string, kind: "income" | "expense" | "fund" = "expense") {
+function seedCategory(
+  name: string,
+  kind: "income" | "expense" | "fund" = "expense",
+  opts: { archivedAt?: Date } = {},
+) {
   categoryCounter += 1;
   const [cat] = handle.db
     .insert(schema.categories)
-    .values({ name: `${name}-${categoryCounter}`, kind })
+    .values({ name: `${name}-${categoryCounter}`, kind, archivedAt: opts.archivedAt })
     .returning()
     .all();
   return cat;
@@ -215,5 +219,24 @@ describe("loadReclassifyCandidates", () => {
     const electric = byName.get(child.name)!;
     expect(electric.transactionCount).toBe(0);
     expect(electric.allPositive).toBe(true);
+  });
+
+  it("(X3/B7) excludes an archived expense leaf — reclassifying it wouldn't fix F1's banner, since it stays hidden from the budget grid regardless of kind", () => {
+    const archived = seedCategory("Zz Old Category", "expense", { archivedAt: new Date("2026-01-01") });
+    const candidates = loadReclassifyCandidates(handle.db);
+    expect(candidates.some((c) => c.id === archived.id)).toBe(false);
+  });
+
+  it("excludes a leaf with a budget_periods row but no transactions — D9A's 'used' check refuses it regardless of allPositive, so DS32 must not offer it as evidence-backed", () => {
+    const planned = seedCategory("Zz Planned Only", "expense");
+    handle.db
+      .insert(schema.budgetPeriods)
+      .values({ categoryId: planned.id, year: 2026, month: 3, allocatedCents: 5000 })
+      .run();
+
+    const candidates = loadReclassifyCandidates(handle.db);
+    expect(candidates.some((c) => c.id === planned.id)).toBe(false);
+    // Confirms the exclusion matches real enforcement: submitting anyway is refused.
+    expect(() => setCategoryKind(handle.db, planned.id, "income")).toThrow(CategoryKindChangeRefusedError);
   });
 });

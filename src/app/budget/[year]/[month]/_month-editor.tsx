@@ -150,7 +150,7 @@ export function MonthEditor(props: MonthEditorProps) {
 
   const hydrated = useHydrated();
 
-  const initial = useMemo(() => {
+  function buildAllocations() {
     const map = new Map<number, EffectiveAllocation | null>();
     for (const section of incomeSections) {
       for (const income of section.categories) {
@@ -168,13 +168,38 @@ export function MonthEditor(props: MonthEditorProps) {
       }
     }
     return map;
-    // Keyed only to (year, month): a new month is a whole new route render
-    // (Next assigns a fresh component instance per route params), so this
-    // never needs to re-derive mid-session.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month]);
+  }
 
-  const [allocations, setAllocations] = useState(initial);
+  const [allocations, setAllocations] = useState(buildAllocations);
+
+  // "Adjust state during render" (React's documented pattern for resetting
+  // derived state when a prop changes) — using state, not a ref, and not a
+  // `useEffect`: `_category-menu.tsx`'s `wasOpen`-vs-`open` reset uses the
+  // same shape, and both constraints are enforced here by lint
+  // (`react-hooks/refs` forbids reading/writing a ref during render;
+  // `react-hooks/set-state-in-effect` forbids calling `setState` from an
+  // effect body).
+  //
+  // `incomeSections`/`expenseSections` are a NEW object graph only when the
+  // server component actually re-executes (a navigation, or another action's
+  // `revalidatePath` — e.g. `copyPreviousMonthAction`/`createCategoryAction`),
+  // never merely because this client island re-rendered on its own — so this
+  // only fires on a genuine fresh payload. Without it, `allocations` was
+  // seeded once at mount and never resynced: "Copy previous month" would
+  // toast success while every cell kept showing its pre-copy (usually blank)
+  // value until the user navigated away and back. Safe to fully replace
+  // rather than merge: this route has no caching layer (`ƒ Dynamic`, plain
+  // SSR against the DB), so a fresh payload already reflects every
+  // previously committed edit — and `CurrencyInput`'s own resync effect
+  // already refuses to stomp a field the user is actively typing in.
+  const [prevIncomeSections, setPrevIncomeSections] = useState(incomeSections);
+  const [prevExpenseSections, setPrevExpenseSections] = useState(expenseSections);
+  if (prevIncomeSections !== incomeSections || prevExpenseSections !== expenseSections) {
+    setPrevIncomeSections(incomeSections);
+    setPrevExpenseSections(expenseSections);
+    setAllocations(buildAllocations());
+  }
+
   const dirtyRef = useRef(false);
 
   const revalidate = useCallback(() => {

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
@@ -7,10 +7,16 @@ type Db = typeof defaultDb;
 type CategoryKind = "income" | "expense" | "fund";
 
 /**
- * Candidates for the F1 banner's reclassify picker: leaf, expense-kind
- * categories — the only starting kind X1 permits a used category to leave.
- * `setCategoryKind` itself enforces the real rule; this list is just what's
- * worth offering rather than every category the action would refuse anyway.
+ * Candidates for the F1 banner's reclassify picker: leaf, expense-kind,
+ * non-archived categories — the only starting kind X1 permits a used
+ * category to leave. `setCategoryKind` itself enforces the real rule; this
+ * list is just what's worth offering rather than every category the action
+ * would refuse anyway. Excludes archived categories for the same reason
+ * `listLeafCategories`'s `includeArchived` guard does (X3/B7): reclassifying
+ * one wouldn't actually fix F1's "no income categories" banner, since an
+ * archived category stays hidden from the budget grid regardless of `kind`
+ * — offering it here would let the dialog report success while the banner
+ * silently persists.
  */
 export function listExpenseLeafCategories(db: Db): { id: number; name: string }[] {
   const parentIds = db
@@ -25,8 +31,12 @@ export function listExpenseLeafCategories(db: Db): { id: number; name: string }[
     .from(schema.categories)
     .where(
       parentIds.length > 0
-        ? and(eq(schema.categories.kind, "expense"), notInArray(schema.categories.id, parentIds))
-        : eq(schema.categories.kind, "expense"),
+        ? and(
+            eq(schema.categories.kind, "expense"),
+            isNull(schema.categories.archivedAt),
+            notInArray(schema.categories.id, parentIds),
+          )
+        : and(eq(schema.categories.kind, "expense"), isNull(schema.categories.archivedAt)),
     )
     .all();
 
@@ -49,10 +59,19 @@ export type ReclassifyCandidate = {
  * all-positive check X1 requires — as evidence, not a precondition
  * discovered only after a refused submit. One grouped query across every
  * candidate rather than one query per row in the picker.
+ *
+ * A category with a `budget_periods` row but zero transactions is excluded
+ * entirely rather than listed with `allPositive: true` — `setCategoryKind`'s
+ * D9A "used" check refuses it regardless of `allPositive` (X1's exception
+ * requires `count > 0`, not just "no negative rows"), so listing it here
+ * would be exactly the "discovered only after a refused submit" case DS32
+ * exists to prevent.
  */
 export function loadReclassifyCandidates(db: Db): ReclassifyCandidate[] {
   const leaves = listExpenseLeafCategories(db);
   if (leaves.length === 0) return [];
+
+  const leafIds = leaves.map((l) => l.id);
 
   const statRows = db
     .select({
@@ -63,28 +82,34 @@ export function loadReclassifyCandidates(db: Db): ReclassifyCandidate[] {
       latestDate: sql<string | null>`MAX(${schema.transactions.date})`,
     })
     .from(schema.transactions)
-    .where(
-      inArray(
-        schema.transactions.categoryId,
-        leaves.map((l) => l.id),
-      ),
-    )
+    .where(inArray(schema.transactions.categoryId, leafIds))
     .groupBy(schema.transactions.categoryId)
     .all();
 
   const statsById = new Map(statRows.map((r) => [r.categoryId as number, r]));
 
-  return leaves.map((leaf) => {
-    const stat = statsById.get(leaf.id);
-    return {
-      id: leaf.id,
-      name: leaf.name,
-      transactionCount: stat?.count ?? 0,
-      earliestDate: stat?.earliestDate ?? null,
-      latestDate: stat?.latestDate ?? null,
-      allPositive: (stat?.negativeCount ?? 0) === 0,
-    };
-  });
+  const plannedCategoryIds = new Set(
+    db
+      .selectDistinct({ categoryId: schema.budgetPeriods.categoryId })
+      .from(schema.budgetPeriods)
+      .where(inArray(schema.budgetPeriods.categoryId, leafIds))
+      .all()
+      .map((r) => r.categoryId),
+  );
+
+  return leaves
+    .filter((leaf) => !plannedCategoryIds.has(leaf.id))
+    .map((leaf) => {
+      const stat = statsById.get(leaf.id);
+      return {
+        id: leaf.id,
+        name: leaf.name,
+        transactionCount: stat?.count ?? 0,
+        earliestDate: stat?.earliestDate ?? null,
+        latestDate: stat?.latestDate ?? null,
+        allPositive: (stat?.negativeCount ?? 0) === 0,
+      };
+    });
 }
 
 /**
