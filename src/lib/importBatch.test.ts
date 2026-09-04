@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { buildPreview, commitImport, transformRow } from "./importBatch";
+import { buildPreview, commitImport, linkTransferPairs, transformRow } from "./importBatch";
 import { computeImportRowHash } from "./hash";
 import { loadAccountBalances } from "./accounts/loadAccountBalances";
 import type { ParsedRow } from "./parseCsv";
@@ -1318,6 +1318,223 @@ describe("commitImport — a pending row's posted re-export updates it in place"
     const [row_] = handle.db.select().from(schema.transactions).all();
     expect(row_.categoryId).toBe(dining.id);
     expect(row_.isPending).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `linkTransferPairs` re-checks rows updated from pending to posted, not just
+// freshly-inserted ones. A `toUpdate` row keeps its ORIGINAL batch's id, so a
+// re-export whose only new information is a pending leg posting used to seed
+// pairing with nothing — the real transfer leg on the other account could
+// never be found, even once both legs existed with matching (txn ± 1) numbers.
+// ---------------------------------------------------------------------------
+
+describe("commitImport — transfer pairing re-checks toUpdate rows", () => {
+  let handle: TestDbHandle;
+  let checkingId: number;
+  let savingsId: number;
+
+  function newAccount(name: string, type: "checking" | "savings"): number {
+    const [account] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name,
+        type,
+        startingBalanceCents: 0,
+        startingBalanceDate: "2026-01-01",
+      })
+      .returning()
+      .all();
+    return account.id;
+  }
+
+  beforeEach(() => {
+    handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    checkingId = newAccount("Checking", "checking");
+    savingsId = newAccount("Savings", "savings");
+  });
+
+  afterEach(() => {
+    handle.close();
+  });
+
+  it("still pairs two freshly-inserted rows across accounts in one batch each", () => {
+    commitImport(
+      {
+        accountId: checkingId,
+        filename: "checking.csv",
+        csvText: starOneCsv([
+          { txn: "3051", date: "04/20/2026", memo: "TRANSFER TO SAVINGS", amount: -25, balance: 975 },
+        ]),
+      },
+      handle.db,
+    );
+    const result = commitImport(
+      {
+        accountId: savingsId,
+        filename: "savings.csv",
+        csvText: starOneCsv([
+          { txn: "3052", date: "04/20/2026", memo: "TRANSFER FROM CHECKING", amount: 25, balance: 1025 },
+        ]),
+      },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("expected commit");
+    expect(result.pairsLinked).toBe(1);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId !== null)).toBe(true);
+  });
+
+  it("pairs a transfer whose leg only became postable once a pending row posted (the toUpdate gap)", () => {
+    // The checking side arrives PENDING first, under Star One's placeholder
+    // transaction number — it cannot pair with anything yet.
+    commitImport(
+      {
+        accountId: checkingId,
+        filename: "checking-pending.csv",
+        csvText: starOneCsv([
+          { txn: "6098", date: "04/20/2026", memo: "   PENDING DEPOSIT", amount: 25, balance: 0 },
+        ]),
+      },
+      handle.db,
+    );
+
+    // The real other leg posts on the savings account in the meantime. At
+    // this point nothing can pair with it yet either.
+    const savingsResult = commitImport(
+      {
+        accountId: savingsId,
+        filename: "savings.csv",
+        csvText: starOneCsv([
+          { txn: "3051", date: "04/20/2026", memo: "TRANSFER TO CHECKING", amount: -25, balance: 975 },
+        ]),
+      },
+      handle.db,
+    );
+    if (savingsResult.status !== "committed") throw new Error("expected commit");
+    expect(savingsResult.pairsLinked).toBe(0);
+
+    // The checking leg finally posts — a re-export carrying ONLY the
+    // now-posted version of the same content-matched row, so this batch
+    // inserts nothing new (`toInsert` is empty) and only updates the existing
+    // pending row in place (`toUpdate`). Its real bank transaction number
+    // (3052) is exactly ±1 from the savings leg's (3051).
+    const checkingResult = commitImport(
+      {
+        accountId: checkingId,
+        filename: "checking-posted.csv",
+        csvText: starOneCsv([
+          { txn: "3052", date: "04/20/2026", memo: "PENDING DEPOSIT", amount: 25, balance: 1025 },
+        ]),
+      },
+      handle.db,
+    );
+    if (checkingResult.status !== "committed") throw new Error("expected commit");
+
+    // Without seeding from the toUpdate row, this was 0 and the pair was
+    // never found even though both real legs now exist with matching numbers.
+    expect(checkingResult.pairsLinked).toBe(1);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.transferPairId !== null)).toBe(true);
+
+    // The persisted count on THIS batch must reflect the pair even though the
+    // linked row (the pending one) belongs to an EARLIER batch — a
+    // `COUNT(*) WHERE import_batch_id = checkingResult.batchId` would find
+    // zero rows here and silently undercount on the success page.
+    const [checkingBatch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, checkingResult.batchId))
+      .all();
+    expect(checkingBatch.pairsLinkedCount).toBe(1);
+    const rowsTaggedWithThisBatch = rows.filter(
+      (r) => r.importBatchId === checkingResult.batchId,
+    );
+    expect(rowsTaggedWithThisBatch).toHaveLength(0);
+  });
+
+  it("seeds from BOTH freshly-inserted and toUpdate ids in the same commitImport call", () => {
+    // Pre-existing pending row on checking — unpaired, placeholder txn number.
+    commitImport(
+      {
+        accountId: checkingId,
+        filename: "checking-pending.csv",
+        csvText: starOneCsv([
+          { txn: "6098", date: "04/21/2026", memo: "   PENDING DEPOSIT", amount: 40, balance: 0 },
+        ]),
+      },
+      handle.db,
+    );
+
+    // Savings already carries BOTH real counterparts, unpaired: one for the
+    // pending row above (once it posts), one for a brand-new row that will
+    // arrive in the checking import below.
+    commitImport(
+      {
+        accountId: savingsId,
+        filename: "savings.csv",
+        csvText: starOneCsv([
+          { txn: "5001", date: "04/21/2026", memo: "TRANSFER TO CHECKING", amount: -40, balance: 960 },
+          { txn: "8001", date: "04/23/2026", memo: "TRANSFER TO CHECKING", amount: -15, balance: 945 },
+        ]),
+      },
+      handle.db,
+    );
+
+    // One checking import, one file, two rows: the pending row finally posts
+    // (toUpdate — keeps its original batch id) AND an unrelated brand-new
+    // transfer leg arrives (toInsert — carries this batch's id). Both must be
+    // seeded into the same linkTransferPairs call for both pairs to link.
+    const result = commitImport(
+      {
+        accountId: checkingId,
+        filename: "checking-mixed.csv",
+        csvText: starOneCsv([
+          { txn: "5002", date: "04/21/2026", memo: "PENDING DEPOSIT", amount: 40, balance: 1000 },
+          { txn: "8002", date: "04/23/2026", memo: "TRANSFER FROM SAVINGS", amount: 15, balance: 1015 },
+        ]),
+      },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("expected commit");
+
+    // A fix that only seeded from `toUpdate` (or only from `insertedIds`)
+    // would find just one of these two pairs, not both.
+    expect(result.pairsLinked).toBe(2);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(4);
+    expect(rows.every((r) => r.transferPairId !== null)).toBe(true);
+
+    // Persisted count reflects both pairs even though only ONE of the two
+    // linked rows (the fresh insert) actually carries this batch's id.
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.pairsLinkedCount).toBe(2);
+  });
+});
+
+describe("linkTransferPairs", () => {
+  it("returns 0 and touches nothing when seedRowIds is empty", () => {
+    const handle = createTestDb();
+    try {
+      expect(linkTransferPairs([], handle.db)).toBe(0);
+    } finally {
+      handle.close();
+    }
   });
 });
 

@@ -344,6 +344,7 @@ export function commitImport(
       .returning({ id: schema.importBatches.id })
       .all();
 
+    const insertedIds: number[] = [];
     for (const row of toInsert) {
       // Auto-categorize on the way in. Without this every import lands 100%
       // uncategorized no matter how many rules the user has trained, and the
@@ -372,6 +373,7 @@ export function commitImport(
         })
         .returning({ id: schema.transactions.id })
         .all();
+      insertedIds.push(inserted.id);
 
       // Recorded so a too-broad rule's whole batch of auto-categorization can
       // be undone later (undoImportCategorization) — matching bulkCategorize's
@@ -434,13 +436,14 @@ export function commitImport(
 
     return {
       batchId: batch.id,
+      insertedIds,
       startingBalance:
         anchorResult.status === "moved"
           ? { date: anchorResult.date, startingBalanceCents: anchorResult.startingBalanceCents }
           : null,
     };
   });
-  const { batchId, startingBalance } = transactionResult;
+  const { batchId, insertedIds, startingBalance } = transactionResult;
 
   // Prune only after the write has committed — pruning before it meant a failed
   // import had already evicted the oldest snapshot to make room for a useless
@@ -448,7 +451,29 @@ export function commitImport(
   // has already succeeded.
   pruneSnapshots(snapshotDir());
 
-  const pairsLinked = linkTransferPairs(batchId, db);
+  // Seeded from BOTH freshly-inserted rows and rows just updated from pending
+  // to posted (`toUpdate`) — not from `batchId` alone. A `toUpdate` row keeps
+  // its ORIGINAL batch's id (that's what lets the success page attribute it
+  // to the import that first brought it in), so a re-export whose only new
+  // information is a pending row posting would otherwise seed this pass with
+  // nothing: a transfer that only became pairable once its pending leg posted
+  // could stay permanently unpaired.
+  const seedRowIds = [
+    ...insertedIds,
+    ...toUpdate.map((row) => row.updateExistingRowId!),
+  ];
+  const pairsLinked = linkTransferPairs(seedRowIds, db);
+
+  // Persisted rather than left for the success page to recompute: a
+  // `COUNT(*) WHERE import_batch_id = batchId` undercounts the moment a pair
+  // links a `toUpdate` row, which keeps its ORIGINAL batch's id by design —
+  // exactly the case this fix exists to handle. Written unconditionally
+  // (even when 0) so a page reading `pairsLinkedCount` can tell "this batch
+  // linked nothing" apart from "written before this column existed" (null).
+  db.update(schema.importBatches)
+    .set({ pairsLinkedCount: pairsLinked })
+    .where(eq(schema.importBatches.id, batchId))
+    .run();
 
   return {
     status: "committed",
@@ -587,7 +612,19 @@ function anchorStartingBalance(
   };
 }
 
-export function linkTransferPairs(batchId: number, db: Db = defaultDb): number {
+/**
+ * Re-check a set of rows (and whatever shares their date) for transfer pairs.
+ *
+ * Takes explicit row ids to seed from, not a batch id: a `commitImport` batch
+ * can bring a row into pairing contention two different ways — a brand-new
+ * insert, or an existing PENDING row updated to posted in place (`toUpdate`
+ * in `commitImport`) — and the second case keeps its ORIGINAL batch's id, so
+ * a query scoped to `importBatchId = batchId` would never find it. The
+ * caller passes both.
+ */
+export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): number {
+  if (seedRowIds.length === 0) return 0;
+
   const newRows = db
     .select({
       id: schema.transactions.id,
@@ -600,7 +637,7 @@ export function linkTransferPairs(batchId: number, db: Db = defaultDb): number {
     .from(schema.transactions)
     .where(
       and(
-        eq(schema.transactions.importBatchId, batchId),
+        inArray(schema.transactions.id, seedRowIds),
         isNull(schema.transactions.transferPairId),
       ),
     )

@@ -1,0 +1,1 @@
+ALTER TABLE `import_batches` ADD `pairs_linked_count` integer;

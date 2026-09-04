@@ -121,6 +121,15 @@ export const importBatches = sqliteTable("import_batches", {
   // batch didn't move the anchor.
   priorStartingBalanceCents: integer("prior_starting_balance_cents"),
   priorStartingBalanceDate: text("prior_starting_balance_date"),
+  // How many transfer pairs `linkTransferPairs` actually linked as PART OF
+  // this batch's commit — persisted rather than left for the success page to
+  // recompute via `COUNT(*) WHERE import_batch_id = this batch`, because that
+  // recompute silently undercounts: a pair can link a row that was updated
+  // from pending to posted (`toUpdate` in `commitImport`), which keeps its
+  // ORIGINAL batch's id, not this one. Null only for batches written before
+  // this column existed; the success page falls back to the old (batch-id-
+  // scoped, imprecise for toUpdate-linked pairs) query for those.
+  pairsLinkedCount: integer("pairs_linked_count"),
 });
 
 export const transactions = sqliteTable(
