@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
 
@@ -19,8 +20,9 @@ import type { CategoryRule } from "@/db/schema";
 export function applyRuleAtImport(
   db: AnyDb,
   normalizedMerchant: string,
+  amountCents: number,
 ): number | null {
-  return buildRuleMatcher(db)(normalizedMerchant)?.categoryId ?? null;
+  return buildRuleMatcher(db)(normalizedMerchant, amountCents)?.categoryId ?? null;
 }
 
 export type RuleMatch = { categoryId: number; ruleId: number };
@@ -39,18 +41,38 @@ export type RuleMatch = { categoryId: number; ruleId: number };
  * Returns the winning rule's id alongside its category, not just the
  * category: both write paths record it onto `import_batch_categorizations` so
  * the batch's auto-categorization can be undone later.
+ *
+ * The returned matcher also takes the row's `amountCents` (X2 + E8): a rule
+ * must not file a negative row into a `kind='income'` category, or a
+ * positive row into a `kind='fund'` category — either one "poisons" that
+ * category's numbers for every future occurrence of the merchant (B8). The
+ * guard joins `categories` in the same query this function already reads
+ * once per batch, rather than adding a second `categories` read at each call
+ * site (`X3`, PR2b's archived-category guard, extends this same join instead
+ * of opening a third one — CLAUDE.md: "one guard in the shared function
+ * beats a guard in every caller"). A rejected candidate is skipped, not
+ * fatal to the whole match: matching continues to the next-ranked rule.
  */
 export function buildRuleMatcher(
   db: AnyDb,
-): (normalizedMerchant: string) => RuleMatch | null {
-  const sorted = db.select().from(schema.categoryRules).all().sort(compareRules);
+): (normalizedMerchant: string, amountCents: number) => RuleMatch | null {
+  const sorted = db
+    .select({
+      rule: schema.categoryRules,
+      categoryKind: schema.categories.kind,
+    })
+    .from(schema.categoryRules)
+    .innerJoin(schema.categories, eq(schema.categoryRules.categoryId, schema.categories.id))
+    .all()
+    .sort((a, b) => compareRules(a.rule, b.rule));
   if (sorted.length === 0) return () => null;
 
-  return (normalizedMerchant: string) => {
-    for (const rule of sorted) {
-      if (matches(rule, normalizedMerchant)) {
-        return { categoryId: rule.categoryId, ruleId: rule.id };
-      }
+  return (normalizedMerchant: string, amountCents: number) => {
+    for (const { rule, categoryKind } of sorted) {
+      if (!matches(rule, normalizedMerchant)) continue;
+      if (categoryKind === "income" && amountCents < 0) continue;
+      if (categoryKind === "fund" && amountCents > 0) continue;
+      return { categoryId: rule.categoryId, ruleId: rule.id };
     }
     return null;
   };

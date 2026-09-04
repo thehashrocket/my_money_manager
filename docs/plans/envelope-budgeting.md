@@ -2139,7 +2139,7 @@ PR2b  Lane I:  S12                         (single lane)
   - Surfaced by: A2 — the plan listed 4; `categorizeTransaction.ts:77`, `bulkCategorize.ts:96` and `goals/actions.ts:41` were missed, and PR3 would have deleted those guards silently
   - Files: `loadMonthView.ts`, `loadGoals.ts`, `loadMonthlyTrends.ts`, `categories.ts`, `categorizeTransaction.ts`, `bulkCategorize.ts`, `goals/actions.ts`
   - Verify: TC18, TC22, **TC22b (E6 — the inverse drift)** + **regressions TC34a, TC34b**
-- [ ] **T6 (P1, human: ~2h / CC: ~20min)** — safety — automatic categorization never files a sign-mismatched row into income or a fund, **guarded inside `buildRuleMatcher` (E8)**
+- [x] **T6 (P1, human: ~2h / CC: ~20min)** — safety — automatic categorization never files a sign-mismatched row into income or a fund, **guarded inside `buildRuleMatcher` (E8)**
   - Surfaced by: X2 / B8 — one remembered merchant poisons `received` forever; **E8 — X2 put the guard in two callers while X3 (PR2b) puts the identical `categories` join inside the matcher, for the same table and the same reason. `CLAUDE.md`: "one guard in the shared function beats a guard in every caller"**
   - The matcher's returned function takes the amount: `(normalizedMerchant: string, amountCents: number) => RuleMatch | null`. The builder joins `categories` for `kind` in the query it already runs once per batch. PR2b's X3 adds `archived_at IS NULL` to that same join rather than a second read.
   - Files: `src/lib/rules.ts`, `src/lib/importBatch.ts`, `src/lib/simplefin/sync.ts`

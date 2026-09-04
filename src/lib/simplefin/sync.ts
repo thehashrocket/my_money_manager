@@ -376,7 +376,7 @@ export async function syncSimpleFin(
 
     for (const { account, rows } of staged) {
       for (const row of rows) {
-        const match = matchRule(row.normalizedMerchant);
+        const match = matchRule(row.normalizedMerchant, row.amountCents);
 
         const [inserted] = tx
           .insert(schema.transactions)

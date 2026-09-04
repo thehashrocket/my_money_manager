@@ -351,7 +351,7 @@ export function commitImport(
       // backlog only ever grows — which is how 498 rows accumulated before
       // this was wired up. No match still means NULL, which is what the
       // dashboard backlog tile counts (CLAUDE.md rule 6).
-      const match = matchRule(row.normalizedMerchant);
+      const match = matchRule(row.normalizedMerchant, row.amountCents);
 
       const [inserted] = tx
         .insert(schema.transactions)

@@ -15,11 +15,11 @@ afterEach(() => {
 });
 
 let categoryNameCounter = 0;
-function seedCategory(name: string) {
+function seedCategory(name: string, kind: "income" | "expense" | "fund" = "expense") {
   categoryNameCounter += 1;
   const [cat] = handle.db
     .insert(schema.categories)
-    .values({ name: `${name}-test-${categoryNameCounter}` })
+    .values({ name: `${name}-test-${categoryNameCounter}`, kind })
     .returning()
     .all();
   return cat;
@@ -27,7 +27,7 @@ function seedCategory(name: string) {
 
 describe("applyRuleAtImport", () => {
   it("returns null when no rules exist", () => {
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBeNull();
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBeNull();
   });
 
   it("matches an exact rule", () => {
@@ -37,8 +37,8 @@ describe("applyRuleAtImport", () => {
       categoryId: groceries.id,
       source: "manual",
     });
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(groceries.id);
-    expect(applyRuleAtImport(handle.db, "TRADER JOES")).toBeNull();
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBe(groceries.id);
+    expect(applyRuleAtImport(handle.db, "TRADER JOES", -1000)).toBeNull();
   });
 
   it("matches a contains rule", () => {
@@ -53,8 +53,8 @@ describe("applyRuleAtImport", () => {
         source: "manual",
       })
       .run();
-    expect(applyRuleAtImport(handle.db, "SHELL OIL 1234")).toBe(gas.id);
-    expect(applyRuleAtImport(handle.db, "CHEVRON")).toBeNull();
+    expect(applyRuleAtImport(handle.db, "SHELL OIL 1234", -1000)).toBe(gas.id);
+    expect(applyRuleAtImport(handle.db, "CHEVRON", -1000)).toBeNull();
   });
 
   it("matches a regex rule", () => {
@@ -69,9 +69,9 @@ describe("applyRuleAtImport", () => {
         source: "auto",
       })
       .run();
-    expect(applyRuleAtImport(handle.db, "DOORDASH CHIPOTLE")).toBe(dining.id);
-    expect(applyRuleAtImport(handle.db, "UBEREATS")).toBe(dining.id);
-    expect(applyRuleAtImport(handle.db, "UBER")).toBeNull();
+    expect(applyRuleAtImport(handle.db, "DOORDASH CHIPOTLE", -1000)).toBe(dining.id);
+    expect(applyRuleAtImport(handle.db, "UBEREATS", -1000)).toBe(dining.id);
+    expect(applyRuleAtImport(handle.db, "UBER", -1000)).toBeNull();
   });
 
   it("regex patterns over 200 characters are treated as non-matching without throwing", () => {
@@ -87,8 +87,8 @@ describe("applyRuleAtImport", () => {
         source: "auto",
       })
       .run();
-    expect(() => applyRuleAtImport(handle.db, "aaaaaaa")).not.toThrow();
-    expect(applyRuleAtImport(handle.db, "aaaaaaa")).toBeNull();
+    expect(() => applyRuleAtImport(handle.db, "aaaaaaa", -1000)).not.toThrow();
+    expect(applyRuleAtImport(handle.db, "aaaaaaa", -1000)).toBeNull();
   });
 
   it("invalid regex patterns do not throw — they just never match", () => {
@@ -103,8 +103,8 @@ describe("applyRuleAtImport", () => {
         source: "auto",
       })
       .run();
-    expect(() => applyRuleAtImport(handle.db, "anything")).not.toThrow();
-    expect(applyRuleAtImport(handle.db, "anything")).toBeNull();
+    expect(() => applyRuleAtImport(handle.db, "anything", -1000)).not.toThrow();
+    expect(applyRuleAtImport(handle.db, "anything", -1000)).toBeNull();
   });
 
   it("higher priority wins over lower priority", () => {
@@ -129,7 +129,7 @@ describe("applyRuleAtImport", () => {
         },
       ])
       .run();
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(household.id);
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBe(household.id);
   });
 
   it("most recently updated wins at equal priority", async () => {
@@ -162,7 +162,7 @@ describe("applyRuleAtImport", () => {
       .run();
 
     // Both "SAFE" and "SAFEWAY" match via contains; equal priority → newer wins.
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(b.id);
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBe(b.id);
   });
 
   it("exact match wins over contains when priority is higher", () => {
@@ -187,7 +187,7 @@ describe("applyRuleAtImport", () => {
         },
       ])
       .run();
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(exactCat.id);
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBe(exactCat.id);
   });
 });
 
@@ -291,8 +291,8 @@ describe("createOrUpdateRule", () => {
 describe("buildRuleMatcher", () => {
   it("returns a matcher that resolves null when the rules table is empty", () => {
     const match = buildRuleMatcher(handle.db);
-    expect(match("SAFEWAY")).toBeNull();
-    expect(match("")).toBeNull();
+    expect(match("SAFEWAY", -1000)).toBeNull();
+    expect(match("", -1000)).toBeNull();
   });
 
   it("reads the rules table once no matter how many merchants it resolves", () => {
@@ -307,7 +307,7 @@ describe("buildRuleMatcher", () => {
     const match = buildRuleMatcher(handle.db);
     expect(selectSpy).toHaveBeenCalledTimes(1);
 
-    for (let i = 0; i < 50; i++) match(i % 2 === 0 ? "SAFEWAY" : "TRADER JOES");
+    for (let i = 0; i < 50; i++) match(i % 2 === 0 ? "SAFEWAY" : "TRADER JOES", -1000);
     expect(selectSpy).toHaveBeenCalledTimes(1);
     selectSpy.mockRestore();
   });
@@ -325,8 +325,8 @@ describe("buildRuleMatcher", () => {
       source: "manual",
     });
 
-    expect(match("SAFEWAY")).toBeNull();
-    expect(applyRuleAtImport(handle.db, "SAFEWAY")).toBe(groceries.id);
+    expect(match("SAFEWAY", -1000)).toBeNull();
+    expect(applyRuleAtImport(handle.db, "SAFEWAY", -1000)).toBe(groceries.id);
   });
 
   // Ranking must be identical to the wrapper's — a batch import and a one-off
@@ -356,10 +356,10 @@ describe("buildRuleMatcher", () => {
       .run();
 
     const match = buildRuleMatcher(handle.db);
-    expect(match("SAFEWAY")?.categoryId).toBe(high.id);
-    expect(match("SAFEWAY")?.categoryId).toBe(applyRuleAtImport(handle.db, "SAFEWAY"));
+    expect(match("SAFEWAY", -1000)?.categoryId).toBe(high.id);
+    expect(match("SAFEWAY", -1000)?.categoryId).toBe(applyRuleAtImport(handle.db, "SAFEWAY", -1000));
     // Only the lower-priority `contains` rule reaches this one.
-    expect(match("SAFEHOUSE")?.categoryId).toBe(low.id);
+    expect(match("SAFEHOUSE", -1000)?.categoryId).toBe(low.id);
   });
 
   // `import_batch_categorizations` records this alongside `categoryId` so a
@@ -373,6 +373,99 @@ describe("buildRuleMatcher", () => {
     });
 
     const match = buildRuleMatcher(handle.db);
-    expect(match("SAFEWAY")).toEqual({ categoryId: groceries.id, ruleId: rule.id });
+    expect(match("SAFEWAY", -1000)).toEqual({ categoryId: groceries.id, ruleId: rule.id });
+  });
+});
+
+// TC32 (X2 + E8): a rule must not file a sign-mismatched row into income or
+// a fund. Moved here from wherever it would otherwise have lived, because
+// this is the only module whose matcher actually sees a sign.
+describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
+  it("skips a match into a kind='income' category for a negative row", () => {
+    const paycheck = seedCategory("Paycheck", "income");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "EMPLOYER",
+      categoryId: paycheck.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("EMPLOYER", -5000)).toBeNull(); // a charge, not a paycheck
+  });
+
+  it("allows a match into a kind='income' category for a positive row", () => {
+    const paycheck = seedCategory("Paycheck", "income");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "EMPLOYER",
+      categoryId: paycheck.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("EMPLOYER", 200000)?.categoryId).toBe(paycheck.id);
+  });
+
+  it("skips a match into a kind='fund' category for a positive row", () => {
+    const fund = seedCategory("Car Repair", "fund");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "TRANSFER",
+      categoryId: fund.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("TRANSFER", 10000)).toBeNull();
+  });
+
+  it("allows a match into a kind='fund' category for a negative row (a withdrawal)", () => {
+    const fund = seedCategory("Car Repair", "fund");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "MECHANIC",
+      categoryId: fund.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("MECHANIC", -30000)?.categoryId).toBe(fund.id);
+  });
+
+  it("never blocks a match into an ordinary expense category, either sign", () => {
+    const groceries = seedCategory("Groceries", "expense");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY", -5000)?.categoryId).toBe(groceries.id);
+    expect(match("SAFEWAY", 1000)?.categoryId).toBe(groceries.id); // a refund
+  });
+
+  it("a rejected candidate falls through to the next-ranked rule rather than aborting the whole match", () => {
+    const paycheck = seedCategory("Paycheck", "income");
+    const groceries = seedCategory("Groceries", "expense");
+    handle.db
+      .insert(schema.categoryRules)
+      .values([
+        {
+          categoryId: paycheck.id,
+          matchType: "contains",
+          matchValue: "GROCERY",
+          priority: 90, // higher priority, but wrong sign for income
+          source: "auto",
+        },
+        {
+          categoryId: groceries.id,
+          matchType: "contains",
+          matchValue: "STORE",
+          priority: 10,
+          source: "auto",
+        },
+      ])
+      .run();
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("GROCERY STORE", -2000)?.categoryId).toBe(groceries.id);
   });
 });
