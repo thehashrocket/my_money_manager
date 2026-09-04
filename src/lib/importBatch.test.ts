@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { buildPreview, commitImport, linkTransferPairs, transformRow } from "./importBatch";
 import { computeImportRowHash } from "./hash";
 import { loadAccountBalances } from "./accounts/loadAccountBalances";
 import type { ParsedRow } from "./parseCsv";
+import { unlinkTransferPair } from "./simplefin/sync";
 
 // `commitImport` calls `createSnapshot` against a real `data/money.db` path,
 // which does not exist in the test environment — stubbed the same way
@@ -1532,6 +1533,335 @@ describe("linkTransferPairs", () => {
     const handle = createTestDb();
     try {
       expect(linkTransferPairs([], handle.db)).toBe(0);
+    } finally {
+      handle.close();
+    }
+  });
+
+  function newAccount(db: TestDbHandle["db"], name: string, type: "checking" | "savings"): number {
+    const [account] = db
+      .insert(schema.accounts)
+      .values({ name, type, startingBalanceCents: 0, startingBalanceDate: "2026-01-01" })
+      .returning()
+      .all();
+    return account.id;
+  }
+
+  // Star One reuses "6098" as a placeholder transaction number across every
+  // still-pending row (CLAUDE.md rule 3). Before filtering on is_pending,
+  // that placeholder was a legitimate-looking ±1 match candidate for any
+  // unrelated real transaction one number away — this pins the fix for both
+  // the seed side and the candidate side of that false-pair risk.
+  it("never pairs a still-pending row carrying the 6098 placeholder, even against an otherwise-perfect ±1 match", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const savingsId = newAccount(handle.db, "Savings", "savings");
+
+      // A pending deposit (Star One's shared 6098 placeholder), inserted
+      // first. It is the seed row for its own batch's linkTransferPairs call.
+      const pendingResult = commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking-pending.csv",
+          csvText: starOneCsv([
+            { txn: "6098", date: "04/20/2026", memo: "   PENDING DEPOSIT", amount: 25, balance: 0 },
+          ]),
+        },
+        handle.db,
+      );
+      if (pendingResult.status !== "committed") throw new Error("expected commit");
+      expect(pendingResult.pairsLinked).toBe(0);
+
+      // An unrelated, already-posted, real withdrawal on a different account,
+      // same date, same |amount|, opposite sign, and a real bank transaction
+      // number exactly one off from the placeholder (6099 vs 6098) — every
+      // signal findTransferPairs uses lines up except that one leg is still
+      // pending. This commit re-checks the pending row too, since it shares
+      // the date with this batch's own new insert.
+      const unrelatedResult = commitImport(
+        {
+          accountId: savingsId,
+          filename: "savings-unrelated.csv",
+          csvText: starOneCsv([
+            { txn: "6099", date: "04/20/2026", memo: "UNRELATED WITHDRAWAL", amount: -25, balance: 975 },
+          ]),
+        },
+        handle.db,
+      );
+      if (unrelatedResult.status !== "committed") throw new Error("expected commit");
+      expect(unrelatedResult.pairsLinked).toBe(0);
+
+      const rows = handle.db.select().from(schema.transactions).all();
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+    } finally {
+      handle.close();
+    }
+  });
+
+  // Codex adversarial review (`/ship` 2026-09-04) flagged that filtering
+  // isPending on BOTH queries (not just sameDayUnpaired) would make a
+  // pending-only import return 0 before ever scanning its date — losing the
+  // only mechanism that re-checks a date once its own legs' original imports
+  // failed to pair them (e.g. two rows manually unlinked via "Not a
+  // transfer"). newRows deliberately does NOT filter isPending so this
+  // repair trigger survives; only sameDayUnpaired does, which is already
+  // sufficient to keep the pending row itself from ever becoming a pair
+  // member (see the test above).
+  it("a pending row's import still triggers repair-linking of two unrelated already-posted, previously-unpaired rows sharing its date", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const savingsId = newAccount(handle.db, "Savings", "savings");
+      const otherId = newAccount(handle.db, "Other", "checking");
+
+      // Two real legs that DO auto-link on arrival...
+      commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking.csv",
+          csvText: starOneCsv([
+            { txn: "7001", date: "04/22/2026", memo: "TRANSFER TO SAVINGS", amount: -50, balance: 950 },
+          ]),
+        },
+        handle.db,
+      );
+      const savingsResult = commitImport(
+        {
+          accountId: savingsId,
+          filename: "savings.csv",
+          csvText: starOneCsv([
+            { txn: "7002", date: "04/22/2026", memo: "TRANSFER FROM CHECKING", amount: 50, balance: 1050 },
+          ]),
+        },
+        handle.db,
+      );
+      if (savingsResult.status !== "committed") throw new Error("expected commit");
+      expect(savingsResult.pairsLinked).toBe(1);
+      const [legA, legB] = handle.db.select().from(schema.transactions).all();
+      expect(legA.transferPairId).not.toBeNull();
+
+      // ...then land back in an unpaired state WITHOUT going through
+      // unlinkTransferPair (which now also stamps transferRejectedAt — see
+      // the "never re-pairs a rejected pair" test below). This simulates a
+      // historical gap instead: e.g. rows imported before this pairing logic
+      // existed, or a `transferPairId` cleared by some other pre-existing
+      // path, never an explicit "Not a transfer" rejection.
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: null })
+        .where(inArray(schema.transactions.id, [legA.id, legB.id]))
+        .run();
+      const afterUnlink = handle.db.select().from(schema.transactions).all();
+      expect(afterUnlink.every((r) => r.transferPairId === null)).toBe(true);
+
+      // An unrelated PENDING row lands on the SAME date, in a THIRD account.
+      // It cannot itself pair with anything (still pending), but its import
+      // should still re-scan 04/22/2026 and repair legA/legB.
+      const repairResult = commitImport(
+        {
+          accountId: otherId,
+          filename: "other-pending.csv",
+          csvText: starOneCsv([
+            { txn: "6098", date: "04/22/2026", memo: "   PENDING DEPOSIT", amount: 10, balance: 0 },
+          ]),
+        },
+        handle.db,
+      );
+      if (repairResult.status !== "committed") throw new Error("expected commit");
+      expect(repairResult.pairsLinked).toBe(1);
+
+      const finalRows = handle.db.select().from(schema.transactions).all();
+      const [finalLegA, finalLegB, finalPending] = [
+        finalRows.find((r) => r.id === legA.id)!,
+        finalRows.find((r) => r.id === legB.id)!,
+        finalRows.find((r) => r.accountId === otherId)!,
+      ];
+      expect(finalLegA.transferPairId).toBe(finalLegB.id);
+      expect(finalLegB.transferPairId).toBe(finalLegA.id);
+      expect(finalPending.transferPairId).toBeNull();
+    } finally {
+      handle.close();
+    }
+  });
+
+  // Red Team (`/ship` 2026-09-04) found that the repair scan above (a
+  // legitimate self-heal for a historical gap) also silently reverses an
+  // EXPLICIT "Not a transfer" correction, because transferPairId IS NULL was
+  // the only eligibility signal and unlinkTransferPair set nothing else.
+  // Fix: unlinkTransferPair now also stamps transferRejectedPartnerId on
+  // both legs (pointed at each other), and linkTransferPairs filters its
+  // PROPOSED pairs against it — pair-scoped, not transaction-scoped (a
+  // transaction-scoped version was tried first and reverted per Codex
+  // structured review; see the next test for exactly the scenario that
+  // caught).
+  it("never re-pairs two rows the user explicitly rejected via unlinkTransferPair, even when an unrelated import re-scans their date", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const savingsId = newAccount(handle.db, "Savings", "savings");
+      const otherId = newAccount(handle.db, "Other", "checking");
+
+      commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking.csv",
+          csvText: starOneCsv([
+            { txn: "7101", date: "04/25/2026", memo: "TRANSFER TO SAVINGS", amount: -60, balance: 940 },
+          ]),
+        },
+        handle.db,
+      );
+      const savingsResult = commitImport(
+        {
+          accountId: savingsId,
+          filename: "savings.csv",
+          csvText: starOneCsv([
+            { txn: "7102", date: "04/25/2026", memo: "TRANSFER FROM CHECKING", amount: 60, balance: 1060 },
+          ]),
+        },
+        handle.db,
+      );
+      if (savingsResult.status !== "committed") throw new Error("expected commit");
+      expect(savingsResult.pairsLinked).toBe(1);
+      const [legA, legB] = handle.db.select().from(schema.transactions).all();
+
+      // User decides this was a coincidental ±1 match, not a real transfer,
+      // and clicks "Not a transfer".
+      unlinkTransferPair(legA.id, handle.db);
+      const rejected = handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, legA.id))
+        .get()!;
+      expect(rejected.transferPairId).toBeNull();
+      expect(rejected.transferRejectedPartnerId).toBe(legB.id);
+
+      // An unrelated PENDING row lands on the SAME date, in a THIRD account —
+      // structurally identical to the repair scenario above, except this pair
+      // was REJECTED, not just historically unpaired.
+      const laterResult = commitImport(
+        {
+          accountId: otherId,
+          filename: "other-pending.csv",
+          csvText: starOneCsv([
+            { txn: "6098", date: "04/25/2026", memo: "   PENDING DEPOSIT", amount: 10, balance: 0 },
+          ]),
+        },
+        handle.db,
+      );
+      if (laterResult.status !== "committed") throw new Error("expected commit");
+      expect(laterResult.pairsLinked).toBe(0);
+
+      const finalRows = handle.db.select().from(schema.transactions).all();
+      const [finalLegA, finalLegB] = [
+        finalRows.find((r) => r.id === legA.id)!,
+        finalRows.find((r) => r.id === legB.id)!,
+      ];
+      expect(finalLegA.transferPairId).toBeNull();
+      expect(finalLegB.transferPairId).toBeNull();
+    } finally {
+      handle.close();
+    }
+  });
+
+  // Codex structured review (`/ship` 2026-09-04) caught the flaw in a
+  // transaction-scoped rejection marker: rejecting one false-positive pair
+  // would permanently block that row from ever pairing with its ACTUAL
+  // correct counterpart too — an ordinary correction became unrecoverable.
+  // The pair-scoped fix (transferRejectedPartnerId) must not have this
+  // problem: legA's real transfer leg should still auto-link normally after
+  // legA was rejected against a DIFFERENT, coincidentally-matching row.
+  it("a row rejected against one false-positive match can still auto-pair with its real counterpart", () => {
+    const handle = createTestDb();
+    createSnapshotMock.mockClear();
+    createSnapshotMock.mockReturnValue({
+      snapshotPath: "/tmp/money.db.pre-import-TEST",
+      timestamp: "TEST",
+      consistent: true,
+      degradedReason: null,
+    });
+    try {
+      const checkingId = newAccount(handle.db, "Checking", "checking");
+      const decoyId = newAccount(handle.db, "Decoy", "savings");
+      const realId = newAccount(handle.db, "Real", "savings");
+
+      // legA and a coincidental ±1 match on Decoy — a false positive.
+      commitImport(
+        {
+          accountId: checkingId,
+          filename: "checking.csv",
+          csvText: starOneCsv([
+            { txn: "8001", date: "04/28/2026", memo: "WITHDRAWAL", amount: -75, balance: 925 },
+          ]),
+        },
+        handle.db,
+      );
+      const decoyResult = commitImport(
+        {
+          accountId: decoyId,
+          filename: "decoy.csv",
+          csvText: starOneCsv([
+            { txn: "8002", date: "04/28/2026", memo: "UNRELATED DEPOSIT", amount: 75, balance: 575 },
+          ]),
+        },
+        handle.db,
+      );
+      if (decoyResult.status !== "committed") throw new Error("expected commit");
+      expect(decoyResult.pairsLinked).toBe(1);
+      const [legA, decoyLeg] = handle.db.select().from(schema.transactions).all();
+
+      // User realizes this was a coincidence, not a real transfer, and rejects it.
+      unlinkTransferPair(legA.id, handle.db);
+
+      // legA's REAL transfer leg arrives later, in a different account —
+      // txn 8000, exactly ±1 from legA's 8001 (8002 is already spoken for
+      // by the rejected decoy pairing).
+      const realResult = commitImport(
+        {
+          accountId: realId,
+          filename: "real.csv",
+          csvText: starOneCsv([
+            { txn: "8000", date: "04/28/2026", memo: "TRANSFER FROM CHECKING", amount: 75, balance: 1075 },
+          ]),
+        },
+        handle.db,
+      );
+      if (realResult.status !== "committed") throw new Error("expected commit");
+      // legA must still be eligible to auto-pair with its real counterpart —
+      // being rejected against decoyLeg must not have blacklisted legA outright.
+      expect(realResult.pairsLinked).toBe(1);
+
+      const finalRows = handle.db.select().from(schema.transactions).all();
+      const finalLegA = finalRows.find((r) => r.id === legA.id)!;
+      const realLeg = finalRows.find((r) => r.accountId === realId)!;
+      const finalDecoyLeg = finalRows.find((r) => r.id === decoyLeg.id)!;
+      expect(finalLegA.transferPairId).toBe(realLeg.id);
+      expect(realLeg.transferPairId).toBe(finalLegA.id);
+      // The decoy stays unpaired — legA didn't drag it along.
+      expect(finalDecoyLeg.transferPairId).toBeNull();
     } finally {
       handle.close();
     }

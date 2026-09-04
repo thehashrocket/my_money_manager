@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import type { SimpleFinResponse, SimpleFinTransaction } from "./types";
@@ -8,6 +8,8 @@ import {
   linkTransferPairManually,
   unlinkTransferPair,
   findLinkedTransferPairs,
+  linkTransfersByBucket,
+  findAmbiguousTransfers,
 } from "./sync";
 import { setAccountLink } from "./link";
 import { mapTransaction } from "./mapTransaction";
@@ -520,6 +522,162 @@ describe("unlinkTransferPair / findLinkedTransferPairs", () => {
     unlinkTransferPair(a.id, handle.db);
     expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
     expect(findLinkedTransferPairs("2026-01-01", handle.db).length).toBe(1);
+  });
+
+  // Red Team (`/ship` 2026-09-04): transferPairId IS NULL alone can't tell
+  // "never evaluated" from "user explicitly rejected this match" apart, so
+  // every automatic matcher would silently re-link a "Not a transfer"
+  // correction the moment an unrelated future row landed on the same date.
+  // Pair-scoped (transferRejectedPartnerId), not transaction-scoped — a
+  // transaction-scoped version was tried first and reverted per Codex
+  // structured review (see the schema comment).
+  it("stamps transferRejectedPartnerId on both legs, pointed at each other", () => {
+    const { a, b } = seedLinkedPair();
+    unlinkTransferPair(a.id, handle.db);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, a.accountId))
+      .all();
+    const rowA = rows.find((r) => r.id === a.id)!;
+    expect(rowA.transferRejectedPartnerId).toBe(b.id);
+    const rowB = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, b.id))
+      .get()!;
+    expect(rowB.transferRejectedPartnerId).toBe(a.id);
+  });
+
+  it("manual re-link clears transferRejectedPartnerId on both legs — explicit human consent overrides an earlier rejection", () => {
+    const { a, b } = seedLinkedPair();
+    unlinkTransferPair(a.id, handle.db);
+    linkTransferPairManually(a.id, b.id, handle.db);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [a.id, b.id]))
+      .all();
+    expect(rows.every((r) => r.transferRejectedPartnerId === null)).toBe(true);
+  });
+
+  // Codex structured review (`/ship` 2026-09-04): an unconditional clear on
+  // manual link would also erase a rejection recorded against a THIRD row —
+  // not just the two rows being linked right now.
+  it("manual link to a different row does NOT clear a rejection recorded against a third row", () => {
+    const { a, b } = seedLinkedPair();
+    unlinkTransferPair(a.id, handle.db); // A rejected specifically against B.
+
+    const other = seedAccount({ name: "Other" });
+    const c = seedTxn({
+      accountId: other.id,
+      batchId: seedBatch("csv").id,
+      amountCents: -a.amountCents,
+      rawMemo: "REAL TRANSFER",
+      date: a.date,
+    });
+
+    linkTransferPairManually(a.id, c.id, handle.db); // A linked to C, not B.
+
+    const rowA = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, a.id))
+      .get()!;
+    // A is paired with C now, but still remembers it rejected B specifically.
+    expect(rowA.transferPairId).toBe(c.id);
+    expect(rowA.transferRejectedPartnerId).toBe(b.id);
+  });
+});
+
+/**
+ * Guards the fix for the gap `unlinkTransferPair`'s docstring names: without
+ * `transferRejectedPartnerId`, every automatic matcher treats a rejected
+ * pair exactly like a never-evaluated one, so the SAME rejected combination
+ * can silently resurface once an unrelated row shares its date.
+ */
+describe("transferRejectedPartnerId — automatic matchers never resurface a rejected pair", () => {
+  it("linkTransfersByBucket does not re-link a rejected pair when a later unrelated row shares its date", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const other = seedAccount({ name: "Other" });
+    const batch = seedBatch("simplefin");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -3000,
+      rawMemo: "TRANSFER TO SAVINGS",
+      date: "2026-09-05",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 3000,
+      rawMemo: "TRANSFER FROM CHECKING",
+      date: "2026-09-05",
+    });
+    linkTransferPairManually(a.id, b.id, handle.db);
+    unlinkTransferPair(a.id, handle.db);
+
+    // An unrelated row lands on the SAME date, re-entering both the bucket
+    // scan's date window and the unlinked pair's own bucket key.
+    seedTxn({
+      accountId: other.id,
+      batchId: batch.id,
+      amountCents: 5000,
+      rawMemo: "UNRELATED",
+      date: "2026-09-05",
+    });
+
+    const { pairsLinked } = linkTransfersByBucket("2026-01-01", handle.db);
+    expect(pairsLinked).toBe(0);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [a.id, b.id]))
+      .all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  // Codex structured review (`/ship` 2026-09-04): a rejected row must NOT
+  // disappear from the review queue entirely — that would leave no UI path
+  // back to `linkTransferPairManually` if the user later decides the
+  // rejection was wrong, or if a genuinely different real counterpart never
+  // shows up and this IS in fact the right pair after all. Since the only
+  // candidate pairing for a and b is the rejected one, matchTransfers can't
+  // resolve a non-rejected assignment and surfaces them as ambiguous instead
+  // of silently doing nothing — a human decides, they aren't hidden.
+  it("findAmbiguousTransfers still surfaces a rejected row when it's the only candidate pairing available", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("simplefin");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -4000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-06",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 4000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-06",
+    });
+    linkTransferPairManually(a.id, b.id, handle.db);
+    unlinkTransferPair(a.id, handle.db);
+
+    const ambiguous = findAmbiguousTransfers("2026-01-01", handle.db);
+    const flatIds = ambiguous.flatMap((bucket) => [
+      ...bucket.positives.map((r) => r.id),
+      ...bucket.negatives.map((r) => r.id),
+    ]);
+    expect(flatIds).toContain(a.id);
+    expect(flatIds).toContain(b.id);
+
+    // And the escape hatch actually works: explicit re-link is still allowed.
+    expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
   });
 });
 

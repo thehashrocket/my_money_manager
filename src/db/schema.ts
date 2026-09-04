@@ -178,6 +178,28 @@ export const transactions = sqliteTable(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },
     ),
+    // Set by `unlinkTransferPair` alongside clearing `transferPairId`, pointed
+    // at the specific partner that was rejected (both legs point at each
+    // other) — deliberately PAIR-scoped, not transaction-scoped. A
+    // transaction-scoped "rejected" flag was tried first and reverted: it
+    // made an ordinary correction unrecoverable, since rejecting one
+    // false-positive match permanently blocked that row from ever pairing
+    // with its ACTUAL correct counterpart either — and `linkTransferPairManually`
+    // is only reachable from `findAmbiguousTransfers`'s review queue, so a
+    // transaction excluded there had no UI path back at all. Found by Codex
+    // structured review during `/ship` 2026-09-04. The automatic matchers
+    // (`linkTransferPairs`, `linkTransfersByBucket`) filter proposed pairs
+    // against this AFTER matching, not as select-time candidacy — the row
+    // itself stays eligible to match something else, only this exact
+    // combination is blocked. `findAmbiguousTransfers` deliberately does NOT
+    // filter on this: a human reviewing that queue is not a silent
+    // re-link, so a rejected row is allowed to resurface there against a
+    // different candidate. `linkTransferPairManually` clears it on both
+    // legs — explicit human consent overrides any earlier rejection.
+    transferRejectedPartnerId: integer("transfer_rejected_partner_id").references(
+      (): AnySQLiteColumn => transactions.id,
+      { onDelete: "set null" },
+    ),
     isPending: integer("is_pending", { mode: "boolean" }).notNull().default(false),
     notes: text("notes"),
     createdAt,

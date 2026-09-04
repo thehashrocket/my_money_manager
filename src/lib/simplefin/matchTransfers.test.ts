@@ -275,3 +275,94 @@ describe("cross-source candidacy guard", () => {
     expect(pairs).toHaveLength(1);
   });
 });
+
+// Codex structured review (`/ship` 2026-09-04): a naive post-filter over the
+// returned pairs would still let the bijection consume a rejected edge
+// before the caller ever sees it, silently dropping an otherwise-valid pair
+// for the OTHER rows in the same balanced bucket. isRejected is threaded
+// into the matching itself so it can pick a different, non-rejected bijection.
+describe("matchTransfers — isRejected", () => {
+  it("a 1-vs-1 bucket whose only pairing is rejected becomes ambiguous, not silently dropped", () => {
+    const a = row(CHK, -5000, "A");
+    const b = row(SAV, 5000, "B");
+    const { pairs, ambiguous } = matchTransfers(
+      [a, b],
+      (x, y) => (x.id === a.id && y.id === b.id) || (x.id === b.id && y.id === a.id),
+    );
+    expect(pairs).toHaveLength(0);
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0].positives.map((r) => r.id)).toEqual([b.id]);
+    expect(ambiguous[0].negatives.map((r) => r.id)).toEqual([a.id]);
+  });
+
+  it("a 2-vs-2 balanced bucket finds the non-rejected bijection instead of dropping everything", () => {
+    // a would naively pair with x (preferred order), but that combination is
+    // rejected. The real bijection-avoidance case: a valid assignment still
+    // exists (a-y, b-x) and must be found instead of giving up.
+    const a = row(CHK, -3000, "A");
+    const b = row(CHK, -3000, "B");
+    const x = row(SAV, 3000, "X");
+    const y = row(SAV, 3000, "Y");
+    const { pairs, ambiguous } = matchTransfers(
+      [a, b, x, y],
+      (p, q) => (p.id === a.id && q.id === x.id) || (p.id === x.id && q.id === a.id),
+    );
+    expect(ambiguous).toHaveLength(0);
+    expect(pairs).toHaveLength(2);
+    const byA = pairs.find((p) => p.a.id === a.id || p.b.id === a.id)!;
+    expect([byA.a.id, byA.b.id]).toContain(y.id);
+    expect([byA.a.id, byA.b.id]).not.toContain(x.id);
+  });
+
+  it("a 2-vs-2 bucket where EVERY bijection hits a rejection becomes fully ambiguous", () => {
+    const a = row(CHK, -4000, "A");
+    const b = row(CHK, -4000, "B");
+    const x = row(SAV, 4000, "X");
+    const y = row(SAV, 4000, "Y");
+    // a is rejected against BOTH x and y, so neither bijection — (a-x,b-y)
+    // nor (a-y,b-x) — has a valid slot left for a.
+    const { pairs, ambiguous } = matchTransfers(
+      [a, b, x, y],
+      (p, q) =>
+        (p.id === a.id && (q.id === x.id || q.id === y.id)) ||
+        (q.id === a.id && (p.id === x.id || p.id === y.id)),
+    );
+    expect(pairs).toHaveLength(0);
+    expect(ambiguous).toHaveLength(1);
+  });
+
+  it("default isRejected (omitted) never rejects anything — existing callers unaffected", () => {
+    const { pairs } = matchTransfers([row(CHK, -1000, "A"), row(SAV, 1000, "B")]);
+    expect(pairs).toHaveLength(1);
+  });
+
+  // The 2-vs-2 test above only exercises a single try-next-candidate step.
+  // This exercises real BACKTRACKING: p1's preferred (first-tried) partner
+  // works fine locally, but committing to it leaves p2 with no valid partner
+  // at all — assignAvoidingRejections must undo that choice (pop the
+  // assignment, restore the candidate to `remaining`) and retry p1 against a
+  // different negative before the recursion can succeed.
+  it("a 3-vs-3 bucket finds a valid assignment that requires backtracking off an initially-successful choice", () => {
+    const p1 = row(SAV, 3000, "P1");
+    const p2 = row(SAV, 3000, "P2");
+    const p3 = row(SAV, 3000, "P3");
+    const n1 = row(CHK, -3000, "N1");
+    const n2 = row(CHK, -3000, "N2");
+    const n3 = row(CHK, -3000, "N3");
+    // p2 can ONLY pair with n1 — but greedy preferred order tries p1-n1
+    // first, which succeeds locally and must be undone.
+    const isRejected = (a: ReturnType<typeof row>, b: ReturnType<typeof row>) =>
+      (a.id === p2.id && (b.id === n2.id || b.id === n3.id)) ||
+      (b.id === p2.id && (a.id === n2.id || a.id === n3.id));
+
+    const { pairs, ambiguous } = matchTransfers([p1, p2, p3, n1, n2, n3], isRejected);
+
+    expect(ambiguous).toHaveLength(0);
+    expect(pairs).toHaveLength(3);
+    const byP2 = pairs.find((p) => p.a.id === p2.id || p.b.id === p2.id)!;
+    expect([byP2.a.id, byP2.b.id]).toContain(n1.id);
+    // p1 was forced off its preferred n1 by the backtrack.
+    const byP1 = pairs.find((p) => p.a.id === p1.id || p.b.id === p1.id)!;
+    expect([byP1.a.id, byP1.b.id]).not.toContain(n1.id);
+  });
+});

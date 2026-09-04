@@ -137,4 +137,45 @@ describe("findTransferPairs", () => {
     ]);
     expect(pairs).toEqual([]);
   });
+
+  // Codex structured review (`/ship` 2026-09-04): checked BEFORE committing
+  // to a candidate, not filtered afterward — a post-filter would still let
+  // the greedy `used` tracking consume row 1 on the rejected match, so its
+  // real partner (row 3, right after row 2 in the same bucket) would never
+  // even be tried.
+  it("isRejected with no alternative candidate leaves both rows unpaired, not force-matched", () => {
+    const pairs = findTransferPairs(
+      [
+        row({ id: 1, accountId: "checking", bankTransactionNumber: "10", amountCents: 5000 }),
+        row({ id: 2, accountId: "savings", bankTransactionNumber: "11", amountCents: -5000 }),
+      ],
+      undefined,
+      (a, b) => (a.id === 1 && b.id === 2) || (a.id === 2 && b.id === 1),
+    );
+    expect(pairs).toEqual([]);
+  });
+
+  it("isRejected: a rejected combination doesn't block the SAME row from pairing with a different valid candidate", () => {
+    const pairs = findTransferPairs(
+      [
+        row({ id: 1, accountId: "checking", bankTransactionNumber: "10", amountCents: 5000 }),
+        // Rejected: same ±1 relationship as id 1's real match below, but a
+        // DIFFERENT row — id 2 sits in the bucket before id 3.
+        row({ id: 2, accountId: "savings", bankTransactionNumber: "11", amountCents: -5000 }),
+        row({ id: 3, accountId: "other", bankTransactionNumber: "9", amountCents: -5000 }),
+      ],
+      undefined,
+      (a, b) => (a.id === 1 && b.id === 2) || (a.id === 2 && b.id === 1),
+    );
+    expect(pairs.length).toBe(1);
+    expect([pairs[0].a.id, pairs[0].b.id].sort()).toEqual([1, 3]);
+  });
+
+  it("default isRejected (omitted) rejects nothing — existing callers unaffected", () => {
+    const pairs = findTransferPairs([
+      row({ id: 1, accountId: "checking", bankTransactionNumber: "10", amountCents: 5000 }),
+      row({ id: 2, accountId: "savings", bankTransactionNumber: "11", amountCents: -5000 }),
+    ]);
+    expect(pairs.length).toBe(1);
+  });
 });

@@ -22,6 +22,13 @@ function memoConfirmsOverdraft(row: PairCandidate): boolean {
 export function findTransferPairs<T extends PairCandidate>(
   rows: T[],
   memoConfirms: (row: T) => boolean = memoConfirmsOverdraft,
+  // Checked BEFORE committing to a candidate (pushing to pairs / marking
+  // used), not after: a `.filter()` over the returned pairs would still let
+  // the greedy `used.add()` below consume a row on a rejected match, so a
+  // real partner sitting right after it in the same bucket would never even
+  // be tried. Default is "nothing is rejected" so every other caller (and
+  // every existing test) is unaffected.
+  isRejected: (a: T, b: T) => boolean = () => false,
 ): TransferPair<T>[] {
   const pairs: TransferPair<T>[] = [];
   const used = new Set<string | number>();
@@ -56,6 +63,7 @@ export function findTransferPairs<T extends PairCandidate>(
         const bNum = Number.parseInt(b.bankTransactionNumber, 10);
         if (!Number.isFinite(bNum)) continue;
         if (Math.abs(aNum - bNum) !== 1) continue;
+        if (isRejected(a, b)) continue;
 
         const confirmed = memoConfirms(a) || memoConfirms(b);
         pairs.push({ a, b, confidence: confirmed ? "certain" : "high" });
