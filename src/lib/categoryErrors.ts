@@ -40,6 +40,21 @@ export class NotASavingsGoalError extends Error {
   }
 }
 
+/** X3/T27: `listLeafCategories`'s default excludes archived categories from
+ * every picker — but that's a client-side hint, not enforcement. A stale
+ * tab (loaded before an archive), or a second tab that archives the
+ * category mid-session, can still submit a categorize request naming it.
+ * Both categorize write paths check this server-side so the picker's
+ * exclusion isn't the only thing standing between "archived" and "still
+ * silently receiving new transactions" (the exact failure X3 exists to
+ * close on the automatic-rule side). */
+export class CategoryArchivedError extends Error {
+  constructor(readonly categoryId: number, readonly categoryName: string) {
+    super(`"${categoryName}" is archived and cannot receive new categorizations. Unarchive it first.`);
+    this.name = "CategoryArchivedError";
+  }
+}
+
 /** T27/§7.2: a parent category is header-only — archiving it would hide its
  * children's group heading while leaving the children themselves active and
  * still budgetable, an inconsistent half-archived group. Archive the

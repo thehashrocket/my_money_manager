@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
   SavingsGoalCategoryError,
@@ -57,6 +58,7 @@ function seedCategory(
     isSavingsGoal?: boolean;
     kind?: "income" | "expense" | "fund";
     carryoverPolicy?: "none" | "rollover" | "reset";
+    archivedAt?: Date | null;
   } = {},
 ) {
   seq += 1;
@@ -68,6 +70,7 @@ function seedCategory(
       isSavingsGoal: opts.isSavingsGoal ?? false,
       kind: opts.kind ?? "expense",
       carryoverPolicy: opts.carryoverPolicy ?? "none",
+      archivedAt: opts.archivedAt ?? null,
     })
     .returning()
     .all();
@@ -610,6 +613,22 @@ describe("categorizeTransaction — rejections", () => {
         applyToPast: false,
       }),
     ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(X3) throws CategoryArchivedError for an archived category — the picker's exclusion is client-side only", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const archived = seedCategory("Old Gym", { archivedAt: new Date() });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: archived.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).toThrow(CategoryArchivedError);
   });
 
   it("(TC22b, E6) does not throw for a kind='expense' category even when isSavingsGoal=1 (inverse drift)", () => {

@@ -404,6 +404,7 @@ function ExpenseTable({
   // (`sections` is already sorted that way), not from `sections`' raw index
   // (which also holds the unparented bucket, itself never a real category).
   const groupSections = sections.filter((s) => s.parentName !== null);
+  const groupIndexByParentId = new Map(groupSections.map((g, i) => [g.parentId, i]));
 
   return (
     <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
@@ -419,7 +420,7 @@ function ExpenseTable({
           </TableRow>
         </TableHeader>
         {sections.map((section) => {
-          const groupIndex = groupSections.findIndex((g) => g.parentId === section.parentId);
+          const groupIndex = groupIndexByParentId.get(section.parentId) ?? -1;
           return (
             <TableBody key={section.parentId ?? "unparented"}>
               {section.parentName && section.parentId !== null ? (
@@ -738,11 +739,12 @@ function MobileExpenseList({
   month: number;
 }) {
   const groupSections = sections.filter((s) => s.parentName !== null);
+  const groupIndexByParentId = new Map(groupSections.map((g, i) => [g.parentId, i]));
 
   return (
     <div className="space-y-4 sm:hidden">
       {sections.map((section) => {
-        const groupIndex = groupSections.findIndex((g) => g.parentId === section.parentId);
+        const groupIndex = groupIndexByParentId.get(section.parentId) ?? -1;
         return (
           <div key={section.parentId ?? "unparented"} className="space-y-2">
             <MobileGroupHeading

@@ -70,6 +70,19 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Enter commits AND immediately calls `advanceFocus`, which focuses the
+  // next input — that triggers THIS input's own `onBlur` synchronously,
+  // before the Enter-triggered commit's `await onCommit(cents)` has
+  // resolved. Without this guard, `onBlur`'s `commitIfDirty()` re-enters
+  // with the same (still-uncommitted) `draft`/`committedCents` and fires a
+  // second, redundant `commitAllocationAction` call with identical
+  // arguments. Harmless to the DATA (`upsertAllocation`'s upsert is
+  // idempotent), but wasteful on the app's highest-frequency interaction
+  // and a source of out-of-order `saving`/`saved` flicker. Set synchronously
+  // before the `await` (not after) so the blur-triggered re-entry — which
+  // happens synchronously within the same call stack as `advanceFocus`, not
+  // on a later microtask — is guaranteed to see it already `true`.
+  const isCommittingRef = useRef(false);
 
   // Re-sync the displayed value when the committed value changes from
   // outside this input (the `⋯` dialog committed the same category-month
@@ -91,6 +104,7 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
   }
 
   async function commitIfDirty() {
+    if (isCommittingRef.current) return;
     if (settleTimer.current) {
       clearTimeout(settleTimer.current);
       settleTimer.current = null;
@@ -128,15 +142,20 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
 
     setStatus("saving");
     setError(null);
-    const result = await onCommit(cents);
-    if (result.ok) {
-      setDraft(formatDollars(cents));
-      setStatus("saved");
-      settleTimer.current = setTimeout(() => setStatus("idle"), 240);
-    } else {
-      revertToCommitted();
-      setStatus("failed");
-      setError(result.message);
+    isCommittingRef.current = true;
+    try {
+      const result = await onCommit(cents);
+      if (result.ok) {
+        setDraft(formatDollars(cents));
+        setStatus("saved");
+        settleTimer.current = setTimeout(() => setStatus("idle"), 240);
+      } else {
+        revertToCommitted();
+        setStatus("failed");
+        setError(result.message);
+      }
+    } finally {
+      isCommittingRef.current = false;
     }
   }
 

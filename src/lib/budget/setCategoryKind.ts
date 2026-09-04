@@ -179,7 +179,17 @@ export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKin
       }
     }
 
-    tx.update(schema.categories).set({ kind: newKind }).where(eq(schema.categories.id, categoryId)).run();
+    // Dual-write (T5, D1B/A2): `createGoalAction` already keeps
+    // `is_savings_goal` truthful alongside `kind` "until PR3 drops the
+    // column entirely" (its own comment). PR2b's general `setCategoryKind`
+    // (T25) is the other place `kind` can now change post-creation — without
+    // this, reclassifying any category to/from `fund` through the `⋯` menu
+    // would silently diverge the two columns the moment anything besides
+    // `createGoalAction` reads `is_savings_goal` again.
+    tx.update(schema.categories)
+      .set({ kind: newKind, isSavingsGoal: newKind === "fund" })
+      .where(eq(schema.categories.id, categoryId))
+      .run();
 
     // Kind decides rollover eligibility (T2's income guard) and Left to
     // Budget's math, so every cached `effective_allocation_cents` for this

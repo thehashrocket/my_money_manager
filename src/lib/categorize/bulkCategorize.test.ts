@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
   SavingsGoalCategoryError,
@@ -53,6 +54,7 @@ function seedCategory(
     isSavingsGoal?: boolean;
     kind?: "income" | "expense" | "fund";
     carryoverPolicy?: "none" | "rollover" | "reset";
+    archivedAt?: Date | null;
   } = {},
 ) {
   seq += 1;
@@ -64,6 +66,7 @@ function seedCategory(
       isSavingsGoal: opts.isSavingsGoal ?? false,
       kind: opts.kind ?? "expense",
       carryoverPolicy: opts.carryoverPolicy ?? "none",
+      archivedAt: opts.archivedAt ?? null,
     })
     .returning()
     .all();
@@ -438,6 +441,17 @@ describe("bulkCategorize — rejections", () => {
         rememberMerchant: false,
       }),
     ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(X3) throws CategoryArchivedError for an archived category — the picker's exclusion is client-side only", () => {
+    const archived = seedCategory("Old Gym", { archivedAt: new Date() });
+    expect(() =>
+      bulkCategorize(handle.db, {
+        normalizedMerchant: "SAFEWAY",
+        categoryId: archived.id,
+        rememberMerchant: false,
+      }),
+    ).toThrow(CategoryArchivedError);
   });
 
   it("(TC22, A2) throws for a kind='fund' category even when isSavingsGoal=0 (drift)", () => {

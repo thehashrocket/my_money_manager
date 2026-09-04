@@ -43,14 +43,8 @@ export function ReclassifyIncomeBanner({ candidates }: { candidates: ReclassifyC
   const comboboxId = useId();
 
   return (
-    <div
-      className="flex flex-col gap-3 rounded-lg px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-      style={{
-        background: "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
-        border: "1px solid color-mix(in oklch, var(--accent-amber) 45%, transparent)",
-      }}
-    >
-      <span style={{ color: "color-mix(in oklch, var(--accent-amber) 55%, var(--fg))" }}>
+    <div className="flex flex-col gap-3 rounded-lg border border-[color-mix(in_oklch,var(--accent-amber)_45%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_18%,var(--background))] px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-[color-mix(in_oklch,var(--accent-amber)_55%,var(--fg))]">
         No income categories — Left to Budget cannot be computed.
       </span>
 

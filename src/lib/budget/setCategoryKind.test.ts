@@ -129,6 +129,24 @@ describe("setCategoryKind — TC23 (D9A)", () => {
     const result = setCategoryKind(handle.db, cat.id, "expense");
     expect(result).toEqual({ categoryId: cat.id, previousKind: "expense", newKind: "expense" });
   });
+
+  it("(T5/D1B/A2) dual-writes is_savings_goal to true when reclassifying an unused category to fund", () => {
+    const cat = seedCategory("New Fund", "expense");
+    setCategoryKind(handle.db, cat.id, "fund");
+
+    const row = handle.db.select().from(schema.categories).where(eq(schema.categories.id, cat.id)).get();
+    expect(row?.isSavingsGoal).toBe(true);
+  });
+
+  it("(T5/D1B/A2) dual-writes is_savings_goal to false when reclassifying a fund away from fund", () => {
+    const cat = seedCategory("Former Fund", "fund");
+    handle.db.update(schema.categories).set({ isSavingsGoal: true }).where(eq(schema.categories.id, cat.id)).run();
+
+    setCategoryKind(handle.db, cat.id, "expense");
+
+    const row = handle.db.select().from(schema.categories).where(eq(schema.categories.id, cat.id)).get();
+    expect(row?.isSavingsGoal).toBe(false);
+  });
 });
 
 describe("setCategoryKind — TC23b (X1)", () => {
