@@ -28,9 +28,9 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { DB_PATH as DB_PATH_REL, MIGRATIONS_FOLDER as MIGRATIONS_FOLDER_REL } from "./db-paths.mjs";
+import { dbPath, MIGRATIONS_FOLDER as MIGRATIONS_FOLDER_REL } from "./db-paths.mjs";
 
-const DB_PATH = path.join(process.cwd(), DB_PATH_REL);
+const DB_PATH = dbPath();
 const MIGRATIONS_FOLDER = path.join(process.cwd(), MIGRATIONS_FOLDER_REL);
 
 /**
