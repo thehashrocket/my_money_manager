@@ -12,7 +12,7 @@ import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
-import { parseAmountToCents } from "./parseAmount";
+import { parseAmountToCents } from "@/lib/money";
 import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
@@ -376,7 +376,7 @@ export async function syncSimpleFin(
 
     for (const { account, rows } of staged) {
       for (const row of rows) {
-        const match = matchRule(row.normalizedMerchant);
+        const match = matchRule(row.normalizedMerchant, row.amountCents);
 
         const [inserted] = tx
           .insert(schema.transactions)

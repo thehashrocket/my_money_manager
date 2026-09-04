@@ -120,6 +120,13 @@
       "when": 1788491717944,
       "tag": "0016_tired_thing",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1788541002733,
+      "tag": "0017_category_kind",
+      "breakpoints": true
     }
   ]
 }

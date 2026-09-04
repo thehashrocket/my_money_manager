@@ -75,6 +75,21 @@
   --font-heading: var(--font-display-var), "Newsreader", ui-serif, Georgia, serif;
 
   /* Type scale (design — replaces Tailwind defaults for consistency) */
+  /* DS46: `@theme inline` MERGES with Tailwind's defaults rather than
+   * replacing them, so anything above `--text-3xl` (text-4xl..text-9xl)
+   * silently fell through to Tailwind's own sizes despite this block's own
+   * comment claiming otherwise — that's how the pre-restyle budget page's
+   * `text-5xl` Hero (48px) resolved at all. This wildcard resets the WHOLE
+   * `--text-*` namespace to disabled; it MUST come first — unlike a bare
+   * `@theme` block, `@theme inline` resolves these more literally in
+   * declaration order, and a wildcard reset placed after the named sizes
+   * below wiped all of them out (measured: every heading on the page
+   * collapsed to browser-default sizing). Declared first, then overridden
+   * by name below, only the unclaimed sizes above `--text-3xl` stay closed
+   * off. Safe now — `text-5xl` was T12's only call site in `src/`, and T12
+   * deleted it.
+   */
+  --text-*: initial;
   --text-xs: 11px;
   --text-sm: 13px;
   --text-base: 15px;
@@ -183,6 +198,16 @@
                  0 0 0 1px color-mix(in oklch, var(--ink-1) 5%, transparent);
   --shadow-lift: 0 6px 24px -8px color-mix(in oklch, var(--ink-1) 22%, transparent),
                  0 0 0 1px color-mix(in oklch, var(--ink-1) 8%, transparent);
+
+  /* Motion (DS41) — two durations, one easing. Not theme-dependent, so this
+     lives once here rather than duplicated into `.dark`. Every animated
+     surface in the app (the Left to Budget settle, PR2a's cell save/saved
+     borders, T16c's copied-row highlight) reads these instead of picking its
+     own duration — that drift (two durations from nowhere, reduced-motion
+     honored on one of four) is exactly what DS41 exists to stop. */
+  --motion-quick: 160ms;
+  --motion-settle: 240ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ============================================================
@@ -215,6 +240,22 @@
                  0 0 0 1px color-mix(in oklch, var(--ink-1) 8%, transparent);
   --shadow-lift: 0 10px 36px -10px rgba(0, 0, 0, 0.6),
                  0 0 0 1px color-mix(in oklch, var(--ink-1) 12%, transparent);
+}
+
+/* ============================================================
+   Motion (DS41) — ONE reduced-motion rule for the whole app, rather than a
+   `motion-reduce:` variant remembered per animated element. Anything using
+   `transition-*`/`animate-*` (the Left to Budget settle, `StateCard`'s
+   loading spin, PR2a's cell borders, T16c's highlight) is covered by this
+   without opting in per component.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ============================================================

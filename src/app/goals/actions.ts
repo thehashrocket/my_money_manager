@@ -15,8 +15,11 @@ export async function createGoalAction(formData: FormData): Promise<void> {
   const { name, targetDollars, carryoverPolicy } = result.data;
   const targetCents = Math.round(targetDollars * 100);
 
+  // Dual-write (T5, D1B/A2): kind is authoritative everywhere else in the
+  // app now, but isSavingsGoal keeps being written so it stays truthful for
+  // anything not yet migrated, until PR3 drops the column entirely.
   db.insert(schema.categories)
-    .values({ name, isSavingsGoal: true, targetCents, carryoverPolicy })
+    .values({ name, isSavingsGoal: true, kind: "fund", targetCents, carryoverPolicy })
     .run();
 
   revalidatePath("/goals");
@@ -38,7 +41,8 @@ export async function updateGoalTargetAction(formData: FormData): Promise<void> 
     .get();
 
   if (!category) throw new CategoryNotFoundError(categoryId);
-  if (!category.isSavingsGoal) throw new NotASavingsGoalError(categoryId);
+  // A2: kind is authoritative, not is_savings_goal (T5).
+  if (category.kind !== "fund") throw new NotASavingsGoalError(categoryId);
 
   db.update(schema.categories)
     .set({ targetCents, updatedAt: new Date() })

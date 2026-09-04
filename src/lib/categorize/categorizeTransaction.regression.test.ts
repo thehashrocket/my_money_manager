@@ -2,10 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import {
-  computeMtdSpent,
-  getEffectiveAllocation,
-} from "@/lib/budget";
+import { computeMtdSpent } from "@/lib/budget";
+import { primeCache } from "@/lib/test/primeCache";
 import { categorizeTransaction } from "./categorizeTransaction";
 import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
 
@@ -68,7 +66,8 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
       .run();
 
     // Prime both months' caches so invalidation has something visible to clear.
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 5, { persist: true });
+    primeCache(handle.db, groceries.id, 2026, 4);
+    primeCache(handle.db, groceries.id, 2026, 5);
     expect(
       readBudget(groceries.id, 2026, 4)?.effectiveAllocationCents,
     ).not.toBeNull();
@@ -116,7 +115,7 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
     ).toBeNull();
 
     // Re-prime May so we can observe undo re-clears it.
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 5, { persist: true });
+    primeCache(handle.db, groceries.id, 2026, 5);
     expect(
       readBudget(groceries.id, 2026, 5)?.effectiveAllocationCents,
     ).not.toBeNull();

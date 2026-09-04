@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeMerchant, extractCardLastFour } from "../normalize";
-import { parseAmountToCents } from "./parseAmount";
+import { parseAmountToCents } from "@/lib/money";
 import type { SimpleFinTransaction } from "./types";
 
 export type MappedRow = {

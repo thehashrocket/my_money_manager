@@ -8,6 +8,7 @@ import { formatCents } from "@/lib/money";
 import { currentMonth } from "@/lib/now";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { TrendChart } from "@/components/ledger/trend-chart";
+import { SummaryStrip, type SummaryStripCell } from "@/components/ledger/summary-strip";
 
 export default async function Home() {
   await connection();
@@ -113,39 +114,29 @@ function AccountTile({ account }: { account: AccountBalance }) {
   );
 }
 
+/**
+ * T13/DS45: renders through the same `SummaryStrip` `/budget/[year]/[month]`
+ * uses, `variant="plain"` — the dashboard hasn't had its own restyle
+ * reviewed yet (§8), so this deliberately keeps today's bordered-card look
+ * rather than importing DS39's ruled surface onto an unreviewed page.
+ */
 function MonthlySummary({ summary }: { summary: MonthViewSummary }) {
-  const cells: [string, number][] = [
-    ["Allocated", summary.allocatedCents],
-    ["Effective", summary.effectiveCents],
-    ["Spent", summary.spentCents],
-    ["Remaining", summary.remainingCents],
+  const cells: SummaryStripCell[] = [
+    { label: "Allocated", cents: summary.allocatedCents },
+    { label: "Effective", cents: summary.effectiveCents },
+    { label: "Spent", cents: summary.spentCents },
+    {
+      label: "Remaining",
+      cents: summary.remainingCents,
+      tone: summary.remainingCents < 0 ? "neg" : summary.remainingCents === 0 ? "zero" : "pos",
+    },
   ];
   return (
     <section>
       <h2 className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
         This month
       </h2>
-      <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-        {cells.map(([label, cents]) => {
-          const isRemaining = label === "Remaining";
-          const tone = isRemaining
-            ? cents < 0
-              ? "text-destructive"
-              : cents === 0
-                ? "text-money-zero"
-                : "text-money-pos"
-            : "";
-          return (
-            <div
-              key={label}
-              className="rounded-md border border-border bg-card px-3 py-2"
-            >
-              <div className="text-xs text-muted-foreground">{label}</div>
-              <div className={`font-medium ${tone}`}>{formatCents(cents)}</div>
-            </div>
-          );
-        })}
-      </div>
+      <SummaryStrip cells={cells} variant="plain" />
     </section>
   );
 }

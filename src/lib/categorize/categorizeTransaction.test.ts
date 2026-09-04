@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { getEffectiveAllocation } from "@/lib/budget";
+import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
+  CategoryArchivedError,
   CategoryNotFoundError,
   ParentAllocationError,
   SavingsGoalCategoryError,
@@ -55,7 +56,9 @@ function seedCategory(
   opts: {
     parentId?: number | null;
     isSavingsGoal?: boolean;
+    kind?: "income" | "expense" | "fund";
     carryoverPolicy?: "none" | "rollover" | "reset";
+    archivedAt?: Date | null;
   } = {},
 ) {
   seq += 1;
@@ -65,11 +68,17 @@ function seedCategory(
       name: `${name}-${seq}`,
       parentId: opts.parentId ?? null,
       isSavingsGoal: opts.isSavingsGoal ?? false,
+      kind: opts.kind ?? "expense",
       carryoverPolicy: opts.carryoverPolicy ?? "none",
+      archivedAt: opts.archivedAt ?? null,
     })
     .returning()
     .all();
   return row;
+}
+
+function primeCache(categoryId: number, year: number, month: number) {
+  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -405,7 +414,7 @@ describe("categorizeTransaction — forward invalidation", () => {
         { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
       ])
       .run();
-    getEffectiveAllocation(handle.db, groceries.id, 2026, 4, { persist: true });
+    primeCache(groceries.id, 2026, 4);
 
     // target is Apr; applyToPast sibling is Feb → earliest = Feb.
     const target = seedTxn({
@@ -448,7 +457,8 @@ describe("categorizeTransaction — forward invalidation", () => {
         { categoryId: household.id, year: 2026, month: 4, allocatedCents: 1000 },
       ])
       .run();
-    getEffectiveAllocation(handle.db, household.id, 2026, 4, { persist: true });
+    primeCache(household.id, 2026, 3);
+    primeCache(household.id, 2026, 4);
 
     // target had household; re-cat to groceries; only Apr (target.date) onward.
     const target = seedTxn({
@@ -499,7 +509,7 @@ describe("categorizeTransaction — forward invalidation", () => {
       .insert(schema.budgetPeriods)
       .values({ categoryId: other.id, year: 2026, month: 4, allocatedCents: 1000 })
       .run();
-    getEffectiveAllocation(handle.db, other.id, 2026, 4, { persist: true });
+    primeCache(other.id, 2026, 4);
 
     const target = seedTxn({ accountId: a.id, batchId: b.id });
 
@@ -578,7 +588,7 @@ describe("categorizeTransaction — rejections", () => {
       }),
     ).toThrow(ParentAllocationError);
 
-    const goal = seedCategory("Emergency", { isSavingsGoal: true });
+    const goal = seedCategory("Emergency", { isSavingsGoal: true, kind: "fund" });
     expect(() =>
       categorizeTransaction(handle.db, {
         transactionId: target.id,
@@ -587,5 +597,53 @@ describe("categorizeTransaction — rejections", () => {
         applyToPast: false,
       }),
     ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(TC22, A2) throws for a kind='fund' category even when isSavingsGoal=0 (drift)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const goal = seedCategory("Drifted Fund", { isSavingsGoal: false, kind: "fund" });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: goal.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(X3) throws CategoryArchivedError for an archived category — the picker's exclusion is client-side only", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const archived = seedCategory("Old Gym", { archivedAt: new Date() });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: archived.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).toThrow(CategoryArchivedError);
+  });
+
+  it("(TC22b, E6) does not throw for a kind='expense' category even when isSavingsGoal=1 (inverse drift)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const cat = seedCategory("Drifted Expense", { isSavingsGoal: true, kind: "expense" });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: cat.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).not.toThrow();
   });
 });

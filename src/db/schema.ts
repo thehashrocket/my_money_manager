@@ -46,6 +46,22 @@ export const categories = sqliteTable(
     parentId: integer("parent_id").references((): AnySQLiteColumn => categories.id, {
       onDelete: "set null",
     }),
+    // 'income' | 'expense' | 'fund' — added by migration 0017. Backfilled from
+    // name (Paycheck/Interest/Reimbursement -> income) and is_savings_goal
+    // (true -> fund); everything else defaults to expense. is_savings_goal
+    // stays a truthful shadow (createGoalAction dual-writes it) until PR3
+    // drops it — see CLAUDE.md rule 6 and TODOS.md.
+    kind: text("kind", { enum: ["income", "expense", "fund"] })
+      .notNull()
+      .default("expense"),
+    // Backfilled alphabetically within each parent by migration 0017.
+    // Ordering only ever compares siblings sharing a parent_id — see the
+    // migration's own comment for why the flat top level (10 group parents +
+    // 3 income leaves + Uncategorized, all parent_id IS NULL) is safe.
+    sortOrder: integer("sort_order").notNull().default(0),
+    // Nullable, no backfill (migration 0017). Matches nothing until PR2b's
+    // archiveCategoryAction exists.
+    archivedAt: integer("archived_at", { mode: "timestamp" }),
     isSavingsGoal: integer("is_savings_goal", { mode: "boolean" })
       .notNull()
       .default(false),

@@ -16,6 +16,13 @@ export type GoalRow = {
   carryoverPolicy: "none" | "rollover" | "reset";
   totalContributedCents: number;
   totalWithdrawnCents: number;
+  /** `totalContributedCents - totalWithdrawnCents` — a sum of PLANNED
+   * `budget_periods.allocated_cents` rows minus real withdrawal
+   * transactions, never a bank balance or a transfer total (B2). An
+   * allocation is an intention: the money may never have actually left the
+   * source account into savings. DS11 keeps this field (PR3 fixes the
+   * underlying math), but `/goals` no longer renders it as a progress bar
+   * or a percent — see `DESIGN.md`'s `/goals` section for why. */
   progressCents: number;
   progressPct: number;
   monthlyBreakdown: MonthlyContribution[];
@@ -27,6 +34,13 @@ export type GoalsView = {
   totalTargetCents: number;
 };
 
+/**
+ * B2/DS11: `progressCents`/`progressPct` are computed from PLANNED
+ * `budget_periods` allocations, not confirmed transfers into savings — see
+ * `GoalRow.progressCents`'s own docstring. This function's math is
+ * unchanged by DS11; only `/goals`' rendering of it changed (the progress
+ * bar and percent-complete UI are gone, per `DESIGN.md`).
+ */
 export function loadGoals(db: Db): GoalsView {
   const goalCategories = db
     .select({
@@ -41,7 +55,8 @@ export function loadGoals(db: Db): GoalsView {
       schema.budgetPeriods,
       eq(schema.budgetPeriods.categoryId, schema.categories.id),
     )
-    .where(eq(schema.categories.isSavingsGoal, true))
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    .where(eq(schema.categories.kind, "fund"))
     .groupBy(schema.categories.id)
     .orderBy(schema.categories.name)
     .all();

@@ -1,5 +1,6 @@
 import { and, desc, eq, gte, isNull, lt, sql, type SQL } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
 
@@ -58,7 +59,7 @@ export function loadTransactions(
 
   if (filter.year !== undefined && filter.month !== undefined) {
     const firstDay = monthBoundary(filter.year, filter.month);
-    const [ny, nm] = nextMonth(filter.year, filter.month);
+    const { year: ny, month: nm } = nextMonthOf(filter.year, filter.month);
     const firstDayNext = monthBoundary(ny, nm);
     predicates.push(gte(schema.transactions.date, firstDay));
     predicates.push(lt(schema.transactions.date, firstDayNext));
@@ -108,11 +109,3 @@ export function loadTransactions(
   });
 }
 
-function nextMonth(year: number, month: number): [number, number] {
-  if (month === 12) return [year + 1, 1];
-  return [year, month + 1];
-}
-
-function monthBoundary(year: number, month: number): string {
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
-}
