@@ -7,6 +7,7 @@ import {
   computeMtdSpent,
   getEffectiveAllocation,
   invalidateForwardRollover,
+  invalidateForwardRolloverMany,
   periodKey,
 } from "./budget";
 import { createTestDb, type TestDbHandle } from "./test/db";
@@ -679,6 +680,61 @@ describe("invalidateForwardRollover", () => {
     // Policy 'none' means no rollover; April effective = allocated only.
     expect(april?.effectiveCents).toBe(1000);
     expect(april?.rolloverCents).toBe(0);
+  });
+});
+
+describe("invalidateForwardRolloverMany (TC28, D8A)", () => {
+  it("clears the same rows for N categories that N single calls would", () => {
+    const a = seedCategory("Gifts", "rollover");
+    const b = seedCategory("Travel", "rollover");
+    const c = seedCategory("Hobbies", "rollover");
+    for (const cat of [a, b, c]) {
+      seedAllocation(cat.id, 2026, 4, 1000);
+      seedAllocation(cat.id, 2026, 5, 1000);
+      primeCache(cat.id, 2026, 4);
+      primeCache(cat.id, 2026, 5);
+    }
+
+    invalidateForwardRolloverMany(handle.db, [a.id, b.id, c.id], 2026, 4);
+
+    const rows = handle.db.select().from(schema.budgetPeriods).all();
+    expect(rows.every((r) => r.effectiveAllocationCents === null)).toBe(true);
+  });
+
+  it("only touches the categories passed, same as calling the single-category function once per id", () => {
+    const a = seedCategory("Gifts", "rollover");
+    const untouched = seedCategory("Travel", "rollover");
+    seedAllocation(a.id, 2026, 4, 1000);
+    seedAllocation(untouched.id, 2026, 4, 2000);
+    primeCache(a.id, 2026, 4);
+    primeCache(untouched.id, 2026, 4);
+
+    invalidateForwardRolloverMany(handle.db, [a.id], 2026, 4);
+
+    const rows = handle.db.select().from(schema.budgetPeriods).all();
+    const aRow = rows.find((r) => r.categoryId === a.id)!;
+    const untouchedRow = rows.find((r) => r.categoryId === untouched.id)!;
+    expect(aRow.effectiveAllocationCents).toBeNull();
+    expect(untouchedRow.effectiveAllocationCents).toBe(2000);
+  });
+
+  it("is a no-op for an empty category list (doesn't throw)", () => {
+    expect(() => invalidateForwardRolloverMany(handle.db, [], 2026, 4)).not.toThrow();
+  });
+
+  it("invalidateForwardRollover (single-category) delegates to it and produces identical results", () => {
+    const cat = seedCategory("Gifts", "rollover");
+    seedAllocation(cat.id, 2026, 3, 5000);
+    seedAllocation(cat.id, 2026, 4, 1000);
+    primeCache(cat.id, 2026, 3);
+    primeCache(cat.id, 2026, 4);
+
+    invalidateForwardRollover(handle.db, cat.id, 2026, 4);
+
+    const rows = handle.db.select().from(schema.budgetPeriods).all();
+    const byMonth = new Map(rows.map((r) => [r.month, r]));
+    expect(byMonth.get(3)?.effectiveAllocationCents).toBe(5000);
+    expect(byMonth.get(4)?.effectiveAllocationCents).toBeNull();
   });
 });
 

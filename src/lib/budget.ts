@@ -1,4 +1,4 @@
-import { and, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import { monthBoundary, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 
@@ -200,11 +200,28 @@ export function invalidateForwardRollover(
   fromYear: number,
   fromMonth: number,
 ): void {
+  invalidateForwardRolloverMany(db, [categoryId], fromYear, fromMonth);
+}
+
+/**
+ * D8A: batched form of {@link invalidateForwardRollover} — one UPDATE
+ * across every category rather than one per category. `copyPreviousMonth`
+ * (T16c) can touch 40 categories in a single copy; the single-category
+ * function now delegates here so there is one implementation of the month
+ * predicate rather than two that could drift.
+ */
+export function invalidateForwardRolloverMany(
+  db: AnyDb,
+  categoryIds: number[],
+  fromYear: number,
+  fromMonth: number,
+): void {
+  if (categoryIds.length === 0) return;
   db.update(schema.budgetPeriods)
     .set({ effectiveAllocationCents: null })
     .where(
       and(
-        eq(schema.budgetPeriods.categoryId, categoryId),
+        inArray(schema.budgetPeriods.categoryId, categoryIds),
         sql`(${schema.budgetPeriods.year} > ${fromYear} OR (${schema.budgetPeriods.year} = ${fromYear} AND ${schema.budgetPeriods.month} >= ${fromMonth}))`,
       ),
     )

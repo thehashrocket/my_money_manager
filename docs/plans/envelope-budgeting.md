@@ -2168,62 +2168,62 @@ PR2b  Lane I:  S12                         (single lane)
 
 ### PR1b — the surface
 
-- [ ] **T11 (P1, human: ~4h / CC: ~35min)** — UI — Left to Budget card, five states incl. the `plannedIncome === 0` guard, 240ms success settle
+- [x] **T11 (P1, human: ~4h / CC: ~35min)** — UI — Left to Budget card, five states incl. the `plannedIncome === 0` guard, 240ms success settle
   - Surfaced by: DS6′ — a virgin month satisfies `0 − 0 − 0` and renders "every dollar has a job" before the user types anything; prior learning `zero-based-budget-empty-state-false-success` (9/10)
   - Files: `src/components/ledger/left-to-budget.tsx`
   - Verify: TC19; all five states, both themes
-- [ ] **T12 (P1, human: ~4h / CC: ~40min)** — UI — restyle `/budget/[year]/[month]` fully to Ledger Paper tokens; bands, income section, FUNDS (conditional), **`Uncategorized` last-under-hairline and conditional (DS26)**, **per-band `Σ planned` subtotal rows (DS27)**
+- [x] **T12 (P1, human: ~4h / CC: ~40min)** — UI — restyle `/budget/[year]/[month]` fully to Ledger Paper tokens; bands, income section, FUNDS (conditional), **`Uncategorized` last-under-hairline and conditional (DS26)**, **per-band `Σ planned` subtotal rows (DS27)**
   - Surfaced by: DS9 — 0 Ledger Paper tokens against 35 shadcn defaults; A1; A6; X5; **DS26**; **DS27 — the headline was an assertion with no on-screen derivation**; prior learning `mm-design-system-documented-not-adopted` (10/10)
   - **Also carries DS44's structural a11y** (split out of T23): `<tbody>` per band and group, `<th scope="rowgroup">` headings, category link as `<th scope="row">`, `<caption class="sr-only">`, DS27's subtotals as `<tfoot>`/`scope="row"`, DS26's hairline `aria-hidden`. PR1b is the merge that restructures the table; it ships that structure readable
   - **Also carries DS43's mobile ledger list** — compact rows under the same band/group headings as desktop, replacing 46 stacked `EnvelopeCard`s; both renderers read `resolveRowDisplay`
   - Files: `src/app/budget/[year]/[month]/page.tsx`, `src/components/ledger/`
   - Verify: visual against variant-C **plus §15's correction list — the mockup predates DS26/DS27/DS39 and does not show subtotals**; no `bg-card`/`border-border`/`text-muted-foreground`/`rounded-md` remain; VoiceOver reads band → group → row without losing column meaning at the income boundary; at 375px the list is scannable without 46 card flaps
-- [ ] **T13a (P2, human: ~15min / CC: ~3min)** — UI — `SummaryStrip` grid becomes `grid-cols-2 lg:grid-cols-5`; drop the `sm:grid-cols-3` step
+- [x] **T13a (P2, human: ~15min / CC: ~3min)** — UI — `SummaryStrip` grid becomes `grid-cols-2 lg:grid-cols-5`; drop the `sm:grid-cols-3` step
   - Surfaced by: DS28 — at 3 columns the five cells break DS2's matched-pair reading and put `Received` beside `Planned spending`; 2 columns preserves the pairs, so the middle breakpoint was worse than the one below it
   - Files: `src/components/ledger/summary-strip.tsx`
   - Verify: pairs read correctly at 375px, 768px and 1280px
-- [ ] **T13 (P1, human: ~3h / CC: ~30min)** — UI — extract `SummaryStrip` (`cells[]` contract), named tokens; **DS45: `variant="ledger" | "plain"` so the dashboard is not half-restyled**; **DS39: one ruled `--bg-raised` strip with `--rule-faint` dividers, not five bordered cards**; **DS42: all five `DESIGN.md` updates**
+- [x] **T13 (P1, human: ~3h / CC: ~30min)** — UI — extract `SummaryStrip` (`cells[]` contract), named tokens; **DS45: `variant="ledger" | "plain"` so the dashboard is not half-restyled**; **DS39: one ruled `--bg-raised` strip with `--rule-faint` dividers, not five bordered cards**; **DS42: all five `DESIGN.md` updates**
   - Surfaced by: DS10 — the `sm:grid-cols-4` grid orphans a cell at five; `DESIGN.md`'s own two-use threshold now exceeded; **DS39 — five bordered boxes under a headline is the dashboard-card mosaic App UI rules name, and this page uses no `--rule-*` token at all**; **DS42 — the plan named 2 `DESIGN.md` edits and invalidates 5**
   - **DS42 — the full `DESIGN.md` list:** `:144` (SummaryStrip — reverses "don't extract yet"), `:150` (`RemainingCell` → `resolveRowDisplay`), `:169-171` (EnvelopeCard fills — **already stale today**: the doc says `bg-amber-500`/`bg-destructive`, the code at `envelope-card.tsx:50-54` uses tokens; and DS40 changes the values again), `:191` (StateCard — reverses "inline them for now"), plus a **new motion section** (DS41). Prior learning `mm-design-system-documented-not-adopted` (10/10) is about exactly this drift
   - Files: `src/components/ledger/summary-strip.tsx`, `src/app/page.tsx`, `DESIGN.md`
   - Verify: dashboard and budget render identical figures from one component; no `border`/`rounded` on individual cells; `grep -n 'bg-amber-500\|bg-destructive' DESIGN.md` returns nothing
-- [ ] **T14 (P1, human: ~2h / CC: ~20min)** — UI — `StateCard` shell (`∅`/`◐`/`!`/`✓`), used by every PR1b empty and error state; update `DESIGN.md:191`; **`loading.tsx` ships here too (DS34)**
+- [x] **T14 (P1, human: ~2h / CC: ~20min)** — UI — `StateCard` shell (`∅`/`◐`/`!`/`✓`), used by every PR1b empty and error state; update `DESIGN.md:191`; **`loading.tsx` ships here too (DS34)**
   - Surfaced by: C5 — `DESIGN.md` says "inline them for now" and there has been exactly one for months; PR1b needs five more
   - Surfaced by (DS34): `src/app/sync/error.tsx` is the app's only `error.tsx` or `loading.tsx`; PR1b otherwise restyles the page and still flashes blank on the app's heaviest read
   - Files: `src/components/ledger/state-card.tsx`, `src/app/budget/[year]/[month]/loading.tsx`, `DESIGN.md`
   - Verify: all six specified states render through it; a throttled cold load shows `◐`, not a blank page
-- [ ] **T15 (P1, human: ~2h / CC: ~25min)** — UI — amber remap and contrast fixes; **DS40's warn/over split**; **DS41's motion tokens + one global reduced-motion rule**
+- [x] **T15 (P1, human: ~2h / CC: ~25min)** — UI — amber remap and contrast fixes; **DS40's warn/over split**; **DS41's motion tokens + one global reduced-motion rule**
   - Surfaced by: DS8′/DS13 — raw `--accent-amber` on `--paper-1` is ≈2.4:1, under the 3:1 large-text floor, and collides with `BacklogBanner` directly above; **DS40 — amber carried five meanings and DS8′ would have made 80% and 120% render identically on the same bar**; **DS41 — §8 claimed one motion while §5.3 specified four, with two durations from nowhere and reduced-motion honored once**
   - Files: `src/components/ledger/left-to-budget.tsx`, `src/components/ledger/envelope-card.tsx`, `src/lib/budget/resolveRowDisplay.ts`, `src/app/globals.css`, `src/app/budget/[year]/[month]/page.tsx`, `DESIGN.md`
   - Verify: contrast check both themes; `> 0` before month start renders neutral, not amber; an 80% and a 120% envelope are visually distinguishable; reduced-motion disables all four motions from one rule
-- [ ] **T16 (P1, human: ~3h / CC: ~30min)** — safety — F1 banner + `setCategoryKindAction` with X1's exception, returning state; **DS32's confirmation dialog (concrete transaction count + date range, named primary button, inline failure)**; `error.tsx`
+- [x] **T16 (P1, human: ~3h / CC: ~30min)** — safety — F1 banner + `setCategoryKindAction` with X1's exception, returning state; **DS32's confirmation dialog (concrete transaction count + date range, named primary button, inline failure)**; `error.tsx`
   - Surfaced by: DS22 + **X1 — the CTA refuses exactly the categories it exists to fix**; A7 — the route has no error boundary and `sync/error.tsx` is the app's only one; **DS32 — an irreversible action (§10 O1) behind a one-clause "a confirmation", on a surface with no dialog vocabulary beyond `AllocateFormTrigger`**
   - Files: `src/app/budget/[year]/[month]/page.tsx`, `error.tsx`, `src/lib/budget/setCategoryKind.ts`, `src/app/budget/actions.ts`
   - Verify: TC23, TC23b; a validation failure renders inline in the dialog, not a page crash and not a toast; the dialog shows a real count and range, not a generic warning
-- [ ] **T16b (P1, human: ~2h / CC: ~20min)** — UI — DS30's first-run `∅` StateCard **with DS36's backlog line and secondary `/categorize` action**; delete the unreachable `sections.length === 0` branch; retarget the `plannedIncome === 0` headline CTA at the Allocate dialog (DS31); **DS37's caption rewrite (reads `loadAccountBalances`)**
+- [x] **T16b (P1, human: ~2h / CC: ~20min)** — UI — DS30's first-run `∅` StateCard **with DS36's backlog line and secondary `/categorize` action**; delete the unreachable `sections.length === 0` branch; retarget the `plannedIncome === 0` headline CTA at the Allocate dialog (DS31); **DS37's caption rewrite (reads `loadAccountBalances`)**
   - Surfaced by: **DS30 — after `0017`'s taxonomy seed the old empty branch can never fire, and the actual day-one screen (50 categories, zero allocations) had no state at all**; **DS31 — the headline CTA was specified as "focuses the first input", which does not exist until PR2a**; **DS36 — 498 uncategorized rows make every `Spent` figure low and the page never said so**; **DS37 — the caption argued against the rail total while the rail total was on screen**
   - Files: `src/app/budget/[year]/[month]/page.tsx`, `src/components/ledger/state-card.tsx`, `src/components/ledger/left-to-budget.tsx`
   - Verify: TC37; a fresh month renders the first-run card, its primary button opens a working dialog, and the backlog line shows the month-scoped count
-- [ ] **T16c (P1, human: ~2h / CC: ~20min)** — UX — **`copyPreviousMonth` moved forward from T20 (DS31)**: `src/lib/budget/copyMonth.ts`, the action, the `∅` primary action and the `btn-outline` beside `MonthNav`, sonner result
+- [x] **T16c (P1, human: ~2h / CC: ~20min)** — UX — **`copyPreviousMonth` moved forward from T20 (DS31)**: `src/lib/budget/copyMonth.ts`, the action, the `∅` primary action and the `btn-outline` beside `MonthNav`, sonner result
   - Surfaced by: **DS31 — DS7's empty-month escape hatch was PR1b UI over PR2a machinery**; it has no dependency on `<MonthEditor>`, and without it PR1b costs 46 dialogs to fill a month, for the full real month X6 schedules before PR2b. **E7 — DS31 moved the function but not its schema dependency: §6.3's pipeline joins `categories.archived_at IS NULL` (DS12) and TC24 asserts the skip, against a column PR2a was scheduled to add. `archived_at` now ships in `0017`, so the join parses and TC24 runs here**
   - The archived filter matches nothing until PR2b's `archiveCategoryAction` exists. That is correct, not a stub — do not drop the join or hardcode `skippedArchived: 0`, or DS12's guarantee ("archive and copy silently undo each other without it") becomes a promise for a later merge to keep.
   - **Sequencing note:** this touches `src/app/budget/[year]/[month]/page.tsx`, which T12 rewrites wholesale. Run after T12 in the same worktree (see §12's Lane D/G conflict flag).
   - Files: `src/lib/budget/copyMonth.ts` + test, `src/app/budget/actions.ts`, `src/app/budget/[year]/[month]/`, `src/lib/budget.ts`
   - Verify: TC8, **TC24 (now runnable — E7)**, TC28
-- [ ] **T17b (P2, human: ~20min / CC: ~5min)** — design system — add `--text-*: initial` to `@theme`, closing the type scale (DS46). **Run after T12**
+- [x] **T17b (P2, human: ~20min / CC: ~5min)** — design system — add `--text-*: initial` to `@theme`, closing the type scale (DS46). **Run after T12**
   - Surfaced by: DS46 — `globals.css:77` claims the scale replaces Tailwind's defaults; `@theme` merges, so anything above `--text-3xl` silently falls back. Measured: **one** call site in `src/` (`page.tsx:115`), which T12 deletes
   - Files: `src/app/globals.css`
   - Verify: `grep -rE "text-(4xl|5xl|6xl|7xl|8xl|9xl)" src/` returns nothing; `pnpm build` clean
-- [ ] **T17c (P2, human: ~3h / CC: ~30min)** — states — `error.tsx` + `loading.tsx` for every remaining route, through `StateCard` (DS47 + E10)
+- [x] **T17c (P2, human: ~3h / CC: ~30min)** — states — `error.tsx` + `loading.tsx` for every remaining route, through `StateCard` (DS47 + E10)
   - Surfaced by: DS47 / prior learning `mm-design-system-documented-not-adopted` (10/10) — every route but `/sync` and (after DS34) `/budget/[year]/[month]` shows Next's default error UI on a throw and a blank page on a slow query
   - **E10 — 17 files, not 19.** DS47's list included `/budget`, which is nine lines of `await connection()` + `redirect()` with no data fetch: a `loading.tsx` there flashes and redirects, an `error.tsx` catches nothing actionable. The glob was also short `/sync/loading.tsx` (that route has an `error.tsx` already), which is why DS47's prose correctly counted 10 missing loading files while the glob produced 9.
   - Files: `src/app/{,categorize/,goals/,import/,import/preview/[id]/,import/success/[batchId]/,subscriptions/,transactions/}{error,loading}.tsx` (16) + `src/app/sync/loading.tsx` (1) — **17 files across 9 routes**
   - Verify: every route renders `!` on a thrown error and `◐` on a throttled load; no route falls back to Next's default UI; `/budget` still redirects without a flash
-- [ ] **T17d (P3, human: ~1h / CC: ~10min)** — design system — audit amber's four remaining meanings app-wide after DS40 (DS48)
+- [x] **T17d (P3, human: ~1h / CC: ~10min)** — design system — audit amber's four remaining meanings app-wide after DS40 (DS48)
   - Surfaced by: DS48 — DS40 resolved the one pair that rendered identically; amber still means backlog-exists (`BacklogBanner`), categorize-count (Spine chip), late-assigning (headline) and `stale` (PR2a cell). Distinguishable today, enforced by nothing
   - Files: audit `src/`; record findings in `DESIGN.md`'s color section
   - Verify: a written inventory of every `--accent-amber` use and what it means
-- [ ] **T17 (P2, human: ~2h / CC: ~20min)** — `/goals` — DS11 replacement copy, income card, hide progress bar / percent / remaining-to-target
+- [x] **T17 (P2, human: ~2h / CC: ~20min)** — `/goals` — DS11 replacement copy, income card, hide progress bar / percent / remaining-to-target
   - Surfaced by: §2 B2; DS11(ii) — a relabel alone leaves `progressPct` asserting a fact about money that may never have moved
   - Files: `src/app/goals/page.tsx`, `src/lib/goals/loadGoals.ts`, `src/components/ledger/`
   - Verify: subhead no longer claims progress; income over-plan renders positive

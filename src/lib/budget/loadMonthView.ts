@@ -44,6 +44,10 @@ export type IncomeLeafRow = {
   receivedCents: number;
   /** `received - planned`; negative means short. */
   varianceCents: number;
+  /** Pending-only subset of this month's rows (DS33's `+p` badge / coverage check). */
+  pendingCents: number;
+  /** Whether a `budget_periods` row exists for this leaf this month (DS14). */
+  hasAllocation: boolean;
 };
 
 /** A `kind='fund'` category's row on the FUNDS band (A6), read-only. */
@@ -221,9 +225,9 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
 
   const incomeRows: IncomeLeafRow[] = incomeLeaves.map((leaf) => {
     const plannedCents = allocatedByCategoryId.get(leaf.id) ?? 0;
+    const pendingCents = pendingTotalByCategoryId.get(leaf.id) ?? 0;
     // TS2: pending EXCLUDED, sum NOT negated (computeMtdReceived's convention).
-    const receivedCents =
-      (totalByCategoryId.get(leaf.id) ?? 0) - (pendingTotalByCategoryId.get(leaf.id) ?? 0);
+    const receivedCents = (totalByCategoryId.get(leaf.id) ?? 0) - pendingCents;
     return {
       categoryId: leaf.id,
       name: leaf.name,
@@ -231,6 +235,8 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       plannedCents,
       receivedCents,
       varianceCents: receivedCents - plannedCents,
+      pendingCents,
+      hasAllocation: hasPeriodRow.has(leaf.id),
     };
   });
 

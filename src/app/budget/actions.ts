@@ -2,10 +2,13 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { z } from "zod";
 import { db } from "@/db";
 import { validateAllocateInput } from "@/lib/budget/validateAllocateInput";
 import { upsertAllocation } from "@/lib/budget/upsertAllocation";
 import { AmountParseError, parseAmountToCents } from "@/lib/money";
+import { CategoryKindChangeRefusedError, setCategoryKind } from "@/lib/budget/setCategoryKind";
+import { copyPreviousMonth, type CopyPreviousMonthResult } from "@/lib/budget/copyMonth";
 
 /**
  * Create or update a single leaf category's allocation for a given month.
@@ -53,4 +56,65 @@ export async function upsertBudgetAllocationAction(
   revalidatePath("/budget");
   revalidatePath(`/budget/${year}/${month}`);
   redirect(`/budget/${year}/${month}`);
+}
+
+const setCategoryKindInputSchema = z.object({
+  categoryId: z.coerce.number().int().positive(),
+  kind: z.enum(["income", "expense", "fund"]),
+});
+
+/**
+ * A7: returns state instead of throwing. DS32's confirmation dialog renders
+ * a refusal inline (with the same category the user was looking at, still
+ * open) rather than losing that context to `error.tsx` — that boundary
+ * stays as the backstop for anything genuinely unexpected, same posture as
+ * `/sync`'s actions.
+ */
+export type SetCategoryKindActionState =
+  | { status: "idle" }
+  | { status: "ok"; categoryId: number }
+  | { status: "error"; message: string };
+
+export async function setCategoryKindAction(
+  _prev: SetCategoryKindActionState,
+  formData: FormData,
+): Promise<SetCategoryKindActionState> {
+  const parsed = setCategoryKindInputSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
+    return { status: "error", message: `Invalid reclassify request — ${issues}` };
+  }
+
+  try {
+    setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
+  } catch (err) {
+    if (err instanceof CategoryKindChangeRefusedError) {
+      return { status: "error", message: err.message };
+    }
+    return { status: "error", message: err instanceof Error ? err.message : String(err) };
+  }
+
+  revalidatePath("/budget");
+  revalidatePath("/budget/[year]/[month]", "page");
+  return { status: "ok", categoryId: parsed.data.categoryId };
+}
+
+const copyPreviousMonthInputSchema = z.object({
+  year: z.coerce.number().int().min(2000).max(2100),
+  month: z.coerce.number().int().min(1).max(12),
+});
+
+/**
+ * T16c/DS7 — called directly from a client transition (not a `<form
+ * action>`), same pattern as `bulkCategorizeMerchantAction` on
+ * `/categorize`: the caller wants the real `{copied, skipped,
+ * skippedArchived}` counts to build its own Sonner toast message, not a
+ * generic ok/error union.
+ */
+export async function copyPreviousMonthAction(year: number, month: number): Promise<CopyPreviousMonthResult> {
+  const parsed = copyPreviousMonthInputSchema.parse({ year, month });
+  const result = copyPreviousMonth(db, parsed.year, parsed.month);
+  revalidatePath("/budget");
+  revalidatePath("/budget/[year]/[month]", "page");
+  return result;
 }

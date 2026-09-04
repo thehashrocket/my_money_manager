@@ -2,6 +2,7 @@ import { connection } from "next/server";
 import { db } from "@/db";
 import { loadGoals, type GoalRow, type MonthlyContribution } from "@/lib/goals/loadGoals";
 import { formatCents } from "@/lib/money";
+import { StateCard } from "@/components/ledger/state-card";
 import { createGoalAction, updateGoalTargetAction } from "./actions";
 
 export default async function GoalsPage() {
@@ -12,10 +13,21 @@ export default async function GoalsPage() {
     <main className="mx-auto max-w-3xl p-6 space-y-8 [font-variant-numeric:tabular-nums]">
       <div className="space-y-1">
         <h1 className="font-display text-xl font-semibold">Savings Goals</h1>
+        {/* DS11(i): the subhead used to be the exact claim ("track
+            progress") this whole change exists to stop making. */}
         <p className="text-sm text-muted-foreground">
-          Track progress toward your financial targets.
+          Planned contributions toward each target. These are amounts you budgeted, not transfers.
         </p>
       </div>
+
+      {/* DS11: a relabel alone leaves the progress bar and percent-complete
+          UI still asserting a fact about money that may never have moved
+          (B2) — this says so plainly instead. */}
+      <StateCard
+        variant="error"
+        title="Progress tracking is paused — see the note above."
+        className="text-left"
+      />
 
       <section className="space-y-3">
         <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
@@ -29,10 +41,7 @@ export default async function GoalsPage() {
       ) : (
         <>
           {view.totalTargetCents > 0 && (
-            <SummaryStrip
-              progressCents={view.totalProgressCents}
-              targetCents={view.totalTargetCents}
-            />
+            <PlannedTotalLine plannedCents={view.totalProgressCents} targetCents={view.totalTargetCents} />
           )}
           <section className="space-y-4">
             <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
@@ -108,42 +117,16 @@ function CreateGoalForm() {
   );
 }
 
-function SummaryStrip({
-  progressCents,
-  targetCents,
-}: {
-  progressCents: number;
-  targetCents: number;
-}) {
-  const pct = Math.min(100, Math.max(0, (progressCents / targetCents) * 100));
+/** DS11: replaces the old bar-plus-ratio `SummaryStrip` — a plain two-number line, no bar. */
+function PlannedTotalLine({ plannedCents, targetCents }: { plannedCents: number; targetCents: number }) {
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3 space-y-2">
-      <div className="flex justify-between text-sm">
-        <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-          Overall progress
-        </span>
-        <span className="font-mono text-sm">
-          {formatCents(progressCents)} / {formatCents(targetCents)}
-        </span>
-      </div>
-      <ProgressBar pct={pct} />
-    </div>
-  );
-}
-
-function ProgressBar({ pct }: { pct: number }) {
-  const color =
-    pct >= 100
-      ? "bg-emerald-500"
-      : pct >= 80
-        ? "bg-amber-500"
-        : "bg-primary";
-  return (
-    <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-      <div
-        className={`h-full rounded-full transition-all ${color}`}
-        style={{ width: `${Math.round(pct)}%` }}
-      />
+    <div className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+        Planned across all goals
+      </span>
+      <span className="font-mono text-sm">
+        {formatCents(plannedCents)} / {formatCents(targetCents)}
+      </span>
     </div>
   );
 }
@@ -165,18 +148,8 @@ function GoalCard({ goal }: { goal: GoalRow }) {
             {formatCents(goal.progressCents)}
           </div>
           <div className="font-mono text-xs text-muted-foreground">
-            of {formatCents(goal.targetCents)}
+            planned of {formatCents(goal.targetCents)}
           </div>
-        </div>
-      </div>
-
-      <div className="space-y-1">
-        <ProgressBar pct={goal.progressPct} />
-        <div className="flex justify-between text-xs text-muted-foreground font-mono">
-          <span>{Math.round(goal.progressPct)}% complete</span>
-          {goal.progressCents < goal.targetCents && (
-            <span>{formatCents(goal.targetCents - goal.progressCents)} remaining</span>
-          )}
         </div>
       </div>
 

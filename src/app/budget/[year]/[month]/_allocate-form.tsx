@@ -22,6 +22,13 @@ type AllocateFormTriggerProps = {
   month: number;
   allocation: LeafAllocation | null;
   carryoverPolicy: "none" | "rollover" | "reset";
+  /** DS30/DS31: the first-run card and the `plannedIncome === 0` headline both
+   * need a CTA that opens THIS category's Allocate dialog, styled as a
+   * primary call-to-action rather than a row's small "Allocate" button.
+   * Overriding the trigger element/label re-skins the same dialog + form
+   * rather than needing a second, state-synced dialog instance. */
+  triggerElement?: React.ReactElement;
+  triggerLabel?: React.ReactNode;
 };
 
 /**
@@ -37,8 +44,16 @@ type AllocateFormTriggerProps = {
  * the mobile breakpoint must hit 16px (TODOS.md v0.3.0 ship review P3).
  */
 export function AllocateFormTrigger(props: AllocateFormTriggerProps) {
-  const { categoryId, categoryName, year, month, allocation, carryoverPolicy } =
-    props;
+  const {
+    categoryId,
+    categoryName,
+    year,
+    month,
+    allocation,
+    carryoverPolicy,
+    triggerElement,
+    triggerLabel,
+  } = props;
   const allocatedCents = allocation?.allocatedCents ?? 0;
   const rolloverCents =
     carryoverPolicy === "rollover" ? (allocation?.rolloverCents ?? 0) : 0;
@@ -57,8 +72,8 @@ export function AllocateFormTrigger(props: AllocateFormTriggerProps) {
 
   return (
     <Dialog>
-      <DialogTrigger render={<Button variant="outline" size="sm" />}>
-        Allocate
+      <DialogTrigger render={triggerElement ?? <Button variant="outline" size="sm" />}>
+        {triggerLabel ?? "Allocate"}
       </DialogTrigger>
       <DialogContent aria-labelledby={titleId} aria-describedby={descId}>
         <DialogHeader>
