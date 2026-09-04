@@ -76,12 +76,22 @@ export function CategoryMenu({
   isGroup = false,
 }: CategoryMenuProps) {
   const [activeDialog, setActiveDialog] = useState<"rename" | "archive" | null>(null);
+  const [moveAnnouncement, setMoveAnnouncement] = useState("");
   const [isPending, startTransition] = useTransition();
 
   function moveTo(direction: "up" | "down") {
     startTransition(async () => {
       const result = await moveCategoryAction(categoryId, direction);
-      if (result.status === "error") toast.error(result.message);
+      if (result.status === "error") {
+        toast.error(result.message);
+        return;
+      }
+      // DS16: "an aria-live announcement of the new position" — the
+      // commit-only Left to Budget region (T23) covers allocation edits,
+      // not reorder, so this is its own small live region rather than
+      // routing an unrelated event through that one.
+      const { newPosition, siblingCount } = result.result;
+      setMoveAnnouncement(`${categoryName} is now position ${newPosition + 1} of ${siblingCount}.`);
     });
   }
 
@@ -124,10 +134,24 @@ export function CategoryMenu({
         <DropdownMenuContent>
           <DropdownMenuItem onClick={() => setActiveDialog("rename")}>Rename…</DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem disabled={!canMoveUp} onClick={() => moveTo("up")}>
+          {/* DS16: "44×44 hit area" — min-h-11 (44px) rather than the
+              shared DropdownMenuItem's default compact padding, since
+              reorder is the one menu action DS16 specifically calls out
+              a touch-target size for; every other item stays list-dense. */}
+          <DropdownMenuItem
+            className="min-h-11"
+            disabled={!canMoveUp}
+            aria-label={`Move ${categoryName} up`}
+            onClick={() => moveTo("up")}
+          >
             Move up
           </DropdownMenuItem>
-          <DropdownMenuItem disabled={!canMoveDown} onClick={() => moveTo("down")}>
+          <DropdownMenuItem
+            className="min-h-11"
+            disabled={!canMoveDown}
+            aria-label={`Move ${categoryName} down`}
+            onClick={() => moveTo("down")}
+          >
             Move down
           </DropdownMenuItem>
           {isGroup ? null : (
@@ -152,6 +176,10 @@ export function CategoryMenu({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <div role="status" aria-live="polite" className="sr-only">
+        {moveAnnouncement}
+      </div>
 
       <RenameDialog
         open={activeDialog === "rename"}
