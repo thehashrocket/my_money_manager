@@ -2131,7 +2131,7 @@ PR2b  Lane I:  S12                         (single lane)
   - While here: `page.tsx:78`'s `shiftMonth(year, month, delta)` is a sixth month-arithmetic variant. It is correct, but T12 rewrites that file anyway — fold it into this sweep rather than leaving a seventh home.
   - Files: `src/lib/budget/monthOfIso.ts` + test, `src/lib/budget.ts`, `src/lib/budget/loadMonthView.ts`, `src/lib/trends/loadMonthlyTrends.ts`, `src/lib/categorize/loadTransactions.ts`, `src/app/budget/[year]/[month]/page.tsx`
   - Verify: **TC41**; `pnpm test` unchanged otherwise
-- [ ] **T4 (P1, human: ~1h / CC: ~15min)** — money — move `parseAmountToCents` to `src/lib/money.ts`, add `$`/`,` stripping, rename `SimpleFinAmountError` → `AmountParseError`, use it in `upsertBudgetAllocationAction`
+- [x] **T4 (P1, human: ~1h / CC: ~15min)** — money — move `parseAmountToCents` to `src/lib/money.ts`, add `$`/`,` stripping, rename `SimpleFinAmountError` → `AmountParseError`, use it in `upsertBudgetAllocationAction`
   - Surfaced by: C4 — `Math.round(Number(dollars) * 100)` at `budget/actions.ts:27`, against `CLAUDE.md` rule 1
   - Files: `src/lib/money.ts`, `src/lib/simplefin/parseAmount.ts` (removed), `src/app/budget/actions.ts`, simplefin importers
   - Verify: TC16b; existing `parseAmount.test.ts` cases green from the new home

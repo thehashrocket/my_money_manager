@@ -2,7 +2,7 @@ import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
-import { parseAmountToCents } from "./parseAmount";
+import { parseAmountToCents } from "@/lib/money";
 
 type Db = typeof defaultDb;
 
