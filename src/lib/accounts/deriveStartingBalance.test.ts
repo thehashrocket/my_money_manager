@@ -152,4 +152,27 @@ describe("deriveStartingBalance", () => {
       reason: "running balance column does not form a consistent chain",
     });
   });
+
+  // A same-day paycheck-and-bill pair nets to zero, so the running-balance
+  // chain validates in BOTH file order and reversed — nothing about the math
+  // says which is true. Picking "forward" anyway would let Star One's export
+  // order (not evidence) decide a real dollar figure. Verified: these two
+  // rows produce anchors $500 apart depending only on which order they're fed.
+  it("refuses when both directions validate but disagree on the anchor", () => {
+    const paycheckThenBill = [
+      row("2026-04-16", 50000, 150000),
+      row("2026-04-16", -50000, 100000),
+    ];
+    expect(deriveStartingBalance(paycheckThenBill)).toEqual({
+      ok: false,
+      reason:
+        "running balance validates in both directions with disagreeing anchors — refusing to guess",
+    });
+    // Same ambiguity, either way it's handed in.
+    expect(deriveStartingBalance([...paycheckThenBill].reverse())).toEqual({
+      ok: false,
+      reason:
+        "running balance validates in both directions with disagreeing anchors — refusing to guess",
+    });
+  });
 });
