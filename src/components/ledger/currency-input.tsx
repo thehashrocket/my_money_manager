@@ -196,6 +196,15 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
 
     if (committedCents !== null && cents === committedCents) {
       setDraftBoth(formatDollars(cents));
+      // Reachable via the retry queue above: an in-flight commit for a
+      // DIFFERENT value can fail (leaving `status`/`error` on "failed")
+      // while a queued edit that lands back on the already-committed value
+      // takes this no-op branch — clear the stale failure treatment for a
+      // field whose displayed value already matches the server.
+      if (status === "failed") {
+        setStatus("idle");
+        setError(null);
+      }
       return; // unchanged — no network round trip
     }
 
