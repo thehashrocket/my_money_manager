@@ -123,6 +123,17 @@ export default async function SuccessPage({
             <dd className="font-mono text-sm [font-variant-numeric:tabular-nums]">
               {formatCents(anchored.startingBalanceCents)} as of{" "}
               {anchored.startingBalanceDate}
+              {batch.priorStartingBalanceCents !== null &&
+                batch.priorStartingBalanceDate !== null && (
+                  <span className="block text-xs text-zinc-500">
+                    was {formatCents(batch.priorStartingBalanceCents)} as of{" "}
+                    {batch.priorStartingBalanceDate} — use the anchor form on{" "}
+                    <Link href="/import" className="underline">
+                      /import
+                    </Link>{" "}
+                    to revert
+                  </span>
+                )}
             </dd>
           </div>
         )}
