@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { loadMonthView } from "./loadMonthView";
@@ -103,24 +103,14 @@ function seedTxn(opts: {
 }
 
 /**
- * The :memory: migrator seeds 6 default leaf categories (Uncategorized +
- * Groceries/Gas/Dining/Utilities/Misc) with parent_id = NULL. Tests that
- * want to assert exact structure delete these first so they start clean.
+ * The :memory: migrator seeds all 50 real categories (migrations 0001/0002/
+ * 0005), plus migration 0017's 10 group parents. Tests that want to assert
+ * exact structure delete every one of them first so they start clean —
+ * naming a fixed subset (the pre-0017 shape) drifted silently once 0017 gave
+ * most of the rest real parents instead of leaving them all in one bucket.
  */
 function clearSeedCategories() {
-  const seeds = [
-    "Groceries",
-    "Gas",
-    "Dining",
-    "Utilities",
-    "Misc",
-  ];
-  for (const name of seeds) {
-    handle.db
-      .delete(schema.categories)
-      .where(eq(schema.categories.name, name))
-      .run();
-  }
+  handle.db.delete(schema.categories).where(ne(schema.categories.name, "Uncategorized")).run();
   // Uncategorized has a BEFORE DELETE trigger — leave it; callers can filter.
 }
 
