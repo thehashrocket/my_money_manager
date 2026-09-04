@@ -6,7 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.12.1] - 2026-09-03
+## [0.12.2] - 2026-09-03
+
+### Fixed
+- **The dashboard's "Spending — Last 6 Months" chart tooltip could cover its own legend, and hovering a bar showed a stark white box behind it.** A month with many categories grew the tooltip tall enough to reach down into the legend below the chart; the tooltip now caps itself at 5 categories plus a "+N more" line and stays pinned near the top of the plot area. The hover-highlight rectangle behind the active bar also now uses the chart's own subtle border color instead of Recharts' default light-theme fill, which read as a jarring white box against this app's dark background.
+- **A same-day transaction pair that nets to zero (a paycheck and a bill, say) could anchor an account's starting balance on the wrong figure**, decided only by which order Star One happened to write the two rows in its export — the two orders are mathematically indistinguishable, so the app is no longer forced to guess between them. Importing a file like this now leaves the existing anchor alone instead of silently picking one.
+- **A CSV import moving an account's starting-balance anchor now does so atomically with the rest of the import**, so a failure partway through can't leave the anchor moved but the imported rows missing (or vice versa). The account's prior anchor value is also recorded on the batch, so a bad automatic move can be corrected from the import success page without having to guess what the old number was. A derived balance or date outside sane bounds (including an accidental future date) is now declined rather than written, and — when a real import problem does cause the anchor to be declined — that's now shown on the import success page instead of failing silently.
 
 ### Fixed
 - **The category picker's search box on `/transactions` and `/categorize` stopped matching anything you typed.** Typing "hotel" (in any case) wouldn't find the "Hotels" category, because the picker's label-lookup function was being handed the wrong shape of data during filtering and always came back empty — every keystroke matched against nothing. Search now works as typed.
