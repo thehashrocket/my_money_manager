@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { currentMonth as getCurrentMonth } from "@/lib/now";
+import { monthBoundary, nMonthsBack } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
 
@@ -22,20 +23,6 @@ export type TrendData = {
   categoryNames: string[];
 };
 
-function nMonthsBack(year: number, month: number, n: number): [number, number] {
-  let y = year;
-  let m = month - n;
-  while (m <= 0) {
-    m += 12;
-    y -= 1;
-  }
-  return [y, m];
-}
-
-function monthBoundary(year: number, month: number): string {
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
-}
-
 function monthLabel(year: number, month: number): string {
   return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
     month: "short",
@@ -47,7 +34,11 @@ function monthLabel(year: number, month: number): string {
 export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
   const { year: currentYear, month: currentMonth } = getCurrentMonth();
 
-  const [startYear, startMonth] = nMonthsBack(currentYear, currentMonth, monthCount - 1);
+  const { year: startYear, month: startMonth } = nMonthsBack(
+    currentYear,
+    currentMonth,
+    monthCount - 1,
+  );
   const startDate = monthBoundary(startYear, startMonth);
 
   // Build leaf → parent name map (excluding savings goals)
@@ -102,7 +93,7 @@ export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
   const totalByGroup = new Map<string, number>();
 
   for (let i = 0; i < monthCount; i++) {
-    const [y, m] = nMonthsBack(currentYear, currentMonth, monthCount - 1 - i);
+    const { year: y, month: m } = nMonthsBack(currentYear, currentMonth, monthCount - 1 - i);
     months.push({
       year: y,
       month: m,

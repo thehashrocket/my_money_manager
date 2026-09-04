@@ -2125,7 +2125,7 @@ PR2b  Lane I:  S12                         (single lane)
   - Surfaced by: §2 B1; D5A; TS2
   - Files: `src/lib/budget.ts`, `src/lib/budget.test.ts`
   - Verify: TC1, TC3, TC3b, TC4, TC20 + **regression TC2**
-- [ ] **T3 (P1, human: ~1.5h / CC: ~20min)** — DRY — move `monthBoundary`, `nextMonth`, `previousMonth`, `nMonthsBack` into `monthOfIso.ts`; update all call sites; **add `monthPhase(year, month, now)` → `'future' | 'open' | 'closed'` (E12)**
+- [x] **T3 (P1, human: ~1.5h / CC: ~20min)** — DRY — move `monthBoundary`, `nextMonth`, `previousMonth`, `nMonthsBack` into `monthOfIso.ts`; update all call sites; **add `monthPhase(year, month, now)` → `'future' | 'open' | 'closed'` (E12)**
   - Surfaced by: D4A — four verbatim copies; prior learning `mm-month-helpers-duplicated-four-times` (10/10); **E12 — `resolveRowDisplay`'s `monthHasStarted`/`monthHasEnded` booleans had no producer anywhere in `src/`, so the date comparison was going to be written inline in a component, where `CLAUDE.md` forbids testing it**
   - `monthPhase` reads the clock through `src/lib/now.ts` (never `.toISOString()`), and replaces the boolean pair — three states, not four; `started=false && ended=true` was expressible and impossible.
   - While here: `page.tsx:78`'s `shiftMonth(year, month, delta)` is a sixth month-arithmetic variant. It is correct, but T12 rewrites that file anyway — fold it into this sweep rather than leaving a seventh home.

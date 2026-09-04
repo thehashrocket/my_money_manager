@@ -1,6 +1,7 @@
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { computeMtdSpent, getEffectiveAllocation } from "@/lib/budget";
+import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
 
@@ -131,7 +132,8 @@ function loadPendingByCategory(
   month: number,
 ): Map<number, number> {
   const firstDay = monthBoundary(year, month);
-  const firstDayNext = monthBoundary(...nextMonth(year, month));
+  const { year: nextYear, month: nextMonth } = nextMonthOf(year, month);
+  const firstDayNext = monthBoundary(nextYear, nextMonth);
 
   const rows = db
     .select({
@@ -236,11 +238,3 @@ function summarize(leaves: LeafRow[]): MonthViewSummary {
   };
 }
 
-function nextMonth(year: number, month: number): [number, number] {
-  if (month === 12) return [year + 1, 1];
-  return [year, month + 1];
-}
-
-function monthBoundary(year: number, month: number): string {
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
-}

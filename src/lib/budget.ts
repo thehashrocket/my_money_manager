@@ -1,5 +1,6 @@
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
+import { monthBoundary, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 
 export type EffectiveAllocation = {
   allocatedCents: number;
@@ -203,16 +204,3 @@ export function computeMtdReceived(
   return row?.total ?? 0;
 }
 
-function previousMonth(year: number, month: number): { year: number; month: number } {
-  if (month === 1) return { year: year - 1, month: 12 };
-  return { year, month: month - 1 };
-}
-
-function nextMonthOf(year: number, month: number): { year: number; month: number } {
-  if (month === 12) return { year: year + 1, month: 1 };
-  return { year, month: month + 1 };
-}
-
-function monthBoundary(year: number, month: number): string {
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
-}

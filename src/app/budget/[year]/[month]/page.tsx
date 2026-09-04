@@ -9,6 +9,7 @@ import {
   type MonthViewSummary,
   type SectionGroup,
 } from "@/lib/budget/loadMonthView";
+import { nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { EnvelopeCard } from "@/components/ledger/envelope-card";
@@ -72,14 +73,9 @@ function monthLabel(year: number, month: number): string {
   });
 }
 
-function shiftMonth(year: number, month: number, delta: -1 | 1) {
-  const total = year * 12 + (month - 1) + delta;
-  return { year: Math.floor(total / 12), month: (total % 12) + 1 };
-}
-
 function MonthNav({ year, month }: { year: number; month: number }) {
-  const prev = shiftMonth(year, month, -1);
-  const next = shiftMonth(year, month, 1);
+  const prev = previousMonth(year, month);
+  const next = nextMonthOf(year, month);
   return (
     <nav className="flex items-center justify-between text-sm">
       <Link
