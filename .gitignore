@@ -55,6 +55,9 @@ next-env.d.ts
 # gbrain worktree-scoped source pin (per-machine, set by /sync-gbrain)
 .gbrain-source
 
+# gstack local daemon state (per-machine PID/port lockfiles, not project source)
+/.gstack/
+
 # Docker-image-only build artifacts: esbuild-bundled from docker/entrypoint.src.mjs
 # and scripts/snapshot-cli.src.mjs by scripts/build-docker-artifacts.mjs, which the
 # builder stage runs. The runner has no src/ tree, so these can't stay thin wrappers
