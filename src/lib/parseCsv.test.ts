@@ -101,4 +101,31 @@ describe("parseStarOneCsv — error handling", () => {
     expect(rows.length).toBe(0);
     expect(errors[0].reason).toMatch(/both/);
   });
+
+  it("rejects a calendar-invalid date within a valid day-of-month range (04/31 — April has 30 days)", () => {
+    const csv = [
+      "Transaction Number,Date,Description,Memo,Amount Debit,Amount Credit,Balance,check_number,Fees",
+      "123,04/31/2026,WITHDRAWAL,BOGUS,-1.00,,0,,",
+    ].join("\n");
+    const { rows, errors } = parseStarOneCsv(csv);
+    expect(rows.length).toBe(0);
+    expect(errors[0].reason).toMatch(/invalid date/);
+  });
+
+  it("rejects Feb 29 on a non-leap year but accepts it on a leap year", () => {
+    const nonLeap = [
+      "Transaction Number,Date,Description,Memo,Amount Debit,Amount Credit,Balance,check_number,Fees",
+      "123,02/29/2026,WITHDRAWAL,BOGUS,-1.00,,0,,",
+    ].join("\n");
+    expect(parseStarOneCsv(nonLeap).rows.length).toBe(0);
+    expect(parseStarOneCsv(nonLeap).errors[0].reason).toMatch(/invalid date/);
+
+    const leap = [
+      "Transaction Number,Date,Description,Memo,Amount Debit,Amount Credit,Balance,check_number,Fees",
+      "124,02/29/2024,WITHDRAWAL,BOGUS,-1.00,,0,,",
+    ].join("\n");
+    const { rows, errors } = parseStarOneCsv(leap);
+    expect(errors.length).toBe(0);
+    expect(rows[0].date).toBe("2024-02-29");
+  });
 });

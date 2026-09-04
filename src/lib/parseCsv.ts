@@ -1,3 +1,5 @@
+import { startingBalanceDateSchema } from "./import/accountAnchorFields";
+
 export type RawDescription = "WITHDRAWAL" | "DEPOSIT";
 
 export type ParsedRow = {
@@ -83,7 +85,12 @@ function mmddyyyyToIso(s: string): string | null {
   if (mm < 1 || mm > 12) return null;
   if (dd < 1 || dd > 31) return null;
   if (yyyy < 1900 || yyyy > 2999) return null;
-  return `${m[3]}-${m[1]}-${m[2]}`;
+  const iso = `${m[3]}-${m[1]}-${m[2]}`;
+  // mm/dd bounds above are range-only, not calendar-aware (e.g. 04/31 or a
+  // non-leap-year 02/29 both pass); z.iso.date() rejects those the same way
+  // it already does for the starting-balance anchor date.
+  if (!startingBalanceDateSchema.safeParse(iso).success) return null;
+  return iso;
 }
 
 function parseDecimalToCents(s: string | undefined): number | null {
