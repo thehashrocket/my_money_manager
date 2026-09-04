@@ -2230,48 +2230,48 @@ PR2b  Lane I:  S12                         (single lane)
 
 ### PR2a — the entry ritual
 
-- [ ] **T18 (P1, human: ~2 days / CC: ~1.5h)** — UX — `<MonthEditor>` client island; inline allocate; **action returns the reconciled row, revalidate once on exit (P2)**
+- [x] **T18 (P1, human: ~2 days / CC: ~1.5h)** — UX — `<MonthEditor>` client island; inline allocate; **action returns the reconciled row, revalidate once on exit (P2)**
   - Surfaced by: §6.1 — 40 page loads to budget 40 lines; P2 — 40 route recomputes per session fighting the optimistic state
   - Files: `src/app/budget/actions.ts`, `src/app/budget/[year]/[month]/`
   - Verify: TC15 manual; read the Next 16 Server Actions doc first
-- [ ] **T19 (P1, human: ~1 day / CC: ~50min)** — UX — currency input, tab order, key semantics, **C3's upper bound**
+- [x] **T19 (P1, human: ~1 day / CC: ~50min)** — UX — currency input, tab order, key semantics, **C3's upper bound**
   - Surfaced by: DS14 — the highest-frequency interaction was unspecified, Tab lands on "Allocate" every other press; C3 — `allocatedCents` has no maximum while `year` and `month` are both ranged
   - Files: `src/app/budget/[year]/[month]/`, `src/lib/budget/validateAllocateInput.ts`
   - Verify: TC16; tab through 10 rows hits only amount inputs
 - [ ] ~~**T20**~~ — **moved to PR1b as T16c by DS31.** `copyPreviousMonth` never needed the client island, and DS7's empty-month CTA was PR1b UI standing on it. Fill-blanks-only, archived excluded (DS12) and `invalidateForwardRolloverMany` (D8A) all move with it.
 - [ ] ~~**T21**~~ — **deleted by E7.** `archived_at` moved into `0017` (T1), because `DS31` had already moved `copyPreviousMonth` into PR1b while its `DS12` archived join and `TC24` still pointed at this migration. `sort_order` and the two-level ordering had already gone to T1/T7 by `DS29`, so nothing was left. **There is no migration `0018`, and PR2a ships no schema change** — §12's S9 lane and its `drizzle/` conflict flag are both retired.
-- [ ] **T22 (P2, human: ~2h / CC: ~20min)** — mobile — inline amount input bound to editor state on DS43's ledger rows; sticky Left to Budget
+- [x] **T22 (P2, human: ~2h / CC: ~20min)** — mobile — inline amount input bound to editor state on DS43's ledger rows; sticky Left to Budget
   - Surfaced by: DS15 — the table is `hidden sm:block`, so the mobile ritual is 40 modal dialogs. **DS43 replaced the 46-card stack in T12, so this is now an input on an existing row rather than an `amountSlot` on `EnvelopeCard`**
   - Files: `src/app/budget/[year]/[month]/`, `src/components/ledger/`
   - Verify: allocate a category at 375px without opening a dialog
-- [ ] **T23 (P2, human: ~2h / CC: ~20min)** — a11y — commit-only live region, per-input labels, 44px reorder targets (**row-group and table semantics moved to T12 by DS44**)
+- [x] **T23 (P2, human: ~2h / CC: ~20min)** — a11y — commit-only live region, per-input labels, 44px reorder targets (**row-group and table semantics moved to T12 by DS44**)
   - Surfaced by: DS16 — copying the `_allocate-form.tsx:124` live-region precedent to a header watching 40 fields announces on every keystroke. The structural half shipped with the structure in PR1b; what is left is interaction-bound and genuinely belongs with the editor
   - Files: `src/app/budget/[year]/[month]/`, `src/components/ledger/`
   - Verify: VoiceOver pass — typing does not announce per keystroke; every input has a name
-- [ ] **T24 (P2, human: ~45min / CC: ~10min)** — hydration — island boundary per band (**`loading.tsx` moved to T14 in PR1b by DS34**)
+- [x] **T24 (P2, human: ~45min / CC: ~10min)** — hydration — island boundary per band (**`loading.tsx` moved to T14 in PR1b by DS34**)
   - Surfaced by: DS17 — inputs swallow keystrokes until hydration. The loading file was the smaller half and did not depend on the island; DS17's real argument is the boundary
   - Files: the editor island
   - Verify: keystrokes before hydration are not lost
 
 ### PR2b — category CRUD and archive (after one month of real use)
 
-- [ ] **T25 (P2, human: ~5h / CC: ~40min)** — CRUD — create group / create leaf / rename / set carryover, all returning state
+- [x] **T25 (P2, human: ~5h / CC: ~40min)** — CRUD — create group / create leaf / rename / set carryover, all returning state
   - Surfaced by: §7.1 — no way to build your own budget structure without it
   - Files: `src/app/budget/`, `src/lib/budget/`, validators
   - Verify: TC25
-- [ ] **T26 (P2, human: ~2h / CC: ~20min)** — CRUD — inline creation + `⋯` menu for structural actions (DS20, resolves O3)
+- [x] **T26 (P2, human: ~2h / CC: ~20min)** — CRUD — inline creation + `⋯` menu for structural actions (DS20, resolves O3)
   - Surfaced by: DS20 — a separate route breaks the flow state PR2a exists to create
   - Files: `src/app/budget/[year]/[month]/`, `src/lib/budget/`
   - Verify: create a line and fund it without leaving the page
-- [ ] **T27 (P1, human: ~4h / CC: ~35min)** — archive — `archiveCategoryAction` **plus X3's two fixes**: the rule matcher skips archived categories, and `listLeafCategories` gains `includeArchived`
+- [x] **T27 (P1, human: ~4h / CC: ~35min)** — archive — `archiveCategoryAction` **plus X3's two fixes**: the rule matcher skips archived categories, and `listLeafCategories` gains `includeArchived`
   - Surfaced by: §7.2; **X3 / B6 — archived categories keep receiving imported transactions; B7 — historical labels go blank**
   - Files: `src/lib/budget/`, `src/lib/rules.ts`, `src/lib/categories.ts`, `src/app/transactions/`
   - Verify: TC11, TC31b, TC31c
-- [ ] **T28 (P2, human: ~1h / CC: ~15min)** — safety — the per-category "this looks like income" hint, non-dismissible `ⓘ` beside the Rollover chip (DS23)
+- [x] **T28 (P2, human: ~1h / CC: ~15min)** — safety — the per-category "this looks like income" hint, non-dismissible `ⓘ` beside the Rollover chip (DS23)
   - Surfaced by: A8 — deferred here because `renameCategoryAction` is the only thing that can make F1's partial failure reachable, and it lands in this PR
   - Files: `src/lib/budget/loadMonthView.ts`, `src/app/budget/[year]/[month]/page.tsx`
   - Verify: an expense category with a net-positive month sets the hint; a net-negative one does not
-- [ ] **T29 (P2, human: ~2h / CC: ~20min)** — reorder — `moveCategoryUpAction` / `moveCategoryDownAction` at both levels
+- [x] **T29 (P2, human: ~2h / CC: ~20min)** — reorder — `moveCategoryUpAction` / `moveCategoryDownAction` at both levels
   - Surfaced by: §6.4 — no drag-and-drop dependency
   - Files: `src/lib/budget/`, `src/app/budget/`
   - Verify: TC26; reorder announces the new position

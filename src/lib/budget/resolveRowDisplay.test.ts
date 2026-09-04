@@ -228,3 +228,25 @@ describe("resolveRowDisplay — TC40 (DS40 + E11): 80% vs 120% both amber, only 
     expect(forTableRow).toEqual(forMobileCard);
   });
 });
+
+describe("resolveRowDisplay — T28/A8/DS23: looksLikeIncome hint", () => {
+  it("sets the hint when an expense category's month is net-positive (money flowed in)", () => {
+    const result = resolveRowDisplay(expenseRow({ spentCents: -5000 }), "expense", "open");
+    expect(result.looksLikeIncome).toBe(true);
+  });
+
+  it("does not set the hint on a normal net-negative (spent) expense month", () => {
+    const result = resolveRowDisplay(expenseRow({ spentCents: 5000 }), "expense", "open");
+    expect(result.looksLikeIncome).toBe(false);
+  });
+
+  it("does not set the hint when there is no activity at all this month", () => {
+    const result = resolveRowDisplay(expenseRow({ spentCents: 0 }), "expense", "open");
+    expect(result.looksLikeIncome).toBe(false);
+  });
+
+  it("is always false for income rows, regardless of phase", () => {
+    const result = resolveRowDisplay(incomeRow(), "income", "closed");
+    expect(result.looksLikeIncome).toBe(false);
+  });
+});

@@ -63,13 +63,20 @@ export default async function TransactionsPage({
     pageSize,
   });
 
+  // X3/B7: the picker excludes archived categories (you can't re-file a
+  // transaction into one), but a `?categoryId=` filter can point at a
+  // category that's since been archived — e.g. a `/budget` row link
+  // followed after the fact. Resolving the filter's own label needs the
+  // archived category to still be findable, or the header silently drops
+  // the name it's filtering by.
   const leafCategories = listLeafCategories(db);
+  const allCategoriesForLabels = listLeafCategories(db, { includeArchived: true });
   // E5: unscoped (all-time), matching this page's existing behavior — only
   // /budget's own banner is month-scoped (X4).
   const uncategorizedBacklog = loadUncategorizedBacklog(db);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-  const activeCategoryName = resolveActiveCategoryName(categoryId, leafCategories);
+  const activeCategoryName = resolveActiveCategoryName(categoryId, allCategoriesForLabels);
 
   return (
     <main className="mx-auto max-w-5xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">

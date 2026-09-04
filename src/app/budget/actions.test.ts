@@ -175,6 +175,49 @@ describe("upsertAllocation — update", () => {
   });
 });
 
+describe("upsertAllocation — reconciled return value (T18/P2)", () => {
+  it("returns the just-written allocated/rollover/effective triple for a non-rollover category", () => {
+    const cat = seedCategory("Groceries");
+
+    const result = upsertAllocation(handle.db, {
+      categoryId: cat.id,
+      year: 2026,
+      month: 4,
+      allocatedCents: 40000,
+    });
+
+    expect(result).toEqual({ allocatedCents: 40000, rolloverCents: 0, effectiveCents: 40000 });
+  });
+
+  it("folds the prior month's carried-forward balance into the reconciled row for a rollover category", () => {
+    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
+    seedAllocation(cat.id, 2026, 3, 5000);
+    // No spend against March, so all $50 carries forward.
+
+    const result = upsertAllocation(handle.db, {
+      categoryId: cat.id,
+      year: 2026,
+      month: 4,
+      allocatedCents: 1000,
+    });
+
+    expect(result).toEqual({ allocatedCents: 1000, rolloverCents: 5000, effectiveCents: 6000 });
+  });
+
+  it("returns the reconciled row even when this is the category's very first budget_periods row", () => {
+    const cat = seedCategory("Rent");
+
+    const result = upsertAllocation(handle.db, {
+      categoryId: cat.id,
+      year: 2026,
+      month: 4,
+      allocatedCents: 0,
+    });
+
+    expect(result).toEqual({ allocatedCents: 0, rolloverCents: 0, effectiveCents: 0 });
+  });
+});
+
 describe("upsertAllocation — forward invalidation", () => {
   it("clears downstream cached effective_allocation_cents for the same category", () => {
     const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });

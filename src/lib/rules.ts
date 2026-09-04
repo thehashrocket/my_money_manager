@@ -48,10 +48,14 @@ export type RuleMatch = { categoryId: number; ruleId: number };
  * category's numbers for every future occurrence of the merchant (B8). The
  * guard joins `categories` in the same query this function already reads
  * once per batch, rather than adding a second `categories` read at each call
- * site (`X3`, PR2b's archived-category guard, extends this same join instead
- * of opening a third one — CLAUDE.md: "one guard in the shared function
- * beats a guard in every caller"). A rejected candidate is skipped, not
- * fatal to the whole match: matching continues to the next-ranked rule.
+ * site. A rejected candidate is skipped, not fatal to the whole match:
+ * matching continues to the next-ranked rule.
+ *
+ * X3 (PR2b): the same join now also carries `archivedAt`, and an archived
+ * category's rules are skipped the same way a sign-mismatched one is —
+ * without this, an archived category kept silently absorbing every newly
+ * imported transaction that matched its trained rules (B6), which is the
+ * opposite of what archiving is supposed to do.
  */
 export function buildRuleMatcher(
   db: AnyDb,
@@ -60,6 +64,7 @@ export function buildRuleMatcher(
     .select({
       rule: schema.categoryRules,
       categoryKind: schema.categories.kind,
+      categoryArchivedAt: schema.categories.archivedAt,
     })
     .from(schema.categoryRules)
     .innerJoin(schema.categories, eq(schema.categoryRules.categoryId, schema.categories.id))
@@ -68,8 +73,9 @@ export function buildRuleMatcher(
   if (sorted.length === 0) return () => null;
 
   return (normalizedMerchant: string, amountCents: number) => {
-    for (const { rule, categoryKind } of sorted) {
+    for (const { rule, categoryKind, categoryArchivedAt } of sorted) {
       if (!matches(rule, normalizedMerchant)) continue;
+      if (categoryArchivedAt !== null) continue;
       if (categoryKind === "income" && amountCents < 0) continue;
       if (categoryKind === "fund" && amountCents > 0) continue;
       return { categoryId: rule.categoryId, ruleId: rule.id };

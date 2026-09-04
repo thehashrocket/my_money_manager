@@ -170,11 +170,11 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   }
 
   const uncategorizedCategory = categories.find((c) => c.name === "Uncategorized");
-  const expenseLeaves = categories.filter(
+  const expenseLeavesAll = categories.filter(
     (c) => c.kind === "expense" && !parentIds.has(c.id) && c.name !== "Uncategorized",
   );
-  const incomeLeaves = categories.filter((c) => c.kind === "income" && !parentIds.has(c.id));
-  const fundLeaves = categories.filter((c) => c.kind === "fund" && !parentIds.has(c.id));
+  const incomeLeavesAll = categories.filter((c) => c.kind === "income" && !parentIds.has(c.id));
+  const fundLeavesAll = categories.filter((c) => c.kind === "fund" && !parentIds.has(c.id));
 
   // T8/T11: bounded set of queries for the whole month, not 2 per leaf plus
   // unbounded backward recursion. #1 categories (above), #2 this month's
@@ -184,6 +184,31 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   // when a rollover expense category exists.
   const { allocatedByCategoryId, hasPeriodRow } = loadAllocationsForMonth(db, year, month);
   const { totalByCategoryId, pendingTotalByCategoryId } = loadSpendForMonth(db, year, month);
+
+  // X3/§7.2: an archived category is hidden from a month where it has
+  // neither an allocation nor any spend — but stays visible in a historical
+  // month that has one or the other, so archiving never erases a past
+  // month's numbers. `allocatedByCategoryId`/`totalByCategoryId` are this
+  // exact month's activity, already computed above for every category
+  // regardless of archive status, so this is a filter over existing maps,
+  // not a new query.
+  //
+  // "Has an allocation" means NONZERO here — the same bar `archiveCategory`
+  // (F4) uses to decide whether archiving is even allowed. A `budget_periods`
+  // row can exist with `allocated_cents = 0` (an explicit "$0 planned," not
+  // "nothing planned" — DS14's placeholder-vs-zero distinction), and that is
+  // routinely how a category BECOMES archivable in the first place (F4 says
+  // "zero out that allocation first"). Using `hasPeriodRow` (any row, even a
+  // $0 one) here would mean the row you just zeroed out specifically so you
+  // could archive it stays visible anyway, immediately after archiving —
+  // contradicting "archived categories are hidden."
+  const hadActivityThisMonth = (categoryId: number) =>
+    (allocatedByCategoryId.get(categoryId) ?? 0) !== 0 || totalByCategoryId.has(categoryId);
+  const notHiddenByArchive = <T extends { id: number; archivedAt: Date | null }>(c: T) =>
+    c.archivedAt === null || hadActivityThisMonth(c.id);
+  const expenseLeaves = expenseLeavesAll.filter(notHiddenByArchive);
+  const incomeLeaves = incomeLeavesAll.filter(notHiddenByArchive);
+  const fundLeaves = fundLeavesAll.filter(notHiddenByArchive);
 
   const rolloverCategoryIds = expenseLeaves
     .filter((c) => c.carryoverPolicy === "rollover")

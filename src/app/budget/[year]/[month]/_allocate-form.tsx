@@ -71,7 +71,18 @@ export function AllocateFormTrigger(props: AllocateFormTriggerProps) {
   const descId = useId();
 
   return (
-    <Dialog>
+    <Dialog
+      onOpenChange={(open) => {
+        // T18: this trigger's row now stays mounted for the whole editing
+        // session instead of remounting on every navigation (the old
+        // redirect-per-commit flow made a fresh mount implicit). Without
+        // this, opening the dialog after the row's inline `CurrencyInput`
+        // already committed a new value would show the STALE number this
+        // component's `useState` initializer captured at first mount —
+        // reset it from the current prop on every open instead.
+        if (open) setExplicitDollars(defaultDollars);
+      }}
+    >
       <DialogTrigger render={triggerElement ?? <Button variant="outline" size="sm" />}>
         {triggerLabel ?? "Allocate"}
       </DialogTrigger>

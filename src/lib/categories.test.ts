@@ -26,7 +26,12 @@ let seq = 0;
 
 function seedCategory(
   name: string,
-  opts: { parentId?: number | null; isSavingsGoal?: boolean; kind?: "income" | "expense" | "fund" } = {},
+  opts: {
+    parentId?: number | null;
+    isSavingsGoal?: boolean;
+    kind?: "income" | "expense" | "fund";
+    archivedAt?: Date | null;
+  } = {},
 ) {
   seq += 1;
   const [cat] = handle.db
@@ -36,6 +41,7 @@ function seedCategory(
       parentId: opts.parentId ?? null,
       isSavingsGoal: opts.isSavingsGoal ?? false,
       kind: opts.kind ?? "expense",
+      archivedAt: opts.archivedAt ?? null,
     })
     .returning()
     .all();
@@ -76,5 +82,30 @@ describe("listLeafCategories — kind is authoritative, not is_savings_goal (E6 
     seedCategory("Drifted Expense", { isSavingsGoal: true, kind: "expense" });
     const names = listLeafCategories(handle.db).map((l) => l.name);
     expect(names.some((n) => n.startsWith("Drifted Expense-"))).toBe(true);
+  });
+});
+
+describe("listLeafCategories — includeArchived (TC31c, X3/B7)", () => {
+  it("excludes an archived category by default (picker posture)", () => {
+    seedCategory("Old Gym", { archivedAt: new Date() });
+    seedCategory("Groceries");
+
+    const names = listLeafCategories(handle.db).map((l) => l.name);
+    expect(names.some((n) => n.startsWith("Old Gym-"))).toBe(false);
+    expect(names.some((n) => n.startsWith("Groceries-"))).toBe(true);
+  });
+
+  it("includes an archived category with { includeArchived: true } (label-resolution posture)", () => {
+    seedCategory("Old Gym", { archivedAt: new Date() });
+
+    const names = listLeafCategories(handle.db, { includeArchived: true }).map((l) => l.name);
+    expect(names.some((n) => n.startsWith("Old Gym-"))).toBe(true);
+  });
+
+  it("still excludes a fund even with includeArchived: true — the flags are independent", () => {
+    seedCategory("Emergency Fund", { isSavingsGoal: true, kind: "fund" });
+
+    const names = listLeafCategories(handle.db, { includeArchived: true }).map((l) => l.name);
+    expect(names.some((n) => n.startsWith("Emergency Fund-"))).toBe(false);
   });
 });

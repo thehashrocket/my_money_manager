@@ -47,6 +47,7 @@ function seedCategory(
     isSavingsGoal?: boolean;
     kind?: "income" | "expense" | "fund";
     sortOrder?: number;
+    archivedAt?: Date | null;
   } = {},
 ) {
   categoryCounter += 1;
@@ -59,6 +60,7 @@ function seedCategory(
       isSavingsGoal: opts.isSavingsGoal ?? false,
       kind: opts.kind ?? "expense",
       sortOrder: opts.sortOrder ?? 0,
+      archivedAt: opts.archivedAt ?? null,
     })
     .returning()
     .all();
@@ -1019,5 +1021,74 @@ describe("loadMonthView — TC12 (INVERTED A4): effective_allocation_cents stays
     expect(leaf.allocation?.effectiveCents).toBe(6000);
     // leftToBudget uses allocated (10_00), not effective (60_00): 1000_00 - 10_00 = 990_00.
     expect(view.summary.leftToBudgetCents).toBe(99000);
+  });
+});
+
+describe("loadMonthView — archived-category visibility (X3/§7.2)", () => {
+  it("hides an archived expense category from a month with no allocation and no spend", () => {
+    clearSeedCategories();
+    const cat = seedCategory("Old Gym", { archivedAt: new Date() });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).not.toContain(cat.name);
+  });
+
+  it("keeps an archived expense category visible in a month it has an allocation in", () => {
+    clearSeedCategories();
+    const cat = seedCategory("Old Gym", { archivedAt: new Date() });
+    seedAllocation(cat.id, 2026, 4, 5000);
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).toContain(cat.name);
+  });
+
+  it("keeps an archived expense category visible in a month it has spend in", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Old Gym", { archivedAt: new Date() });
+    seedTxn({ accountId: account.id, batchId: batch.id, categoryId: cat.id, date: "2026-04-10", amountCents: -3000 });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).toContain(cat.name);
+  });
+
+  it("hides an archived category with an explicit $0 allocation this month (not just a missing row)", () => {
+    // The exact sequence archiving normally requires: F4 refuses to archive
+    // a category with a nonzero current-month allocation ("zero out that
+    // allocation first"), so a $0 `budget_periods` ROW commonly exists at
+    // the moment a category gets archived. That row existing must not, by
+    // itself, keep the now-archived category visible — `hasPeriodRow` alone
+    // (any row, even at $0) would say it should stay, contradicting
+    // "archived categories are hidden."
+    clearSeedCategories();
+    const cat = seedCategory("Old Gym", { archivedAt: new Date() });
+    seedAllocation(cat.id, 2026, 4, 0);
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).not.toContain(cat.name);
+  });
+
+  it("hides the SAME archived category from a later month with no activity", () => {
+    clearSeedCategories();
+    const cat = seedCategory("Old Gym", { archivedAt: new Date() });
+    seedAllocation(cat.id, 2026, 4, 5000);
+
+    const laterView = loadMonthView(handle.db, 2026, 5);
+    const names = laterView.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).not.toContain(cat.name);
+  });
+
+  it("does not hide a non-archived category with no activity (baseline)", () => {
+    clearSeedCategories();
+    const cat = seedCategory("Groceries");
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
+    expect(names).toContain(cat.name);
   });
 });

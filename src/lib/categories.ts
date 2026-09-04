@@ -1,4 +1,4 @@
-import { and, eq, ne, notInArray } from "drizzle-orm";
+import { and, eq, isNull, ne, notInArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
@@ -15,10 +15,21 @@ export type LeafCategory = {
  * these; bulk categorize refuses anything else (parents are header-only;
  * savings goals live on a separate surface).
  *
+ * X3/B7: `includeArchived` defaults to `false` — a picker (this dropdown,
+ * `CategoryCombobox`) must never let you re-file a transaction into an
+ * archived category. But `/transactions` also uses this same list to resolve
+ * an ALREADY-categorized row's display label, and excluding archived there
+ * makes that lookup return nothing — the row's own category name goes
+ * blank. Callers doing label resolution over historical data must pass
+ * `{ includeArchived: true }` explicitly; the option shape mirrors
+ * `getEffectiveAllocation`'s "read what's there, no persist-side-effect"
+ * posture rather than introducing a second function.
+ *
  * Sort: by name ASC. Two SELECTs is fine at V1 scale (dozens of categories)
  * and keeps the query readable; can fold into one query if it ever matters.
  */
-export function listLeafCategories(db: Db): LeafCategory[] {
+export function listLeafCategories(db: Db, options: { includeArchived?: boolean } = {}): LeafCategory[] {
+  const { includeArchived = false } = options;
   const parentRows = db
     .selectDistinct({ parentId: schema.categories.parentId })
     .from(schema.categories)
@@ -27,6 +38,13 @@ export function listLeafCategories(db: Db): LeafCategory[] {
     .map((r) => r.parentId)
     .filter((id): id is number => id !== null);
 
+  const conditions = [
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    ne(schema.categories.kind, "fund"),
+    ...(parentIds.length > 0 ? [notInArray(schema.categories.id, parentIds)] : []),
+    ...(includeArchived ? [] : [isNull(schema.categories.archivedAt)]),
+  ];
+
   const rows = db
     .select({
       id: schema.categories.id,
@@ -34,15 +52,7 @@ export function listLeafCategories(db: Db): LeafCategory[] {
       parentId: schema.categories.parentId,
     })
     .from(schema.categories)
-    .where(
-      // A2: kind is authoritative, not is_savings_goal (T5).
-      parentIds.length > 0
-        ? and(
-            ne(schema.categories.kind, "fund"),
-            notInArray(schema.categories.id, parentIds),
-          )
-        : ne(schema.categories.kind, "fund"),
-    )
+    .where(and(...conditions))
     .all();
 
   return [...rows].sort((a, b) => a.name.localeCompare(b.name));

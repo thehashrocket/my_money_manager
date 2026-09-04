@@ -469,3 +469,49 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     expect(match("GROCERY STORE", -2000)?.categoryId).toBe(groceries.id);
   });
 });
+
+// TC31b (X3, PR2b): an archived category's rules must stop firing — the
+// same `categories` join E8/X2 already added, extended with one more clause.
+describe("buildRuleMatcher — archived-category guard (TC31b, X3)", () => {
+  it("skips a match into an archived category", () => {
+    const groceries = seedCategory("Groceries");
+    handle.db.update(schema.categories).set({ archivedAt: new Date() }).where(eq(schema.categories.id, groceries.id)).run();
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY", -1000)).toBeNull();
+  });
+
+  it("still matches a non-archived category", () => {
+    const groceries = seedCategory("Groceries");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAFEWAY", -1000)?.categoryId).toBe(groceries.id);
+  });
+
+  it("falls through to the next-ranked rule when the top match is archived", () => {
+    const archived = seedCategory("Old Groceries");
+    handle.db.update(schema.categories).set({ archivedAt: new Date() }).where(eq(schema.categories.id, archived.id)).run();
+    const active = seedCategory("Groceries");
+
+    handle.db
+      .insert(schema.categoryRules)
+      .values([
+        { categoryId: archived.id, matchType: "contains", matchValue: "GROCERY", priority: 90, source: "auto" },
+        { categoryId: active.id, matchType: "contains", matchValue: "STORE", priority: 10, source: "auto" },
+      ])
+      .run();
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("GROCERY STORE", -2000)?.categoryId).toBe(active.id);
+  });
+});

@@ -3,22 +3,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { db } from "@/db";
-import {
-  loadMonthView,
-  type FundRow,
-  type IncomeLeafRow,
-  type LeafRow,
-  type MonthViewSummary,
-  type SectionGroup,
-  type UncategorizedRow,
-} from "@/lib/budget/loadMonthView";
-import { monthPhase, nextMonthOf, previousMonth, type MonthPhase } from "@/lib/budget/monthOfIso";
+import { loadMonthView, type FundRow, type IncomeLeafRow, type MonthViewSummary } from "@/lib/budget/loadMonthView";
+import { monthPhase, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
 import { formatCents } from "@/lib/money";
-import { resolveRowDisplay, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
-import { cn } from "@/lib/utils";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
-import { LeftToBudget } from "@/components/ledger/left-to-budget";
 import { SummaryStrip, type SummaryStripCell } from "@/components/ledger/summary-strip";
 import { StateCard } from "@/components/ledger/state-card";
 import { Button } from "@/components/ui/button";
@@ -37,6 +26,8 @@ import { hasAnyAllocations } from "@/lib/budget/copyMonth";
 import { AllocateFormTrigger } from "./_allocate-form";
 import { ReclassifyIncomeBanner } from "./_reclassify-income";
 import { CopyPreviousMonthButton } from "./_copy-month";
+import { BandSection } from "./_band-section";
+import { MonthEditor } from "./_month-editor";
 
 /**
  * Route params arrive as strings from the URL; Zod coerces + bounds them.
@@ -51,19 +42,6 @@ const paramsSchema = z.object({
 
 type RouteParams = { year: string; month: string };
 
-const TONE_CLASS: Record<RowTone, string> = {
-  positive: "text-money-pos",
-  negative: "text-money-neg",
-  neutral: "text-money-zero",
-  muted: "text-ink-3",
-};
-
-const BAR_CLASS: Record<BarTone, string> = {
-  ledger: "bg-ledger",
-  amber: "bg-amber-accent",
-  redbrown: "bg-redbrown",
-};
-
 /**
  * DS31: both the Left to Budget hero's `no-income` CTA and DS30's first-run
  * card point at the SAME dialog — `AllocateFormTrigger` re-skinned via its
@@ -77,9 +55,18 @@ function firstIncomeAllocateCta(
   year: number,
   month: number,
   label: string,
+  /** T18: this element crosses into `<MonthEditor>`'s client boundary as
+   * one of several sibling element-valued props (`noIncomeCta` alongside
+   * `headerTop`/`summaryStrip`/`firstRunCard`) — RSC's Flight serialization
+   * treats those as a list needing stable keys, distinct from the ordinary
+   * single-hop Server→Client prop passing T11 already used safely. Callers
+   * pass a slot-specific key so the two call sites (the header CTA and
+   * `FirstRunCard`'s primary action) never collide. */
+  key: string,
 ) {
   return (
     <AllocateFormTrigger
+      key={key}
       categoryId={category.categoryId}
       categoryName={category.name}
       year={year}
@@ -133,7 +120,7 @@ function FirstRunCard({
       label={`Copy ${priorMonthLabel}'s budget`}
     />
   ) : (
-    firstIncomeAllocateCta(category, year, month, `Plan ${category.name} →`)
+    firstIncomeAllocateCta(category, year, month, `Plan ${category.name} →`, "first-run-cta")
   );
   const secondaryAction = priorMonthHasAllocations ? (
     <Button variant="outline" render={<a href="#income-band" />}>
@@ -214,81 +201,61 @@ export default async function BudgetMonthPage({
       ) : null}
       {!hasIncomeCategory ? <ReclassifyIncomeBanner candidates={reclassifyCandidates} /> : null}
 
-      <header className="space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex-1">
-            <MonthNav year={year} month={month} />
+      {/* T18/DS13: everything from Left to Budget through the Income/Expense
+          bands is one client island — see `_month-editor.tsx`'s own header
+          comment for the full diagram. `headerTop`/`summaryStrip`/
+          `firstRunCard` are server-rendered slots; none of the three reads
+          live editor state (§6.1's diagram scopes the island to the
+          numeral, not the whole header — see that file for why SummaryStrip
+          and FirstRunCard deliberately stay static until the next
+          navigation/revalidation). */}
+      <MonthEditor
+        year={year}
+        month={month}
+        phase={phase}
+        railTotalCents={railTotalCents}
+        plannedFundCents={view.summary.plannedFundCents}
+        incomeSections={view.incomeSections}
+        expenseSections={view.sections}
+        uncategorizedRow={view.uncategorizedRow}
+        noIncomeCta={
+          firstIncomeCategory
+            ? firstIncomeAllocateCta(firstIncomeCategory, year, month, `Plan ${firstIncomeCategory.name} →`, "no-income-cta")
+            : undefined
+        }
+        headerTop={
+          <div key="header-top" className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex-1">
+              <MonthNav year={year} month={month} />
+            </div>
+            {/* DS7: "in any other month the trigger is a btn-outline beside
+                MonthNav" — the first-run card already leads with this same
+                action when it's showing, so it doesn't need a second copy. */}
+            {!isFirstRun ? (
+              <CopyPreviousMonthButton
+                year={year}
+                month={month}
+                priorMonthLabel={priorMonthLabel}
+                priorMonthHasAllocations={priorMonthHasAllocations}
+              />
+            ) : null}
           </div>
-          {/* DS7: "in any other month the trigger is a btn-outline beside
-              MonthNav" — the first-run card already leads with this same
-              action when it's showing, so it doesn't need a second copy. */}
-          {!isFirstRun ? (
-            <CopyPreviousMonthButton
+        }
+        summaryStrip={<SummaryStrip key="summary-strip" cells={summaryStripCells(view.summary)} variant="ledger" />}
+        firstRunCard={
+          isFirstRun && firstIncomeCategory ? (
+            <FirstRunCard
+              key="first-run-card"
+              category={firstIncomeCategory}
               year={year}
               month={month}
+              backlogCount={view.uncategorizedBacklog.count}
               priorMonthLabel={priorMonthLabel}
               priorMonthHasAllocations={priorMonthHasAllocations}
             />
-          ) : null}
-        </div>
-        <LeftToBudget
-          plannedIncomeCents={view.summary.plannedIncomeCents}
-          allocatedCents={view.summary.allocatedCents}
-          plannedFundCents={view.summary.plannedFundCents}
-          leftToBudgetCents={view.summary.leftToBudgetCents}
-          phase={phase}
-          railTotalCents={railTotalCents}
-          noIncomeCta={
-            firstIncomeCategory
-              ? firstIncomeAllocateCta(firstIncomeCategory, year, month, `Plan ${firstIncomeCategory.name} →`)
-              : undefined
-          }
-        />
-        <SummaryStrip cells={summaryStripCells(view.summary)} variant="ledger" />
-      </header>
-
-      {isFirstRun && firstIncomeCategory ? (
-        <FirstRunCard
-          category={firstIncomeCategory}
-          year={year}
-          month={month}
-          backlogCount={view.uncategorizedBacklog.count}
-          priorMonthLabel={priorMonthLabel}
-          priorMonthHasAllocations={priorMonthHasAllocations}
-        />
-      ) : null}
-
-      {/* A1: bands come from `kind`, groups from `parent_id` — never
-          conflated. Each band is its own table (DS18), so income's column
-          meaning never silently inherits expense's. */}
-      <BandSection heading="Income" id="income-band">
-        <IncomeTable
-          sections={view.incomeSections}
-          plannedIncomeCents={view.summary.plannedIncomeCents}
-          phase={phase}
-          year={year}
-          month={month}
-        />
-        <MobileIncomeList sections={view.incomeSections} phase={phase} year={year} month={month} />
-      </BandSection>
-
-      <BandSection heading="Expenses">
-        <ExpenseTable
-          sections={view.sections}
-          uncategorizedRow={view.uncategorizedRow}
-          allocatedCents={view.summary.allocatedCents}
-          phase={phase}
-          year={year}
-          month={month}
-        />
-        <MobileExpenseList
-          sections={view.sections}
-          uncategorizedRow={view.uncategorizedRow}
-          phase={phase}
-          year={year}
-          month={month}
-        />
-      </BandSection>
+          ) : null
+        }
+      />
 
       {/* A6: FUNDS renders only when a fund category exists — nothing to
           reconcile with an empty section. */}
@@ -341,323 +308,9 @@ function summaryStripCells(summary: MonthViewSummary): SummaryStripCell[] {
   ];
 }
 
-function BandSection({
-  heading,
-  id,
-  children,
-}: {
-  heading: string;
-  id?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section id={id} className="scroll-mt-6 space-y-2">
-      <h2 className="font-mono text-xs uppercase tracking-[0.14em] text-ink-2">{heading}</h2>
-      {children}
-    </section>
-  );
-}
-
-function RowBadges({ badges }: { badges: RowBadge[] }) {
-  return (
-    <>
-      {badges.map((badge, i) => {
-        if (badge.type === "pending") {
-          return (
-            <span
-              key={i}
-              title={`Includes ${formatCents(badge.amountCents)} pending`}
-              className="ml-1.5 font-mono text-[10px] uppercase tracking-wide text-ink-3"
-            >
-              +p
-            </span>
-          );
-        }
-        if (badge.type === "over-plan") {
-          return (
-            <span key={i} className="ml-1.5 font-mono text-[10px] text-ledger">
-              +{formatCents(badge.amountCents)} over plan
-            </span>
-          );
-        }
-        return (
-          <span
-            key={i}
-            aria-hidden
-            title={`${formatCents(badge.amountCents)} over budget`}
-            className="ml-1.5 inline-block h-2 w-[2px] align-middle bg-redbrown"
-          />
-        );
-      })}
-    </>
-  );
-}
-
-function Bar({ pct, tone }: { pct: number; tone: BarTone }) {
-  return (
-    <div className="h-[2px] w-24 overflow-hidden rounded-full bg-[var(--bg-inset)]" aria-hidden>
-      <div className={cn("h-full", BAR_CLASS[tone])} style={{ width: `${pct}%` }} />
-    </div>
-  );
-}
-
-/* ── EXPENSES — desktop table ─────────────────────────────────────────── */
-
-function ExpenseTable({
-  sections,
-  uncategorizedRow,
-  allocatedCents,
-  phase,
-  year,
-  month,
-}: {
-  sections: SectionGroup<LeafRow>[];
-  uncategorizedRow: UncategorizedRow | null;
-  allocatedCents: number;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  return (
-    <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
-      <Table className="border-collapse">
-        <TableCaption className="sr-only">Expenses for {monthLabel(year, month)}</TableCaption>
-        <TableHeader className="bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
-          <TableRow>
-            <TableHead className="px-3">Category</TableHead>
-            <TableHead className="px-3 text-right">Planned</TableHead>
-            <TableHead className="px-3 text-right">Spent</TableHead>
-            <TableHead className="px-3 text-right">Remaining</TableHead>
-            <TableHead className="px-3 text-right">Allocate</TableHead>
-          </TableRow>
-        </TableHeader>
-        {sections.map((section) => (
-          <TableBody key={section.parentId ?? "unparented"}>
-            {section.parentName ? (
-              <TableRow className="bg-[var(--bg-inset)] hover:bg-[var(--bg-inset)]">
-                <TableHead scope="rowgroup" colSpan={5} className="px-3 py-1.5 font-display text-sm font-normal text-ink-2">
-                  {section.parentName}
-                </TableHead>
-              </TableRow>
-            ) : null}
-            {section.categories.map((leaf) => (
-              <ExpenseDesktopRow key={leaf.categoryId} leaf={leaf} phase={phase} year={year} month={month} />
-            ))}
-          </TableBody>
-        ))}
-        {uncategorizedRow ? (
-          <TableBody>
-            {/* DS26: hairline separates the one row nobody can act on from
-                the rows above it. `aria-hidden` — the cell beneath already
-                announces its own header via `<th scope="row">`. */}
-            <TableRow aria-hidden className="hover:bg-transparent">
-              <TableCell colSpan={5} className="h-px border-t-2 border-[var(--rule-strong)] p-0" />
-            </TableRow>
-            <TableRow>
-              <TableHead scope="row" className="px-3 py-2 font-normal text-ink-1">
-                {uncategorizedRow.name}
-              </TableHead>
-              <TableCell className="px-3 py-2 text-right text-ink-3">—</TableCell>
-              <TableCell className="px-3 py-2 text-right text-ink-1">{formatCents(uncategorizedRow.spentCents)}</TableCell>
-              <TableCell className="px-3 py-2 text-right text-ink-3">—</TableCell>
-              <TableCell className="px-3 py-2 text-right text-ink-3">—</TableCell>
-            </TableRow>
-          </TableBody>
-        ) : null}
-        <TableFooter className="bg-transparent">
-          <TableRow className="hover:bg-transparent">
-            <TableHead scope="row" className="px-3 py-2 font-mono text-sm font-normal text-ink-2">
-              Σ planned spending
-            </TableHead>
-            <TableCell className="px-3 py-2 text-right font-mono text-sm text-ink-2">{formatCents(allocatedCents)}</TableCell>
-            <TableCell colSpan={3} />
-          </TableRow>
-        </TableFooter>
-      </Table>
-    </div>
-  );
-}
-
-function ExpenseDesktopRow({
-  leaf,
-  phase,
-  year,
-  month,
-}: {
-  leaf: LeafRow;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  const effective = leaf.allocation?.effectiveCents ?? 0;
-  const display = resolveRowDisplay(
-    {
-      effectiveCents: effective,
-      spentCents: leaf.spentCents,
-      pendingCents: leaf.pendingCents,
-      hasAllocation: leaf.allocation !== null,
-    },
-    "expense",
-    phase,
-  );
-  return (
-    <TableRow>
-      <TableHead scope="row" className="px-3 py-2 font-normal">
-        <Link
-          href={`/transactions?categoryId=${leaf.categoryId}&year=${year}&month=${month}`}
-          className="font-display text-ink-1 underline-offset-4 hover:underline"
-        >
-          {leaf.name}
-        </Link>
-        {leaf.carryoverPolicy === "rollover" ? (
-          <span className="ml-2 rounded-xs bg-[var(--bg-inset)] px-1 font-mono text-[10px] uppercase tracking-wide text-ink-2">
-            Rollover
-          </span>
-        ) : null}
-      </TableHead>
-      <TableCell className="px-3 py-2 text-right text-ink-1">
-        {display.amountPlaceholder ? <span className="text-ink-3">—</span> : formatCents(effective)}
-      </TableCell>
-      <TableCell className="px-3 py-2 text-right text-ink-1">
-        {formatCents(leaf.spentCents)}
-        <RowBadges badges={display.badges} />
-      </TableCell>
-      <TableCell className="px-3 py-2 text-right">
-        <div className="flex flex-col items-end gap-1">
-          <span className={TONE_CLASS[display.tone]}>{formatCents(leaf.remainingCents)}</span>
-          <Bar pct={display.barPct} tone={display.barTone} />
-        </div>
-      </TableCell>
-      <TableCell className="px-3 py-2 text-right">
-        <AllocateFormTrigger
-          categoryId={leaf.categoryId}
-          categoryName={leaf.name}
-          year={year}
-          month={month}
-          allocation={leaf.allocation}
-          carryoverPolicy={leaf.carryoverPolicy}
-        />
-      </TableCell>
-    </TableRow>
-  );
-}
-
-/* ── INCOME — desktop table ───────────────────────────────────────────── */
-
-function IncomeTable({
-  sections,
-  plannedIncomeCents,
-  phase,
-  year,
-  month,
-}: {
-  sections: SectionGroup<IncomeLeafRow>[];
-  plannedIncomeCents: number;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  return (
-    <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
-      <Table className="border-collapse">
-        <TableCaption className="sr-only">Income for {monthLabel(year, month)}</TableCaption>
-        {/* DS18: income keeps its own column header row rather than
-            inheriting the expense table's — the heavier rule beneath marks
-            the boundary where column meaning changes. */}
-        <TableHeader className="border-b-2 border-[var(--rule-strong)] bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
-          <TableRow>
-            <TableHead className="px-3">Category</TableHead>
-            <TableHead className="px-3 text-right">Planned</TableHead>
-            <TableHead className="px-3 text-right">Received</TableHead>
-            <TableHead className="px-3 text-right">Variance</TableHead>
-            <TableHead className="px-3 text-right">Allocate</TableHead>
-          </TableRow>
-        </TableHeader>
-        {sections.map((section) => (
-          <TableBody key={section.parentId ?? "unparented"}>
-            {section.parentName ? (
-              <TableRow className="bg-[var(--bg-inset)] hover:bg-[var(--bg-inset)]">
-                <TableHead scope="rowgroup" colSpan={5} className="px-3 py-1.5 font-display text-sm font-normal text-ink-2">
-                  {section.parentName}
-                </TableHead>
-              </TableRow>
-            ) : null}
-            {section.categories.map((income) => (
-              <IncomeDesktopRow key={income.categoryId} income={income} phase={phase} year={year} month={month} />
-            ))}
-          </TableBody>
-        ))}
-        <TableFooter className="bg-transparent">
-          <TableRow className="hover:bg-transparent">
-            <TableHead scope="row" className="px-3 py-2 font-mono text-sm font-normal text-ink-2">
-              Σ planned income
-            </TableHead>
-            <TableCell className="px-3 py-2 text-right font-mono text-sm text-ink-2">{formatCents(plannedIncomeCents)}</TableCell>
-            <TableCell colSpan={3} />
-          </TableRow>
-        </TableFooter>
-      </Table>
-    </div>
-  );
-}
-
-function IncomeDesktopRow({
-  income,
-  phase,
-  year,
-  month,
-}: {
-  income: IncomeLeafRow;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  const display = resolveRowDisplay(
-    {
-      plannedCents: income.plannedCents,
-      receivedCents: income.receivedCents,
-      varianceCents: income.varianceCents,
-      pendingCents: income.pendingCents,
-      hasAllocation: income.hasAllocation,
-    },
-    "income",
-    phase,
-  );
-  return (
-    <TableRow>
-      <TableHead scope="row" className="px-3 py-2 font-normal">
-        <Link
-          href={`/transactions?categoryId=${income.categoryId}&year=${year}&month=${month}`}
-          className="font-display text-ink-1 underline-offset-4 hover:underline"
-        >
-          {income.name}
-        </Link>
-      </TableHead>
-      <TableCell className="px-3 py-2 text-right text-ink-1">
-        {display.amountPlaceholder ? <span className="text-ink-3">—</span> : formatCents(income.plannedCents)}
-      </TableCell>
-      <TableCell className="px-3 py-2 text-right text-ink-1">
-        {formatCents(income.receivedCents)}
-        <RowBadges badges={display.badges} />
-      </TableCell>
-      <TableCell className={cn("px-3 py-2 text-right", TONE_CLASS[display.tone])}>
-        {formatCents(income.varianceCents)}
-      </TableCell>
-      <TableCell className="px-3 py-2 text-right">
-        <AllocateFormTrigger
-          categoryId={income.categoryId}
-          categoryName={income.name}
-          year={year}
-          month={month}
-          allocation={{ allocatedCents: income.plannedCents, rolloverCents: 0, effectiveCents: income.plannedCents }}
-          carryoverPolicy="none"
-        />
-      </TableCell>
-    </TableRow>
-  );
-}
-
-/* ── FUNDS — desktop table (read-only, A6/D3A) ────────────────────────── */
+/* ── FUNDS — desktop table (read-only, A6/D3A). Stays server-rendered:
+   PR2a's inline editing is expense/income only (§6.1's diagram never lists
+   a Funds editor), so this band has no live state to read. ────────────── */
 
 function FundsTable({
   fundRows,
@@ -706,197 +359,6 @@ function FundsTable({
         </TableFooter>
       </Table>
     </div>
-  );
-}
-
-/* ── DS43 — mobile ledger list. Compact rows under the same band/group
-   headings as desktop, reading the same `resolveRowDisplay` decisions
-   rather than a folded-flap `EnvelopeCard` per row. ──────────────────── */
-
-function MobileGroupHeading({ name }: { name: string | null }) {
-  if (!name) return null;
-  return <h3 className="font-display text-sm text-ink-2">{name}</h3>;
-}
-
-function MobileExpenseList({
-  sections,
-  uncategorizedRow,
-  phase,
-  year,
-  month,
-}: {
-  sections: SectionGroup<LeafRow>[];
-  uncategorizedRow: UncategorizedRow | null;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  return (
-    <div className="space-y-4 sm:hidden">
-      {sections.map((section) => (
-        <div key={section.parentId ?? "unparented"} className="space-y-2">
-          <MobileGroupHeading name={section.parentName} />
-          <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft">
-            {section.categories.map((leaf) => (
-              <MobileExpenseRow key={leaf.categoryId} leaf={leaf} phase={phase} year={year} month={month} />
-            ))}
-          </ul>
-        </div>
-      ))}
-      {uncategorizedRow ? (
-        <div className="space-y-2 border-t-2 border-[var(--rule-strong)] pt-3">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-ink-1">{uncategorizedRow.name}</span>
-            <span className="font-mono text-ink-1">{formatCents(uncategorizedRow.spentCents)}</span>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function MobileExpenseRow({
-  leaf,
-  phase,
-  year,
-  month,
-}: {
-  leaf: LeafRow;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  const effective = leaf.allocation?.effectiveCents ?? 0;
-  const display = resolveRowDisplay(
-    {
-      effectiveCents: effective,
-      spentCents: leaf.spentCents,
-      pendingCents: leaf.pendingCents,
-      hasAllocation: leaf.allocation !== null,
-    },
-    "expense",
-    phase,
-  );
-  return (
-    <li className="px-3 py-2.5">
-      <div className="flex items-baseline justify-between gap-2">
-        <Link
-          href={`/transactions?categoryId=${leaf.categoryId}&year=${year}&month=${month}`}
-          className="min-w-0 truncate font-display text-ink-1 underline-offset-4 hover:underline"
-        >
-          {leaf.name}
-        </Link>
-        <span className={cn("shrink-0 font-mono text-sm", TONE_CLASS[display.tone])}>
-          {formatCents(leaf.remainingCents)}
-        </span>
-      </div>
-      <div className="mt-1 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1 font-mono text-xs text-ink-3">
-          <span>
-            {formatCents(leaf.spentCents)} / {display.amountPlaceholder ? "—" : formatCents(effective)}
-          </span>
-          <RowBadges badges={display.badges} />
-          {leaf.carryoverPolicy === "rollover" ? (
-            <span className="rounded-xs bg-[var(--bg-inset)] px-1 uppercase tracking-wide">Rollover</span>
-          ) : null}
-        </div>
-        <div className="w-16">
-          <Bar pct={display.barPct} tone={display.barTone} />
-        </div>
-      </div>
-      <div className="mt-2">
-        <AllocateFormTrigger
-          categoryId={leaf.categoryId}
-          categoryName={leaf.name}
-          year={year}
-          month={month}
-          allocation={leaf.allocation}
-          carryoverPolicy={leaf.carryoverPolicy}
-        />
-      </div>
-    </li>
-  );
-}
-
-function MobileIncomeList({
-  sections,
-  phase,
-  year,
-  month,
-}: {
-  sections: SectionGroup<IncomeLeafRow>[];
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  return (
-    <div className="space-y-4 sm:hidden">
-      {sections.map((section) => (
-        <div key={section.parentId ?? "unparented"} className="space-y-2">
-          <MobileGroupHeading name={section.parentName} />
-          <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft">
-            {section.categories.map((income) => (
-              <MobileIncomeRow key={income.categoryId} income={income} phase={phase} year={year} month={month} />
-            ))}
-          </ul>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function MobileIncomeRow({
-  income,
-  phase,
-  year,
-  month,
-}: {
-  income: IncomeLeafRow;
-  phase: MonthPhase;
-  year: number;
-  month: number;
-}) {
-  const display = resolveRowDisplay(
-    {
-      plannedCents: income.plannedCents,
-      receivedCents: income.receivedCents,
-      varianceCents: income.varianceCents,
-      pendingCents: income.pendingCents,
-      hasAllocation: income.hasAllocation,
-    },
-    "income",
-    phase,
-  );
-  return (
-    <li className="px-3 py-2.5">
-      <div className="flex items-baseline justify-between gap-2">
-        <Link
-          href={`/transactions?categoryId=${income.categoryId}&year=${year}&month=${month}`}
-          className="min-w-0 truncate font-display text-ink-1 underline-offset-4 hover:underline"
-        >
-          {income.name}
-        </Link>
-        <span className={cn("shrink-0 font-mono text-sm", TONE_CLASS[display.tone])}>
-          {formatCents(income.varianceCents)}
-        </span>
-      </div>
-      <div className="mt-1 flex items-center gap-1 font-mono text-xs text-ink-3">
-        <span>
-          {formatCents(income.receivedCents)} / {display.amountPlaceholder ? "—" : formatCents(income.plannedCents)}
-        </span>
-        <RowBadges badges={display.badges} />
-      </div>
-      <div className="mt-2">
-        <AllocateFormTrigger
-          categoryId={income.categoryId}
-          categoryName={income.name}
-          year={year}
-          month={month}
-          allocation={{ allocatedCents: income.plannedCents, rolloverCents: 0, effectiveCents: income.plannedCents }}
-          carryoverPolicy="none"
-        />
-      </div>
-    </li>
   );
 }
 

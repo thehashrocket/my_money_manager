@@ -34,6 +34,13 @@ export type RowDisplay = {
    * cannot express "no budget_periods row" vs "a row allocating $0". */
   amountPlaceholder: boolean;
   badges: RowBadge[];
+  /** T28/A8/DS23: an EXPENSE-kind category with net-positive money flowing
+   * INTO it this month — the Layer 2 partial-failure shape F1 describes
+   * (a category that should be `kind='income'` but isn't). Always `false`
+   * for income rows, which never need to be told they look like themselves.
+   * Non-dismissible by design (DS23) — a per-render fact, not a warning to
+   * acknowledge and forget. */
+  looksLikeIncome: boolean;
 };
 
 export type ExpenseDisplayRow = {
@@ -103,7 +110,13 @@ function resolveExpenseRow(row: ExpenseDisplayRow): RowDisplay {
   if (pendingCents > 0) badges.push({ type: "pending", amountCents: pendingCents });
   if (isOver) badges.push({ type: "overflow", amountCents: spentCents - effectiveCents });
 
-  return { tone, barPct, barTone, amountPlaceholder: !hasAllocation, badges };
+  // T28: negative "spent" is nonsensical for a true expense category — it
+  // means net money flowed IN this month (`spentCents = 0 - SUM(amount_cents)`,
+  // so a positive SUM, i.e. deposits, produces a negative `spentCents`).
+  // Exactly zero activity is not flagged; there is nothing to point at yet.
+  const looksLikeIncome = spentCents < 0;
+
+  return { tone, barPct, barTone, amountPlaceholder: !hasAllocation, badges, looksLikeIncome };
 }
 
 /**
@@ -153,5 +166,5 @@ function resolveIncomeRow(row: IncomeDisplayRow, phase: MonthPhase): RowDisplay 
   if (pendingCents > 0) badges.push({ type: "pending", amountCents: pendingCents });
   if (varianceCents > 0) badges.push({ type: "over-plan", amountCents: varianceCents });
 
-  return { tone, barPct, barTone: "ledger", amountPlaceholder: !hasAllocation, badges };
+  return { tone, barPct, barTone: "ledger", amountPlaceholder: !hasAllocation, badges, looksLikeIncome: false };
 }

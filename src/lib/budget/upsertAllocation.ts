@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
+import { getEffectiveAllocation, invalidateForwardRollover, type EffectiveAllocation } from "@/lib/budget";
 import {
   CategoryNotFoundError,
   ParentAllocationError,
@@ -24,12 +24,20 @@ export { CategoryNotFoundError, ParentAllocationError };
  *
  * Upsert + invalidation run inside a single `db.transaction` so an error
  * between steps never leaves a stale cache pointing at a mutated
- * `allocated_cents`. Nothing rebuilds it, though (T8/TS1 deleted the only
- * writer, `getEffectiveAllocation`'s `persist` option) — it just stays NULL,
- * which every real reader (`loadMonthView`'s set-based path) already
- * ignores. See `invalidateForwardRollover`'s own docstring in `budget.ts`.
+ * `allocated_cents`. Nothing rebuilds the cache column, though (T8/TS1
+ * deleted the only writer, `getEffectiveAllocation`'s `persist` option) — it
+ * just stays NULL, which every real reader (`loadMonthView`'s set-based
+ * path) already ignores. See `invalidateForwardRollover`'s own docstring in
+ * `budget.ts`.
+ *
+ * P2 (T18): returns the reconciled row — `getEffectiveAllocation`, read
+ * inside the same transaction right after the invalidation it depends on —
+ * so `<MonthEditor>`'s inline commit can merge the real
+ * allocated/rollover/effective triple back into client state instead of
+ * trusting its own optimistic guess (which cannot know a rollover
+ * category's carried-forward balance) or re-fetching the whole route.
  */
-export function upsertAllocation(db: Db, input: AllocateInput): void {
+export function upsertAllocation(db: Db, input: AllocateInput): EffectiveAllocation {
   const { categoryId, year, month, allocatedCents } = input;
 
   const category = db
@@ -47,7 +55,7 @@ export function upsertAllocation(db: Db, input: AllocateInput): void {
     .get();
   if (firstChild) throw new ParentAllocationError(category.id, category.name);
 
-  db.transaction((tx) => {
+  return db.transaction((tx) => {
     tx.insert(schema.budgetPeriods)
       .values({ categoryId, year, month, allocatedCents })
       .onConflictDoUpdate({
@@ -64,5 +72,14 @@ export function upsertAllocation(db: Db, input: AllocateInput): void {
       })
       .run();
     invalidateForwardRollover(tx, categoryId, year, month);
+
+    // The row we just wrote always exists at this point — `reconciled` can
+    // only be null when no `budget_periods` row exists for the month, which
+    // the insert above just guaranteed.
+    const reconciled = getEffectiveAllocation(tx, categoryId, year, month);
+    if (!reconciled) {
+      throw new Error(`upsertAllocation: reconciled row missing for category ${categoryId} ${year}-${month}`);
+    }
+    return reconciled;
   });
 }

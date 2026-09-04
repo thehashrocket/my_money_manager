@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateAllocateInput } from "./validateAllocateInput";
+import { ALLOCATE_MAX_CENTS, validateAllocateInput } from "./validateAllocateInput";
 
 const valid = {
   categoryId: 7,
@@ -56,6 +56,23 @@ describe("validateAllocateInput — happy path", () => {
 describe("validateAllocateInput — rejections", () => {
   it("rejects negative allocatedCents", () => {
     const result = validateAllocateInput({ ...valid, allocatedCents: -1 });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const paths = result.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("allocatedCents");
+    }
+  });
+
+  // C3: a pasted account number or stray digit must produce a visible
+  // inline error, not a silently accepted "($4,183,200.00) over-budgeted"
+  // headline.
+  it("accepts allocatedCents exactly at the $1M bound", () => {
+    const result = validateAllocateInput({ ...valid, allocatedCents: ALLOCATE_MAX_CENTS });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects allocatedCents one cent over the $1M bound", () => {
+    const result = validateAllocateInput({ ...valid, allocatedCents: ALLOCATE_MAX_CENTS + 1 });
     expect(result.success).toBe(false);
     if (!result.success) {
       const paths = result.error.issues.map((i) => i.path.join("."));
