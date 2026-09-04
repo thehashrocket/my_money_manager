@@ -41,7 +41,8 @@ export function loadGoals(db: Db): GoalsView {
       schema.budgetPeriods,
       eq(schema.budgetPeriods.categoryId, schema.categories.id),
     )
-    .where(eq(schema.categories.isSavingsGoal, true))
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    .where(eq(schema.categories.kind, "fund"))
     .groupBy(schema.categories.id)
     .orderBy(schema.categories.name)
     .all();

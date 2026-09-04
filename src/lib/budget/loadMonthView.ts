@@ -1,4 +1,4 @@
-import { and, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { computeMtdSpent, getEffectiveAllocation } from "@/lib/budget";
 import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
@@ -84,7 +84,8 @@ export function loadMonthView(
   const categories = db
     .select()
     .from(schema.categories)
-    .where(eq(schema.categories.isSavingsGoal, false))
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    .where(ne(schema.categories.kind, "fund"))
     .all();
 
   const parentIds = new Set<number>();

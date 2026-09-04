@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { currentMonth as getCurrentMonth } from "@/lib/now";
 import { monthBoundary, nMonthsBack } from "@/lib/budget/monthOfIso";
@@ -49,7 +49,8 @@ export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
       parentId: schema.categories.parentId,
     })
     .from(schema.categories)
-    .where(eq(schema.categories.isSavingsGoal, false))
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    .where(ne(schema.categories.kind, "fund"))
     .all();
 
   const categoryNameById = new Map<number, string>();

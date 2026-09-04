@@ -1,4 +1,4 @@
-import { and, eq, notInArray } from "drizzle-orm";
+import { and, eq, ne, notInArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
@@ -35,12 +35,13 @@ export function listLeafCategories(db: Db): LeafCategory[] {
     })
     .from(schema.categories)
     .where(
+      // A2: kind is authoritative, not is_savings_goal (T5).
       parentIds.length > 0
         ? and(
-            eq(schema.categories.isSavingsGoal, false),
+            ne(schema.categories.kind, "fund"),
             notInArray(schema.categories.id, parentIds),
           )
-        : eq(schema.categories.isSavingsGoal, false),
+        : ne(schema.categories.kind, "fund"),
     )
     .all();
 

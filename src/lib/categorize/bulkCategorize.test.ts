@@ -51,6 +51,7 @@ function seedCategory(
   opts: {
     parentId?: number | null;
     isSavingsGoal?: boolean;
+    kind?: "income" | "expense" | "fund";
     carryoverPolicy?: "none" | "rollover" | "reset";
   } = {},
 ) {
@@ -61,6 +62,7 @@ function seedCategory(
       name: `${name}-${seq}`,
       parentId: opts.parentId ?? null,
       isSavingsGoal: opts.isSavingsGoal ?? false,
+      kind: opts.kind ?? "expense",
       carryoverPolicy: opts.carryoverPolicy ?? "none",
     })
     .returning()
@@ -422,7 +424,7 @@ describe("bulkCategorize — rejections", () => {
   });
 
   it("throws SavingsGoalCategoryError when the target is a savings goal", () => {
-    const goal = seedCategory("Emergency", { isSavingsGoal: true });
+    const goal = seedCategory("Emergency", { isSavingsGoal: true, kind: "fund" });
     expect(() =>
       bulkCategorize(handle.db, {
         normalizedMerchant: "SAFEWAY",
@@ -430,6 +432,28 @@ describe("bulkCategorize — rejections", () => {
         rememberMerchant: false,
       }),
     ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(TC22, A2) throws for a kind='fund' category even when isSavingsGoal=0 (drift)", () => {
+    const goal = seedCategory("Drifted Fund", { isSavingsGoal: false, kind: "fund" });
+    expect(() =>
+      bulkCategorize(handle.db, {
+        normalizedMerchant: "SAFEWAY",
+        categoryId: goal.id,
+        rememberMerchant: false,
+      }),
+    ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(TC22b, E6) does not throw for a kind='expense' category even when isSavingsGoal=1 (inverse drift)", () => {
+    const cat = seedCategory("Drifted Expense", { isSavingsGoal: true, kind: "expense" });
+    expect(() =>
+      bulkCategorize(handle.db, {
+        normalizedMerchant: "SAFEWAY",
+        categoryId: cat.id,
+        rememberMerchant: false,
+      }),
+    ).not.toThrow();
   });
 
   it("rolls back on mid-transaction error — no txns flipped, no rule inserted", () => {

@@ -2135,7 +2135,7 @@ PR2b  Lane I:  S12                         (single lane)
   - Surfaced by: C4 — `Math.round(Number(dollars) * 100)` at `budget/actions.ts:27`, against `CLAUDE.md` rule 1
   - Files: `src/lib/money.ts`, `src/lib/simplefin/parseAmount.ts` (removed), `src/app/budget/actions.ts`, simplefin importers
   - Verify: TC16b; existing `parseAmount.test.ts` cases green from the new home
-- [ ] **T5 (P1, human: ~2h / CC: ~20min)** — schema reads — repoint **all seven** `is_savings_goal` readers to `kind`; `createGoalAction` dual-writes
+- [x] **T5 (P1, human: ~2h / CC: ~20min)** — schema reads — repoint **all seven** `is_savings_goal` readers to `kind`; `createGoalAction` dual-writes
   - Surfaced by: A2 — the plan listed 4; `categorizeTransaction.ts:77`, `bulkCategorize.ts:96` and `goals/actions.ts:41` were missed, and PR3 would have deleted those guards silently
   - Files: `loadMonthView.ts`, `loadGoals.ts`, `loadMonthlyTrends.ts`, `categories.ts`, `categorizeTransaction.ts`, `bulkCategorize.ts`, `goals/actions.ts`
   - Verify: TC18, TC22, **TC22b (E6 — the inverse drift)** + **regressions TC34a, TC34b**

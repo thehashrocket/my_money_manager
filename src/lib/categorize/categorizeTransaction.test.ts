@@ -55,6 +55,7 @@ function seedCategory(
   opts: {
     parentId?: number | null;
     isSavingsGoal?: boolean;
+    kind?: "income" | "expense" | "fund";
     carryoverPolicy?: "none" | "rollover" | "reset";
   } = {},
 ) {
@@ -65,6 +66,7 @@ function seedCategory(
       name: `${name}-${seq}`,
       parentId: opts.parentId ?? null,
       isSavingsGoal: opts.isSavingsGoal ?? false,
+      kind: opts.kind ?? "expense",
       carryoverPolicy: opts.carryoverPolicy ?? "none",
     })
     .returning()
@@ -578,7 +580,7 @@ describe("categorizeTransaction — rejections", () => {
       }),
     ).toThrow(ParentAllocationError);
 
-    const goal = seedCategory("Emergency", { isSavingsGoal: true });
+    const goal = seedCategory("Emergency", { isSavingsGoal: true, kind: "fund" });
     expect(() =>
       categorizeTransaction(handle.db, {
         transactionId: target.id,
@@ -587,5 +589,37 @@ describe("categorizeTransaction — rejections", () => {
         applyToPast: false,
       }),
     ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(TC22, A2) throws for a kind='fund' category even when isSavingsGoal=0 (drift)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const goal = seedCategory("Drifted Fund", { isSavingsGoal: false, kind: "fund" });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: goal.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).toThrow(SavingsGoalCategoryError);
+  });
+
+  it("(TC22b, E6) does not throw for a kind='expense' category even when isSavingsGoal=1 (inverse drift)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+    const cat = seedCategory("Drifted Expense", { isSavingsGoal: true, kind: "expense" });
+
+    expect(() =>
+      categorizeTransaction(handle.db, {
+        transactionId: target.id,
+        categoryId: cat.id,
+        rememberMerchant: false,
+        applyToPast: false,
+      }),
+    ).not.toThrow();
   });
 });

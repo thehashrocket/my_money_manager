@@ -68,13 +68,14 @@ export function categorizeTransaction(
       .select({
         id: schema.categories.id,
         name: schema.categories.name,
-        isSavingsGoal: schema.categories.isSavingsGoal,
+        kind: schema.categories.kind,
       })
       .from(schema.categories)
       .where(eq(schema.categories.id, categoryId))
       .get();
     if (!category) throw new CategoryNotFoundError(categoryId);
-    if (category.isSavingsGoal) {
+    // A2: kind is authoritative, not is_savings_goal (T5).
+    if (category.kind === "fund") {
       throw new SavingsGoalCategoryError(category.id, category.name);
     }
 

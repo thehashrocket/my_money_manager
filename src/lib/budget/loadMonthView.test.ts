@@ -44,6 +44,7 @@ function seedCategory(
     parentId?: number | null;
     carryoverPolicy?: "none" | "rollover" | "reset";
     isSavingsGoal?: boolean;
+    kind?: "income" | "expense" | "fund";
   } = {},
 ) {
   categoryCounter += 1;
@@ -54,6 +55,7 @@ function seedCategory(
       parentId: opts.parentId ?? null,
       carryoverPolicy: opts.carryoverPolicy ?? "none",
       isSavingsGoal: opts.isSavingsGoal ?? false,
+      kind: opts.kind ?? "expense",
     })
     .returning()
     .all();
@@ -171,15 +173,33 @@ describe("loadMonthView — structure & grouping", () => {
     expect(flat).not.toContain(housing.name);
   });
 
-  it("excludes savings-goal categories from the view entirely", () => {
+  it("excludes fund (kind='fund') categories from the view entirely", () => {
     clearSeedCategories();
     seedCategory("Groceries");
-    seedCategory("Emergency Fund", { isSavingsGoal: true });
+    seedCategory("Emergency Fund", { isSavingsGoal: true, kind: "fund" });
 
     const view = loadMonthView(handle.db, 2026, 4);
     const flat = view.sections.flatMap((s) => s.categories.map((c) => c.name));
     expect(flat).toEqual(expect.arrayContaining([expect.stringMatching(/^Groceries-/)]));
     expect(flat.some((n) => n.startsWith("Emergency Fund-"))).toBe(false);
+  });
+
+  it("(TC22) excludes a kind='fund' category even when isSavingsGoal=0 (drift)", () => {
+    clearSeedCategories();
+    seedCategory("Drifted Fund", { isSavingsGoal: false, kind: "fund" });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const flat = view.sections.flatMap((s) => s.categories.map((c) => c.name));
+    expect(flat.some((n) => n.startsWith("Drifted Fund-"))).toBe(false);
+  });
+
+  it("(TC22b, E6) includes a kind='expense' category as an ordinary row even when isSavingsGoal=1 (inverse drift)", () => {
+    clearSeedCategories();
+    seedCategory("Drifted Expense", { isSavingsGoal: true, kind: "expense" });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const flat = view.sections.flatMap((s) => s.categories.map((c) => c.name));
+    expect(flat.some((n) => n.startsWith("Drifted Expense-"))).toBe(true);
   });
 
   it("sorts leaves within a section by spent DESC, then name ASC", () => {
