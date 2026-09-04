@@ -66,13 +66,16 @@ export function getEffectiveAllocation(
   }
 
   const category = db
-    .select({ carryoverPolicy: schema.categories.carryoverPolicy })
+    .select({ carryoverPolicy: schema.categories.carryoverPolicy, kind: schema.categories.kind })
     .from(schema.categories)
     .where(eq(schema.categories.id, categoryId))
     .get();
 
+  // Rollover is meaningless on an income category — there is nothing to
+  // "carry forward under-spent." A hand-set carryover_policy='rollover' on
+  // an income row must not inflate planned income (F2).
   let rolloverCents = 0;
-  if (category?.carryoverPolicy === "rollover") {
+  if (category?.carryoverPolicy === "rollover" && category?.kind !== "income") {
     const { year: priorYear, month: priorMonth } = previousMonth(year, month);
     const prior = getEffectiveAllocation(db, categoryId, priorYear, priorMonth, {
       persist,
@@ -127,8 +130,28 @@ export function invalidateForwardRollover(
 }
 
 /**
+ * The genuinely shared half of every category-month total (D5A): a category,
+ * excluding transfer-paired rows (both sides are bookkeeping, not spend or
+ * income), within [first day of month, first day of next month). Sign
+ * handling and pending inclusion are NOT shared — they differ per caller and
+ * stay explicit at each call site rather than behind a `mode` flag, because
+ * what "spent" or "received" means is a product decision (see TODOS.md).
+ */
+function categoryMonthPredicate(categoryId: number, year: number, month: number) {
+  const firstDay = monthBoundary(year, month);
+  const { year: nextYear, month: nextMonth } = nextMonthOf(year, month);
+  const firstDayNext = monthBoundary(nextYear, nextMonth);
+
+  return and(
+    eq(schema.transactions.categoryId, categoryId),
+    isNull(schema.transactions.transferPairId),
+    gte(schema.transactions.date, firstDay),
+    sql`${schema.transactions.date} < ${firstDayNext}`,
+  );
+}
+
+/**
  * Month-to-date spend in positive cents for the given category + month.
- * Excludes transfer-paired rows (both sides are bookkeeping, not spend).
  * Pending rows are included — they count toward spent until they post.
  * Refunds (positive amount_cents on a spend category) net against debits.
  */
@@ -138,10 +161,32 @@ export function computeMtdSpent(
   year: number,
   month: number,
 ): number {
-  const firstDay = monthBoundary(year, month);
-  const { year: nextYear, month: nextMonth } = nextMonthOf(year, month);
-  const firstDayNext = monthBoundary(nextYear, nextMonth);
+  const row = db
+    .select({
+      total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+    })
+    .from(schema.transactions)
+    .where(categoryMonthPredicate(categoryId, year, month))
+    .get();
 
+  const sum = row?.total ?? 0;
+  return 0 - sum;
+}
+
+/**
+ * Month-to-date received in cents for an income category (TS2). Unlike
+ * `computeMtdSpent`, pending rows are EXCLUDED: CLAUDE.md rule 1 already
+ * treats pending money as not-yet-yours for every balance in the app, and a
+ * pending paycheck counted as received would make Left to Budget report a
+ * paycheck that has not actually landed. A negative row (a clawback) nets
+ * the total down rather than being dropped.
+ */
+export function computeMtdReceived(
+  db: AnyDb,
+  categoryId: number,
+  year: number,
+  month: number,
+): number {
   const row = db
     .select({
       total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
@@ -149,16 +194,13 @@ export function computeMtdSpent(
     .from(schema.transactions)
     .where(
       and(
-        eq(schema.transactions.categoryId, categoryId),
-        isNull(schema.transactions.transferPairId),
-        gte(schema.transactions.date, firstDay),
-        sql`${schema.transactions.date} < ${firstDayNext}`,
+        categoryMonthPredicate(categoryId, year, month),
+        eq(schema.transactions.isPending, false),
       ),
     )
     .get();
 
-  const sum = row?.total ?? 0;
-  return 0 - sum;
+  return row?.total ?? 0;
 }
 
 function previousMonth(year: number, month: number): { year: number; month: number } {

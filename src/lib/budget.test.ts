@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import {
+  computeMtdReceived,
   computeMtdSpent,
   getEffectiveAllocation,
   invalidateForwardRollover,
@@ -45,11 +46,12 @@ let categoryNameCounter = 0;
 function seedCategory(
   name: string,
   carryoverPolicy: "none" | "rollover" | "reset" = "none",
+  kind: "income" | "expense" | "fund" = "expense",
 ) {
   categoryNameCounter += 1;
   const [cat] = handle.db
     .insert(schema.categories)
-    .values({ name: `${name}-test-${categoryNameCounter}`, carryoverPolicy })
+    .values({ name: `${name}-test-${categoryNameCounter}`, carryoverPolicy, kind })
     .returning()
     .all();
   return cat;
@@ -248,6 +250,115 @@ describe("computeMtdSpent", () => {
   });
 });
 
+describe("computeMtdReceived (TC3)", () => {
+  it("returns 0 when no transactions exist", () => {
+    const cat = seedCategory("Paycheck", "none", "income");
+    expect(computeMtdReceived(handle.db, cat.id, 2026, 4)).toBe(0);
+  });
+
+  it("sums positive rows as received", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "none", "income");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-05",
+      amountCents: 200000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-20",
+      amountCents: 200000,
+    });
+    expect(computeMtdReceived(handle.db, cat.id, 2026, 4)).toBe(400000);
+  });
+
+  it("a negative clawback nets the total down", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "none", "income");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-05",
+      amountCents: 200000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: -5000, // clawback
+    });
+    expect(computeMtdReceived(handle.db, cat.id, 2026, 4)).toBe(195000);
+  });
+
+  it("excludes transfer-paired rows", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "none", "income");
+    const paired = seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: 30000,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: paired.id })
+      .where(eq(schema.transactions.id, paired.id))
+      .run();
+
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-11",
+      amountCents: 15000,
+    });
+
+    expect(computeMtdReceived(handle.db, cat.id, 2026, 4)).toBe(15000);
+  });
+});
+
+describe("pending rows: asymmetric by design (TC3b, TS2)", () => {
+  it("a pending row in an income category does NOT count toward received", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "none", "income");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: 200000,
+      isPending: true,
+    });
+    expect(computeMtdReceived(handle.db, cat.id, 2026, 4)).toBe(0);
+  });
+
+  it("a pending row in an expense category still counts toward spent", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Groceries");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: -2000,
+      isPending: true,
+    });
+    expect(computeMtdSpent(handle.db, cat.id, 2026, 4)).toBe(2000);
+  });
+});
+
 describe("getEffectiveAllocation", () => {
   it("returns null when no budget_periods row exists", () => {
     const cat = seedCategory("Groceries");
@@ -306,6 +417,28 @@ describe("getEffectiveAllocation", () => {
     const result = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
     expect(result?.rolloverCents).toBe(0);
     expect(result?.effectiveCents).toBe(10000);
+  });
+
+  it("(TC4) forces rolloverCents to 0 on an income category, even with carryover_policy='rollover'", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "rollover", "income");
+    seedAllocation(cat.id, 2026, 3, 5000);
+    seedAllocation(cat.id, 2026, 4, 200000);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-20",
+      amountCents: 4000, // would roll 1000 if the guard didn't fire
+    });
+
+    const result = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    expect(result).toEqual({
+      allocatedCents: 200000,
+      rolloverCents: 0,
+      effectiveCents: 200000,
+    });
   });
 
   it("contributes 0 rollover when no prior month row exists", () => {

@@ -2121,7 +2121,7 @@ PR2b  Lane I:  S12                         (single lane)
   - Order inside the file matters: three `ADD COLUMN`s → kind backfills → group INSERT → `parent_id` UPDATEs → **then** the `sort_order` backfill (it partitions on `parent_id`, so running it earlier numbers one flat bucket) → cache clear.
   - Files: `drizzle/0017_category_kind.sql`, `src/db/schema.ts`, `src/db/migration0017.test.ts`
   - Verify: `pnpm db:migrate` then `pnpm test`; TC5, **TC24a (restated — E3)**, **TC35 (extended — E2)**
-- [ ] **T2 (P1, human: ~2h / CC: ~15min)** — budget math — extract `categoryMonthPredicate`, add `computeMtdReceived` (pending excluded, TS2), force rollover 0 on income
+- [x] **T2 (P1, human: ~2h / CC: ~15min)** — budget math — extract `categoryMonthPredicate`, add `computeMtdReceived` (pending excluded, TS2), force rollover 0 on income
   - Surfaced by: §2 B1; D5A; TS2
   - Files: `src/lib/budget.ts`, `src/lib/budget.test.ts`
   - Verify: TC1, TC3, TC3b, TC4, TC20 + **regression TC2**
