@@ -183,6 +183,63 @@ describe("setCategoryKind — TC23b (X1)", () => {
 
     expect(() => setCategoryKind(handle.db, cat.id, "expense")).toThrow(CategoryKindChangeRefusedError);
   });
+
+  it("does not leak to expense -> fund on a used, all-positive category", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Refunds", "expense");
+    seedTxn(account.id, batch.id, cat.id, 20000, "2026-03-01");
+
+    expect(() => setCategoryKind(handle.db, cat.id, "fund")).toThrow(CategoryKindChangeRefusedError);
+  });
+
+  it("does not leak to income -> fund on a used, all-positive category", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "income");
+    seedTxn(account.id, batch.id, cat.id, 200000, "2026-03-01");
+
+    expect(() => setCategoryKind(handle.db, cat.id, "fund")).toThrow(CategoryKindChangeRefusedError);
+  });
+
+  it("does not leak to fund -> income on a used, all-positive category", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Savings", "fund");
+    seedTxn(account.id, batch.id, cat.id, 20000, "2026-03-01");
+
+    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
+  });
+
+  it("still applies X1 when the category also has budget_periods rows — disclosure, not refusal", () => {
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Freelance", "expense");
+    seedTxn(account.id, batch.id, cat.id, 50000, "2026-03-01");
+    handle.db
+      .insert(schema.budgetPeriods)
+      .values({ categoryId: cat.id, year: 2026, month: 3, allocatedCents: 10000 })
+      .run();
+
+    const result = setCategoryKind(handle.db, cat.id, "income");
+    expect(result.newKind).toBe("income");
+  });
+
+  it("dual-writes is_savings_goal to stay a truthful shadow of kind === 'fund'", () => {
+    const cat = seedCategory("Emergency Fund", "expense");
+
+    setCategoryKind(handle.db, cat.id, "fund");
+    const asFund = handle.db.select().from(schema.categories).where(eq(schema.categories.id, cat.id)).get();
+    expect(asFund?.isSavingsGoal).toBe(true);
+
+    setCategoryKind(handle.db, cat.id, "expense");
+    const backToExpense = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.id, cat.id))
+      .get();
+    expect(backToExpense?.isSavingsGoal).toBe(false);
+  });
 });
 
 describe("loadReclassifyCandidates", () => {
@@ -238,5 +295,10 @@ describe("loadReclassifyCandidates", () => {
     expect(candidates.some((c) => c.id === planned.id)).toBe(false);
     // Confirms the exclusion matches real enforcement: submitting anyway is refused.
     expect(() => setCategoryKind(handle.db, planned.id, "income")).toThrow(CategoryKindChangeRefusedError);
+  });
+
+  it("excludes the seed Uncategorized category from candidates", () => {
+    const candidates = loadReclassifyCandidates(handle.db);
+    expect(candidates.some((c) => c.name === "Uncategorized")).toBe(false);
   });
 });

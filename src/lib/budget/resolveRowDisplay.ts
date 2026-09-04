@@ -20,20 +20,26 @@ import type { MonthPhase } from "./monthOfIso";
 export type RowTone = "positive" | "negative" | "neutral" | "muted";
 export type BarTone = "ledger" | "amber" | "redbrown";
 
-export type RowBadge =
-  | { type: "pending"; amountCents: number }
-  | { type: "over-plan"; amountCents: number }
-  | { type: "overflow"; amountCents: number };
+export type PendingBadge = { type: "pending"; amountCents: number };
+export type OverPlanBadge = { type: "over-plan"; amountCents: number };
+export type OverflowBadge = { type: "overflow"; amountCents: number };
 
-export type RowDisplay = {
-  tone: RowTone;
+export type RowBadge = PendingBadge | OverPlanBadge | OverflowBadge;
+
+/**
+ * Split by row kind rather than one flat shape: income never uses `negative`
+ * tone, a non-`"ledger"` bar, or an `overflow` badge (those are expense-only
+ * concepts — DS12/DS35), and expense never produces an `over-plan` badge or
+ * a `"muted"` tone. A shared flat type let those illegal combinations
+ * type-check even though no code path here produces them today; this makes
+ * them unrepresentable instead of merely untested.
+ */
+type BaseRowDisplay = {
   /** 0-100, always capped — the bar never renders past full. */
   barPct: number;
-  barTone: BarTone;
   /** DS14: true means render "—", not `formatCents(0)` — `formatCents`
    * cannot express "no budget_periods row" vs "a row allocating $0". */
   amountPlaceholder: boolean;
-  badges: RowBadge[];
   /** T28/A8/DS23: an EXPENSE-kind category with net-positive money flowing
    * INTO it this month — the Layer 2 partial-failure shape F1 describes
    * (a category that should be `kind='income'` but isn't). Always `false`
@@ -42,6 +48,22 @@ export type RowDisplay = {
    * acknowledge and forget. */
   looksLikeIncome: boolean;
 };
+
+export type ExpenseRowDisplay = BaseRowDisplay & {
+  kind: "expense";
+  tone: Extract<RowTone, "positive" | "negative" | "neutral">;
+  barTone: Extract<BarTone, "ledger" | "amber">;
+  badges: (PendingBadge | OverflowBadge)[];
+};
+
+export type IncomeRowDisplay = BaseRowDisplay & {
+  kind: "income";
+  tone: Extract<RowTone, "positive" | "neutral" | "muted">;
+  barTone: "ledger";
+  badges: (PendingBadge | OverPlanBadge)[];
+};
+
+export type RowDisplay = ExpenseRowDisplay | IncomeRowDisplay;
 
 export type ExpenseDisplayRow = {
   effectiveCents: number;
@@ -63,12 +85,12 @@ export function resolveRowDisplay(
   row: ExpenseDisplayRow,
   kind: "expense",
   phase: MonthPhase,
-): RowDisplay;
+): ExpenseRowDisplay;
 export function resolveRowDisplay(
   row: IncomeDisplayRow,
   kind: "income",
   phase: MonthPhase,
-): RowDisplay;
+): IncomeRowDisplay;
 export function resolveRowDisplay(
   row: ExpenseDisplayRow | IncomeDisplayRow,
   kind: "expense" | "income",
@@ -94,19 +116,25 @@ export function resolveRowDisplay(
  * DS14: `amountPlaceholder` is true exactly when no `budget_periods` row
  * exists — distinct from a row that allocates exactly $0.
  */
-function resolveExpenseRow(row: ExpenseDisplayRow): RowDisplay {
+function resolveExpenseRow(row: ExpenseDisplayRow): ExpenseRowDisplay {
   const { effectiveCents, spentCents, pendingCents, hasAllocation } = row;
 
   const raw = effectiveCents > 0 ? (spentCents / effectiveCents) * 100 : spentCents > 0 ? 100 : 0;
   const barPct = Math.min(100, Math.max(0, raw));
-  const isOver = raw > 100;
+  // Spending against a zero-or-absent allocation is the worst overspend
+  // state there is, but `raw` clamps to exactly 100 in that case (division
+  // by a non-positive `effectiveCents` is undefined, so it's special-cased
+  // above) — `raw > 100` alone misses it entirely and the row loses its
+  // overflow tick, the one signal DS8 reserves for "over" specifically.
+  const isOver = raw > 100 || (effectiveCents <= 0 && spentCents > 0);
   const isWarn = raw >= 80;
-  const barTone: BarTone = isOver || isWarn ? "amber" : "ledger";
+  const barTone: ExpenseRowDisplay["barTone"] = isOver || isWarn ? "amber" : "ledger";
 
   const remainingCents = effectiveCents - spentCents;
-  const tone: RowTone = remainingCents < 0 ? "negative" : remainingCents === 0 ? "neutral" : "positive";
+  const tone: ExpenseRowDisplay["tone"] =
+    remainingCents < 0 ? "negative" : remainingCents === 0 ? "neutral" : "positive";
 
-  const badges: RowBadge[] = [];
+  const badges: ExpenseRowDisplay["badges"] = [];
   if (pendingCents > 0) badges.push({ type: "pending", amountCents: pendingCents });
   if (isOver) badges.push({ type: "overflow", amountCents: spentCents - effectiveCents });
 
@@ -116,7 +144,7 @@ function resolveExpenseRow(row: ExpenseDisplayRow): RowDisplay {
   // Exactly zero activity is not flagged; there is nothing to point at yet.
   const looksLikeIncome = spentCents < 0;
 
-  return { tone, barPct, barTone, amountPlaceholder: !hasAllocation, badges, looksLikeIncome };
+  return { kind: "expense", tone, barPct, barTone, amountPlaceholder: !hasAllocation, badges, looksLikeIncome };
 }
 
 /**
@@ -142,7 +170,7 @@ function resolveExpenseRow(row: ExpenseDisplayRow): RowDisplay {
  * DS14: `amountPlaceholder` mirrors the expense rule — true only when no
  * `budget_periods` row exists for this income category this month.
  */
-function resolveIncomeRow(row: IncomeDisplayRow, phase: MonthPhase): RowDisplay {
+function resolveIncomeRow(row: IncomeDisplayRow, phase: MonthPhase): IncomeRowDisplay {
   const { plannedCents, receivedCents, varianceCents, pendingCents, hasAllocation } = row;
 
   const raw = plannedCents > 0 ? (receivedCents / plannedCents) * 100 : receivedCents > 0 ? 100 : 0;
@@ -151,7 +179,7 @@ function resolveIncomeRow(row: IncomeDisplayRow, phase: MonthPhase): RowDisplay 
   const shortfallCents = -varianceCents; // positive when short
   const coveredByPending = shortfallCents > 0 && pendingCents >= shortfallCents;
 
-  let tone: RowTone;
+  let tone: IncomeRowDisplay["tone"];
   if (varianceCents >= 0) {
     tone = "positive";
   } else if (coveredByPending) {
@@ -162,9 +190,17 @@ function resolveIncomeRow(row: IncomeDisplayRow, phase: MonthPhase): RowDisplay 
     tone = "neutral";
   }
 
-  const badges: RowBadge[] = [];
+  const badges: IncomeRowDisplay["badges"] = [];
   if (pendingCents > 0) badges.push({ type: "pending", amountCents: pendingCents });
   if (varianceCents > 0) badges.push({ type: "over-plan", amountCents: varianceCents });
 
-  return { tone, barPct, barTone: "ledger", amountPlaceholder: !hasAllocation, badges, looksLikeIncome: false };
+  return {
+    kind: "income",
+    tone,
+    barPct,
+    barTone: "ledger",
+    amountPlaceholder: !hasAllocation,
+    badges,
+    looksLikeIncome: false,
+  };
 }

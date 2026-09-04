@@ -1,7 +1,6 @@
 "use client";
 
-import { StateCard } from "@/components/ledger/state-card";
-import { Button } from "@/components/ui/button";
+import { RouteErrorCard } from "@/app/_components/RouteErrorCard";
 
 /** DS47/E10 — `/import` had no error boundary. */
 export default function ImportError({
@@ -13,19 +12,16 @@ export default function ImportError({
 }) {
   return (
     <main className="mx-auto max-w-3xl p-6">
-      <StateCard
-        variant="error"
+      <RouteErrorCard
         title="Something went wrong loading the import page"
-        description={
-          <pre className="mt-1 overflow-x-auto rounded-md bg-[var(--bg-inset)] p-3 text-left text-xs text-ink-2">
-            {error.message}
-          </pre>
+        reassurance={
+          <p>
+            Nothing was imported. Every import snapshots the database before it writes, and commits happen
+            in a single transaction.
+          </p>
         }
-        primaryAction={
-          <Button type="button" variant="primary" onClick={reset}>
-            Try again
-          </Button>
-        }
+        error={error}
+        reset={reset}
       />
     </main>
   );

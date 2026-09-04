@@ -170,11 +170,16 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   }
 
   const uncategorizedCategory = categories.find((c) => c.name === "Uncategorized");
+  const uncategorizedId = uncategorizedCategory?.id;
   const expenseLeavesAll = categories.filter(
-    (c) => c.kind === "expense" && !parentIds.has(c.id) && c.name !== "Uncategorized",
+    (c) => c.kind === "expense" && !parentIds.has(c.id) && c.id !== uncategorizedId,
   );
-  const incomeLeavesAll = categories.filter((c) => c.kind === "income" && !parentIds.has(c.id));
-  const fundLeavesAll = categories.filter((c) => c.kind === "fund" && !parentIds.has(c.id));
+  const incomeLeavesAll = categories.filter(
+    (c) => c.kind === "income" && !parentIds.has(c.id) && c.id !== uncategorizedId,
+  );
+  const fundLeavesAll = categories.filter(
+    (c) => c.kind === "fund" && !parentIds.has(c.id) && c.id !== uncategorizedId,
+  );
 
   // T8/T11: bounded set of queries for the whole month, not 2 per leaf plus
   // unbounded backward recursion. #1 categories (above), #2 this month's

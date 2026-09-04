@@ -22,11 +22,13 @@ export default async function GoalsPage() {
 
       {/* DS11: a relabel alone leaves the progress bar and percent-complete
           UI still asserting a fact about money that may never have moved
-          (B2) — this says so plainly instead. */}
+          (B2) — this says so plainly instead. `empty`, not `error`: this is
+          the page working as designed, not a failure, so it shouldn't wear
+          the same redbrown `!` mark a real error does. */}
       <StateCard
-        variant="error"
-        title="Progress tracking is paused — see the note above."
-        className="text-left"
+        variant="empty"
+        title="Progress tracking is paused"
+        description="These are amounts you budgeted toward each goal, not confirmed transfers — the app can't tell whether the money actually moved, so there's no percent-complete bar until that's true."
       />
 
       <section className="space-y-3">

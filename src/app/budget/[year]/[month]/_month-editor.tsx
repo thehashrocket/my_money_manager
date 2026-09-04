@@ -297,7 +297,7 @@ export function MonthEditor(props: MonthEditorProps) {
 
         <BandSection heading="Income" id="income-band">
           <IncomeTable sections={incomeSections} plannedIncomeCents={plannedIncomeCents} year={year} month={month} />
-          <MobileIncomeList sections={incomeSections} year={year} month={month} />
+          <MobileIncomeList sections={incomeSections} plannedIncomeCents={plannedIncomeCents} year={year} month={month} />
         </BandSection>
 
         <BandSection heading="Expenses">
@@ -308,7 +308,13 @@ export function MonthEditor(props: MonthEditorProps) {
             year={year}
             month={month}
           />
-          <MobileExpenseList sections={expenseSections} uncategorizedRow={uncategorizedRow} year={year} month={month} />
+          <MobileExpenseList
+            sections={expenseSections}
+            uncategorizedRow={uncategorizedRow}
+            allocatedCents={allocatedCents}
+            year={year}
+            month={month}
+          />
           <NewGroupRow />
         </BandSection>
       </div>
@@ -386,7 +392,10 @@ function RowBadges({ badges }: { badges: RowBadge[] }) {
               title={`Includes ${formatCents(badge.amountCents)} pending`}
               className="ml-1.5 font-mono text-[10px] uppercase tracking-wide text-ink-3"
             >
-              +p
+              {/* `title` is unreachable by touch/keyboard/most screen readers —
+                  the visual mark stays decorative, the real content is sr-only. */}
+              <span aria-hidden>+p</span>
+              <span className="sr-only">Includes {formatCents(badge.amountCents)} pending</span>
             </span>
           );
         }
@@ -400,10 +409,12 @@ function RowBadges({ badges }: { badges: RowBadge[] }) {
         return (
           <span
             key={i}
-            aria-hidden
             title={`${formatCents(badge.amountCents)} over budget`}
-            className="ml-1.5 inline-block h-2 w-[2px] align-middle bg-redbrown"
-          />
+            className="ml-1.5 inline-flex items-center align-middle"
+          >
+            <span aria-hidden className="inline-block h-2 w-[2px] bg-redbrown" />
+            <span className="sr-only">{formatCents(badge.amountCents)} over budget</span>
+          </span>
         );
       })}
     </>
@@ -761,14 +772,29 @@ function MobileGroupHeading({ name, menu }: { name: string | null; menu?: React.
   );
 }
 
+/** Mirrors the desktop tables' `TableFooter` subtotal row (`Σ planned …`) —
+ * without it, the band-level "what did I plan here" figure was only
+ * recoverable from `SummaryStrip`, which uses different labels and doesn't
+ * break out funding at all. */
+function MobileSubtotal({ label, cents }: { label: string; cents: number }) {
+  return (
+    <div className="flex items-center justify-between border-t-2 border-[var(--rule-strong)] px-1 pt-2 font-mono text-sm text-ink-2">
+      <span>{label}</span>
+      <span>{formatCents(cents)}</span>
+    </div>
+  );
+}
+
 function MobileExpenseList({
   sections,
   uncategorizedRow,
+  allocatedCents,
   year,
   month,
 }: {
   sections: SectionGroup<LeafRow>[];
   uncategorizedRow: UncategorizedRow | null;
+  allocatedCents: number;
   year: number;
   month: number;
 }) {
@@ -821,6 +847,7 @@ function MobileExpenseList({
           </div>
         </div>
       ) : null}
+      <MobileSubtotal label="Σ planned spending" cents={allocatedCents} />
     </div>
   );
 }
@@ -895,10 +922,12 @@ function MobileExpenseRow({
 
 function MobileIncomeList({
   sections,
+  plannedIncomeCents,
   year,
   month,
 }: {
   sections: SectionGroup<IncomeLeafRow>[];
+  plannedIncomeCents: number;
   year: number;
   month: number;
 }) {
@@ -915,6 +944,7 @@ function MobileIncomeList({
           </ul>
         </div>
       ))}
+      <MobileSubtotal label="Σ planned income" cents={plannedIncomeCents} />
     </div>
   );
 }

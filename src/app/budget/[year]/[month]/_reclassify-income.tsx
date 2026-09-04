@@ -60,6 +60,9 @@ export function ReclassifyIncomeBanner({ candidates }: { candidates: ReclassifyC
           </DialogHeader>
 
           <div className="space-y-3">
+            <label className="sr-only" htmlFor={comboboxId}>
+              Category to reclassify as income
+            </label>
             <CategoryCombobox
               id={comboboxId}
               name="categoryIdPicker"

@@ -121,13 +121,6 @@ function clearSeedCategories() {
   // Uncategorized has a BEFORE DELETE trigger — leave it; callers can filter.
 }
 
-function leafNamesByParent(view: ReturnType<typeof loadMonthView>) {
-  return view.sections.map((s) => ({
-    parentName: s.parentName,
-    leaves: s.categories.map((c) => c.name),
-  }));
-}
-
 describe("loadMonthView — structure & grouping", () => {
   it("renders a single synthetic 'Ungrouped' section when all leaves have parent_id = NULL", () => {
     clearSeedCategories();
@@ -775,6 +768,27 @@ describe("loadMonthView — TC25a, TC25b, TC26", () => {
       .flatMap((s) => s.categories)
       .some((c) => c.categoryId === uncategorized.id);
     expect(inSections).toBe(false);
+  });
+
+  it("regression: Uncategorized is excluded from incomeSections/fundRows too, not just expense sections, if its kind is ever income or fund", () => {
+    // `setCategoryKind` refuses to ever put Uncategorized in this state
+    // (it's excluded from the reclassify picker), but `loadMonthView` must
+    // not rely on that as its only defense — a direct DB write (or a future
+    // bug in that refusal) must not double-count Uncategorized as a real
+    // income/fund row on top of its dedicated `uncategorizedRow`.
+    clearSeedCategories();
+    const uncategorized = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Uncategorized"))
+      .get()!;
+    handle.db.update(schema.categories).set({ kind: "income" }).where(eq(schema.categories.id, uncategorized.id)).run();
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const inIncomeSections = view.incomeSections
+      .flatMap((s) => s.categories)
+      .some((c) => c.categoryId === uncategorized.id);
+    expect(inIncomeSections).toBe(false);
   });
 
   it("(TC26, DS12) groups order by the parent's sort_order, not alphabetically by name", () => {

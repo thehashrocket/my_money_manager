@@ -262,7 +262,7 @@ export default async function BudgetMonthPage({
       {view.summary.fundCount > 0 ? (
         <BandSection heading="Funds">
           <FundsTable fundRows={view.fundRows} plannedFundCents={view.summary.plannedFundCents} year={year} month={month} />
-          <MobileFundsList fundRows={view.fundRows} />
+          <MobileFundsList fundRows={view.fundRows} plannedFundCents={view.summary.plannedFundCents} />
         </BandSection>
       ) : null}
     </main>
@@ -362,17 +362,26 @@ function FundsTable({
   );
 }
 
-function MobileFundsList({ fundRows }: { fundRows: FundRow[] }) {
+function MobileFundsList({ fundRows, plannedFundCents }: { fundRows: FundRow[]; plannedFundCents: number }) {
   return (
-    <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft sm:hidden">
-      {fundRows.map((fund) => (
-        <li key={fund.categoryId}>
-          <Link href="/goals" className="flex items-center justify-between gap-2 px-3 py-2.5">
-            <span className="font-display text-ink-1">{fund.name}</span>
-            <span className="font-mono text-sm text-ink-1">{formatCents(fund.plannedCents)} →</span>
-          </Link>
-        </li>
-      ))}
-    </ul>
+    <div className="space-y-2 sm:hidden">
+      <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft">
+        {fundRows.map((fund) => (
+          <li key={fund.categoryId}>
+            <Link href="/goals" className="flex items-center justify-between gap-2 px-3 py-2.5">
+              <span className="font-display text-ink-1">{fund.name}</span>
+              <span className="font-mono text-sm text-ink-1">{formatCents(fund.plannedCents)} →</span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+      {/* Mirrors the desktop table's `TableFooter` subtotal row — without
+          it, the band-level "what did I plan here" figure was only
+          recoverable from `SummaryStrip`, which doesn't break out funding. */}
+      <div className="flex items-center justify-between border-t-2 border-[var(--rule-strong)] px-1 pt-2 font-mono text-sm text-ink-2">
+        <span>Σ planned funding</span>
+        <span>{formatCents(plannedFundCents)}</span>
+      </div>
+    </div>
   );
 }

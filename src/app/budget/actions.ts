@@ -77,7 +77,10 @@ export async function upsertBudgetAllocationAction(
 
   const { year, month } = parsed.data;
   revalidatePath("/budget");
-  revalidatePath(`/budget/${year}/${month}`);
+  // Pattern form, not the literal path: `upsertAllocation`'s rollover
+  // invalidation can touch every month forward of this one, and the literal
+  // form only ever revalidates the one month just submitted.
+  revalidatePath("/budget/[year]/[month]", "page");
   redirect(`/budget/${year}/${month}`);
 }
 
@@ -111,6 +114,10 @@ export async function setCategoryKindAction(
   try {
     setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
   } catch (err) {
+    // Only the two failures reachable from ordinary use are downgraded to
+    // state (DS32 wants the refusal inline, next to the category the user
+    // was looking at). Anything else — a locked DB, a driver error — rethrows
+    // to `error.tsx`, which is the actual backstop this comment promises.
     if (err instanceof CategoryKindChangeRefusedError || err instanceof CategoryNotFoundError) {
       return { status: "error", message: err.message };
     }
@@ -196,8 +203,12 @@ const copyPreviousMonthInputSchema = z.object({
  * generic ok/error union.
  */
 export async function copyPreviousMonthAction(year: number, month: number): Promise<CopyPreviousMonthResult> {
-  const parsed = copyPreviousMonthInputSchema.parse({ year, month });
-  const result = copyPreviousMonth(db, parsed.year, parsed.month);
+  const parsed = copyPreviousMonthInputSchema.safeParse({ year, month });
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
+    throw new Error(`Invalid copy-month request — ${issues}`);
+  }
+  const result = copyPreviousMonth(db, parsed.data.year, parsed.data.month);
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
   return result;

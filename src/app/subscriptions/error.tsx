@@ -1,7 +1,6 @@
 "use client";
 
-import { StateCard } from "@/components/ledger/state-card";
-import { Button } from "@/components/ui/button";
+import { RouteErrorCard } from "@/app/_components/RouteErrorCard";
 
 /** DS47/E10 — `/subscriptions` had no error boundary. */
 export default function SubscriptionsError({
@@ -13,20 +12,7 @@ export default function SubscriptionsError({
 }) {
   return (
     <main className="mx-auto max-w-3xl p-6">
-      <StateCard
-        variant="error"
-        title="Something went wrong loading your subscriptions"
-        description={
-          <pre className="mt-1 overflow-x-auto rounded-md bg-[var(--bg-inset)] p-3 text-left text-xs text-ink-2">
-            {error.message}
-          </pre>
-        }
-        primaryAction={
-          <Button type="button" variant="primary" onClick={reset}>
-            Try again
-          </Button>
-        }
-      />
+      <RouteErrorCard title="Something went wrong loading your subscriptions" error={error} reset={reset} />
     </main>
   );
 }

@@ -55,13 +55,57 @@ describe("resolveRowDisplay — TC33a (DS8'): amber over 100%, capped bar, overf
     expect(result.barTone).toBe("ledger");
   });
 
-  it("treats any spend with zero allocation as fully over", () => {
+  it("treats any spend with zero allocation as fully over, including the overflow badge", () => {
     const result = resolveRowDisplay(
       expenseRow({ effectiveCents: 0, spentCents: 100 }),
       "expense",
       "open",
     );
     expect(result.barPct).toBe(100);
+    expect(result.barTone).toBe("amber");
+    expect(result.tone).toBe("negative");
+    // Regression: `raw` clamps to exactly 100 (not >100) when effectiveCents
+    // is 0, so `isOver` must be computed separately from `raw > 100` or the
+    // worst overspend state (nothing budgeted at all) loses its overflow tick.
+    expect(result.badges).toContainEqual({ type: "overflow", amountCents: 100 });
+  });
+
+  it("also treats spend against a negative allocation as fully over, with the overflow amount relative to zero", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: -500, spentCents: 200 }),
+      "expense",
+      "open",
+    );
+    expect(result.barTone).toBe("amber");
+    expect(result.badges).toContainEqual({ type: "overflow", amountCents: 700 });
+  });
+});
+
+describe("resolveRowDisplay — expense tone's positive/neutral branches (not just negative)", () => {
+  it("is positive when spend is under the effective allocation", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 4000 }),
+      "expense",
+      "open",
+    );
+    expect(result.tone).toBe("positive");
+  });
+
+  it("is neutral when spend exactly equals the effective allocation", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 10000 }),
+      "expense",
+      "open",
+    );
+    expect(result.tone).toBe("neutral");
+  });
+
+  it("is negative when spend exceeds the effective allocation by even a cent", () => {
+    const result = resolveRowDisplay(
+      expenseRow({ effectiveCents: 10000, spentCents: 10001 }),
+      "expense",
+      "open",
+    );
     expect(result.tone).toBe("negative");
   });
 });

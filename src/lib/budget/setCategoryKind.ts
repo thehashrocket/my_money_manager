@@ -4,7 +4,9 @@ import { invalidateForwardRollover } from "@/lib/budget";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 
 type Db = typeof defaultDb;
-type CategoryKind = "income" | "expense" | "fund";
+// Derived, not retyped: a hand-duplicated union would silently drift the
+// moment the schema's enum gains or loses a kind.
+export type CategoryKind = (typeof schema.categories.$inferSelect)["kind"];
 
 /**
  * Candidates for the F1 banner's reclassify picker: leaf, expense-kind,
@@ -40,7 +42,13 @@ export function listExpenseLeafCategories(db: Db): { id: number; name: string }[
     )
     .all();
 
-  return [...rows].sort((a, b) => a.name.localeCompare(b.name));
+  // The seed "Uncategorized" category is the default-override target for
+  // unmatched rows (CLAUDE.md rule 6), not a real income source — offering it
+  // here would let a stray positive manual override flip it to income/fund
+  // via X1 and break every downstream `category_id IS NULL` backlog check.
+  return [...rows]
+    .filter((r) => r.name !== "Uncategorized")
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export type ReclassifyCandidate = {
@@ -156,6 +164,22 @@ export type SetCategoryKindResult = {
  * that is "used" only via a `budget_periods` row (planned, never spent) does
  * not fit that repair story and stays refused — `count > 0` is required,
  * not just "no negative rows found."
+ *
+ * A category can be X1-eligible AND have `budget_periods` rows (it was
+ * actively budgeted under its wrong kind) — this function's own rule still
+ * permits it: refusing it would leave the repair permanently incomplete for
+ * exactly the categories most in need of it, since every month it was
+ * budgeted while mislabeled would keep miscounting forever. The reclassify
+ * PICKER (`loadReclassifyCandidates`) is more conservative than this
+ * function on purpose, though: it excludes any category with a
+ * `budget_periods` row from the candidate list entirely (DS32 — offering a
+ * category whose reclassification would silently move months of allocated
+ * spending into planned income, with no way to preview the blast radius in
+ * the confirmation dialog, is exactly the "discovered only after a refused
+ * submit" case DS32 exists to prevent, even though this function itself
+ * would allow the submit to succeed). A future caller reaching this
+ * function directly with such a category still gets the permissive
+ * behavior described above.
  */
 export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKind): SetCategoryKindResult {
   return db.transaction((tx) => {
