@@ -2,7 +2,7 @@
 
 Local-first, single-user personal budgeting app for Star One Credit Union (checking + savings). Transactions arrive on their own over SimpleFIN, or from a CSV export when you need older history. Categorize them, track envelope-style budgets, and keep every row on your own machine instead of handing it to Plaid or a cloud service.
 
-**Status:** v0.12.4. Dashboard, envelope budgets, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship. `/sync` pulls posted transactions straight from the bank, and its balance check now tells real drift from a stale bank figure instead of flagging both the same way; `/import` still handles anything the feed's 45-day window no longer reaches, and can now fix a wrong starting-balance anchor inline — the anchor move itself is now atomic with the import, bounds-checked against calendar-invalid dates (now enforced on every imported row's date, not just the anchor), and reversible from the import success page, whose "transfer pairs linked" count is now accurate even when a pending row posts via re-import rather than a fresh insert. Transfer-pair matching no longer selects a still-pending row as a match, and a "Not a transfer" correction now sticks instead of being silently reversible by a later unrelated import. Auto-categorization at import time (CSV or sync) can now be undone per-batch, reverting just the categorization without discarding the rest of the import. The app also runs in Docker now (still on SQLite — see the [Docker](#docker) section below). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
+**Status:** v0.13.0. `/budget/[year]/[month]` is now a real zero-based (EveryDollar-style) budget: categories have a `kind` (income/expense/fund), every planned-amount cell is editable in place with instant save, "Copy previous month" fills the whole month in one click, and categories can be created, renamed, reorganized, archived/unarchived, and (in one narrow, evidence-backed case) reclassified from expense to income — all without leaving the page. Dashboard, bulk categorization, transactions list, subscriptions, goals and the 6-month trend chart all ship too. `/sync` pulls posted transactions straight from the bank, and its balance check now tells real drift from a stale bank figure instead of flagging both the same way; `/import` still handles anything the feed's 45-day window no longer reaches, and can now fix a wrong starting-balance anchor inline — the anchor move itself is now atomic with the import, bounds-checked against calendar-invalid dates (now enforced on every imported row's date, not just the anchor), and reversible from the import success page, whose "transfer pairs linked" count is now accurate even when a pending row posts via re-import rather than a fresh insert. Transfer-pair matching no longer selects a still-pending row as a match, and a "Not a transfer" correction now sticks instead of being silently reversible by a later unrelated import. Auto-categorization at import time (CSV or sync) can now be undone per-batch, reverting just the categorization without discarding the rest of the import. The app also runs in Docker now (still on SQLite — see the [Docker](#docker) section below). See [PLAN.md](./PLAN.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Stack
 
@@ -93,13 +93,15 @@ Optional: `pnpm simplefin:sample` dumps a live account payload to `.context/simp
 
 ```
 src/
-  app/           App Router pages: / (dashboard), /budget/[year]/[month], /transactions,
-                 /categorize, /subscriptions, /goals, /sync, /import (+ preview + success)
+  app/           App Router pages: / (dashboard), /budget/[year]/[month], /budget/categories,
+                 /transactions, /categorize, /subscriptions, /goals, /sync, /import (+ preview + success)
   components/    shadcn/ui (components/ui) + design-system pieces (components/ledger)
   db/            Drizzle schema + HMR-safe client singleton
   lib/           parseCsv, normalize, hash, transferPair, snapshot, money, rules
   lib/accounts/  Live per-account balance queries
-  lib/budget/    Month view, allocations, validators
+  lib/budget/    Month view (loadMonthView, resolveRowDisplay), allocations (upsertAllocation,
+                 validateAllocateInput), category CRUD + archive + reclassify (manageCategories,
+                 archiveCategory, setCategoryKind, loadAllCategories), copyMonth, monthOfIso
   lib/categorize/ Bulk-categorize logic, import-time-categorization undo, and validators
   lib/goals/     Savings goal progress
   lib/import/    CSV import orchestration and validators
@@ -126,6 +128,7 @@ These are load-bearing — the whole app is built around them:
 4. **Transfer-pair detection is memo-independent.** Two rows pair iff `|txn_a - txn_b| == 1` AND same date AND `|amount_a| == |amount_b|` AND opposite signs AND different accounts. Star One labels the receiving-side memo correctly only ~20% of the time, so memo is confirmation-only. The feed carries no transaction number, so sync pairs by counting instead: bucket on `(date, |amount|)`, keep only opposite-signed rows in different accounts, and auto-link any bucket where the two sides balance, since every possible pairing excludes the same rows from spending. Unbalanced buckets are the ones `/sync` asks you about — as is any pair with a CSV leg carrying a transaction number the stronger ±1 matcher already judged and declined, whether the other leg is from the feed or CSV too. A still-pending CSV row can never become a pair member (the feed itself never carries pending rows at all), and a pair you've explicitly marked "Not a transfer" stays rejected — it won't get silently re-linked by a later import, though either row can still pair with a genuinely different match.
 5. **Every batch import writes a DB snapshot first** to `data/money.db.pre-import-{timestamp}`, using `VACUUM INTO` so WAL-resident writes are included — a plain file copy could produce a snapshot that would not open. Last 10 are kept, pruned only once the write commits. Rollback = stop dev server, swap file. Sync snapshots too, and adds a logical undo that deletes just that batch without stopping the server. Both paths check whether the snapshot actually came back consistent; if it degraded to a plain copy, a warning is persisted on the batch and shown on its success page instead of assuming the rollback works.
 6. **Money comes in as decimal strings from the feed** — parse with `parseAmountToCents` (string math), never `parseFloat(x) * 100`.
+7. **A category's `kind` (income/expense/fund) can't change once it's been used** — any transaction or planned amount locks it in, with one narrow exception: an expense-labeled category that turns out to be income can be reclassified back, but only if every one of its transactions is positive. Archiving a category hides it from every current-and-future budget view and picker, but never deletes it — past months and historical transactions keep showing it until it's unarchived.
 
 ## What's NOT in V1
 
