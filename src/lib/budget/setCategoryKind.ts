@@ -142,6 +142,25 @@ export class CategoryKindChangeRefusedError extends Error {
   }
 }
 
+/**
+ * The seed "Uncategorized" category is excluded from `listExpenseLeafCategories`
+ * (the reclassify picker), but that is a UI-layer courtesy, not a guarantee —
+ * `setCategoryKind` is a general-purpose function any future caller (a script,
+ * a bulk operation, a bug in a different picker) could invoke directly with
+ * Uncategorized's real id. And unlike an ordinary category, Uncategorized is
+ * frequently "used" with zero transactions pointed at it (NULL is the real
+ * default per CLAUDE.md rule 6, not this row's id) and zero budget_periods
+ * rows, so the ordinary `isUsed` refusal would not catch it either. Refuse
+ * unconditionally, at the actual write boundary, matching the same by-name
+ * convention the `categories_uncategorized_no_delete` trigger already uses.
+ */
+export class ProtectedCategoryKindError extends Error {
+  constructor(readonly categoryId: number) {
+    super(`"Uncategorized" is a protected category and its kind cannot be changed.`);
+    this.name = "ProtectedCategoryKindError";
+  }
+}
+
 export type SetCategoryKindResult = {
   categoryId: number;
   previousKind: CategoryKind;
@@ -189,6 +208,7 @@ export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKin
       .where(eq(schema.categories.id, categoryId))
       .get();
     if (!category) throw new CategoryNotFoundError(categoryId);
+    if (category.name === "Uncategorized") throw new ProtectedCategoryKindError(categoryId);
 
     const previousKind = category.kind;
     if (previousKind === newKind) {

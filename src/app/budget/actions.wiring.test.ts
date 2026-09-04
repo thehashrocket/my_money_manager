@@ -55,7 +55,9 @@ vi.mock("@/lib/budget/copyMonth", async (importOriginal) => {
 const { upsertBudgetAllocationAction, setCategoryKindAction, copyPreviousMonthAction } = await import(
   "./actions"
 );
-const { CategoryKindChangeRefusedError } = await import("@/lib/budget/setCategoryKind");
+const { CategoryKindChangeRefusedError, ProtectedCategoryKindError } = await import(
+  "@/lib/budget/setCategoryKind"
+);
 const { CategoryNotFoundError } = await import("@/lib/categoryErrors");
 
 beforeEach(() => {
@@ -155,6 +157,18 @@ describe("setCategoryKindAction — validation and error narrowing", () => {
     expect(state.status).toBe("error");
     if (state.status !== "error") throw new Error("unreachable");
     expect(state.message).toMatch(/999/);
+  });
+
+  it("downgrades ProtectedCategoryKindError to error state, inline", async () => {
+    setCategoryKindMock.mockImplementation(() => {
+      throw new ProtectedCategoryKindError(1);
+    });
+
+    const state = await setCategoryKindAction({ status: "idle" }, formData({ categoryId: "1", kind: "income" }));
+
+    expect(state.status).toBe("error");
+    if (state.status !== "error") throw new Error("unreachable");
+    expect(state.message).toMatch(/Uncategorized/);
   });
 
   it("rethrows anything else — the actual error.tsx backstop, not downgraded to state", async () => {

@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import {
   CategoryKindChangeRefusedError,
+  ProtectedCategoryKindError,
   loadReclassifyCandidates,
   setCategoryKind,
 } from "./setCategoryKind";
@@ -122,6 +123,30 @@ describe("setCategoryKind — TC23 (D9A)", () => {
 
   it("throws CategoryNotFoundError for an unknown category id", () => {
     expect(() => setCategoryKind(handle.db, 999999, "income")).toThrow(CategoryNotFoundError);
+  });
+
+  it("refuses to change Uncategorized's kind even when it has zero transactions and zero budget_periods rows", () => {
+    // The picker (listExpenseLeafCategories) already excludes Uncategorized,
+    // but that's a UI-layer courtesy — this is the actual write boundary.
+    // Uncategorized is frequently "used" with none of its own transactions
+    // (NULL is the real default, not this row's id per CLAUDE.md rule 6), so
+    // the ordinary isUsed refusal alone would not catch a direct call here.
+    const uncategorized = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Uncategorized"))
+      .get()!;
+
+    expect(() => setCategoryKind(handle.db, uncategorized.id, "income")).toThrow(
+      ProtectedCategoryKindError,
+    );
+
+    const stillExpense = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.id, uncategorized.id))
+      .get();
+    expect(stillExpense?.kind).toBe("expense");
   });
 
   it("is a no-op that returns success when newKind matches the current kind", () => {

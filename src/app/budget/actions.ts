@@ -13,7 +13,11 @@ import {
 } from "@/lib/budget/upsertAllocation";
 import type { EffectiveAllocation } from "@/lib/budget";
 import { AmountParseError, parseAmountToCents } from "@/lib/money";
-import { CategoryKindChangeRefusedError, setCategoryKind } from "@/lib/budget/setCategoryKind";
+import {
+  CategoryKindChangeRefusedError,
+  ProtectedCategoryKindError,
+  setCategoryKind,
+} from "@/lib/budget/setCategoryKind";
 import { copyPreviousMonth, type CopyPreviousMonthResult } from "@/lib/budget/copyMonth";
 import {
   createCategory,
@@ -118,7 +122,11 @@ export async function setCategoryKindAction(
     // state (DS32 wants the refusal inline, next to the category the user
     // was looking at). Anything else — a locked DB, a driver error — rethrows
     // to `error.tsx`, which is the actual backstop this comment promises.
-    if (err instanceof CategoryKindChangeRefusedError || err instanceof CategoryNotFoundError) {
+    if (
+      err instanceof CategoryKindChangeRefusedError ||
+      err instanceof CategoryNotFoundError ||
+      err instanceof ProtectedCategoryKindError
+    ) {
       return { status: "error", message: err.message };
     }
     throw err;
