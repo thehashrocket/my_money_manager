@@ -21,6 +21,36 @@ import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 
 const drizzleDir = path.join(process.cwd(), "drizzle");
 
+/** Shared by every describe block below that needs to replay the pre-0017
+ * schema by hand (0010's rebuild means `createTestDb()` can't be trusted to
+ * reflect a hand-mutated pre-migration state — see the module docstring). */
+const PRE_0017_MIGRATIONS = [
+  "0000_thin_mandroid.sql",
+  "0001_complete_ikaris.sql",
+  "0002_more_categories.sql",
+  "0003_flimsy_micromacro.sql",
+  "0004_chubby_the_spike.sql",
+  "0005_subscriptions_category.sql",
+  "0006_subscription_rules.sql",
+  "0007_unique_lily_hollister.sql",
+  "0008_naive_zeigeist.sql",
+  "0009_narrow_sentinels.sql",
+  "0010_flat_baron_zemo.sql",
+  "0011_living_black_tom.sql",
+  "0012_anchor_starting_balance_on_batch.sql",
+  "0013_flaky_chronomancer.sql",
+  "0014_modern_virginia_dare.sql",
+  "0015_early_stardust.sql",
+  "0016_tired_thing.sql",
+];
+
+function execMigration(sqlite: Database.Database, file: string): void {
+  const content = fs
+    .readFileSync(path.join(drizzleDir, file), "utf8")
+    .replace(/-->\s*statement-breakpoint/g, "");
+  sqlite.exec(content);
+}
+
 const GROUPS: Record<string, string[]> = {
   Giving: ["Gifts", "Charity"],
   Housing: ["Rent", "Home Maintenance", "Renter's Insurance", "Home Goods"],
@@ -229,33 +259,6 @@ describe("migration 0017 (categories.kind / sort_order / archived_at)", () => {
 });
 
 describe("migration 0017 — TC5 failure mode: a renamed Paycheck is not caught by the migration", () => {
-  const PRE_0017_MIGRATIONS = [
-    "0000_thin_mandroid.sql",
-    "0001_complete_ikaris.sql",
-    "0002_more_categories.sql",
-    "0003_flimsy_micromacro.sql",
-    "0004_chubby_the_spike.sql",
-    "0005_subscriptions_category.sql",
-    "0006_subscription_rules.sql",
-    "0007_unique_lily_hollister.sql",
-    "0008_naive_zeigeist.sql",
-    "0009_narrow_sentinels.sql",
-    "0010_flat_baron_zemo.sql",
-    "0011_living_black_tom.sql",
-    "0012_anchor_starting_balance_on_batch.sql",
-    "0013_flaky_chronomancer.sql",
-    "0014_modern_virginia_dare.sql",
-    "0015_early_stardust.sql",
-    "0016_tired_thing.sql",
-  ];
-
-  function execMigration(sqlite: Database.Database, file: string): void {
-    const content = fs
-      .readFileSync(path.join(drizzleDir, file), "utf8")
-      .replace(/-->\s*statement-breakpoint/g, "");
-    sqlite.exec(content);
-  }
-
   it("F1: renaming Paycheck before the migration runs leaves it kind='expense' — the name match is the whole mechanism", () => {
     const sqlite = new Database(":memory:");
     try {
@@ -284,33 +287,6 @@ describe("migration 0017 — TC5 failure mode: a renamed Paycheck is not caught 
 });
 
 describe("migration 0017 — group-name collision: a pre-existing category can't be silently annexed as a GROUP parent", () => {
-  const PRE_0017_MIGRATIONS = [
-    "0000_thin_mandroid.sql",
-    "0001_complete_ikaris.sql",
-    "0002_more_categories.sql",
-    "0003_flimsy_micromacro.sql",
-    "0004_chubby_the_spike.sql",
-    "0005_subscriptions_category.sql",
-    "0006_subscription_rules.sql",
-    "0007_unique_lily_hollister.sql",
-    "0008_naive_zeigeist.sql",
-    "0009_narrow_sentinels.sql",
-    "0010_flat_baron_zemo.sql",
-    "0011_living_black_tom.sql",
-    "0012_anchor_starting_balance_on_batch.sql",
-    "0013_flaky_chronomancer.sql",
-    "0014_modern_virginia_dare.sql",
-    "0015_early_stardust.sql",
-    "0016_tired_thing.sql",
-  ];
-
-  function execMigration(sqlite: Database.Database, file: string): void {
-    const content = fs
-      .readFileSync(path.join(drizzleDir, file), "utf8")
-      .replace(/-->\s*statement-breakpoint/g, "");
-    sqlite.exec(content);
-  }
-
   it("a user category named 'Travel' (e.g. a savings goal) is never reparented onto and stays untouched", () => {
     const sqlite = new Database(":memory:");
     try {

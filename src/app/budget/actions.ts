@@ -33,6 +33,10 @@ import {
   UncategorizedArchiveError,
 } from "@/lib/categoryErrors";
 
+function formatZodIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
+}
+
 /**
  * Create or update a single leaf category's allocation for a given month.
  *
@@ -67,10 +71,7 @@ export async function upsertBudgetAllocationAction(
 
   const parsed = validateAllocateInput(raw);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`)
-      .join("; ");
-    throw new Error(`Invalid allocation input — ${issues}`);
+    throw new Error(`Invalid allocation input — ${formatZodIssues(parsed.error)}`);
   }
 
   upsertAllocation(db, parsed.data);
@@ -107,8 +108,7 @@ export async function setCategoryKindAction(
 ): Promise<SetCategoryKindActionState> {
   const parsed = setCategoryKindInputSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
-    return { status: "error", message: `Invalid reclassify request — ${issues}` };
+    return { status: "error", message: `Invalid reclassify request — ${formatZodIssues(parsed.error)}` };
   }
 
   try {
@@ -205,8 +205,7 @@ const copyPreviousMonthInputSchema = z.object({
 export async function copyPreviousMonthAction(year: number, month: number): Promise<CopyPreviousMonthResult> {
   const parsed = copyPreviousMonthInputSchema.safeParse({ year, month });
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`).join("; ");
-    throw new Error(`Invalid copy-month request — ${issues}`);
+    throw new Error(`Invalid copy-month request — ${formatZodIssues(parsed.error)}`);
   }
   const result = copyPreviousMonth(db, parsed.data.year, parsed.data.month);
   revalidatePath("/budget");

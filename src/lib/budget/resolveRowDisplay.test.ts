@@ -22,6 +22,18 @@ function incomeRow(overrides: Partial<IncomeDisplayRow> = {}): IncomeDisplayRow 
   };
 }
 
+describe("resolveRowDisplay — kind discriminant (ExpenseRowDisplay | IncomeRowDisplay)", () => {
+  it("tags an expense result with kind: 'expense'", () => {
+    const result = resolveRowDisplay(expenseRow(), "expense", "open");
+    expect(result.kind).toBe("expense");
+  });
+
+  it("tags an income result with kind: 'income'", () => {
+    const result = resolveRowDisplay(incomeRow(), "income", "open");
+    expect(result.kind).toBe("income");
+  });
+});
+
 describe("resolveRowDisplay — TC33a (DS8'): amber over 100%, capped bar, overflow badge", () => {
   it("caps barPct at 100 and returns an overflow badge when spent exceeds effective", () => {
     const result = resolveRowDisplay(
