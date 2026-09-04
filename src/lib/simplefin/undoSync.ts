@@ -1,20 +1,12 @@
 import { and, desc, eq } from "drizzle-orm";
-import type { ExtractTablesWithRelations } from "drizzle-orm";
-import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import { db as defaultDb, schema } from "@/db";
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { resolveBatchLabel } from "@/lib/batchLabel";
 
 type Db = typeof defaultDb;
 
 // Structural type, unlike `Db` above — accepts both the singleton database
 // and a transaction handle, so `isLatestBatch` can be re-checked from inside
-// `db.transaction((tx) => ...)`. Matches the pattern in `src/lib/rules.ts`.
-type AnyDb = BaseSQLiteDatabase<
-  "sync",
-  unknown,
-  typeof schema,
-  ExtractTablesWithRelations<typeof schema>
->;
+// `db.transaction((tx) => ...)`.
 
 export type SyncBatchSummary = {
   batchId: number;

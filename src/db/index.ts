@@ -1,7 +1,23 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
+import type { ExtractTablesWithRelations } from "drizzle-orm";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import * as schema from "./schema";
 import { dbPath } from "@/lib/paths";
+
+/**
+ * Structural DB type — accepts both the singleton `better-sqlite3` database
+ * and a transaction handle passed to `db.transaction((tx) => ...)`. The one
+ * shared definition; modules that need to accept "either" should import this
+ * rather than redeclaring the same generic locally (as `rules.ts`, `budget.ts`,
+ * `importBatch.ts`, and `simplefin/undoSync.ts` each used to).
+ */
+export type AnyDb = BaseSQLiteDatabase<
+  "sync",
+  unknown,
+  typeof schema,
+  ExtractTablesWithRelations<typeof schema>
+>;
 
 const DB_PATH = dbPath();
 

@@ -676,6 +676,60 @@ describe("commitImport — starting balance anchor", () => {
     return a;
   }
 
+  // The actual motivation for moving anchorStartingBalance's write inside
+  // commitImport's transaction: prove it's really atomic with the row
+  // inserts, not just "happens to always succeed together." Forces a real
+  // exception from a later write in the same transaction and asserts the
+  // account's anchor (written earlier in that same transaction) rolled back
+  // along with everything else, rather than sticking as a partial write.
+  it("rolls back the account's anchor move when a later write in the same transaction fails", () => {
+    type TxParam = Parameters<Parameters<typeof handle.db.transaction>[0]>[0];
+    let importBatchesUpdateCalls = 0;
+    const dbProxy = new Proxy(handle.db, {
+      get(target, prop, receiver) {
+        if (prop !== "transaction") return Reflect.get(target, prop, receiver);
+        return (cb: (tx: TxParam) => unknown) =>
+          (Reflect.get(target, "transaction", target) as typeof target.transaction).call(
+            target,
+            (tx: TxParam) => {
+              const txProxy = new Proxy(tx, {
+                get(txTarget, txProp, txReceiver) {
+                  if (txProp !== "update") return Reflect.get(txTarget, txProp, txReceiver);
+                  return (table: unknown) => {
+                    if (table === schema.importBatches) {
+                      importBatchesUpdateCalls++;
+                      // 1st call is the transactionCount update (let it pass);
+                      // 2nd is the anchor-columns update anchorStartingBalance
+                      // triggers — fail exactly that one.
+                      if (importBatchesUpdateCalls === 2) {
+                        throw new Error("simulated failure after anchor move");
+                      }
+                    }
+                    return (txTarget.update as (t: unknown) => unknown)(table);
+                  };
+                },
+              });
+              return cb(txProxy);
+            },
+          );
+      },
+    });
+
+    expect(() =>
+      commitImport(
+        { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+        dbProxy as typeof handle.db,
+      ),
+    ).toThrow("simulated failure after anchor move");
+
+    // The whole transaction rolled back, including anchorStartingBalance's
+    // account-row write — which ran earlier in the very same transaction.
+    expect(account().startingBalanceCents).toBe(0);
+    expect(account().startingBalanceDate).toBe("2026-01-01");
+    // The row inserts rolled back too, not just the anchor.
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
   it("persists the anchor onto the batch it came from, not just the account", () => {
     const result = commitImport(
       { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
@@ -690,6 +744,112 @@ describe("commitImport — starting balance anchor", () => {
       .all();
     expect(batch.anchoredStartingBalanceCents).toBe(100000);
     expect(batch.anchoredStartingBalanceDate).toBe("2026-04-16");
+  });
+
+  // The record that lets a bad automatic anchor move be corrected via
+  // updateAccountAnchorAction without guessing what the old value was.
+  it("records the account's prior anchor on the batch when it moves the anchor", () => {
+    const result = commitImport(
+      { accountId, filename: "a.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.priorStartingBalanceCents).toBe(0);
+    expect(batch.priorStartingBalanceDate).toBe("2026-01-01");
+  });
+
+  // The prior-value capture has to read the account's CURRENT anchor at move
+  // time, not some cached "original" value — otherwise a second move in a
+  // row of imports would keep pointing a revert at the wrong (stale) value.
+  it("records the immediately-prior anchor on a second sequential move, not the original", () => {
+    commitImport(
+      { accountId, filename: "first.csv", csvText: starOneCsv([COFFEE, GAS, PAY]) },
+      handle.db,
+    );
+    expect(account().startingBalanceCents).toBe(100000);
+    expect(account().startingBalanceDate).toBe("2026-04-16");
+
+    const later = { ...COFFEE, txn: "9002", date: "04/20/2026", balance: 3000 };
+    const result = commitImport(
+      { accountId, filename: "second.csv", csvText: starOneCsv([later]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.priorStartingBalanceCents).toBe(100000);
+    expect(batch.priorStartingBalanceDate).toBe("2026-04-16");
+    expect(batch.anchoredStartingBalanceCents).toBe(300000);
+    expect(batch.anchoredStartingBalanceDate).toBe("2026-04-20");
+  });
+
+  // A single-row file trivially satisfies the running-balance chain check
+  // (the loop over adjacent pairs never runs), so nothing corroborates its
+  // Balance cell. Without a bounds check, one corrupted or hand-edited row
+  // would otherwise anchor the account on whatever that row's Balance says.
+  it("declines to move the anchor when the derived balance is outside the allowed range, and warns", () => {
+    const wild = { ...COFFEE, balance: 200_000_000 };
+    const result = commitImport(
+      { accountId, filename: "wild.csv", csvText: starOneCsv([wild]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    expect(result.startingBalance).toBeNull();
+    expect(result.warnings).toContain(
+      "Declined to move the starting-balance anchor: the derived balance ($200000000.00) is outside the allowed range.",
+    );
+    expect(account().startingBalanceCents).toBe(0);
+    expect(account().startingBalanceDate).toBe("2026-01-01");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.anchoredStartingBalanceCents).toBeNull();
+    // The regression this whole test file previously missed: a caught-but-
+    // unpersisted warning is invisible in production, since the import
+    // success page renders `batch.snapshotWarning`, never `result.warnings`
+    // (which nothing downstream of `commitImport` actually reads).
+    expect(batch.snapshotWarning).toContain("outside the allowed range");
+  });
+
+  // Mirrors validateUpdateAnchorInput's future-date guard: loadAccountBalances
+  // sums only rows dated strictly after the anchor, so a future anchor would
+  // exclude every real transaction and freeze the displayed balance. A real
+  // Star One CSV can't produce this, but nothing upstream guarantees that.
+  it("declines to move the anchor when the derived date is in the future, and warns", () => {
+    const future = { ...COFFEE, date: "04/16/2099", balance: 5000 };
+    const result = commitImport(
+      { accountId, filename: "future.csv", csvText: starOneCsv([future]) },
+      handle.db,
+    );
+    if (result.status !== "committed") throw new Error("unreachable");
+
+    expect(result.startingBalance).toBeNull();
+    expect(result.warnings).toContain(
+      'Declined to move the starting-balance anchor: the derived date "2099-04-16" is in the future.',
+    );
+    expect(account().startingBalanceCents).toBe(0);
+    expect(account().startingBalanceDate).toBe("2026-01-01");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.snapshotWarning).toContain("is in the future");
   });
 
   it("leaves the batch's anchor fields null when this import declined to move the anchor", () => {
@@ -792,7 +952,7 @@ describe("commitImport — starting balance anchor", () => {
     expect(account().startingBalanceCents).toBe(214790);
   });
 
-  it("leaves the anchor alone when the running balance does not chain", () => {
+  it("leaves the anchor alone when the running balance does not chain, and warns", () => {
     const broken = starOneCsv([COFFEE, { ...GAS, balance: 88888 }]);
     const result = commitImport(
       { accountId, filename: "broken.csv", csvText: broken },
@@ -802,8 +962,68 @@ describe("commitImport — starting balance anchor", () => {
     expect(result.status).toBe("committed");
     if (result.status !== "committed") throw new Error("unreachable");
     expect(result.startingBalance).toBeNull();
+    expect(result.warnings).toContain(
+      "Declined to move the starting-balance anchor: running balance column does not form a consistent chain.",
+    );
     expect(account().startingBalanceCents).toBe(0);
     expect(account().startingBalanceDate).toBe("2026-01-01");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.snapshotWarning).toContain("does not form a consistent chain");
+  });
+
+  // A same-day paycheck-and-bill pair (deriveStartingBalance.test.ts's
+  // ambiguous-anchor case) is real, non-corrupt data — unlike a broken chain,
+  // it's likely to occur on ordinary imports, so it gets the same warning
+  // treatment rather than staying silent.
+  it("leaves the anchor alone when both chronological directions disagree, and warns", () => {
+    const paycheckThenBill = [
+      { ...COFFEE, txn: "9101", amount: 500, balance: 1500 },
+      { ...COFFEE, txn: "9102", amount: -500, balance: 1000 },
+    ];
+    const result = commitImport(
+      { accountId, filename: "ambiguous.csv", csvText: starOneCsv(paycheckThenBill) },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toBeNull();
+    expect(result.warnings).toContain(
+      "Declined to move the starting-balance anchor: running balance validates in both directions with disagreeing anchors — refusing to guess.",
+    );
+    expect(account().startingBalanceCents).toBe(0);
+    expect(account().startingBalanceDate).toBe("2026-01-01");
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, result.batchId))
+      .all();
+    expect(batch.snapshotWarning).toContain("disagreeing anchors");
+  });
+
+  // The far more common decline reason — an all-pending or Balance-less
+  // import — is not evidence of a problem and must stay silent, unlike the
+  // two "we had data but it didn't resolve" cases above.
+  it("stays silent (no warning) when there are simply no posted rows to derive from", () => {
+    // Star One's pending heuristic keys on the placeholder txn number "6098"
+    // with a blank/zero balance (see the "pending" fixture used elsewhere in
+    // this file for the posted-re-export tests).
+    const allPending = { ...COFFEE, txn: "6098", balance: 0 };
+    const result = commitImport(
+      { accountId, filename: "pending-only.csv", csvText: starOneCsv([allPending]) },
+      handle.db,
+    );
+
+    expect(result.status).toBe("committed");
+    if (result.status !== "committed") throw new Error("unreachable");
+    expect(result.startingBalance).toBeNull();
+    expect(result.warnings).toEqual([]);
   });
 
   // Rows already in the ledger are still links in the running-balance chain.

@@ -1,19 +1,5 @@
-import type { ExtractTablesWithRelations } from "drizzle-orm";
-import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
-import { schema } from "@/db";
+import { schema, type AnyDb as Db } from "@/db";
 import type { CategoryRule } from "@/db/schema";
-
-/**
- * Structural DB type — accepts both the singleton `better-sqlite3`
- * database and a transaction handle. Matches the pattern in
- * `src/lib/budget.ts`.
- */
-type Db = BaseSQLiteDatabase<
-  "sync",
-  unknown,
-  typeof schema,
-  ExtractTablesWithRelations<typeof schema>
->;
 
 /**
  * Resolve a normalized merchant string to a category via the rules table.

@@ -1,11 +1,21 @@
 import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
+import { db as defaultDb, schema, type AnyDb as DbOrTx } from "@/db";
 import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
 import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { contentSignature } from "./contentSignature";
 import { buildRuleMatcher } from "./rules";
-import { deriveStartingBalance } from "./accounts/deriveStartingBalance";
+import {
+  deriveStartingBalance,
+  CHAIN_AMBIGUOUS_REASON,
+  CHAIN_BROKEN_REASON,
+} from "./accounts/deriveStartingBalance";
+import {
+  isStartingBalanceCentsInBounds,
+  startingBalanceDateSchema,
+} from "./import/accountAnchorFields";
+import { formatCents } from "./money";
+import { todayIso } from "./now";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
 import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
 import { dbPath, snapshotDir } from "./paths";
@@ -303,10 +313,25 @@ export function commitImport(
     );
   }
 
-  const batchId = db.transaction((tx) => {
+  const transactionResult = db.transaction((tx) => {
     // Trained rules are read once for the whole batch, not once per row: a
     // 4-month backfill is hundreds of rows inside a single write transaction.
     const matchRule = buildRuleMatcher(tx);
+
+    // Computed BEFORE the batch insert (it depends only on `preview.rows`,
+    // already built outside the transaction, and `tx`) so a declined-anchor
+    // reason can be folded into the same `snapshotWarning` field the insert
+    // below writes — not appended to `warnings` afterward, where nothing
+    // ever persists it. That gap (warnings computed after the row the UI
+    // actually reads was already written, with no follow-up update) is
+    // exactly how the first version of this fix shipped a warning nobody
+    // could ever see; caught by cross-model adversarial review, not by
+    // any test, since every test asserted the in-memory `warnings` array
+    // rather than the persisted column the success page renders.
+    const anchorResult = anchorStartingBalance(opts.accountId, preview.rows, tx);
+    if (anchorResult.status === "rejected") {
+      warnings.push(anchorResult.reason);
+    }
 
     const [batch] = tx
       .insert(schema.importBatches)
@@ -388,25 +413,35 @@ export function commitImport(
         .run();
     }
 
-    return batch.id;
+    // Persisted onto the batch (not re-derived from the account's current
+    // anchor on every page view) so a later import that moves the anchor again
+    // can't make this batch's success page misattribute the newer value to
+    // itself, and so the tile can be omitted outright when this batch didn't
+    // move the anchor at all. `priorStartingBalance*` is the account's anchor
+    // immediately before this move — the record that lets a bad automatic
+    // move be corrected via `updateAccountAnchorAction` without guessing what
+    // the old value was.
+    if (anchorResult.status === "moved") {
+      tx.update(schema.importBatches)
+        .set({
+          anchoredStartingBalanceCents: anchorResult.startingBalanceCents,
+          anchoredStartingBalanceDate: anchorResult.date,
+          priorStartingBalanceCents: anchorResult.priorStartingBalanceCents,
+          priorStartingBalanceDate: anchorResult.priorStartingBalanceDate,
+        })
+        .where(eq(schema.importBatches.id, batch.id))
+        .run();
+    }
+
+    return {
+      batchId: batch.id,
+      startingBalance:
+        anchorResult.status === "moved"
+          ? { date: anchorResult.date, startingBalanceCents: anchorResult.startingBalanceCents }
+          : null,
+    };
   });
-
-  const startingBalance = anchorStartingBalance(opts.accountId, preview.rows, db);
-
-  // Persisted onto the batch (not re-derived from the account's current
-  // anchor on every page view) so a later import that moves the anchor again
-  // can't make this batch's success page misattribute the newer value to
-  // itself, and so the tile can be omitted outright when this batch didn't
-  // move the anchor at all.
-  if (startingBalance) {
-    db.update(schema.importBatches)
-      .set({
-        anchoredStartingBalanceCents: startingBalance.startingBalanceCents,
-        anchoredStartingBalanceDate: startingBalance.date,
-      })
-      .where(eq(schema.importBatches.id, batchId))
-      .run();
-  }
+  const { batchId, startingBalance } = transactionResult;
 
   // Prune only after the write has committed — pruning before it meant a failed
   // import had already evicted the oldest snapshot to make room for a useless
@@ -429,6 +464,17 @@ export function commitImport(
   };
 }
 
+type AnchorResult =
+  | {
+      status: "moved";
+      date: string;
+      startingBalanceCents: number;
+      priorStartingBalanceCents: number;
+      priorStartingBalanceDate: string;
+    }
+  | { status: "unchanged" }
+  | { status: "rejected"; reason: string };
+
 /**
  * Move the account's starting-balance anchor onto a real bank balance read from
  * this file's running-balance column.
@@ -443,23 +489,73 @@ export function commitImport(
  * the more history has to be complete for the total to come out right. Moving
  * it backwards would trade a known-good anchor for one that depends on more
  * data being present.
+ *
+ * Runs inside the caller's write transaction and takes `tx`, never `defaultDb`
+ * directly — this used to run after `commitImport`'s transaction committed,
+ * so a crash between the two writes could leave the imported rows in place
+ * with no matching anchor move and no record of what almost happened.
+ *
+ * Bounds-checked the same as a hand-typed anchor (`accountAnchorFields.ts`):
+ * a single-row file trivially satisfies `isValidChain` (the loop over pairs
+ * never executes), so one corrupted or hand-edited row would otherwise anchor
+ * the account on whatever that row's Balance cell says, with no corroboration
+ * at all.
  */
 function anchorStartingBalance(
   accountId: number,
   rows: readonly ImportPreviewRow[],
-  db: Db,
-): { date: string; startingBalanceCents: number } | null {
+  tx: DbOrTx,
+): AnchorResult {
   const derived = deriveStartingBalance(rows);
-  if (!derived.ok) return null;
+  if (!derived.ok) {
+    // Only the two "we had running-balance data but it didn't resolve"
+    // reasons are worth a warning — the far more common "no posted rows
+    // carried a balance" case (an all-pending or Balance-less import) isn't
+    // evidence of a problem, so it stays silent like it always has.
+    if (derived.reason === CHAIN_BROKEN_REASON || derived.reason === CHAIN_AMBIGUOUS_REASON) {
+      return {
+        status: "rejected",
+        reason: `Declined to move the starting-balance anchor: ${derived.reason}.`,
+      };
+    }
+    return { status: "unchanged" };
+  }
 
-  const account = db
+  if (!isStartingBalanceCentsInBounds(derived.startingBalanceCents)) {
+    return {
+      status: "rejected",
+      reason: `Declined to move the starting-balance anchor: the derived balance (${formatCents(derived.startingBalanceCents)}) is outside the allowed range.`,
+    };
+  }
+  if (!startingBalanceDateSchema.safeParse(derived.date).success) {
+    return {
+      status: "rejected",
+      reason: `Declined to move the starting-balance anchor: the derived date "${derived.date}" is not a valid anchor date.`,
+    };
+  }
+  // Mirrors `validateUpdateAnchorInput`'s future-date guard: `loadAccountBalances`
+  // sums only rows dated strictly after the anchor, so a future anchor (a
+  // corrupted or hand-edited Balance/date cell) would exclude every real
+  // transaction and freeze the displayed balance, permanently silencing the
+  // `/sync` drift check for this account too. A real bank CSV can't produce a
+  // future transaction date, but nothing upstream of this guarantees that.
+  if (derived.date > todayIso()) {
+    return {
+      status: "rejected",
+      reason: `Declined to move the starting-balance anchor: the derived date "${derived.date}" is in the future.`,
+    };
+  }
+
+  const account = tx
     .select()
     .from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
-  if (!account || derived.date < account.startingBalanceDate) return null;
+  if (!account || derived.date < account.startingBalanceDate) {
+    return { status: "unchanged" };
+  }
 
-  db.update(schema.accounts)
+  tx.update(schema.accounts)
     .set({
       startingBalanceCents: derived.startingBalanceCents,
       startingBalanceDate: derived.date,
@@ -468,7 +564,13 @@ function anchorStartingBalance(
     .where(eq(schema.accounts.id, accountId))
     .run();
 
-  return { date: derived.date, startingBalanceCents: derived.startingBalanceCents };
+  return {
+    status: "moved",
+    date: derived.date,
+    startingBalanceCents: derived.startingBalanceCents,
+    priorStartingBalanceCents: account.startingBalanceCents,
+    priorStartingBalanceDate: account.startingBalanceDate,
+  };
 }
 
 export function linkTransferPairs(batchId: number, db: Db = defaultDb): number {
