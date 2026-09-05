@@ -1,15 +1,26 @@
-import { and, desc, eq, gte, isNull, lt, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
 
 export type TransactionFilter = {
   /** `number` = exact category, `"none"` = NULL-category backlog, `undefined` = any. */
   categoryId?: number | "none";
-  /** Both must be provided together; caller validates at the Zod boundary. */
-  year?: number;
-  month?: number;
+  accountId?: number;
+  /** Inclusive on both ends. Either or both may be set independently. */
+  dateFrom?: string;
+  dateTo?: string;
+  /**
+   * Magnitude range in cents — matches `ABS(amount_cents)`, so a min/max of
+   * 5000/10000 matches both a -$75 withdrawal and a +$75 deposit (D7:
+   * "find transactions around $75" has no sign in a person's head).
+   */
+  amountMinCents?: number;
+  amountMaxCents?: number;
+  /** `undefined` = no filter (today's default: pending and posted both show). */
+  isPending?: boolean;
+  /** Matched against rawDescription/normalizedMerchant/payee — SQLite's default `LIKE` is case-insensitive for ASCII. */
+  search?: string;
   /** 1-indexed page number. */
   page: number;
   /** Rows per page. Caller clamps to [1, 500]. */
@@ -35,13 +46,39 @@ export type LoadTransactionsResult = {
   totalCount: number;
 };
 
+const LIKE_ESCAPE_CHAR = "\\";
+
+/**
+ * Escapes SQLite `LIKE` wildcards (`%`, `_`) and the escape character itself
+ * so a literal search term (e.g. "50% off") matches literally instead of
+ * being interpreted as a wildcard pattern.
+ */
+export function escapeLikePattern(term: string): string {
+  return term.replace(/[\\%_]/g, (ch) => `${LIKE_ESCAPE_CHAR}${ch}`);
+}
+
+function searchPredicate(term: string): SQL {
+  const pattern = `%${escapeLikePattern(term)}%`;
+  return sql`(${schema.transactions.rawDescription} LIKE ${pattern} ESCAPE ${LIKE_ESCAPE_CHAR}
+    OR ${schema.transactions.normalizedMerchant} LIKE ${pattern} ESCAPE ${LIKE_ESCAPE_CHAR}
+    OR ${schema.transactions.payee} LIKE ${pattern} ESCAPE ${LIKE_ESCAPE_CHAR})`;
+}
+
 /**
  * Paginated read for `/transactions`. Transfer-paired rows are unconditionally
  * excluded so categorize actions never touch rows owned by the pair machinery
  * (matches `/budget` MTD semantics).
  *
- * Date window: when `year`+`month` are set, restricts to `[first_day, first_of_next_month)`.
- * No window → no date restriction (caller layer can choose a default like last 60 days).
+ * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
+ * both, or neither may be set. Replaces the old `year`+`month` window (whole
+ * months are now expressed as `dateFrom=monthBoundary(...)`,
+ * `dateTo=lastDayOfMonth(...)` by the caller).
+ *
+ * Amount window is magnitude-based (`ABS(amount_cents)`), not signed — see
+ * `TransactionFilter.amountMinCents`. `ABS()` on the column means this
+ * predicate can't use an index, same as the `LIKE` search below; both are
+ * negligible at this app's realistic row counts (single household, low
+ * thousands of rows even after years).
  *
  * Sort: `date DESC, id DESC` — newest first, stable tiebreaker.
  */
@@ -57,12 +94,30 @@ export function loadTransactions(
     predicates.push(eq(schema.transactions.categoryId, filter.categoryId));
   }
 
-  if (filter.year !== undefined && filter.month !== undefined) {
-    const firstDay = monthBoundary(filter.year, filter.month);
-    const { year: ny, month: nm } = nextMonthOf(filter.year, filter.month);
-    const firstDayNext = monthBoundary(ny, nm);
-    predicates.push(gte(schema.transactions.date, firstDay));
-    predicates.push(lt(schema.transactions.date, firstDayNext));
+  if (filter.accountId !== undefined) {
+    predicates.push(eq(schema.transactions.accountId, filter.accountId));
+  }
+
+  if (filter.dateFrom !== undefined) {
+    predicates.push(gte(schema.transactions.date, filter.dateFrom));
+  }
+  if (filter.dateTo !== undefined) {
+    predicates.push(lte(schema.transactions.date, filter.dateTo));
+  }
+
+  if (filter.amountMinCents !== undefined) {
+    predicates.push(sql`ABS(${schema.transactions.amountCents}) >= ${filter.amountMinCents}`);
+  }
+  if (filter.amountMaxCents !== undefined) {
+    predicates.push(sql`ABS(${schema.transactions.amountCents}) <= ${filter.amountMaxCents}`);
+  }
+
+  if (filter.isPending !== undefined) {
+    predicates.push(eq(schema.transactions.isPending, filter.isPending));
+  }
+
+  if (filter.search !== undefined && filter.search.trim() !== "") {
+    predicates.push(searchPredicate(filter.search.trim()));
   }
 
   const where = and(...predicates);
@@ -108,4 +163,3 @@ export function loadTransactions(
     return { rows, totalCount };
   });
 }
-

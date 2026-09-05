@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AmountParseError, formatCents, parseAmountToCents } from "./money";
+import { AmountParseError, centsToDollarString, formatCents, parseAmountToCents } from "./money";
 
 describe("formatCents", () => {
   it("formats positive integers with two decimals", () => {
@@ -71,5 +71,27 @@ describe("parseAmountToCents (TC16b)", () => {
     }
     // @ts-expect-error guarding the runtime boundary, not the type
     expect(() => parseAmountToCents(null)).toThrow(AmountParseError);
+  });
+});
+
+describe("centsToDollarString", () => {
+  it("formats zero", () => {
+    expect(centsToDollarString(0)).toBe("0.00");
+  });
+
+  it("formats whole dollars", () => {
+    expect(centsToDollarString(500)).toBe("5.00");
+    expect(centsToDollarString(10000)).toBe("100.00");
+  });
+
+  it("formats sub-dollar cents", () => {
+    expect(centsToDollarString(5)).toBe("0.05");
+    expect(centsToDollarString(50)).toBe("0.50");
+  });
+
+  it("round-trips through parseAmountToCents", () => {
+    for (const cents of [0, 5, 50, 500, 7599, 123456]) {
+      expect(parseAmountToCents(centsToDollarString(cents))).toBe(cents);
+    }
   });
 });

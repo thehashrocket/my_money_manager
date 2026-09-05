@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  lastDayOfMonth,
   monthBoundary,
   monthPhase,
   nextMonthOf,
@@ -67,6 +68,28 @@ describe("monthBoundary", () => {
   it("formats and zero-pads", () => {
     expect(monthBoundary(2026, 9)).toBe("2026-09-01");
     expect(monthBoundary(2026, 1)).toBe("2026-01-01");
+  });
+});
+
+describe("lastDayOfMonth", () => {
+  it("an ordinary 30-day month", () => {
+    expect(lastDayOfMonth(2026, 4)).toBe("2026-04-30");
+  });
+
+  it("an ordinary 31-day month", () => {
+    expect(lastDayOfMonth(2026, 1)).toBe("2026-01-31");
+  });
+
+  it("February in a non-leap year", () => {
+    expect(lastDayOfMonth(2026, 2)).toBe("2026-02-28");
+  });
+
+  it("February in a leap year", () => {
+    expect(lastDayOfMonth(2028, 2)).toBe("2028-02-29");
+  });
+
+  it("December (year-rollover boundary)", () => {
+    expect(lastDayOfMonth(2026, 12)).toBe("2026-12-31");
   });
 });
 
