@@ -8,6 +8,14 @@ import os from "node:os";
 import path from "node:path";
 
 /**
+ * Both tests below spawn a real `node scripts/migrate.mjs` subprocess
+ * (execFileSync) — under a full parallel test-suite run this can exceed
+ * vitest's 5s default (observed flaky; passes in ~1s standalone), so each
+ * needs its own generous budget rather than a global bump for every test.
+ */
+const SUBPROCESS_TEST_TIMEOUT_MS = 20_000;
+
+/**
  * Migration 0010 (`filename` NOT NULL → nullable `label`) is a full SQLite
  * table rebuild, not an in-place ALTER. Every other test in this repo runs
  * migrations against an empty `:memory:` DB (see `createTestDb`), so the
@@ -205,7 +213,7 @@ describe("scripts/migrate.mjs against a database with real FK-referencing rows",
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 });
 
 /**
@@ -262,5 +270,5 @@ describe("scripts/migrate.mjs — foreign_key_check failure path", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TEST_TIMEOUT_MS);
 });
