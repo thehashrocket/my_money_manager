@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-05
+
+### Added
+- **`/budget/[year]/[month]` now has an in-page "How this page works" reference.** A collapsible glossary — closed by default, matching the same native `<details>`/`<summary>` pattern already used on `/goals` — explains the envelope-budgeting model and what each of Left to Budget's five states means (before income is planned, looking ahead to a future month, still unassigned, over-budgeted, every dollar has a job), plus why Funds is read-only here and why Spent can look wrong when transactions aren't categorized yet. It's hidden on a genuine first-run month so it never stacks with the existing first-run onboarding card, and it's static, server-rendered reference content — it never reports which state currently applies, only what each one means in general.
+
 ## [0.13.0] - 2026-09-04
 
 _Zero-based budgeting, EveryDollar-style: every dollar of expected income gets
