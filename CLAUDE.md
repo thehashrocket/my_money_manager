@@ -28,11 +28,13 @@ src/
   db/              Drizzle schema + client singleton
   lib/             Pure functions: parsers, normalizer, categorization, money, utils
   lib/accounts/    loadAccountBalances — live per-account balance queries
+                   listAccounts — {id, name} picker list for the /transactions account filter
   lib/budget/      loadMonthView, resolveRowDisplay — month read model + row tone/badge decisions
                    upsertAllocation, validateAllocateInput — the per-cell allocate write path
                    manageCategories, archiveCategory, setCategoryKind, loadAllCategories —
                    category CRUD, archive/unarchive, and expense→income reclassification
-                   copyMonth, monthOfIso
+                   copyMonth, monthOfIso, transactionsDrilldownHref — /budget → /transactions
+                   per-category-per-month link builder (dateFrom/dateTo, not year/month)
   lib/categorize/  Bulk-categorize logic and validators
   lib/import/      Import orchestration and validators
   lib/simplefin/   Automated sync: client (zod-validated), mapping, bucket transfer

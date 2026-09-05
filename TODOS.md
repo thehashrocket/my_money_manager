@@ -446,8 +446,11 @@ both of which document auto-categorize-at-commit as shipped behavior that does n
   tool for the head of the distribution. Found by Codex during the outside-voice pass while
   checking an effort estimate that had assumed a month-scoped bulk screen; it does not
   exist. Deferred out of `load-the-ledger.md` deliberately: it is a new feature, and that
-  plan is a stabilization pass. The month picker on `/transactions` is the obvious thing to
-  lift into a shared filter component when this is picked up. Depends on nothing.
+  plan is a stabilization pass. **Updated 2026-09-05 (v0.15.0):** `/transactions` gained a
+  real filter bar (`_filter-bar.tsx` — search, account, category, date range, amount range,
+  pending status), so the "lift the month picker into a shared filter component" framing is
+  moot; the month picker it referred to no longer exists. The underlying gap here — no
+  month-scoped *bulk* categorize screen — is untouched. Depends on nothing.
 
 - [x] **P3** — `scripts/db-paths.mjs` hardcoded cwd-relative `./data/money.db` and did not
   read `DATA_DIR`, while the app itself does (`src/lib/paths.ts:9`, `dataDir()`). The two
