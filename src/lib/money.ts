@@ -51,3 +51,12 @@ export function parseAmountToCents(raw: string): number {
 
   return sign === "-" ? -cents : cents;
 }
+
+/**
+ * Inverse of `parseAmountToCents` for round-tripping a magnitude into a plain
+ * decimal string (e.g. for redisplaying a filter input's value). Cents are
+ * assumed non-negative — callers filtering on magnitude never have a sign.
+ */
+export function centsToDollarString(cents: number): string {
+  return (cents / 100).toFixed(2);
+}

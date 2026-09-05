@@ -20,6 +20,7 @@ import type {
 } from "@/lib/budget/loadMonthView";
 import type { MonthPhase } from "@/lib/budget/monthOfIso";
 import { resolveRowDisplay, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
+import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { LeftToBudget } from "@/components/ledger/left-to-budget";
@@ -560,7 +561,7 @@ function ExpenseDesktopRow({
     <TableRow>
       <TableHead scope="row" className="px-3 py-2 font-normal">
         <Link
-          href={`/transactions?categoryId=${leaf.categoryId}&year=${year}&month=${month}`}
+          href={transactionsDrilldownHref(leaf.categoryId, year, month)}
           tabIndex={-1}
           className="font-display text-ink-1 underline-offset-4 hover:underline"
         >
@@ -719,7 +720,7 @@ function IncomeDesktopRow({ income, year, month }: { income: IncomeLeafRow; year
     <TableRow>
       <TableHead scope="row" className="px-3 py-2 font-normal">
         <Link
-          href={`/transactions?categoryId=${income.categoryId}&year=${year}&month=${month}`}
+          href={transactionsDrilldownHref(income.categoryId, year, month)}
           tabIndex={-1}
           className="font-display text-ink-1 underline-offset-4 hover:underline"
         >
@@ -882,7 +883,7 @@ function MobileExpenseRow({
     <li className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-2">
         <Link
-          href={`/transactions?categoryId=${leaf.categoryId}&year=${year}&month=${month}`}
+          href={transactionsDrilldownHref(leaf.categoryId, year, month)}
           tabIndex={-1}
           className="min-w-0 truncate font-display text-ink-1 underline-offset-4 hover:underline"
         >
@@ -969,7 +970,7 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
     <li className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-2">
         <Link
-          href={`/transactions?categoryId=${income.categoryId}&year=${year}&month=${month}`}
+          href={transactionsDrilldownHref(income.categoryId, year, month)}
           tabIndex={-1}
           className="min-w-0 truncate font-display text-ink-1 underline-offset-4 hover:underline"
         >

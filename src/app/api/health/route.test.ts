@@ -6,13 +6,16 @@ describe("/api/health", () => {
     vi.resetModules();
   });
 
+  // Dynamic import under a full parallel test-suite run can exceed vitest's
+  // 5s default (observed flaky; instant standalone) — see the matching note
+  // in src/db/migration0010.test.ts.
   it("returns 200 { ok: true } when the DB responds", async () => {
     vi.doMock("@/db", () => ({ db: { get: () => ({ "1": 1 }) } }));
     const { GET } = await import("./route");
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-  });
+  }, 15_000);
 
   it("returns 503 with a generic error — the raw driver message is never returned to the caller", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});

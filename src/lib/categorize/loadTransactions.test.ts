@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { loadTransactions } from "./loadTransactions";
+import { escapeLikePattern, loadTransactions } from "./loadTransactions";
 
 let handle: TestDbHandle;
 
@@ -57,6 +57,9 @@ function seedTxn(opts: {
   categoryId?: number | null;
   transferPairId?: number | null;
   date?: string;
+  rawDescription?: string;
+  payee?: string | null;
+  isPending?: boolean;
 }) {
   seq += 1;
   const [row] = handle.db
@@ -64,16 +67,17 @@ function seedTxn(opts: {
     .values({
       accountId: opts.accountId,
       date: opts.date ?? "2026-04-05",
-      rawDescription: "DESC",
+      rawDescription: opts.rawDescription ?? "DESC",
       rawMemo: "MEMO",
       normalizedMerchant: opts.merchant ?? "SAFEWAY",
+      payee: opts.payee ?? null,
       amountCents: opts.amountCents ?? -1000,
       categoryId: opts.categoryId ?? null,
       importSource: "csv",
       importBatchId: opts.batchId,
       importRowHash: `hash-${seq}`,
       transferPairId: opts.transferPairId ?? null,
-      isPending: false,
+      isPending: opts.isPending ?? false,
     })
     .returning()
     .all();
@@ -127,7 +131,7 @@ describe("loadTransactions", () => {
     for (const row of r.rows) expect(row.categoryId).toBeNull();
   });
 
-  it("filters by year+month (inclusive start, exclusive next month)", () => {
+  it("filters by dateFrom/dateTo (inclusive on both ends)", () => {
     const a = seedAccount();
     const b = seedBatch();
     seedTxn({ accountId: a.id, batchId: b.id, date: "2026-03-31" });
@@ -136,8 +140,8 @@ describe("loadTransactions", () => {
     seedTxn({ accountId: a.id, batchId: b.id, date: "2026-05-01" });
 
     const r = loadTransactions(handle.db, {
-      year: 2026,
-      month: 4,
+      dateFrom: "2026-04-01",
+      dateTo: "2026-04-30",
       page: 1,
       pageSize: 50,
     });
@@ -148,20 +152,215 @@ describe("loadTransactions", () => {
     ]);
   });
 
-  it("handles December → next-January rollover", () => {
+  it("handles a dateFrom/dateTo window spanning a December → January rollover", () => {
     const a = seedAccount();
     const b = seedBatch();
     seedTxn({ accountId: a.id, batchId: b.id, date: "2026-12-31" });
     seedTxn({ accountId: a.id, batchId: b.id, date: "2027-01-01" });
 
     const r = loadTransactions(handle.db, {
-      year: 2026,
-      month: 12,
+      dateFrom: "2026-12-01",
+      dateTo: "2026-12-31",
       page: 1,
       pageSize: 50,
     });
     expect(r.totalCount).toBe(1);
     expect(r.rows[0].date).toBe("2026-12-31");
+  });
+
+  it("dateFrom alone is an open-ended upper bound", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, date: "2026-04-30" });
+    seedTxn({ accountId: a.id, batchId: b.id, date: "2026-05-01" });
+
+    const r = loadTransactions(handle.db, { dateFrom: "2026-05-01", page: 1, pageSize: 50 });
+    expect(r.totalCount).toBe(1);
+    expect(r.rows[0].date).toBe("2026-05-01");
+  });
+
+  it("dateTo alone is an open-ended lower bound", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, date: "2026-04-30" });
+    seedTxn({ accountId: a.id, batchId: b.id, date: "2026-05-01" });
+
+    const r = loadTransactions(handle.db, { dateTo: "2026-04-30", page: 1, pageSize: 50 });
+    expect(r.totalCount).toBe(1);
+    expect(r.rows[0].date).toBe("2026-04-30");
+  });
+
+  it("filters to one account", () => {
+    const a = seedAccount("Checking");
+    const b = seedAccount("Savings");
+    const batch = seedBatch();
+    seedTxn({ accountId: a.id, batchId: batch.id });
+    seedTxn({ accountId: b.id, batchId: batch.id });
+
+    const r = loadTransactions(handle.db, { accountId: a.id, page: 1, pageSize: 50 });
+    expect(r.totalCount).toBe(1);
+    expect(r.rows[0].accountId).toBe(a.id);
+  });
+
+  describe("amount-magnitude range (D7)", () => {
+    it("matches both a withdrawal and a deposit of the same magnitude", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -7500 });
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: 7500 });
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -100 });
+
+      const r = loadTransactions(handle.db, {
+        amountMinCents: 5000,
+        amountMaxCents: 10000,
+        page: 1,
+        pageSize: 50,
+      });
+      expect(r.totalCount).toBe(2);
+      expect(r.rows.map((row) => row.amountCents).sort()).toEqual([-7500, 7500]);
+    });
+
+    it("amountMinCents alone is an open-ended upper bound", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -100 });
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -20000 });
+
+      const r = loadTransactions(handle.db, { amountMinCents: 10000, page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].amountCents).toBe(-20000);
+    });
+
+    it("amountMaxCents alone is an open-ended lower bound", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -100 });
+      seedTxn({ accountId: a.id, batchId: b.id, amountCents: -20000 });
+
+      const r = loadTransactions(handle.db, { amountMaxCents: 10000, page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].amountCents).toBe(-100);
+    });
+  });
+
+  describe("isPending tri-state", () => {
+    it("unset applies no predicate (today's default: pending and posted both show)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: false });
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: true });
+
+      const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(2);
+    });
+
+    it("isPending=false returns posted rows only", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: false });
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: true });
+
+      const r = loadTransactions(handle.db, { isPending: false, page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].isPending).toBe(false);
+    });
+
+    it("isPending=true returns pending rows only", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: false });
+      seedTxn({ accountId: a.id, batchId: b.id, isPending: true });
+
+      const r = loadTransactions(handle.db, { isPending: true, page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].isPending).toBe(true);
+    });
+  });
+
+  describe("search", () => {
+    it("matches on rawDescription", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "AMAZON MKTPLACE" });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "OTHER" });
+
+      const r = loadTransactions(handle.db, { search: "amazon", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+    });
+
+    it("matches on normalizedMerchant only (not rawDescription)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "X", merchant: "TARGET" });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "Y", merchant: "SAFEWAY" });
+
+      const r = loadTransactions(handle.db, { search: "target", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].normalizedMerchant).toBe("TARGET");
+    });
+
+    it("matches on payee only", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "X", merchant: "Y", payee: "Costco Wholesale" });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "X2", merchant: "Y2", payee: null });
+
+      const r = loadTransactions(handle.db, { search: "costco", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+    });
+
+    it("matches a literal % without treating it as a wildcard", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "50% OFF SALE" });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "SOMETHING ELSE" });
+
+      const r = loadTransactions(handle.db, { search: "50%", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+    });
+
+    it("matches a literal _ without treating it as a single-char wildcard", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "ACCT_1234" });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "ACCTX1234" });
+
+      const r = loadTransactions(handle.db, { search: "ACCT_1234", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].rawDescription).toBe("ACCT_1234");
+    });
+
+    it("empty/whitespace-only search applies no predicate", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id });
+      seedTxn({ accountId: a.id, batchId: b.id });
+
+      const r = loadTransactions(handle.db, { search: "   ", page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(2);
+    });
+
+    it("composes with other filters (AND, not OR)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      const groceries = seedCategory("Groceries");
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        rawDescription: "AMAZON",
+        categoryId: groceries.id,
+      });
+      seedTxn({ accountId: a.id, batchId: b.id, rawDescription: "AMAZON", categoryId: null });
+
+      const r = loadTransactions(handle.db, {
+        search: "amazon",
+        categoryId: groceries.id,
+        page: 1,
+        pageSize: 50,
+      });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].categoryId).toBe(groceries.id);
+    });
   });
 
   it("excludes transfer-paired rows", () => {
@@ -230,5 +429,23 @@ describe("loadTransactions", () => {
     const [row] = loadTransactions(handle.db, { page: 1, pageSize: 50 }).rows;
     expect(row.categoryId).toBeNull();
     expect(row.categoryName).toBeNull();
+  });
+});
+
+describe("escapeLikePattern", () => {
+  it("leaves a plain term unchanged", () => {
+    expect(escapeLikePattern("amazon")).toBe("amazon");
+  });
+
+  it("escapes %", () => {
+    expect(escapeLikePattern("50% off")).toBe("50\\% off");
+  });
+
+  it("escapes _", () => {
+    expect(escapeLikePattern("acct_1234")).toBe("acct\\_1234");
+  });
+
+  it("escapes a literal backslash", () => {
+    expect(escapeLikePattern("a\\b")).toBe("a\\\\b");
   });
 });

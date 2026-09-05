@@ -47,6 +47,18 @@ export function monthBoundary(year: number, month: number): string {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
 }
 
+/**
+ * The ISO date of the last day of (year, month), leap years included.
+ *
+ * `Date.UTC(year, month, 0)` lands on "day 0" of the following month, which
+ * JS resolves to the last day of the target month — so this needs no
+ * per-month day-count table and no separate leap-year branch.
+ */
+export function lastDayOfMonth(year: number, month: number): string {
+  const d = new Date(Date.UTC(year, month, 0));
+  return `${String(d.getUTCFullYear()).padStart(4, "0")}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 export type MonthPhase = "future" | "open" | "closed";
 
 /**
