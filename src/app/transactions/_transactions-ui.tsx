@@ -6,6 +6,7 @@ import type { LeafCategory } from "@/lib/categories";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import type { UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { formatCents } from "@/lib/money";
+import { filterValuesToSearchParams, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionRowForm } from "./_transaction-row";
 
 type Props = {
@@ -16,11 +17,7 @@ type Props = {
   pageSize: number;
   totalCount: number;
   totalPages: number;
-  searchParams: {
-    categoryId: number | "none" | undefined;
-    year: number | undefined;
-    month: number | undefined;
-  };
+  searchParams: TransactionsFilterValues;
 };
 
 /**
@@ -132,16 +129,7 @@ function Pagination({
 }) {
   if (totalPages <= 1) return null;
 
-  const baseParams = new URLSearchParams();
-  if (searchParams.categoryId !== undefined) {
-    baseParams.set("categoryId", String(searchParams.categoryId));
-  }
-  if (searchParams.year !== undefined) {
-    baseParams.set("year", String(searchParams.year));
-  }
-  if (searchParams.month !== undefined) {
-    baseParams.set("month", String(searchParams.month));
-  }
+  const baseParams = filterValuesToSearchParams(searchParams);
   if (pageSize !== 50) baseParams.set("pageSize", String(pageSize));
 
   const hrefFor = (p: number) => {
