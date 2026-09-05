@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-05
+
+### Added
+- **`/transactions` now has real search and filtering.** A filter bar above the list lets you search by description, merchant, or payee; narrow to one account or category; pick an arbitrary date range (replacing the old one-month-at-a-time picker) with a "This month" quick-select button; filter by amount range (matches a transaction's size regardless of whether it's a deposit or a withdrawal); and show posted-only, pending-only, or everything. Filters compose — search, account, category, date range, amount range, and status all apply together — and every combination stays intact across pagination.
+
+### Fixed
+- **`/budget`'s category drilldown links no longer silently widen to "every transaction ever"** now that the date-range change above retires the old month picker — the four links that jump from a budget row into that category's transactions for one month now carry the new date-range params instead.
+- **A filter pointing at an account or category no longer in the picker's list** (an archived category, or a hand-edited URL) **used to silently revert to "All" the next time you changed a filter**, quietly dropping the constraint. The picker now shows the actual filtered value even when it isn't in the dropdown.
+- **A bookmarked or hand-typed link still using the retired month-picker URL format now returns a clear "not found"** instead of silently showing every transaction ever filed under that category.
+- **A non-default page size no longer resets to 50** when applying a filter, using the "This month" shortcut, or clearing filters.
+
 ## [0.14.0] - 2026-09-05
 
 ### Added
