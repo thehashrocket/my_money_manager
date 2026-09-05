@@ -28,6 +28,7 @@ import { ReclassifyIncomeBanner } from "./_reclassify-income";
 import { CopyPreviousMonthButton } from "./_copy-month";
 import { BandSection } from "./_band-section";
 import { MonthEditor } from "./_month-editor";
+import { BudgetHelpPanel } from "./_help-panel";
 
 /**
  * Route params arrive as strings from the URL; Zod coerces + bounds them.
@@ -256,6 +257,12 @@ export default async function BudgetMonthPage({
           ) : null
         }
       />
+
+      {/* Eng review Issue 4 + design review (2026-09-05): hidden on
+          first-run so it never stacks with FirstRunCard's onboarding above,
+          and placed after the hero/bands (not before) so a top-to-bottom
+          scan hits the real budget numbers first. */}
+      {!isFirstRun ? <BudgetHelpPanel /> : null}
 
       {/* A6: FUNDS renders only when a fund category exists — nothing to
           reconcile with an empty section. */}
