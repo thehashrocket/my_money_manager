@@ -25,6 +25,29 @@ findings, all in code this release introduced._
 - **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
 - **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
 
+## [0.17.0] - 2026-09-07
+
+_Merchant names finally group. The ledger had 516 different merchant names for
+1540 transactions — more than one name for every three rows — because a
+reference number, a timestamp or a city on the end of a bank memo made every
+purchase look like a new merchant. It now has 363, and one-off names dropped
+from 354 to 222. The rules you have already trained come with it._
+
+### Added
+- **`pnpm db:backfill-merchants`** — brings the merchant names already in your ledger in line with the normalizer, and rewrites your trained categorization rules to match. Without it the two disagree silently: rules keep matching the old names while every new import writes the new ones. Measured on the real ledger, that gap would have dropped auto-categorization from 672 rows to 196. It runs a dry run by default, snapshots before it writes, does everything in one transaction, and refuses outright if two rules would merge while disagreeing about the category — the only part of it that moves money between envelopes.
+
+### Changed
+- **Google One and YouTube Premium are separate merchants again.** They shared a single "GOOGLE" name that spanned two different categories, so whichever one you categorized last silently decided where the other one filed. The same fix applies to any charge where Google bills for its own product.
+- **Amazon Prime is separate from ordinary Amazon orders**, so a Prime subscription charge no longer disappears into the general Amazon pile — and the built-in "Amazon Prime" subscription rule keeps working.
+- **A store's own name is no longer mistaken for a state code.** Names the bank truncates mid-word — `TAPPED APPLE LL`, `HOTEL SUTTER RE` — kept losing their last two letters. Only real state codes are stripped now.
+- **Merchant names clean up completely in one pass.** Removing a city could expose a store number, removing that could expose something else, and the old cleanup stopped after one round: `SAVEMART #12 MA MANTECA` settled as `SAVEMART MA` and `AUTOZONE 3335 147 MANTECA` as `AUTOZONE 3335`. They now settle as `SAVEMART` and `AUTOZONE`.
+
+### Fixed
+- **A merchant name could come out starting with a `*`.** A memo that began with a timestamp left nothing in front of the reference marker, and the whole raw string became the name.
+- **Normalizing an already-normalized name is now a no-op** for every merchant in the ledger but one, which is documented rather than hidden. The test that claimed this previously used a hand-picked list that happened to exclude every counterexample, so it could never fail while the claim was false for 22 names.
+- **Dismissed subscriptions survive a merchant-name change.** They are stored under the merchant name, with no link back to the transactions, so a rename would have brought a dismissed subscription back as active while leaving the original permanently unreachable from the page — no way to dismiss it again.
+- The docs described the normalizer as "12 rules"; it has been a four-phase pipeline for a while.
+
 ## [0.16.0] - 2026-09-07
 
 _Credit cards and loans. The app has tracked what you have since day one; this
