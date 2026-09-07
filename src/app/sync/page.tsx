@@ -3,7 +3,7 @@ import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents } from "@/lib/money";
 import { countRevertibleCategorizations } from "@/lib/categorize/undoImportCategorization";
-import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
+import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { readAccessUrl } from "@/lib/simplefin/accessUrl";
 import { listRemoteAccounts, type RemoteAccount } from "@/lib/simplefin/link";
 import {
@@ -339,7 +339,7 @@ async function RemoteSections({ host }: { host: string | null }) {
 
   const accounts = db.select().from(schema.accounts).all();
   const accountsById = new Map(accounts.map((a) => [a.id, a]));
-  const ledgerByAccountId = new Map(loadAccountBalances().map((b) => [b.id, b]));
+  const ledgerByAccountId = new Map(loadAccountBalancesForRequest().map((b) => [b.id, b]));
 
   return (
     <>

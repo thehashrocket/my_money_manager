@@ -1,16 +1,18 @@
-import { Fragment } from "react";
 import { connection } from "next/server";
 import Link from "next/link";
 import { db } from "@/db";
 import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
-import { loadAccountBalances, type AccountBalance } from "@/lib/accounts/loadAccountBalances";
+import {
+  loadAccountBalancesForRequest,
+  type AccountBalance,
+} from "@/lib/accounts/loadAccountBalances";
 import { paidDownCents } from "@/lib/accounts/paidDownCents";
 import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { monthPhase } from "@/lib/budget/monthOfIso";
 import { rankByProximity, type ProximityRow } from "@/lib/budget/rankByProximity";
 import { TONE_CLASS } from "@/lib/budget/resolveRowDisplay";
-import { SubtotalRow } from "@/components/ledger/balance-list";
+import { NetWorthRow, SubtotalRow } from "@/components/ledger/balance-list";
 import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import { currentMonth } from "@/lib/now";
@@ -22,7 +24,7 @@ export default async function Home() {
   await connection();
   const { year, month } = currentMonth();
 
-  const accounts = loadAccountBalances(db);
+  const accounts = loadAccountBalancesForRequest();
   const view = loadMonthView(db, year, month);
   const trends = loadMonthlyTrends(db);
 
@@ -150,21 +152,20 @@ function BalanceSection({
           </h2>
           <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg border border-border bg-card shadow-soft">
             {liabilities.map((a, i) => (
-              <Fragment key={a.id}>
-                {/* DS66 — the muting on a long-term row is lower-contrast ink,
-                    which is invisible to a screen reader. LONG-TERM has to be
-                    a real grouping heading, never muting alone. /accounts
-                    renders the same heading; the dashboard sorted for it and
-                    then omitted it, so the only signal here was colour. */}
-                {i === firstLongTermIndex ? (
-                  <li className="px-4 pt-3">
-                    <h3 className="font-mono text-xs uppercase tracking-wide text-ink-3">
-                      Long-term
-                    </h3>
-                  </li>
-                ) : null}
-                <BalanceRow account={a} />
-              </Fragment>
+              /* DS66 — the muting on a long-term row is lower-contrast ink,
+                 which is invisible to a screen reader. LONG-TERM has to be a
+                 real grouping heading, never muting alone. The dashboard
+                 sorted long-term-last as if a heading were coming, then
+                 omitted it, so the only signal here was colour.
+
+                 Inside the row's own <li>, not a sibling one, so the parent's
+                 `divide-y` draws a single rule above the group instead of one
+                 above the label and another between the label and its row. */
+              <BalanceRow
+                key={a.id}
+                account={a}
+                heading={i === firstLongTermIndex ? "Long-term" : undefined}
+              />
             ))}
             <SubtotalRow
               label="Debt"
@@ -179,54 +180,47 @@ function BalanceSection({
               }
             />
           </ul>
-          <div className="mt-3 border-t-[3px] border-double border-[var(--rule-strong)] pt-3">
-            <div className="flex items-baseline justify-between px-1">
-              <span className="font-mono text-xs uppercase tracking-wide text-ink-2">
-                Net worth
-              </span>
-              {/* DS51 — subtotal size, not larger. The ledger double rule
-                  already carries the "bottom line" signal; type size on top of
-                  it is shouting, and the thing it shouts is a six-figure
-                  negative on a page you open when you are already anxious. */}
-              <span
-                className={`font-mono text-lg ${moneyToneClass(summary.netWorthCents)}`}
-                aria-label={
-                  summary.netWorthCents < 0
-                    ? `negative ${formatCents(Math.abs(summary.netWorthCents))}`
-                    : undefined
-                }
-              >
-                {formatCents(summary.netWorthCents)}
-              </span>
-            </div>
-          </div>
         </div>
       ) : null}
+
+      {/* Outside the liabilities conditional, deliberately. Nested inside it,
+          a user with only checking and savings saw ASSETS + Cash and nothing
+          below — no bottom line at all — while /accounts showed one for the
+          same ledger. DS49: two surfaces answering "where do I stand" should
+          not look like two different products. */}
+      <NetWorthRow cents={summary.netWorthCents} />
     </section>
   );
 }
 
-function BalanceRow({ account }: { account: AccountBalance }) {
+function BalanceRow({ account, heading }: { account: AccountBalance; heading?: string }) {
   const isLiability = account.class === "liability";
   const longTerm = isLongTermLiability(account.type);
   return (
-    <li className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 py-3">
-      <span className={`font-display text-base ${longTerm ? "text-ink-3" : "text-ink-1"}`}>
-        {account.name}
-      </span>
-      <span
-        className={`font-mono text-lg ${
-          longTerm
-            ? "text-ink-3"
-            : moneyToneClass(account.balanceCents, {
-                context: isLiability ? "liability" : "asset",
-              })
-        }`}
-        /* DS66 — parens are silent to a screen reader. */
-        aria-label={isLiability ? `owed ${formatCents(Math.abs(account.balanceCents))}` : undefined}
-      >
-        {formatCents(account.balanceCents)}
-      </span>
+    <li className="px-4 py-3">
+      {heading ? (
+        <h3 className="mb-2 font-mono text-xs uppercase tracking-wide text-ink-3">{heading}</h3>
+      ) : null}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <span className={`font-display text-base ${longTerm ? "text-ink-3" : "text-ink-1"}`}>
+          {account.name}
+        </span>
+        <span
+          className={`font-mono text-lg ${
+            longTerm
+              ? "text-ink-3"
+              : moneyToneClass(account.balanceCents, {
+                  context: isLiability ? "liability" : "asset",
+                })
+          }`}
+          /* DS66 — parens are silent to a screen reader. */
+          aria-label={
+            isLiability ? `owed ${formatCents(Math.abs(account.balanceCents))}` : undefined
+          }
+        >
+          {formatCents(account.balanceCents)}
+        </span>
+      </div>
     </li>
   );
 }

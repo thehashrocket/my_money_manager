@@ -44,3 +44,36 @@ export function SubtotalRow({
     </li>
   );
 }
+
+/**
+ * DS51's bottom line — the ledger double rule and the NET WORTH figure.
+ *
+ * Shared for the same reason `SubtotalRow` is: this block was copy-pasted
+ * verbatim between the dashboard and `/accounts`, down to the rationale
+ * comment, in the PR whose stated purpose was deleting exactly that kind of
+ * duplication. Two identical blocks one Tailwind edit from disagreeing.
+ *
+ * Renders unconditionally. On the dashboard it used to live inside the
+ * `liabilities.length > 0` branch, so a user with only checking and savings
+ * got no bottom line at all while `/accounts` gave them one.
+ */
+export function NetWorthRow({ cents }: { cents: number }) {
+  return (
+    <div className="mt-3 border-t-[3px] border-double border-[var(--rule-strong)] pt-3">
+      <div className="flex items-baseline justify-between px-1">
+        <span className="font-mono text-xs uppercase tracking-wide text-ink-2">Net worth</span>
+        {/* DS51 — subtotal size, not larger. The ledger double rule already
+            carries the "bottom line" signal; type size on top of it is
+            shouting, and the thing it shouts is a six-figure negative on a
+            page you open when you are already anxious. */}
+        <span
+          className={`font-mono text-lg [font-variant-numeric:tabular-nums] ${moneyToneClass(cents)}`}
+          /* DS66 — accounting parens are silent to a screen reader. */
+          aria-label={cents < 0 ? `negative ${formatCents(Math.abs(cents))}` : undefined}
+        >
+          {formatCents(cents)}
+        </span>
+      </div>
+    </div>
+  );
+}

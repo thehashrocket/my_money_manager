@@ -3,7 +3,7 @@ import { connection } from "next/server";
 import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents, moneyToneClass } from "@/lib/money";
-import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
+import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { SpineMonth } from "./spine-month";
 import { SpineTabs, type TabItem } from "./spine-tabs";
@@ -40,7 +40,7 @@ export async function Spine() {
   // freeze at build time (same rationale as `/budget/page.tsx`).
   await connection();
 
-  const allBalances = loadAccountBalances();
+  const allBalances = loadAccountBalancesForRequest();
   // DS50 — the peek is ASSETS ONLY. D4=A relabels the subtotal to "Cash", but
   // leaving the liabilities in the list above it produces a subtotal that
   // visibly does not sum its own rows — a closure violation, on every page in

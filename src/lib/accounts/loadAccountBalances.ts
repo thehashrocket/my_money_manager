@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { and, eq, gt, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { accountClass, type AccountClass } from "./accountClass";
@@ -95,3 +96,28 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
     };
   });
 }
+
+/**
+ * The render-path entry point: the same query set, memoized for one request.
+ *
+ * `Spine` is mounted in the root layout, so it runs on EVERY route, and the
+ * pages that show balances (`/`, `/accounts`, `/budget/[y]/[m]`, `/sync`) each
+ * ran the whole thing again in their own body — two full passes over the
+ * transactions table per render, on a synchronous better-sqlite3 driver that
+ * blocks the event loop while it works. This is the one cost here that grows
+ * linearly with transaction count.
+ *
+ * `cache()` is request-scoped, not a cross-request cache: a server action that
+ * writes and then revalidates starts a new request, so a mutation is never
+ * served a stale figure.
+ *
+ * Deliberately takes NO db argument. `cache` keys on arguments, so `f()` and
+ * `f(defaultDb)` would be two entries and neither would hit — and the callers
+ * that must NOT be memoized are exactly the ones passing an explicit handle:
+ * `manualTransaction.ts` reads the balance back inside its own write
+ * transaction, where a memo from earlier in the request would be wrong.
+ * Those keep calling `loadAccountBalances` directly.
+ */
+export const loadAccountBalancesForRequest = cache((): AccountBalance[] =>
+  loadAccountBalances(defaultDb),
+);

@@ -35,10 +35,19 @@ export function AccountRow({
   account,
   today,
   categories = [],
+  heading,
 }: {
   account: AccountRowData;
   today: string;
   categories?: LeafCategory[];
+  /** DS66's LONG-TERM label, rendered INSIDE this row's own <li>.
+   *
+   *  It used to be a sibling <li>, which put it in the parent's `divide-y`
+   *  and drew a hairline both above the label AND between the label and the
+   *  row it labels — so the mortgage read as detached from its own group and
+   *  the label read as an empty ruled row. The mockup shows one rule above
+   *  the group, with the label attached to what it groups. */
+  heading?: string;
 }) {
   const isLiability = account.class === "liability";
   const longTerm = isLongTermLiability(account.type);
@@ -52,6 +61,9 @@ export function AccountRow({
 
   return (
     <li className="px-4 py-3 sm:px-5">
+      {heading ? (
+        <h3 className="mb-2 font-mono text-xs uppercase tracking-wide text-ink-3">{heading}</h3>
+      ) : null}
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <span
           className={`font-display text-base ${longTerm ? "text-ink-3" : "text-ink-1"}`}

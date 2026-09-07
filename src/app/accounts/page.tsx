@@ -3,14 +3,14 @@ import Link from "next/link";
 import { db } from "@/db";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
 import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
-import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
+import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { paidDownCents } from "@/lib/accounts/paidDownCents";
 import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { listLeafCategories } from "@/lib/categories";
-import { formatCents, moneyToneClass } from "@/lib/money";
+import { formatCents } from "@/lib/money";
 import { currentMonth, todayIso } from "@/lib/now";
 import { StateCard } from "@/components/ledger/state-card";
-import { SubtotalRow } from "@/components/ledger/balance-list";
+import { NetWorthRow, SubtotalRow } from "@/components/ledger/balance-list";
 import { AccountRow, type AccountRowData } from "./_account-row";
 import type { LeafCategory } from "@/lib/categories";
 
@@ -25,7 +25,7 @@ export default async function AccountsPage() {
   // DS67's dialog requires a category, so the picker's options come with the
   // page rather than through a second round trip.
   const categories = listLeafCategories(db);
-  const balances = loadAccountBalances(db);
+  const balances = loadAccountBalancesForRequest();
   const rows: AccountRowData[] = balances.map((b) => ({
     ...b,
     hasAnyRows: hasAnyTransactionRows(b.id, db),
@@ -138,28 +138,8 @@ export default async function AccountsPage() {
         </ul>
       </section>
 
-      {/* The ledger double rule carries the "this is the bottom line" signal;
-          DS51 keeps the type at subtotal size because size on top of that is
-          shouting, and the thing it would shout is a six-figure negative on a
-          page you open when you are already anxious about debt. */}
       <section aria-label="Net worth">
-        <div className="border-t-[3px] border-double border-[var(--rule-strong)] pt-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-4 px-1">
-            <span className="font-mono text-xs uppercase tracking-wide text-ink-2">
-              Net worth
-            </span>
-            <span
-              className={`font-mono text-lg ${moneyToneClass(summary.netWorthCents)}`}
-              aria-label={
-                summary.netWorthCents < 0
-                  ? `negative ${formatCents(Math.abs(summary.netWorthCents))}`
-                  : undefined
-              }
-            >
-              {formatCents(summary.netWorthCents)}
-            </span>
-          </div>
-        </div>
+        <NetWorthRow cents={summary.netWorthCents} />
       </section>
     </main>
   );
@@ -180,15 +160,12 @@ function LiabilityListItem({
   categories: LeafCategory[];
   showLongTermHeading: boolean;
 }) {
-  if (!showLongTermHeading) {
-    return <AccountRow account={account} today={today} categories={categories} />;
-  }
   return (
-    <>
-      <li className="px-4 pt-3 sm:px-5">
-        <h3 className="font-mono text-xs uppercase tracking-wide text-ink-3">Long-term</h3>
-      </li>
-      <AccountRow account={account} today={today} categories={categories} />
-    </>
+    <AccountRow
+      account={account}
+      today={today}
+      categories={categories}
+      heading={showLongTermHeading ? "Long-term" : undefined}
+    />
   );
 }
