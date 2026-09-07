@@ -64,7 +64,7 @@ v0.8.0 — automated sync:
 Weekend 1 — CSV import pipeline:
 - Real CSV data analyzed (checking + savings, 90 days, 652 rows combined)
 - Six-table Drizzle schema + migration landed; HMR-safe DB singleton in place
-- Pure-function tier shipped with Vitest coverage: merchant normalizer (12 rules), row-hash, Star One CSV parser, memo-independent transfer-pair matcher
+- Pure-function tier shipped with Vitest coverage: merchant normalizer (four-phase pipeline), row-hash, Star One CSV parser, memo-independent transfer-pair matcher
 - Snapshot + import orchestrator: `commitImport` snapshots the DB, inserts batch + rows in a single transaction, then links transfer pairs
 - Upload/preview/confirm UI in the App Router using Server Actions; confirm flow verified live (543 rows committed, snapshot written, redirect to success page)
 - Star One CU memo-labeling quirk logged as a durable project memory

@@ -17,7 +17,9 @@ Short-term checklist. For the full roadmap see [PLAN.md](./PLAN.md). For context
 - [x] First Drizzle migration — all tables at once: `accounts`, `transactions`, `categories`, `category_rules`, `budget_periods`, `import_batches`
 - [x] better-sqlite3 DB client singleton in `src/db/index.ts` (globalThis-cached, Proxy-wrapped for HMR-safe reopen)
 - [x] CSV parser in `src/lib/parseCsv.ts` — handles both checking and savings memo variants
-- [x] Merchant normalizer in `src/lib/normalize.ts` — 12 rules total, pure function, Vitest-covered
+- [x] Merchant normalizer in `src/lib/normalize.ts` — four-phase pure-function pipeline, Vitest-covered
+- [x] Merchant-key backfill (`pnpm db:backfill-merchants`) — renormalizes rows and rewrites trained rules; see `docs/plans/merchant-normalization.md` T4
+- [ ] `docs/plans/merchant-normalization.md` T3 / T5 / T6 — alias table, alias CRUD, re-run auto-categorization over the backlog. **Priority:** P2. T3 was measured worth only ~5 groups, so re-justify before building it.
 - [x] Transfer-pair matcher in `src/lib/transferPair.ts` — memo-independent, keys on (txn±1, date, |amount|, opposite signs, different accounts)
 - [x] Import preview UI — CSV upload → `/import/preview/{id}` stat cards + row list with duplicate/pending/error shading + confirm/cancel server actions
 - [x] Pre-import DB snapshot in `src/lib/snapshot.ts` — copy `data/money.db` to `data/money.db.pre-import-{ts}` before any write; 10-snapshot retention
