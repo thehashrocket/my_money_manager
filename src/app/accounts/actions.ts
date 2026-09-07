@@ -13,7 +13,12 @@ import {
 } from "@/lib/accounts/manualTransaction";
 import type { AccountsActionState, CardActivityState } from "./action-state";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
+import {
+  STARTING_BALANCE_DOLLARS_MAX,
+  owedDollarsToSignedCents,
+} from "@/lib/import/accountAnchorFields";
 import { formatCents } from "@/lib/money";
+import { todayIso } from "@/lib/now";
 import { syncSimpleFin } from "@/lib/simplefin/sync";
 
 /**
@@ -72,6 +77,13 @@ export async function updateLiabilityBalanceAction(
 ): Promise<AccountsActionState> {
   try {
     const raw = Object.fromEntries(formData);
+    // Checked before `Number()`, because `Number("")` and `Number(null)` are
+    // both 0 — finite and >= 0, so the guard below would pass and silently
+    // reconcile the card to a $0 balance owed. The form's `required` is
+    // client-side only; a Server Action is a network endpoint.
+    if (raw.balanceOwed === undefined || String(raw.balanceOwed).trim() === "") {
+      return fail("Enter what you owe as a positive number.", "balance");
+    }
     const owed = Number(raw.balanceOwed);
     if (!Number.isFinite(owed) || owed < 0) {
       return fail("Enter what you owe as a positive number.", "balance");
@@ -106,7 +118,11 @@ export async function updateLiabilityBalanceAction(
       return fail(`${account.name} is not a credit card or loan.`);
     }
 
-    const cents = Math.round(startingBalance * 100);
+    // Shared with account creation, so the two paths cannot round a
+    // half-cent in opposite directions. `startingBalance` is already the
+    // negated signed figure the validator bounds-checked, so re-derive the
+    // owed magnitude to hand the helper the positive number it expects.
+    const cents = owedDollarsToSignedCents(-startingBalance);
     db.update(schema.accounts)
       .set({
         startingBalanceCents: cents,
@@ -218,6 +234,21 @@ export async function addCardActivityAction(
     }
     if (!Number.isFinite(amount) || amount <= 0) {
       return { status: "error", message: "Enter an amount greater than zero." };
+    }
+    // Upper bound, shared with every other money writer in the app. Without
+    // it, `amount=1e12` produced a 1e14-cent row that permanently skewed the
+    // card balance, net worth and its envelope's spend; larger values reached
+    // better-sqlite3's int64 bind and surfaced as an opaque RangeError rather
+    // than a message. `min="0.01"` on the input is client-side only.
+    if (amount > STARTING_BALANCE_DOLLARS_MAX) {
+      return { status: "error", message: "That amount is larger than this app accepts." };
+    }
+    // Capped at today for the same reason `validateUpdateAnchorInput` caps the
+    // anchor: a future-dated row inflates the card balance against activity
+    // that has not happened yet. The dialog sets `max={today}`, but a Server
+    // Action is reachable regardless of what the form rendered.
+    if (String(raw.date ?? "") > todayIso()) {
+      return { status: "error", message: "That date is in the future." };
     }
 
     const result = createCardActivity(

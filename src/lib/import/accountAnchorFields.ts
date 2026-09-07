@@ -39,3 +39,27 @@ export function isStartingBalanceCentsInBounds(cents: number): boolean {
     cents >= STARTING_BALANCE_CENTS_MIN && cents <= STARTING_BALANCE_CENTS_MAX
   );
 }
+
+/**
+ * The ONE place a liability's "balance owed" becomes a signed `amount_cents`.
+ *
+ * Both write paths take a positive number from the user — account creation
+ * (`validateCreateAccountInput`) and reconcile (`updateLiabilityBalanceAction`)
+ * — and both have to negate it. They used to do that independently, and they
+ * disagreed: create computed `-Math.round(owed * 100)` while reconcile
+ * computed `Math.round(-owed * 100)`. `Math.round` breaks half-values toward
+ * +Infinity, so the two differ by a cent on any half-cent input — `0.125`
+ * gives -13 one way and -12 the other. A Server Action is reachable
+ * regardless of the form's `step="0.01"`, so that was live, not theoretical.
+ *
+ * Rounding happens BEFORE the sign flip, always.
+ *
+ * The `magnitude !== 0` guard is for -0, which a paid-off card produces and
+ * which is not `Object.is`-equal to 0. SQLite stores it as 0 either way, but
+ * it survives in memory long enough to fail an equality assertion downstream
+ * for a reason nobody would guess.
+ */
+export function owedDollarsToSignedCents(owedDollars: number): number {
+  const magnitude = Math.round(owedDollars * 100);
+  return magnitude === 0 ? 0 : -magnitude;
+}

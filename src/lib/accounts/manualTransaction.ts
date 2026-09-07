@@ -5,6 +5,7 @@ import { accountClass } from "./accountClass";
 import { isLongTermLiability } from "./isLongTermLiability";
 import { loadAccountBalances } from "./loadAccountBalances";
 import { formatMonthDay } from "@/lib/now";
+import { startingBalanceDateSchema } from "@/lib/import/accountAnchorFields";
 import { normalizeMerchant } from "@/lib/normalize";
 import { formatCents } from "@/lib/money";
 
@@ -168,6 +169,21 @@ export function createCardActivity(
   if (input.merchant.trim() === "") {
     return refused("invalid", "Enter where the charge was made.");
   }
+  // The date is validated here, not just compared. `input.date <= anchor`
+  // below is a LEXICOGRAPHIC string compare against a TEXT column, so a
+  // syntactically-shaped but calendar-invalid date ("2026-13-40") or an
+  // arbitrary string ("banana") sorts after every real anchor, passes that
+  // guard, and lands in `transactions.date` verbatim — where rule 1's strict
+  // `>` then mis-sorts the account's whole history. CLAUDE.md hardened the
+  // CSV path against exactly this in v0.12.4; this is the same check on the
+  // third write path, using the same shared schema so they cannot drift.
+  if (!startingBalanceDateSchema.safeParse(input.date).success) {
+    return refused("invalid", "Enter a valid date.");
+  }
+  // The future-date cap deliberately lives in `addCardActivityAction`, not
+  // here: it needs the wall clock, and this function is otherwise pure and
+  // clock-free, which is what lets its tests use fixed dates. Same split
+  // `validateUpdateAnchorInput` uses for the anchor form.
 
   const result = db.transaction((tx): ManualWriteResult => {
     const guard = requireCardAccount(input.accountId, tx);

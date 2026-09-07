@@ -2,6 +2,7 @@ import { z } from "zod";
 import { accountClass } from "@/lib/accounts/accountClass";
 import {
   STARTING_BALANCE_DOLLARS_MAX,
+  owedDollarsToSignedCents,
   startingBalanceDateSchema,
   startingBalanceDollarsSchema,
 } from "./accountAnchorFields";
@@ -23,8 +24,10 @@ import {
  * $4,000 — with no error, no warning, and a number that looked plausible.
  *
  * Emitting `startingBalanceCents` rather than dollars is deliberate: it keeps
- * exactly one place in the codebase where an account's opening sign is
- * decided, and that place has tests.
+ * the sign decision at the boundary rather than in each caller. The negation
+ * itself is `owedDollarsToSignedCents` in `accountAnchorFields.ts`, shared
+ * with reconcile — this file used to own its own copy, and the two rounded
+ * half-cents in opposite directions.
  */
 
 /** Cards only (D2=A). Optional; `""` from an untouched form field is NULL. */
@@ -80,17 +83,15 @@ export const createAccountInputSchema = baseSchema
     }
   })
   .transform((v) => {
-    const magnitude = Math.round(v.startingBalance * 100);
-    // `magnitude !== 0` guards against -0, which a paid-off card produces and
-    // which is not `Object.is`-equal to 0. SQLite would store it as 0 either
-    // way, but it would survive in memory long enough to make an equality
-    // assertion somewhere downstream fail for a reason nobody would guess.
-    const negate = accountClass(v.type) === "liability" && magnitude !== 0;
+    const isLiability = accountClass(v.type) === "liability";
     return {
       name: v.name,
       type: v.type,
-      // The one negation in the app's account-creation path.
-      startingBalanceCents: negate ? -magnitude : magnitude,
+      // Shared with reconcile via `owedDollarsToSignedCents`, so the two
+      // paths cannot round a half-cent differently. See its docstring.
+      startingBalanceCents: isLiability
+        ? owedDollarsToSignedCents(v.startingBalance)
+        : Math.round(v.startingBalance * 100),
       startingBalanceDate: v.startingBalanceDate,
       creditLimitCents: v.creditLimit === null ? null : Math.round(v.creditLimit * 100),
       minimumPaymentCents:

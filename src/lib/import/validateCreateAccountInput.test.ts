@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateCreateAccountInput } from "./validateCreateAccountInput";
+import { owedDollarsToSignedCents } from "./accountAnchorFields";
 
 const valid = {
   name: "Checking",
@@ -258,5 +259,46 @@ describe("validateCreateAccountInput — credit limit and minimum payment (E3, D
 
   it("accepts a loan with both fields simply absent", () => {
     expect(validateCreateAccountInput({ ...card, type: "loan" }).success).toBe(true);
+  });
+});
+
+describe("the liability negation is shared with reconcile", () => {
+  // REGRESSION. Account creation and `updateLiabilityBalanceAction` both turn
+  // a positive "balance owed" into a negative `amount_cents`, and they used to
+  // do it independently: create computed `-Math.round(owed * 100)` while
+  // reconcile computed `Math.round(-owed * 100)`. `Math.round` breaks
+  // half-values toward +Infinity, so the two disagreed by a cent on any
+  // half-cent input — 0.125 gave -13 one way and -12 the other. A Server
+  // Action is reachable regardless of the form's step="0.01", so it was live.
+  //
+  // Both now call `owedDollarsToSignedCents`. This test pins that: it asserts
+  // the helper's output IS what creation stores, so reintroducing a second
+  // local copy that rounds differently fails here.
+  it.each([0, 0.005, 0.125, 2000, 2000.005, 2148.32])(
+    "creation stores exactly owedDollarsToSignedCents(%s)",
+    (owed) => {
+      const parsed = validateCreateAccountInput({
+        name: "Visa",
+        type: "credit",
+        startingBalance: owed,
+        startingBalanceDate: "2026-04-16",
+      });
+
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.startingBalanceCents).toBe(owedDollarsToSignedCents(owed));
+      }
+    },
+  );
+
+  it("never emits -0, which a paid-off card would otherwise produce", () => {
+    expect(Object.is(owedDollarsToSignedCents(0), -0)).toBe(false);
+    expect(owedDollarsToSignedCents(0)).toBe(0);
+  });
+
+  it("leaves an asset account's sign alone", () => {
+    const parsed = validateCreateAccountInput({ ...valid, startingBalance: 1234.56 });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.startingBalanceCents).toBe(123_456);
   });
 });

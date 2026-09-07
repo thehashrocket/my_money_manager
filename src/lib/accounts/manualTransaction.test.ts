@@ -502,3 +502,102 @@ describe("E21 — one import batch per manual operation", () => {
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
   });
 });
+
+/**
+ * The `not-found` and "already on this card" refusals. Every one is reachable
+ * from a stale tab — a Server Action is a network endpoint regardless of what
+ * the UI rendered — and none of them may throw (E20), because a throw
+ * unmounts /accounts and takes the user's typed input with it.
+ */
+describe("refusals reachable from a stale tab", () => {
+  it("refuses a charge against an account id that no longer exists", () => {
+    const category = seedCategory();
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: 999_999,
+        date: "2026-09-06",
+        amountCents: 8_000,
+        merchant: "Costco",
+        categoryId: category.id,
+      },
+      handle.db,
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") expect(result.reason).toBe("not-found");
+  });
+
+  it("refuses a payment whose checking leg no longer exists", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const result = markAsCardPayment(
+      { transactionId: 999_999, cardAccountId: visa.id },
+      handle.db,
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") expect(result.reason).toBe("not-found");
+  });
+
+  it("refuses to mark a row on the card as a payment TO that same card", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const onCard = seedCheckingDebit(visa.id, "2026-09-06", -25_000);
+    const result = markAsCardPayment(
+      { transactionId: onCard.id, cardAccountId: visa.id },
+      handle.db,
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.reason).toBe("invalid");
+      expect(result.message).toContain("Visa");
+    }
+    // No mirror was written, so the card's balance is untouched.
+    expect(balanceOf(visa.id)).toBe(-200_000 - 25_000);
+  });
+});
+
+describe("createCardActivity — date validation", () => {
+  // REGRESSION. The anchor guard below this check is `input.date <=
+  // account.startingBalanceDate` — a LEXICOGRAPHIC compare against a TEXT
+  // column. Any string sorting after the anchor passed it and was inserted
+  // verbatim, so "2026-13-40" and "banana" both returned status "ok" and
+  // landed in transactions.date. Rule 1's strict `>` then mis-sorts the
+  // account's whole history against a date that is not a date. CLAUDE.md
+  // hardened the CSV path against exactly this in v0.12.4; this is the same
+  // check on the third write path.
+  it.each(["2026-13-40", "2026-02-30", "banana", "", "04/31/2026"])(
+    "REFUSES the calendar-invalid or malformed date %j instead of storing it",
+    (bad) => {
+      const visa = seedAccount({ name: "Visa", type: "credit", anchor: "2026-08-01" });
+      const result = createCardActivity(
+        {
+          kind: "charge",
+          accountId: visa.id,
+          date: bad,
+          amountCents: 5_000,
+          merchant: "COSTCO WHSE",
+          categoryId: seedCategory().id,
+        },
+        handle.db,
+      );
+
+      expect(result.status).toBe("refused");
+      expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+    },
+  );
+
+  it("still accepts a well-formed date after the anchor", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit", anchor: "2026-08-01" });
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: visa.id,
+        date: "2026-08-15",
+        amountCents: 5_000,
+        merchant: "COSTCO WHSE",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+
+    expect(result.status).toBe("ok");
+  });
+});
