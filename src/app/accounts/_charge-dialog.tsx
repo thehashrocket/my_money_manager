@@ -62,7 +62,22 @@ export function ChargeDialog({
   const categoryFieldId = useId();
 
   // Close on success, so the row's new balance is what the user sees next.
-  if (state.status === "ok" && open) setOpen(false);
+  //
+  // Gated on the state CHANGING, not on `state.status === "ok"` alone.
+  // `useActionState` keeps the last result for the life of the component, and
+  // `CardControls` never remounts this one — so a bare status check re-fires
+  // on the very next render after the user reopens the dialog, closing it
+  // again instantly. The symptom is brutal and silent: you can log exactly one
+  // charge per page load, and every attempt after that is a no-op.
+  //
+  // This is the "adjust state during render" pattern `_month-editor.tsx`
+  // already uses to detect a genuinely new server payload, and the same
+  // transition check `_category-menu.tsx`'s dialogs use.
+  const [handledState, setHandledState] = useState(state);
+  if (state !== handledState) {
+    setHandledState(state);
+    if (state.status === "ok") setOpen(false);
+  }
 
   return (
     <>

@@ -1,10 +1,8 @@
 import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import type { AccountBalance } from "@/lib/accounts/loadAccountBalances";
 import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
-import {
-  formatMonthDay,
-  resolveStalenessDisplay,
-} from "@/lib/accounts/resolveStalenessDisplay";
+import { resolveStalenessDisplay } from "@/lib/accounts/resolveStalenessDisplay";
+import { formatMonthDay } from "@/lib/now";
 import { resolveUtilizationDisplay } from "@/lib/accounts/resolveUtilizationDisplay";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import type { LeafCategory } from "@/lib/categories";
@@ -149,34 +147,6 @@ export function AccountRow({
           <RefreshButton accountId={account.id} accountName={account.name} />
         </div>
       ) : null}
-    </li>
-  );
-}
-
-/** A recessed, action-less, date-less summary row — DS51's `Cash` / `Debt`. */
-export function SubtotalRow({
-  label,
-  cents,
-  context,
-  note,
-}: {
-  label: string;
-  cents: number;
-  context: "asset" | "liability";
-  note?: React.ReactNode;
-}) {
-  return (
-    <li className="bg-[var(--bg-inset)] px-4 py-3 sm:px-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4">
-        <span className="font-mono text-xs uppercase tracking-wide text-ink-2">{label}</span>
-        <span
-          className={`font-mono text-lg [font-variant-numeric:tabular-nums] ${moneyToneClass(cents, { context })}`}
-          aria-label={context === "liability" ? `owed ${formatCents(Math.abs(cents))}` : undefined}
-        >
-          {formatCents(cents)}
-        </span>
-      </div>
-      {note ? <div className="mt-1">{note}</div> : null}
     </li>
   );
 }

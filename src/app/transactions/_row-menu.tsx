@@ -42,7 +42,6 @@ export function TransactionRowMenu({
   onChanged,
 }: {
   transactionId: number;
-  amountCents: number;
   isTransfer: boolean;
   transferPartnerAccountName: string | null;
   /** Credit cards only — a mortgage is rejected server-side anyway (E17). */

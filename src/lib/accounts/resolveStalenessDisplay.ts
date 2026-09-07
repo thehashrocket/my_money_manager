@@ -1,4 +1,4 @@
-import { toLocalIso, todayIso } from "@/lib/now";
+import { formatMonthDay, toLocalIso, todayIso } from "@/lib/now";
 import type { BalanceSource } from "./resolveBalanceAction";
 
 export type StalenessDisplay = {
@@ -40,18 +40,6 @@ export type StalenessDisplay = {
  */
 export const FEED_STALE_AFTER_DAYS = 7;
 export const MANUAL_STALE_AFTER_DAYS = 35;
-
-const MONTH_DAY = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  timeZone: "UTC",
-});
-
-/** `2026-09-06` → `Sep 6`. Parsed as UTC so it can't slip a day. */
-export function formatMonthDay(iso: string): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  return MONTH_DAY.format(new Date(Date.UTC(y, m - 1, d)));
-}
 
 /** Whole days from `iso` to `todayIso`, floored at zero. */
 function daysBetween(iso: string, today: string): number {

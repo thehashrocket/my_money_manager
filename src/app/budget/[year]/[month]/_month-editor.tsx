@@ -19,7 +19,7 @@ import type {
   UncategorizedRow,
 } from "@/lib/budget/loadMonthView";
 import type { MonthPhase } from "@/lib/budget/monthOfIso";
-import { resolveRowDisplay, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
+import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -39,13 +39,6 @@ import { commitAllocationAction, revalidateBudgetSurfacesAction } from "../../ac
 import { BandSection } from "./_band-section";
 import { CategoryMenu } from "./_category-menu";
 import { NewCategoryRow, NewGroupRow } from "./_create-category";
-
-const TONE_CLASS: Record<RowTone, string> = {
-  positive: "text-money-pos",
-  negative: "text-money-neg",
-  neutral: "text-money-zero",
-  muted: "text-ink-3",
-};
 
 const BAR_CLASS: Record<BarTone, string> = {
   ledger: "bg-ledger",

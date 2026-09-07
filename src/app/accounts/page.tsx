@@ -10,7 +10,8 @@ import { listLeafCategories } from "@/lib/categories";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import { currentMonth, todayIso } from "@/lib/now";
 import { StateCard } from "@/components/ledger/state-card";
-import { AccountRow, SubtotalRow, type AccountRowData } from "./_account-row";
+import { SubtotalRow } from "@/components/ledger/balance-list";
+import { AccountRow, type AccountRowData } from "./_account-row";
 import type { LeafCategory } from "@/lib/categories";
 
 export default async function AccountsPage() {
@@ -82,7 +83,7 @@ export default async function AccountsPage() {
           ))}
           {/* D4=A — "Cash", not "Total". The rail and this page both answer
               "can I afford this," and net worth cannot. */}
-          <SubtotalRow label="Cash" cents={summary.assetsCents} context="asset" />
+          <SubtotalRow label="Cash" cents={summary.assetsCents} context="asset" className="sm:px-5" />
         </ul>
       </section>
 
@@ -124,6 +125,7 @@ export default async function AccountsPage() {
               label="Debt"
               cents={summary.liabilitiesCents}
               context="liability"
+              className="sm:px-5"
               note={
                 debtPaidDown > 0 ? (
                   <p className="font-mono text-xs text-ledger">

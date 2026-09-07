@@ -4,7 +4,7 @@ import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { accountClass } from "./accountClass";
 import { isLongTermLiability } from "./isLongTermLiability";
 import { loadAccountBalances } from "./loadAccountBalances";
-import { formatMonthDay } from "./resolveStalenessDisplay";
+import { formatMonthDay } from "@/lib/now";
 import { normalizeMerchant } from "@/lib/normalize";
 import { formatCents } from "@/lib/money";
 

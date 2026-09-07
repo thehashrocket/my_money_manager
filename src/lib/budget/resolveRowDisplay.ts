@@ -18,6 +18,20 @@ import type { MonthPhase } from "./monthOfIso";
  */
 
 export type RowTone = "positive" | "negative" | "neutral" | "muted";
+
+/**
+ * The one `RowTone` → Tailwind class map. Lives here because this module owns
+ * `RowTone`, and because a second copy is exactly the failure this file's own
+ * docstring describes: the tone rule was written five times across two color
+ * systems before `resolveRowDisplay` existed. `_month-editor.tsx` and the
+ * dashboard's proximity list both import it.
+ */
+export const TONE_CLASS: Record<RowTone, string> = {
+  positive: "text-money-pos",
+  negative: "text-money-neg",
+  neutral: "text-money-zero",
+  muted: "text-ink-3",
+};
 export type BarTone = "ledger" | "amber" | "redbrown";
 
 export type PendingBadge = { type: "pending"; amountCents: number };

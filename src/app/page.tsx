@@ -8,6 +8,8 @@ import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { monthPhase } from "@/lib/budget/monthOfIso";
 import { rankByProximity, type ProximityRow } from "@/lib/budget/rankByProximity";
+import { TONE_CLASS } from "@/lib/budget/resolveRowDisplay";
+import { SubtotalRow } from "@/components/ledger/balance-list";
 import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import { currentMonth } from "@/lib/now";
@@ -208,32 +210,6 @@ function BalanceRow({ account }: { account: AccountBalance }) {
   );
 }
 
-function SubtotalRow({
-  label,
-  cents,
-  context,
-  note,
-}: {
-  label: string;
-  cents: number;
-  context: "asset" | "liability";
-  note?: React.ReactNode;
-}) {
-  return (
-    <li className="bg-[var(--bg-inset)] px-4 py-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4">
-        <span className="font-mono text-xs uppercase tracking-wide text-ink-2">{label}</span>
-        <span
-          className={`font-mono text-lg ${moneyToneClass(cents, { context })}`}
-          aria-label={context === "liability" ? `owed ${formatCents(Math.abs(cents))}` : undefined}
-        >
-          {formatCents(cents)}
-        </span>
-      </div>
-      {note ? <div className="mt-1">{note}</div> : null}
-    </li>
-  );
-}
 
 /**
  * T13/DS45: renders through the same `SummaryStrip` `/budget/[year]/[month]`
@@ -389,7 +365,7 @@ function ProximityListRow({
         >
           {row.name}
         </Link>
-        <span className={`font-mono text-sm ${MONTH_TONE[row.display.tone]}`}>
+        <span className={`font-mono text-sm ${TONE_CLASS[row.display.tone]}`}>
           {/* DS14 — `formatCents` cannot express "no budget_periods row" as
               distinct from "a row allocating $0", which is what
               `amountPlaceholder` is for. "($600.00) left" against a budget
@@ -436,11 +412,3 @@ function ProximityListRow({
     </li>
   );
 }
-
-/** Same map `_month-editor.tsx` uses — one vocabulary for row tone. */
-const MONTH_TONE: Record<string, string> = {
-  positive: "text-money-pos",
-  negative: "text-money-neg",
-  neutral: "text-money-zero",
-  muted: "text-ink-3",
-};

@@ -200,7 +200,6 @@ export function TransactionRowForm({
       </button>
       <TransactionRowMenu
         transactionId={row.id}
-        amountCents={row.amountCents}
         isTransfer={false}
         transferPartnerAccountName={null}
         cardAccounts={cardAccounts}
@@ -265,7 +264,6 @@ export function TransferRowItem({
       </span>
       <TransactionRowMenu
         transactionId={row.id}
-        amountCents={row.amountCents}
         isTransfer
         transferPartnerAccountName={row.transferPartnerAccountName}
         cardAccounts={cardAccounts}

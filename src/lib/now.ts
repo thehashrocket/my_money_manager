@@ -54,3 +54,47 @@ export function daysAgoIso(days: number, now: Date = new Date()): string {
   const local = new Date(now.getFullYear(), now.getMonth(), now.getDate() - days);
   return toLocalIso(local);
 }
+
+/**
+ * Parse a `YYYY-MM-DD` ledger date into a Date anchored at UTC midnight.
+ *
+ * Every date this app STORES is a local-calendar `YYYY-MM-DD` string, but
+ * `new Date("2026-09-06")` parses as UTC while `new Date(2026, 8, 6)` parses
+ * as local — so formatting a stored date without pinning the timezone slips a
+ * day for part of every evening west of Greenwich. Formatters built on this
+ * must pass `timeZone: "UTC"` to match.
+ *
+ * The inverse direction (a Date → a stored string) is `toLocalIso`, which
+ * pins to LOCAL for the opposite reason: a timestamp is an instant, and the
+ * user's calendar day is the local one.
+ */
+export function parseIsoUtc(iso: string): Date | null {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+const MONTH_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
+
+const LONG_DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+/** `2026-09-06` → `Sep 6`. Returns the input unchanged if unparseable. */
+export function formatMonthDay(iso: string): string {
+  const d = parseIsoUtc(iso);
+  return d ? MONTH_DAY_FORMAT.format(d) : iso;
+}
+
+/** `2026-09-06` → `September 6, 2026`. Returns the input if unparseable. */
+export function formatLongDate(iso: string): string {
+  const d = parseIsoUtc(iso);
+  return d ? LONG_DATE_FORMAT.format(d) : iso;
+}

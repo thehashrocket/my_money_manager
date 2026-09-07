@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import { accountClass } from "@/lib/accounts/accountClass";
 import type { AccountType } from "@/lib/accounts/loadAccountBalances";
 import { formatCents } from "@/lib/money";
+import { formatLongDate } from "@/lib/now";
 import { Button } from "@/components/ui/button";
 import { createAccountAction } from "./actions";
 
@@ -36,17 +37,6 @@ const FIELD =
 const LABEL = "mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3";
 const HELP = "mt-1 block text-base font-normal text-ink-3";
 
-function longDate(iso: string): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  if (!y || !m || !d) return iso;
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-}
-
 export function CreateAccountForm({ today }: { today: string }) {
   const [type, setType] = useState<AccountType>("checking");
   const [balance, setBalance] = useState("");
@@ -64,7 +54,7 @@ export function CreateAccountForm({ today }: { today: string }) {
   const owedCents = Math.round(Number(balance) * 100);
   const echo =
     isLiability && balance.trim() !== "" && Number.isFinite(owedCents) && owedCents >= 0
-      ? `You owe ${formatCents(owedCents)} as of ${longDate(asOf)}.`
+      ? `You owe ${formatCents(owedCents)} as of ${formatLongDate(asOf)}.`
       : null;
 
   return (
