@@ -3,10 +3,13 @@ import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
 
+/** Widened by migration 0018 to include `credit` and `loan`. */
+export type AccountType = typeof schema.accounts.$inferSelect["type"];
+
 export type AccountBalance = {
   id: number;
   name: string;
-  type: "checking" | "savings";
+  type: AccountType;
   balanceCents: number;
   /** The anchor this balance was computed from. */
   startingBalanceDate: string;
