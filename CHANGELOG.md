@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-07
+
+_Credit cards and loans. The app has tracked what you have since day one; this
+is the first release that tracks what you owe, and puts the two together into
+a net worth figure. A mortgage is deliberately inert — it shows up in the
+total and does nothing else, because it is a fact about your life rather than
+a problem you are solving this month._
+
+### Added
+- **Credit cards and loans are real account types.** Add one from `/import` by entering what you owe as a positive number ("Balance owed") — you never type a minus sign anywhere in the app. Cards can carry a credit limit and a minimum payment; loans and mortgages carry neither, on purpose.
+- **A new `/accounts` page**, second in the nav, where debt is managed. Assets and liabilities as ruled lists, a `Cash` subtotal, a `Debt` subtotal, and a net worth bottom line. Each card row shows how much of its limit is used, when the balance was last confirmed, and how much you paid down this month.
+- **Reconcile** — set what a card actually owes today, which is the one way a card's balance moves. **Refresh** — pull a linked account's balance straight from the bank feed, offered only where it can work (a feed-linked account with no transactions of its own).
+- **Undo a balance change.** Every reconcile records the balance it replaced, and the row offers to go back to it. Undoing is itself undoable.
+- **Edit a card's credit limit and minimum payment** after the fact, so a mistyped limit is a fix rather than something you live with.
+- **Add a charge or a refund to a card by hand**, categorized, so card spending counts toward its envelope in the month you spent it. A charge dated before your last reconcile is refused — it would count as spending without moving the balance — and the refusal hands you straight to Reconcile, which already includes it.
+- **Mark a transaction as a card payment** from the row menu on `/transactions`, pairing the money leaving checking with the money landing on the card so it counts as neither spending nor income. Unmark it the same way.
+- **"Closest to limit"** on the dashboard — the five categories nearest to spending their budget, worst first, so the ones about to go over are the ones you see.
+- **A "show transfers" toggle** on `/transactions`. Transfers are hidden by default because they are not spending; the toggle survives paging and filtering.
+- **The dashboard's balances are now a ruled list rather than a grid of cards**, with net worth closing it — and it renders whether or not you have any debt.
+
+### Changed
+- **`DESIGN.md`'s spacing cadence is now actually followed, app-wide.** It has specified a 4/8/12/16/20/28/40/56 scale since the design system was written while every page used the 24px shadcn cadence it tells you to avoid. 37 files, mechanical: page gutters to 20px, section rhythm to 28px.
+- **Balances are computed once per page render instead of twice.** The nav's balance peek and the page body each ran the full query independently; on a synchronous SQLite driver that is two passes over the transactions table per page, and it was the one cost here that grew with transaction count.
+- **The "Add an account" form keeps what you typed when validation fails.** It used to replace the whole page with a generic error card and clear every field, so the specific message about what was wrong never reached you.
+
+### Fixed
+- **A hand-entered charge could be saved with a date that is not a date.** `2026-13-40` (there is no month 13) and even plain text were stored as written, which silently mis-sorted that account's entire history against the balance anchor. CSV import was hardened against this in v0.12.4; the hand-entry path was not.
+- **A card's balance could round to a different number depending on which screen you set it from** — creating the account and reconciling it disagreed by a cent on half-cent amounts.
+- **Reconciling with the balance field left empty silently set the card to $0** instead of refusing.
+- **A charge with no upper limit on its amount** could be submitted and permanently skew the card balance, net worth, and its envelope.
+- **A loan created with a very large balance could never be corrected afterwards** — creation accepted a figure that the only repair path then rejected, leaving no way back.
+- **Long-term debt was distinguished only by lighter grey text on the dashboard**, which a screen reader cannot perceive. It now carries a real "Long-term" heading, as `/accounts` already did.
+- **The "show transfers" toggle announced nothing to a screen reader**, and the charge/refund switch showed no focus outline when tabbed to.
+- **Several controls were below the 44px touch-target floor** the rest of this release uses, including the nav's balances link — whose comment claimed it was already compliant.
+- **`pnpm db:seed-dev` ran database migrations against whatever `DATA_DIR` pointed at *before* checking whether that database was empty**, so its own promise that it "cannot clobber a real ledger by a mistyped DATA_DIR" was not true for the migration step. It now requires `DATA_DIR` to be set explicitly and refuses if any ledger table has rows.
+
 ## [0.15.0] - 2026-09-05
 
 ### Added

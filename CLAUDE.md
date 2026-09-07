@@ -28,7 +28,14 @@ src/
   db/              Drizzle schema + client singleton
   lib/             Pure functions: parsers, normalizer, categorization, money, utils
   lib/accounts/    loadAccountBalances — live per-account balance queries
+                   loadAccountBalancesForRequest — the same, React-cache'd per request
                    listAccounts — {id, name} picker list for the /transactions account filter
+                   accountClass, isLongTermLiability — asset/liability + mortgage-vs-card
+                   summarizeBalances — assets / debt / net worth for the dashboard + Spine
+                   resolveBalanceAction — per-row Reconcile-vs-Refresh, total over its inputs
+                   resolveUtilizationDisplay, resolveStalenessDisplay, paidDownCents
+                   manualTransaction — the third write path: hand-entered card activity
+                   validateCardTermsInput — credit limit + minimum payment repair
   lib/budget/      loadMonthView, resolveRowDisplay — month read model + row tone/badge decisions
                    upsertAllocation, validateAllocateInput — the per-cell allocate write path
                    manageCategories, archiveCategory, setCategoryKind, loadAllCategories —
@@ -108,6 +115,12 @@ These are load-bearing. Violating them corrupts the database.
 
 8. **A category's `kind` (`'income'|'expense'|'fund'`) is fixed once the category is "used"** — at least one transaction or `budget_periods` row (`src/lib/budget/setCategoryKind.ts`). The one exception (X1): expense → income is allowed on a used category whose transactions are *all positive* — the repair path for a category that was always income but got named/seeded like an expense, since `leftToBudgetCents` is uncomputable with zero income categories. Every other kind transition on a used category is refused outright, with the transaction count and date range as evidence rather than a bare rejection. `archived_at` (nullable timestamp) excludes a category from every picker and stops its auto-categorization rules (`buildRuleMatcher` skips an archived category's rules) — but never deletes it, and it is NOT unconditionally hidden from `loadMonthView`: `notHiddenByArchive` (`src/lib/budget/loadMonthView.ts`) only hides an archived category from a month where it has neither a nonzero allocation nor any spend that month, so a month it already has activity in (including the current one) keeps showing it — archiving can never erase a month's numbers. `/budget/categories` is the one surface that still lists (and can unarchive) it. `archiveCategory` refuses the built-in `Uncategorized` category, any category with children (parents are header-only), and any category with a nonzero *allocation* (not spend — only `budget_periods`, not transactions) in the current or a future month.
 
+9. **A liability's balance is stored NEGATIVE, and the user never types a minus sign.** Owing $2,000 on a Visa is `starting_balance_cents = -200000`. Every consumer already handled a negative balance (an overdrawn checking account), so the sign convention needed no new branch downstream — that is the whole argument for it. The form says "Balance owed" and takes a positive figure; exactly one function negates it, `owedDollarsToSignedCents` (`src/lib/import/accountAnchorFields.ts`), shared by account creation and by `/accounts`' Reconcile. Those two used to negate independently and disagreed: one computed `-Math.round(owed * 100)` and the other `Math.round(-owed * 100)`, which differ by a cent on any half-cent input because `Math.round` breaks half-values toward +Infinity. Round first, flip the sign second, in one place. Getting this wrong is silent and expensive — a positive anchor on a card adds the debt to the dashboard's Cash figure and leaves net worth wrong by twice the balance, with a number that looks entirely plausible.
+   `accountClass(type)` (`'asset'|'liability'`) is DERIVED from `accounts.type`, never stored, and `isLongTermLiability(type)` is the single switch behind every mortgage-vs-card divergence — muted money weight, no utilization bar, no Reconcile, no hand-entered charges. Do not add a fourth independent derivation of "is this a mortgage."
+   **`/accounts` is the ONLY anchor surface for a liability.** `/import`'s repair form is the raw *signed* twin of Reconcile — it takes a signed balance with no relabelling and no negation — so it filters to assets and rejects a liability `accountId` server-side (E18). CSV import does the same (E6). A liability reaching either path reintroduces the corruption the sign convention exists to prevent.
+   **`credit_limit_cents`, `minimum_payment_cents` are cards-only** (`type='credit'`), enforced server-side rather than by where the form renders — a mortgage row draws neither, so storing them there persists a figure nothing reads. A NULL credit limit means "no limit recorded" and is NOT the same fact as `0`; `""` from an emptied number input must clear to NULL, never coerce to zero (`optionalPositiveDollarsSchema`, shared by the create and repair paths).
+   **`prior_starting_balance_cents`/`_date` hold exactly ONE prior anchor, not a series.** Every liability path that moves an anchor records it — Reconcile and the sync balance pass — which is what makes `revertLiabilityBalanceAction` possible. It SWAPS rather than clears, so the undo is itself undoable; the cost is that it is a toggle rather than an idempotent operation. The asset-only `/import` repair path deliberately does NOT write these columns, because nothing can read them for an asset. A debt trend line needs a real history table and is unbuildable until one exists.
+
 ## Conventions
 
 - Dates stored as ISO `YYYY-MM-DD` text. Timestamps as Unix seconds (`integer` with `mode: 'timestamp'`).
@@ -136,7 +149,9 @@ Constraints that are properties of the feed, not choices:
 
 ## What's NOT in V1 — do not add
 
-Credit cards. Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Cloud/NAS hosting (Docker exists for local self-hosting only — see `docs/plans/dockerize-postgres.md`, PR3). Tests for UI components (categorization logic only).
+Auth. Cloud sync. Multi-currency. Bill pay. Investment tracking. Tax features. Split transactions (one category per transaction; override wins). Retroactive goal target edits. YNAB-style overspend-shuffle. Cloud/NAS hosting (Docker exists for local self-hosting only — see `docs/plans/dockerize-postgres.md`, PR3). Tests for UI components (categorization logic only).
+
+**Credit cards and loans came IN as of v0.16.0** and are no longer on this list. What stayed out of that feature, deliberately, is worth naming because it looks like an omission otherwise: no interest or APR modeling, no payoff projection, no minimum-payment tracking beyond storing the number for reference, no statement periods or due dates, and no balance history series (`accounts.prior_starting_balance_cents` holds exactly one prior value, not a series — a debt trend line is unbuildable until that changes; see TODOS.md). A mortgage is deliberately inert: no utilization bar, no Reconcile, no paid-down line, because it is a fact about your life rather than a problem you are solving this month.
 
 CI (lint + test + build on PR) is in via `.github/workflows/ci.yml` — gates merges into `main`.
 
