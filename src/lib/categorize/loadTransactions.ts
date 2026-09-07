@@ -19,6 +19,18 @@ export type TransactionFilter = {
   amountMaxCents?: number;
   /** `undefined` = no filter (today's default: pending and posted both show). */
   isPending?: boolean;
+  /**
+   * D14=B — reveal transfer-paired rows. Defaults to false, which is the
+   * historical (and correct-for-bank-transfers) behaviour.
+   *
+   * This exists because marking a checking debit as a card payment makes it a
+   * transfer pair, and paired rows are unconditionally hidden here — so a
+   * routine, deliberate action would make the row VANISH from the page you
+   * use to manage transactions, with the only surface listing pairs being
+   * /sync's review queue on a 240-day window. Hiding auto-detected bank
+   * transfers is right; hiding something the user just did is not.
+   */
+  includeTransfers?: boolean;
   /** Matched against rawDescription/normalizedMerchant/payee — SQLite's default `LIKE` is case-insensitive for ASCII. */
   search?: string;
   /** 1-indexed page number. */
@@ -39,6 +51,10 @@ export type TransactionRow = {
   categoryName: string | null;
   accountId: number;
   accountName: string;
+  /** Non-null only on a paired row, and only when `includeTransfers` is set. */
+  transferPairId: number | null;
+  /** The other leg's account name — what makes a revealed row legible. */
+  transferPartnerAccountName: string | null;
 };
 
 export type LoadTransactionsResult = {
@@ -65,9 +81,9 @@ function searchPredicate(term: string): SQL {
 }
 
 /**
- * Paginated read for `/transactions`. Transfer-paired rows are unconditionally
- * excluded so categorize actions never touch rows owned by the pair machinery
- * (matches `/budget` MTD semantics).
+ * Paginated read for `/transactions`. Transfer-paired rows are excluded by
+ * default so categorize actions never touch rows owned by the pair machinery
+ * (matches `/budget` MTD semantics); `includeTransfers` reveals them.
  *
  * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
  * both, or neither may be set. Replaces the old `year`+`month` window (whole
@@ -86,7 +102,10 @@ export function loadTransactions(
   db: Db,
   filter: TransactionFilter,
 ): LoadTransactionsResult {
-  const predicates: SQL[] = [isNull(schema.transactions.transferPairId)];
+  const predicates: SQL[] = [];
+  if (!filter.includeTransfers) {
+    predicates.push(isNull(schema.transactions.transferPairId));
+  }
 
   if (filter.categoryId === "none") {
     predicates.push(isNull(schema.transactions.categoryId));
@@ -144,6 +163,16 @@ export function loadTransactions(
         categoryName: schema.categories.name,
         accountId: schema.transactions.accountId,
         accountName: schema.accounts.name,
+        transferPairId: schema.transactions.transferPairId,
+        // T26 needs to name the other side ("paired with Visa"), or a
+        // revealed row is just a transaction that mysteriously does not count.
+        transferPartnerAccountName: sql<string | null>`(
+          SELECT partner_account.name
+          FROM ${schema.transactions} AS partner
+          JOIN ${schema.accounts} AS partner_account
+            ON partner_account.id = partner.account_id
+          WHERE partner.id = ${schema.transactions.transferPairId}
+        )`,
       })
       .from(schema.transactions)
       .leftJoin(
