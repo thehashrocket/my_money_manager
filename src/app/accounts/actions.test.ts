@@ -4,6 +4,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
+import { owedDollarsToSignedCents } from "@/lib/import/accountAnchorFields";
 import type { AccountsActionState } from "./action-state";
 
 /**
@@ -90,7 +91,30 @@ function reconcile(raw: { accountId: unknown; balanceOwed: unknown; asOf: unknow
     return fail(`${account.name} is not a credit card or loan.`);
   }
 
-  const cents = Math.round(startingBalance * 100);
+  // THE SHARED HELPER, not a local copy. This line used to read
+  // `Math.round(startingBalance * 100)` — and since `startingBalance` is
+  // already `-owed`, that was verbatim the `Math.round(-owed * 100)` formula
+  // rule 9 names as the half-cent divergence. The double therefore CONTAINED
+  // the bug it was written to guard: `owed = 0.125` produced -12 here and -13
+  // in production, and the negation test below would have passed unchanged if
+  // `actions.ts` had reverted to its own local copy.
+  const cents = owedDollarsToSignedCents(-startingBalance);
+
+  // The no-op guard, mirrored from the action. Without it, Save-with-no-edits
+  // overwrites the single `prior_starting_balance_*` slot with the current
+  // anchor and destroys the only undo step.
+  const existing = handle.db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get()!;
+  if (
+    cents === existing.startingBalanceCents &&
+    startingBalanceDate === existing.startingBalanceDate
+  ) {
+    return { status: "ok" as const, message: `${existing.name} is unchanged.` };
+  }
+
   handle.db
     .update(schema.accounts)
     .set({
@@ -363,5 +387,88 @@ describe("revertLiabilityBalanceAction (E19)", () => {
     const after = reload(loan.id);
     expect(after?.balanceSource).toBe("manual");
     expect(after?.balanceAsOf).toBeNull();
+  });
+});
+
+/**
+ * `prior_starting_balance_*` holds exactly ONE step of history (rule 9), and
+ * the reconcile write used to overwrite it unconditionally. The form arrives
+ * pre-filled with the current balance and today's date, so the most ordinary
+ * interaction on the page spent that single slot on a no-op and destroyed the
+ * real previous anchor.
+ */
+describe("updateLiabilityBalanceAction — a no-op must not spend the undo", () => {
+  it("LEAVES the prior anchor alone when nothing actually changed", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+    // A real earlier correction: -$3,000 on Jul 1 is what Undo should go back
+    // to, and it is the value at risk.
+    handle.db
+      .update(schema.accounts)
+      .set({ priorStartingBalanceCents: -300_000, priorStartingBalanceDate: "2026-07-01" })
+      .where(eq(schema.accounts.id, visa.id))
+      .run();
+
+    // Save with exactly what the form renders: the current magnitude, and the
+    // current anchor date.
+    const state = reconcile({
+      accountId: String(visa.id),
+      balanceOwed: "2000.00",
+      asOf: "2026-08-01",
+    });
+
+    expect(state.status).toBe("ok");
+    const after = reload(visa.id);
+    expect(after?.startingBalanceCents).toBe(-200_000);
+    expect(after?.startingBalanceDate).toBe("2026-08-01");
+    // The genuine previous balance survives, so Undo still goes somewhere real.
+    expect(after?.priorStartingBalanceCents).toBe(-300_000);
+    expect(after?.priorStartingBalanceDate).toBe("2026-07-01");
+  });
+
+  it("still records the prior anchor when the balance really moves", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+
+    const state = reconcile({
+      accountId: String(visa.id),
+      balanceOwed: "2148.32",
+      asOf: "2026-08-01",
+    });
+
+    expect(state.status).toBe("ok");
+    const after = reload(visa.id);
+    expect(after?.startingBalanceCents).toBe(-214_832);
+    expect(after?.priorStartingBalanceCents).toBe(-200_000);
+  });
+
+  it("treats a same-balance-different-date save as a real move", () => {
+    // The anchor DATE is half the anchor. Re-dating the same figure to today
+    // is a genuine assertion about when it was true, so it earns the write.
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+
+    const state = reconcile({
+      accountId: String(visa.id),
+      balanceOwed: "2000.00",
+      asOf: "2026-09-06",
+    });
+
+    expect(state.status).toBe("ok");
+    const after = reload(visa.id);
+    expect(after?.startingBalanceDate).toBe("2026-09-06");
+    expect(after?.priorStartingBalanceDate).toBe("2026-08-01");
   });
 });
