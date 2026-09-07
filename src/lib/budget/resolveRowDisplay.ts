@@ -6,7 +6,7 @@ import type { MonthPhase } from "./monthOfIso";
  * tested function. CLAUDE.md scopes tests to "categorization logic only";
  * a rule written in JSX is a rule this repo cannot test. Before this
  * function the same tone rule was written FIVE times across TWO color
- * systems (envelope-card.tsx's `resolveState`/`FILL_COLORS`, page.tsx's
+ * systems (the since-deleted envelope card's `resolveState`/`FILL_COLORS`, page.tsx's
  * `RemainingCell` text tone, and page.tsx's own desktop-table bar, which
  * used a third, raw-Tailwind palette) — this is one function, six dumb
  * renderers (3 kinds × 2 layouts).

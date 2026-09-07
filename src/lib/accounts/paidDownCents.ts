@@ -1,5 +1,6 @@
 import { and, between, eq, gt, isNotNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { hasAnyTransactionRows } from "./hasAnyTransactionRows";
 import { lastDayOfMonth, monthBoundary } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
@@ -35,13 +36,9 @@ export function paidDownCents(
   month: number,
   db: Db = defaultDb,
 ): number | null {
-  const owns = db
-    .select({ one: sql<number>`1` })
-    .from(schema.transactions)
-    .where(eq(schema.transactions.accountId, accountId))
-    .limit(1)
-    .get();
-  if (owns === undefined) return null;
+  // The sibling helper, not a second copy of its query — its own docstring
+  // says "one helper for all three call sites", and this was the third.
+  if (!hasAnyTransactionRows(accountId, db)) return null;
 
   const row = db
     .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)` })

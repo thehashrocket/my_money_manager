@@ -47,13 +47,11 @@ export function ReconcileDisclosure(props: {
   startOpen?: boolean;
 }) {
   const [open, setOpen] = useState(props.startOpen ?? false);
-  const triggerRef = useRef<HTMLButtonElement>(null);
 
   if (!open) {
     return (
       <div className="mt-2">
         <Button
-          ref={triggerRef}
           type="button"
           variant="outline"
           size="sm"

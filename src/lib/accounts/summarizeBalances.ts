@@ -13,9 +13,10 @@ export type BalanceSummary = {
  * Splits a flat balance list into the three figures the dashboard, `/accounts`
  * and the Spine need.
  *
- * This exists because two call sites flat-summed every account
- * (`page.tsx:63` and `spine.tsx:40`, both `reduce((s, a) => s + a.balanceCents, 0)`),
- * which was correct only for as long as every account was an asset. The first
+ * This exists because two call sites flat-summed every account — the
+ * dashboard's balance section and the Spine's peek total, both
+ * `reduce((s, a) => s + a.balanceCents, 0)` — which was correct only for as
+ * long as every account was an asset. The first
  * mortgage turns that reduce into net worth without renaming it — on the
  * dashboard, and via the Spine on EVERY route in the app:
  *
