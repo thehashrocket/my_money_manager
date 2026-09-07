@@ -6,6 +6,8 @@ import type { LeafCategory } from "@/lib/categories";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
+import type { AccountOption } from "@/lib/accounts/listAccounts";
+import { TransactionRowMenu } from "./_row-menu";
 import {
   categorizeTransactionAction,
   undoCategorizeTransactionAction,
@@ -18,6 +20,10 @@ type Props = {
   onCategorized: (priorCategoryId: number | null, updatedCount: number) => void;
   /** Called after Undo resolves — reverses the backlog bump. */
   onUndone: (priorCategoryId: number | null, revertedCount: number) => void;
+  /** DS52 — credit cards, for the row menu's "Mark as payment to". */
+  cardAccounts: AccountOption[];
+  /** Refresh the page after a pairing change, which alters what this list shows. */
+  onPairingChanged: () => void;
 };
 
 /**
@@ -36,6 +42,8 @@ type Props = {
 export function TransactionRowForm({
   row,
   leafCategories,
+  cardAccounts,
+  onPairingChanged,
   onCategorized,
   onUndone,
 }: Props) {
@@ -190,6 +198,79 @@ export function TransactionRowForm({
       >
         {isPending ? "Saving…" : "Save"}
       </button>
+      <TransactionRowMenu
+        transactionId={row.id}
+        amountCents={row.amountCents}
+        isTransfer={false}
+        transferPartnerAccountName={null}
+        cardAccounts={cardAccounts}
+        onChanged={onPairingChanged}
+      />
     </form>
+  );
+}
+
+/**
+ * A transfer-paired row, revealed by T26's "show transfers" toggle.
+ *
+ * Deliberately NOT the categorize form. A paired row is money moving between
+ * your own accounts: it is excluded from every spend query by the existing
+ * `transfer_pair_id IS NULL` filters, the synthetic mirror carries
+ * `category_id = NULL` on purpose, and offering a category picker here would
+ * invite a positive amount into an expense category — which produces negative
+ * `spentCents`, the exact state `resolveRowDisplay`'s `looksLikeIncome` flag
+ * exists to complain about.
+ *
+ * What it does offer is the way back out, via the same `⋯` menu.
+ */
+export function TransferRowItem({
+  row,
+  cardAccounts,
+  onPairingChanged,
+}: {
+  row: TransactionRow;
+  cardAccounts: AccountOption[];
+  onPairingChanged: () => void;
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm"
+      style={{
+        borderColor: "color-mix(in oklch, var(--accent-indigo) 30%, transparent)",
+        background: "color-mix(in oklch, var(--accent-indigo) 6%, var(--card))",
+      }}
+    >
+      <div className="flex min-w-0 flex-[2_1_16rem] items-baseline gap-2">
+        <span className="truncate font-medium" title={row.rawDescription}>
+          {row.normalizedMerchant}
+        </span>
+        <span
+          className="rounded-sm px-1 py-0.5 text-[10px] uppercase tracking-wide"
+          style={{
+            background: "color-mix(in oklch, var(--accent-indigo) 18%, var(--background))",
+            color: "color-mix(in oklch, var(--accent-indigo) 60%, var(--foreground))",
+          }}
+        >
+          {row.transferPartnerAccountName
+            ? `Paired · ${row.transferPartnerAccountName}`
+            : "Paired"}
+        </span>
+      </div>
+      <div className="flex items-baseline gap-3 text-xs text-muted-foreground">
+        <span>{row.date}</span>
+        <span>{row.accountName}</span>
+      </div>
+      <span className="ml-auto w-24 text-right [font-variant-numeric:tabular-nums]">
+        {formatCents(row.amountCents)}
+      </span>
+      <TransactionRowMenu
+        transactionId={row.id}
+        amountCents={row.amountCents}
+        isTransfer
+        transferPartnerAccountName={row.transferPartnerAccountName}
+        cardAccounts={cardAccounts}
+        onChanged={onPairingChanged}
+      />
+    </div>
   );
 }

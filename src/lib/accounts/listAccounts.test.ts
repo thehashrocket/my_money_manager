@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { listAccounts } from "./listAccounts";
+import { listAccounts, listCardAccounts } from "./listAccounts";
 
 let handle: TestDbHandle;
 
@@ -66,5 +66,31 @@ describe("listAccounts", () => {
   it("returns an empty list when the only account is a mortgage", () => {
     seedAccount("Mortgage", "loan");
     expect(listAccounts(handle.db)).toEqual([]);
+  });
+});
+
+describe("listCardAccounts", () => {
+  it("returns credit cards only, sorted by name", () => {
+    seedAccount("Checking");
+    seedAccount("Visa", "credit");
+    seedAccount("Amex", "credit");
+    seedAccount("Mortgage", "loan");
+    seedAccount("Savings", "savings");
+
+    expect(listCardAccounts(handle.db).map((a) => a.name)).toEqual(["Amex", "Visa"]);
+  });
+
+  it("excludes a loan — not accountClass, deliberately", () => {
+    // A mortgage is a valid liability and an invalid payment target.
+    // manualTransaction rejects it at the shared entry regardless (E17); this
+    // is the half that never offers it, so the refusal stays a guard rather
+    // than something users trip over.
+    seedAccount("Mortgage", "loan");
+    expect(listCardAccounts(handle.db)).toEqual([]);
+  });
+
+  it("returns an empty list when no cards exist, so the menu can say so", () => {
+    seedAccount("Checking");
+    expect(listCardAccounts(handle.db)).toEqual([]);
   });
 });
