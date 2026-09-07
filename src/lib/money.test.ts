@@ -29,8 +29,13 @@ describe("formatCents", () => {
   });
 
   it("handles large amounts", () => {
-    expect(formatCents(100_000_00)).toBe("$100000.00");
-    expect(formatCents(-100_000_00)).toBe("($100000.00)");
+    // Grouped, matching DESIGN.md's own money-display examples. The bare
+    // .toFixed(2) this replaced rendered "$100000.00", which nothing under
+    // four figures made visible — and a mortgage balance makes unreadable.
+    expect(formatCents(100_000_00)).toBe("$100,000.00");
+    expect(formatCents(-100_000_00)).toBe("($100,000.00)");
+    expect(formatCents(-30_248_011)).toBe("($302,480.11)");
+    expect(formatCents(500_000)).toBe("$5,000.00");
   });
 });
 

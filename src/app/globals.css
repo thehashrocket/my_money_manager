@@ -541,6 +541,21 @@
   text-transform: uppercase;
   margin-bottom: 8px;
 }
+/* DS68 — the peek header links to /accounts. `display: block` so the whole
+   header row is the target (it clears 44px with its own margin-bottom), and a
+   persistent `›` because there is no hover on touch and a header that merely
+   happens to be clickable signals nothing. */
+.spine-peek .peek-title-link {
+  display: block;
+  text-decoration: none;
+  transition: color var(--motion-quick) var(--motion-ease);
+}
+.spine-peek .peek-title-link:hover,
+.spine-peek .peek-title-link:focus-visible {
+  color: var(--fg-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .spine-peek .peek-empty {
   font-size: var(--text-sm);
   color: var(--fg-subtle);

@@ -1,12 +1,26 @@
+const USD = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 /**
  * Format a signed integer cent amount as a USD string.
  *
  * Negatives render in accounting parens — `($42.00)` — per the Weekend 2 design
  * decision. Zero is rendered as `$0.00` without parens.
+ *
+ * Thousands ARE grouped: `($302,480.11)`. This used to be a bare
+ * `.toFixed(2)`, which rendered `($302480.11)` — DESIGN.md's own money-display
+ * examples have always shown `($1,204.50)`, so the formatter and the design
+ * doc disagreed. Nothing under four figures made it visible, which is exactly
+ * why it survived; a mortgage balance makes it unreadable at a glance.
+ * `Intl.NumberFormat` is instantiated once at module scope — constructing one
+ * per call is the expensive part, and this runs per row.
  */
 export function formatCents(cents: number): string {
-  const abs = Math.abs(cents);
-  const body = `$${(abs / 100).toFixed(2)}`;
+  const body = USD.format(Math.abs(cents) / 100);
   return cents < 0 ? `(${body})` : body;
 }
 

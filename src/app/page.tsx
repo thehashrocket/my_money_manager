@@ -1,7 +1,10 @@
 import { connection } from "next/server";
 import Link from "next/link";
 import { db } from "@/db";
+import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import { loadAccountBalances, type AccountBalance } from "@/lib/accounts/loadAccountBalances";
+import { paidDownCents } from "@/lib/accounts/paidDownCents";
+import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
 import { formatCents, moneyToneClass } from "@/lib/money";
@@ -28,7 +31,15 @@ export default async function Home() {
     return <EmptyState />;
   }
 
-  const totalCents = accounts.reduce((sum, a) => sum + a.balanceCents, 0);
+  const summary = summarizeBalances(accounts);
+  const assets = accounts.filter((a) => a.class === "asset");
+  const liabilities = accounts
+    .filter((a) => a.class === "liability")
+    .sort((a, b) => Number(isLongTermLiability(a.type)) - Number(isLongTermLiability(b.type)));
+  const debtPaidDownCents = liabilities.reduce(
+    (sum, a) => sum + (paidDownCents(a.id, year, month, db) ?? 0),
+    0,
+  );
 
   return (
     <main className="mx-auto max-w-3xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">
@@ -38,21 +49,12 @@ export default async function Home() {
 
       <h1 className="font-display text-xl font-semibold">{monthLabel}</h1>
 
-      <section className="space-y-3">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {accounts.map((account) => (
-            <AccountTile key={account.id} account={account} />
-          ))}
-        </div>
-        <div className="flex items-center justify-between px-1">
-          <span className="font-mono text-sm text-ink-3 uppercase tracking-wide">
-            Total
-          </span>
-          <span className={`font-mono text-lg font-semibold ${moneyToneClass(totalCents)}`}>
-            {formatCents(totalCents)}
-          </span>
-        </div>
-      </section>
+      <BalanceSection
+        assets={assets}
+        liabilities={liabilities}
+        summary={summary}
+        debtPaidDownCents={debtPaidDownCents}
+      />
 
       <MonthlySummary summary={view.summary} />
 
@@ -80,21 +82,142 @@ export default async function Home() {
   );
 }
 
-function AccountTile({ account }: { account: AccountBalance }) {
+/**
+ * DS49 — the balance section is ruled row-lists, not a card mosaic.
+ *
+ * Codex's outside-voice pass triggered two hard rejections against this page:
+ * "#1 generic SaaS card grid as first impression" and "#7 app UI made of
+ * stacked cards instead of layout". `AccountTile` was a `grid-cols-1
+ * sm:grid-cols-2` of bordered boxes whose entire content was a name and a
+ * number — a `<div>` with a border tax — and adding liability tiles plus
+ * proximity tiles on top of it is what makes the mosaic. Same idiom as
+ * `/accounts` now, deliberately: two surfaces answering "where do I stand"
+ * should not look like two different products.
+ *
+ * The SummaryStrip below is NOT touched (DS45's `variant="plain"` stays) —
+ * only the balance section above it and the new list below it.
+ */
+function BalanceSection({
+  assets,
+  liabilities,
+  summary,
+  debtPaidDownCents,
+}: {
+  assets: AccountBalance[];
+  liabilities: AccountBalance[];
+  summary: { assetsCents: number; liabilitiesCents: number; netWorthCents: number };
+  debtPaidDownCents: number;
+}) {
   return (
-    <div className="rounded-lg border border-border bg-card p-4 shadow-soft">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="font-mono text-sm text-ink-2 uppercase tracking-wide">
-          {account.name}
-        </span>
-        <span className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-          {account.type}
-        </span>
+    <section className="space-y-4">
+      <div>
+        <h2 className="mb-2 font-mono text-xs uppercase tracking-wide text-ink-3">Assets</h2>
+        <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg border border-border bg-card shadow-soft">
+          {assets.map((a) => (
+            <BalanceRow key={a.id} account={a} />
+          ))}
+          <SubtotalRow label="Cash" cents={summary.assetsCents} context="asset" />
+        </ul>
       </div>
-      <div className={`font-mono text-2xl font-semibold ${moneyToneClass(account.balanceCents)}`}>
+
+      {liabilities.length > 0 ? (
+        <div>
+          <h2 className="mb-2 font-mono text-xs uppercase tracking-wide text-ink-3">
+            Liabilities
+          </h2>
+          <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg border border-border bg-card shadow-soft">
+            {liabilities.map((a) => (
+              <BalanceRow key={a.id} account={a} />
+            ))}
+            <SubtotalRow
+              label="Debt"
+              cents={summary.liabilitiesCents}
+              context="liability"
+              note={
+                debtPaidDownCents > 0 ? (
+                  <p className="font-mono text-xs text-ledger">
+                    paid down {formatCents(debtPaidDownCents)} this month
+                  </p>
+                ) : null
+              }
+            />
+          </ul>
+          <div className="mt-3 border-t-[3px] border-double border-[var(--rule-strong)] pt-3">
+            <div className="flex items-baseline justify-between px-1">
+              <span className="font-mono text-xs uppercase tracking-wide text-ink-2">
+                Net worth
+              </span>
+              {/* DS51 — subtotal size, not larger. The ledger double rule
+                  already carries the "bottom line" signal; type size on top of
+                  it is shouting, and the thing it shouts is a six-figure
+                  negative on a page you open when you are already anxious. */}
+              <span
+                className={`font-mono text-lg ${moneyToneClass(summary.netWorthCents)}`}
+                aria-label={
+                  summary.netWorthCents < 0
+                    ? `negative ${formatCents(Math.abs(summary.netWorthCents))}`
+                    : undefined
+                }
+              >
+                {formatCents(summary.netWorthCents)}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function BalanceRow({ account }: { account: AccountBalance }) {
+  const isLiability = account.class === "liability";
+  const longTerm = isLongTermLiability(account.type);
+  return (
+    <li className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-4 py-3">
+      <span className={`font-display text-base ${longTerm ? "text-ink-3" : "text-ink-1"}`}>
+        {account.name}
+      </span>
+      <span
+        className={`font-mono text-lg ${
+          longTerm
+            ? "text-ink-3"
+            : moneyToneClass(account.balanceCents, {
+                context: isLiability ? "liability" : "asset",
+              })
+        }`}
+        /* DS66 — parens are silent to a screen reader. */
+        aria-label={isLiability ? `owed ${formatCents(Math.abs(account.balanceCents))}` : undefined}
+      >
         {formatCents(account.balanceCents)}
+      </span>
+    </li>
+  );
+}
+
+function SubtotalRow({
+  label,
+  cents,
+  context,
+  note,
+}: {
+  label: string;
+  cents: number;
+  context: "asset" | "liability";
+  note?: React.ReactNode;
+}) {
+  return (
+    <li className="bg-[var(--bg-inset)] px-4 py-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4">
+        <span className="font-mono text-xs uppercase tracking-wide text-ink-2">{label}</span>
+        <span
+          className={`font-mono text-lg ${moneyToneClass(cents, { context })}`}
+          aria-label={context === "liability" ? `owed ${formatCents(Math.abs(cents))}` : undefined}
+        >
+          {formatCents(cents)}
+        </span>
       </div>
-    </div>
+      {note ? <div className="mt-1">{note}</div> : null}
+    </li>
   );
 }
 

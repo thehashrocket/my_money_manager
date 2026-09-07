@@ -48,7 +48,7 @@ const MONTH_DAY = new Intl.DateTimeFormat("en-US", {
 });
 
 /** `2026-09-06` → `Sep 6`. Parsed as UTC so it can't slip a day. */
-function formatMonthDay(iso: string): string {
+export function formatMonthDay(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   return MONTH_DAY.format(new Date(Date.UTC(y, m - 1, d)));
 }
