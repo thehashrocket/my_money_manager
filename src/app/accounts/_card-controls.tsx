@@ -24,12 +24,20 @@ export function CardControls({
   balanceCents,
   today,
   categories,
+  canAddCharge,
 }: {
   accountId: number;
   accountName: string;
   balanceCents: number;
   today: string;
   categories: LeafCategory[];
+  /**
+   * False for a long-term liability. A mortgage takes no hand-entered
+   * charges (D3=A keeps it at zero transaction rows, and `manualTransaction`
+   * enforces that at its shared entry per E17) — but it still has a balance
+   * that may need correcting, so Reconcile is NOT gated on this.
+   */
+  canAddCharge: boolean;
 }) {
   // Bumping a key remounts ReconcileDisclosure in its open state, which is
   // also what moves focus into the balance field (DS66: a handoff that
@@ -46,13 +54,15 @@ export function CardControls({
         today={today}
         startOpen={handoff > 0}
       />
-      <ChargeDialog
-        accountId={accountId}
-        accountName={accountName}
-        categories={categories}
-        today={today}
-        onReconcileInstead={() => setHandoff((n) => n + 1)}
-      />
+      {canAddCharge ? (
+        <ChargeDialog
+          accountId={accountId}
+          accountName={accountName}
+          categories={categories}
+          today={today}
+          onReconcileInstead={() => setHandoff((n) => n + 1)}
+        />
+      ) : null}
     </div>
   );
 }

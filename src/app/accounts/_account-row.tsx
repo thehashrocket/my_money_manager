@@ -129,17 +129,29 @@ export function AccountRow({
         </p>
       ) : null}
 
-      {/* DS55 — exactly one balance control, never both, never neither.
-          `CardControls` also owns DS56's handoff: the charge dialog's
-          before-anchor refusal opens the reconcile form focused, which needs
-          both to share client state. */}
-      {isLiability && !longTerm && action === "reconcile" ? (
+      {/* DS55 — exactly one BALANCE control, never both, never neither.
+          
+          The choice is made by `action` ALONE. It must not be ANDed with
+          anything else: `resolveBalanceAction` is total over its inputs
+          precisely so this stays true, and adding `&& !longTerm` here
+          reintroduced E4's own failure one layer up — an unlinked loan (a car
+          loan, say) resolves to "reconcile", was then excluded for being
+          long-term, and rendered NEITHER control. Its balance was
+          unreachable: `manualTransaction` refuses a loan (E17), and
+          `/import`'s repair form excludes every liability (E18) while
+          pointing the user at this page.
+          
+          `longTerm` gates only the CHARGE affordance, which is a genuinely
+          separate question — a mortgage takes no hand-entered charges (D3=A),
+          but it still has a balance somebody may need to correct. */}
+      {isLiability && action === "reconcile" ? (
         <CardControls
           accountId={account.id}
           accountName={account.name}
           balanceCents={account.balanceCents}
           today={today}
           categories={categories}
+          canAddCharge={!longTerm}
         />
       ) : null}
       {isLiability && action === "refresh" ? (

@@ -106,6 +106,17 @@ const accounts = {
     sfin: "ACT-DEMO-LOAN", limit: null, minPayment: null,
     asOf: unix(new Date(now.getTime() - 9 * 86400000)), source: "feed",
   }).lastInsertRowid,
+  // A long-term liability with NO feed link — a car loan. Must offer
+  // Reconcile (it resolves to "reconcile", having no feed) but NOT "Add a
+  // charge" (D3=A/E17 keep a loan at zero transaction rows). This row exists
+  // because gating the balance control on `!longTerm` as well as on the
+  // resolved action made it render NEITHER, leaving its balance permanently
+  // unreachable: manualTransaction refuses a loan and /import's repair form
+  // excludes every liability while pointing here.
+  carLoan: insertAccount.run({
+    name: "Car Loan", type: "loan", cents: -1850000, date: monthStartMinus(20),
+    sfin: null, limit: null, minPayment: null, asOf: null, source: "manual",
+  }).lastInsertRowid,
 };
 
 const csvBatch = insertBatch.run("csv", "seed.csv", 0).lastInsertRowid;
