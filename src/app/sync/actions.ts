@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { formatCents } from "@/lib/money";
 import type { ZodError } from "zod";
 import {
   syncSimpleFin,
@@ -70,6 +71,22 @@ function toMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * One sentence naming every liability whose balance the feed just moved.
+ *
+ * Never silent: an anchor move is a real write, and the outcome it rides in
+ * on (`up-to-date`) otherwise tells the user nothing happened.
+ */
+function describeBalanceUpdates(
+  updates: { name: string; balanceCents: number }[],
+): string | null {
+  if (updates.length === 0) return null;
+  const named = updates
+    .map((u) => `${u.name} is now ${formatCents(u.balanceCents)}`)
+    .join("; ");
+  return `Balance updated: ${named}.`;
+}
+
 export async function syncNowAction(): Promise<SyncActionState> {
   let outcome: Awaited<ReturnType<typeof syncSimpleFin>>;
   try {
@@ -92,8 +109,18 @@ export async function syncNowAction(): Promise<SyncActionState> {
   // them here is what made a dead connection render as a green "Already up to
   // date" while transactions aged past the 45-day window into CSV-only
   // territory. A sync carrying warnings is never a plain success.
+  // F8 — the balance pass runs BEFORE syncSimpleFin's `up-to-date` early
+  // return and must be reported through it. "Already up to date — nothing new
+  // to import" is a true statement about transactions and a false one about
+  // the ledger if a mortgage's anchor just moved underneath it.
+  const balanceNote = describeBalanceUpdates(outcome.balanceUpdates);
+
   if (outcome.status === "up-to-date") {
-    return ok("Already up to date — nothing new to import.", outcome.warnings);
+    const message =
+      balanceNote === null
+        ? "Already up to date — nothing new to import."
+        : `No new transactions. ${balanceNote}`;
+    return ok(message, outcome.warnings);
   }
 
   const parts = [
@@ -103,7 +130,8 @@ export async function syncNowAction(): Promise<SyncActionState> {
   if (outcome.ambiguous.length > 0) {
     parts.push(`${outcome.ambiguous.length} needing review`);
   }
-  return ok(parts.join(", ") + ".", outcome.warnings);
+  const summary = parts.join(", ") + ".";
+  return ok(balanceNote === null ? summary : `${summary} ${balanceNote}`, outcome.warnings);
 }
 
 export async function undoSyncAction(

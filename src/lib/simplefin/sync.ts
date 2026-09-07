@@ -13,6 +13,13 @@ import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
 import { parseAmountToCents } from "@/lib/money";
+import { accountClass } from "@/lib/accounts/accountClass";
+import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
+import {
+  isStartingBalanceCentsInBounds,
+  startingBalanceDateSchema,
+} from "@/lib/import/accountAnchorFields";
+import { toLocalIso, todayIso } from "@/lib/now";
 import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
@@ -73,11 +80,25 @@ export type AccountSyncSummary = AccountSyncCounts & {
   driftCents: number | null;
 };
 
+/**
+ * A liability whose anchor the balance pass moved. Reported in EVERY outcome,
+ * including `up-to-date` — see `refreshLiabilityBalances` for why that matters.
+ */
+export type LiabilityBalanceUpdate = {
+  accountId: number;
+  name: string;
+  balanceCents: number;
+  asOfIso: string;
+  priorBalanceCents: number;
+  priorAsOfIso: string;
+};
+
 export type SyncOutcome =
   | { status: "no-linked-accounts" }
   | {
       status: "up-to-date";
       accounts: AccountSyncSummary[];
+      balanceUpdates: LiabilityBalanceUpdate[];
       warnings: string[];
     }
   | {
@@ -88,6 +109,7 @@ export type SyncOutcome =
       ambiguous: AmbiguousBucket<TransferRow>[];
       snapshot: SnapshotResult;
       accounts: AccountSyncSummary[];
+      balanceUpdates: LiabilityBalanceUpdate[];
       warnings: string[];
     };
 
@@ -155,6 +177,161 @@ export function resolveStartDate(
   };
 }
 
+type LinkedAccount = typeof schema.accounts.$inferSelect;
+
+/**
+ * Splits the linked accounts into the ones whose TRANSACTIONS we import and
+ * the ones we only ever read a BALANCE for.
+ *
+ * E1 — D3=A ("the mortgage never gets a transaction row") was asserted in
+ * prose across four decisions and enforced by no code. The linked-account
+ * query has no type filter and the staging loop runs over every row it
+ * returns, so linking the mortgage imported its transactions: interest,
+ * escrow and principal rows into the categorize backlog and, once
+ * categorized, into budget spend — double-counting the mortgage payment you
+ * already budget for on the checking side. Worse, it was self-disabling:
+ * once the loan had rows, the zero-row-scoped balance pass below skipped it
+ * forever, leaving an amber staleness label as the only symptom.
+ *
+ * E2 — this must PARTITION, not exclude, and the difference is the whole
+ * function. Dropping liability ids from `linked` would also drop them from
+ * the `accountIds` sent to the feed, so there would be no balance to write.
+ * They stay in the one fetch and are steered away from staging instead.
+ */
+export function partitionLinkedAccounts(linked: readonly LinkedAccount[]): {
+  importAccounts: LinkedAccount[];
+  balanceOnlyAccounts: LinkedAccount[];
+} {
+  const importAccounts: LinkedAccount[] = [];
+  const balanceOnlyAccounts: LinkedAccount[] = [];
+  for (const a of linked) {
+    if (accountClass(a.type) === "asset") importAccounts.push(a);
+    else balanceOnlyAccounts.push(a);
+  }
+  return { importAccounts, balanceOnlyAccounts };
+}
+
+/**
+ * Moves a zero-row liability's anchor to the balance the feed reports.
+ *
+ * D7=B + D15=A, narrowed twice. SCOPE IS ZERO-TRANSACTION-ROW ACCOUNTS ONLY —
+ * in practice, the mortgage. Rule 1 requires the anchor to be the balance at
+ * the CLOSE of `starting_balance_date`, and SimpleFIN's `balance-date` is a
+ * nullable INSTANT. Collapsing `2026-09-06T14:32Z` to `2026-09-06` and
+ * storing it asserts a close-of-day figure the feed never claimed, and the
+ * strict `>` then drops every row later that same day out of the balance. For
+ * an account with no rows at all the SUM is zero regardless, so the
+ * imprecision is unobservable — which is exactly why credit cards, which do
+ * carry rows, get manual reconcile only.
+ *
+ * "Zero rows" means `hasAnyTransactionRows`: EXISTS with no anchor filter
+ * (E16). The cheap anchor-filtered count would call a freshly reconciled card
+ * zero-row and make it eligible for this pass.
+ *
+ * PLACEMENT IS PART OF THE CONTRACT. This runs BEFORE `syncSimpleFin`'s
+ * `up-to-date` early return and its result is carried in every outcome. That
+ * return renders as "nothing new to import", so a balance pass hidden behind
+ * it would mutate state while the UI claimed it had not.
+ *
+ * No import batch and no transaction rows: this is an anchor move, not an
+ * import, and `undoSyncBatch` deletes rows only. The prior anchor goes onto
+ * the account row itself (E19) — there is no batch to hang it on — which is
+ * also the real mechanism `/accounts/error.tsx` reassures the user with.
+ */
+function refreshLiabilityBalances(
+  balanceOnlyAccounts: readonly LinkedAccount[],
+  byExternalId: ReadonlyMap<string, SimpleFinAccount>,
+  db: Db,
+  now: Date,
+): { updates: LiabilityBalanceUpdate[]; warnings: string[] } {
+  const updates: LiabilityBalanceUpdate[] = [];
+  const warnings: string[] = [];
+
+  for (const account of balanceOnlyAccounts) {
+    const remote = byExternalId.get(account.simplefinAccountId!);
+    if (!remote) {
+      // The staging loop has its own version of this warning; a balance-only
+      // account is not in that loop, so without this a mortgage the feed
+      // stopped returning would go completely silent.
+      warnings.push(
+        `SimpleFIN returned nothing for "${account.name}" — its balance was not updated.`,
+      );
+      continue;
+    }
+
+    if (hasAnyTransactionRows(account.id, db)) {
+      warnings.push(
+        `"${account.name}" has transactions, so its balance was not refreshed from the feed. Update it from the Accounts page.`,
+      );
+      continue;
+    }
+
+    const balanceDateUnix = remote["balance-date"];
+    if (balanceDateUnix === null || balanceDateUnix === undefined) {
+      // Without a date from the provider there is no defensible anchor date:
+      // using today would assert a close-of-day balance for a figure that
+      // might be weeks old, and silently reset DS57's staleness clock.
+      warnings.push(
+        `SimpleFIN sent a balance for "${account.name}" but no date for it, so it was left unchanged.`,
+      );
+      continue;
+    }
+
+    let balanceCents: number;
+    try {
+      balanceCents = parseAmountToCents(remote.balance);
+    } catch {
+      warnings.push(`SimpleFIN sent an unreadable balance for "${account.name}".`);
+      continue;
+    }
+
+    const asOfDate = new Date(balanceDateUnix * 1000);
+    const asOfIso = toLocalIso(asOfDate);
+
+    // The same shared bounds every other anchor writer uses. Nothing writes
+    // these columns with its own validation (CLAUDE.md rule 1).
+    if (!isStartingBalanceCentsInBounds(balanceCents)) {
+      warnings.push(`SimpleFIN's balance for "${account.name}" was out of range and ignored.`);
+      continue;
+    }
+    if (!startingBalanceDateSchema.safeParse(asOfIso).success || asOfIso > todayIso(now)) {
+      warnings.push(`SimpleFIN dated "${account.name}"'s balance invalidly, so it was ignored.`);
+      continue;
+    }
+
+    if (
+      balanceCents === account.startingBalanceCents &&
+      asOfIso === account.startingBalanceDate
+    ) {
+      continue; // Nothing moved; do not manufacture a report.
+    }
+
+    db.update(schema.accounts)
+      .set({
+        startingBalanceCents: balanceCents,
+        startingBalanceDate: asOfIso,
+        priorStartingBalanceCents: account.startingBalanceCents,
+        priorStartingBalanceDate: account.startingBalanceDate,
+        balanceAsOf: asOfDate,
+        balanceSource: "feed",
+        updatedAt: now,
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+
+    updates.push({
+      accountId: account.id,
+      name: account.name,
+      balanceCents,
+      asOfIso,
+      priorBalanceCents: account.startingBalanceCents,
+      priorAsOfIso: account.startingBalanceDate,
+    });
+  }
+
+  return { updates, warnings };
+}
+
 /**
  * Fetch, dedup, insert, link transfers. Writes straight to the DB (no preview
  * step) but takes a pre-write snapshot first per CLAUDE.md rule 5, and every
@@ -180,7 +357,15 @@ export async function syncSimpleFin(
 
   if (linked.length === 0) return { status: "no-linked-accounts" };
 
-  const latestDates = linked.map((a) => {
+  const { importAccounts, balanceOnlyAccounts } = partitionLinkedAccounts(linked);
+
+  // REGRESSION R1 — `importAccounts`, never `linked`. resolveStartDate widens
+  // to the full 45-day floor when ANY account it is given has no history
+  // (`known.length !== latestDates.length`), and a balance-only liability has
+  // no history permanently by D3=A. Passing `linked` here would therefore pin
+  // EVERY sync to the 45-day window forever, re-running content dedup over six
+  // weeks of already-imported rows on every single run.
+  const latestDates = importAccounts.map((a) => {
     const row = db
       .select({ max: sql<string | null>`MAX(${schema.transactions.date})` })
       .from(schema.transactions)
@@ -194,6 +379,9 @@ export async function syncSimpleFin(
   const creds = readAccessUrl();
   const response = await fetchAccounts(creds, {
     startDate: startUnix,
+    // E2 — ALL linked ids, including the balance-only ones. This is why the
+    // fix had to partition rather than exclude: drop the liabilities here and
+    // there is no balance for the pass below to write.
     accountIds: linked.map((a) => a.simplefinAccountId!),
     // A user-supplied signal wins; otherwise fall back to a deadline so a
     // stalled bridge cannot hang the sync indefinitely.
@@ -210,7 +398,7 @@ export async function syncSimpleFin(
   const staged: Staged[] = [];
   const counts: AccountSyncCounts[] = [];
 
-  for (const account of linked) {
+  for (const account of importAccounts) {
     const remote = byExternalId.get(account.simplefinAccountId!);
     if (!remote) {
       warnings.push(
@@ -339,12 +527,23 @@ export async function syncSimpleFin(
     });
   }
 
+  // Before the early return, deliberately (D7/D15). `up-to-date` renders as
+  // "nothing new to import"; a balance pass behind it would move an anchor
+  // while the UI said nothing had changed.
+  const balancePass = refreshLiabilityBalances(balanceOnlyAccounts, byExternalId, db, now);
+  warnings.push(...balancePass.warnings);
+
   const totalToInsert = staged.reduce((n, s) => n + s.rows.length, 0);
 
   if (totalToInsert === 0) {
     const finalised = finaliseBalances(counts, db);
     warnings.push(...missingAccountWarnings(finalised.missingAccounts));
-    return { status: "up-to-date", accounts: finalised.summaries, warnings };
+    return {
+      status: "up-to-date",
+      accounts: finalised.summaries,
+      balanceUpdates: balancePass.updates,
+      warnings,
+    };
   }
 
   // ---- write ----
@@ -448,6 +647,7 @@ export async function syncSimpleFin(
     ambiguous,
     snapshot,
     accounts: finalised.summaries,
+    balanceUpdates: balancePass.updates,
     warnings,
   };
 }
@@ -520,6 +720,30 @@ function finaliseBalances(
 }
 
 /**
+ * D11 — a manually-entered row is NEVER a candidate for the automatic
+ * transfer matcher, in either query.
+ *
+ * The concrete failure it allows: you enter a $250 charge on the Visa dated
+ * 09-15, and a $250 reimbursement lands in checking on 09-15. The bucket
+ * `(2026-09-15, 25000)` then holds one negative and one positive across two
+ * accounts — balanced 1-and-1, which the counting argument auto-links WITHOUT
+ * ASKING. Neither leg carries a `bank_transaction_number`, so the
+ * cross-source guard never fires either. Both rows silently drop out of every
+ * spend sum.
+ *
+ * This sits beside `isAtmWithdrawal` in matchTransfers.ts for the same
+ * reason: a row class that collides on amounts and is never a legitimate
+ * auto-pair leg. It costs nothing — the only manual row that should ever be
+ * paired is the payment mirror, which is linked explicitly at creation and so
+ * already has a non-NULL `transfer_pair_id`.
+ *
+ * The CSV ±1 matcher is safe by accident here (it requires a
+ * `bank_transaction_number`, which manual rows do not have). That is noted,
+ * not depended on.
+ */
+const NOT_MANUAL = sql`${schema.transactions.importSource} != 'manual'`;
+
+/**
  * Links unpaired rows on or after `sinceIso` across ALL accounts — not just the
  * rows this batch inserted — so a SimpleFIN row can still pair with a CSV row
  * imported earlier.
@@ -544,6 +768,7 @@ export function linkTransfersByBucket(
       and(
         gte(schema.transactions.date, sinceIso),
         isNull(schema.transactions.transferPairId),
+        NOT_MANUAL,
       ),
     )
     .all()
@@ -803,6 +1028,7 @@ export function findAmbiguousTransfers(
       and(
         gte(schema.transactions.date, sinceIso),
         isNull(schema.transactions.transferPairId),
+        NOT_MANUAL,
       ),
     )
     .all()
