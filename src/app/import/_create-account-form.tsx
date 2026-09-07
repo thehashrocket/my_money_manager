@@ -1,12 +1,13 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useActionState, useId, useState } from "react";
 import { accountClass } from "@/lib/accounts/accountClass";
 import type { AccountType } from "@/lib/accounts/loadAccountBalances";
 import { formatCents } from "@/lib/money";
 import { formatLongDate } from "@/lib/now";
 import { Button } from "@/components/ui/button";
 import { createAccountAction } from "./actions";
+import { IDLE_CREATE_ACCOUNT, type CreateAccountField } from "./action-state";
 
 /**
  * DS64 — the account-creation form, and the one surface where the sign
@@ -38,6 +39,7 @@ const LABEL = "mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3";
 const HELP = "mt-1 block text-base font-normal text-ink-3";
 
 export function CreateAccountForm({ today }: { today: string }) {
+  const [state, formAction, pending] = useActionState(createAccountAction, IDLE_CREATE_ACCOUNT);
   const [type, setType] = useState<AccountType>("checking");
   const [balance, setBalance] = useState("");
   const [asOf, setAsOf] = useState(today);
@@ -47,6 +49,10 @@ export function CreateAccountForm({ today }: { today: string }) {
   const dateId = useId();
   const limitId = useId();
   const minPaymentId = useId();
+
+  // Announced against the control, not only as loose text below it.
+  const invalid = (field: CreateAccountField) =>
+    state.status === "error" && state.field === field;
 
   const isLiability = accountClass(type) === "liability";
   const isCard = type === "credit";
@@ -59,7 +65,7 @@ export function CreateAccountForm({ today }: { today: string }) {
 
   return (
     <form
-      action={createAccountAction}
+      action={formAction}
       className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-paper-2 p-5 shadow-soft sm:grid-cols-2"
     >
       <div className="sm:col-span-1">
@@ -68,6 +74,7 @@ export function CreateAccountForm({ today }: { today: string }) {
         </label>
         <input
           id={nameId}
+          aria-invalid={invalid("name")}
           type="text"
           name="name"
           required
@@ -82,6 +89,7 @@ export function CreateAccountForm({ today }: { today: string }) {
         </label>
         <select
           id={typeId}
+          aria-invalid={invalid("type")}
           name="type"
           required
           value={type}
@@ -102,6 +110,7 @@ export function CreateAccountForm({ today }: { today: string }) {
         </label>
         <input
           id={balanceId}
+          aria-invalid={invalid("startingBalance")}
           type="number"
           name="startingBalance"
           step="0.01"
@@ -137,6 +146,7 @@ export function CreateAccountForm({ today }: { today: string }) {
         </label>
         <input
           id={dateId}
+          aria-invalid={invalid("startingBalanceDate")}
           type="date"
           name="startingBalanceDate"
           required
@@ -175,6 +185,7 @@ export function CreateAccountForm({ today }: { today: string }) {
             </label>
             <input
               id={limitId}
+              aria-invalid={invalid("creditLimit")}
               type="number"
               name="creditLimit"
               step="0.01"
@@ -191,6 +202,7 @@ export function CreateAccountForm({ today }: { today: string }) {
             </label>
             <input
               id={minPaymentId}
+              aria-invalid={invalid("minimumPayment")}
               type="number"
               name="minimumPayment"
               step="0.01"
@@ -208,8 +220,13 @@ export function CreateAccountForm({ today }: { today: string }) {
             this branch — the default Button size is 34px, which would have
             left the primary CTA of account creation below the 44px floor its
             own secondary buttons one route over already clear. */}
-        <Button type="submit" variant="primary" className="min-h-11 w-full sm:w-auto">
-          Create account
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={pending}
+          className="min-h-11 w-full sm:w-auto"
+        >
+          {pending ? "Creating…" : "Create account"}
         </Button>
         {/* DS61 #3 — restates what will be STORED, in the words the user
             would use, so a sign mistake is visible before it is committed
@@ -224,6 +241,22 @@ export function CreateAccountForm({ today }: { today: string }) {
           </span>
         ) : null}
       </div>
+
+      {/* The whole reason this form now returns state instead of throwing.
+          A thrown action replaced this page with error.tsx's generic card and
+          took every typed field with it, so the DS61 message the schema was
+          written to produce never reached anyone. */}
+      {state.status !== "idle" ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className={`sm:col-span-2 text-base ${
+            state.status === "error" ? "text-redbrown" : "text-ledger"
+          }`}
+        >
+          {state.message}
+        </p>
+      ) : null}
     </form>
   );
 }

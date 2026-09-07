@@ -18,6 +18,7 @@ import { validateImportIdInput } from "@/lib/import/validateImportIdInput";
 import { validateUndoImportCategorizationInput } from "@/lib/import/validateUndoImportCategorizationInput";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { validateUploadCsvInput } from "@/lib/import/validateUploadCsvInput";
+import type { CreateAccountField, CreateAccountState } from "./action-state";
 
 function rejectionMessage(error: ZodError): string {
   return error.issues
@@ -25,10 +26,38 @@ function rejectionMessage(error: ZodError): string {
     .join("; ");
 }
 
-export async function createAccountAction(formData: FormData): Promise<void> {
+/**
+ * Returns its outcome as state; it does NOT throw and does NOT redirect.
+ *
+ * A thrown Server Action unmounts the route into `import/error.tsx`'s generic
+ * card, so every DS61 message written for this form ("Enter what you owe as a
+ * positive number.") was replaced by "Something went wrong loading the import
+ * page" — and the whole form, the longest in the app, was wiped. `/accounts`
+ * made this call under T28/E20 for the same reason; this brings the account
+ * form to the same contract.
+ *
+ * The redirect is gone with it: it pointed at `/import`, the page the form is
+ * already on, so its only real effect was clearing the fields. `revalidatePath`
+ * refreshes the account list in place and the success message names what was
+ * created.
+ */
+export async function createAccountAction(
+  _prev: CreateAccountState,
+  formData: FormData,
+): Promise<CreateAccountState> {
   const parsed = validateCreateAccountInput(Object.fromEntries(formData));
   if (!parsed.success) {
-    throw new Error(`Invalid account input — ${rejectionMessage(parsed.error)}`);
+    const issue = parsed.error.issues[0];
+    const field = issue?.path[0];
+    return {
+      status: "error",
+      // The zod message itself, not a rewrite of it. Every message on this
+      // schema was written to DS61's register already — stating the
+      // consequence, naming no schema concept — so surfacing it directly is
+      // what makes that work visible instead of discarding it.
+      message: issue?.message ?? rejectionMessage(parsed.error),
+      field: typeof field === "string" ? (field as CreateAccountField) : undefined,
+    };
   }
   const {
     name,
@@ -58,7 +87,7 @@ export async function createAccountAction(formData: FormData): Promise<void> {
     .run();
 
   revalidatePath("/import");
-  redirect("/import");
+  return { status: "ok", message: `${name} added.` };
 }
 
 /**
