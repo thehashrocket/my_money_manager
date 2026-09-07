@@ -89,6 +89,45 @@ export function ReconcileForm({
   autoFocus?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(updateLiabilityBalanceAction, IDLE);
+  // CONTROLLED, for the reason `CardTermsDisclosure` documents: React 19
+  // unconditionally resets a form submitted through a function action
+  // (`requestFormReset`, verified in react-dom 19.2.8), so an uncontrolled
+  // input snaps back to its `defaultValue` on every submit — including a
+  // REJECTED one. Both fields here were uncontrolled, so rejecting a
+  // future-dated reconcile bounced the date back to today (now valid) and the
+  // typed balance back to the stored figure, while the error "That date is in
+  // the future" sat under a date field showing today and `aria-invalid` marked
+  // the field it had just emptied. That is the same bug the create-account and
+  // card-terms forms were fixed for; these two were missed.
+  const [balanceOwed, setBalanceOwed] = useState(centsToDollarString(Math.abs(balanceCents)));
+  const [asOf, setAsOf] = useState(today);
+
+  // RESYNC WHEN THE BALANCE MOVES UNDERNEATH AN UNTOUCHED FIELD.
+  //
+  // Going controlled fixed the rejected-submit wipe but broke something the
+  // uncontrolled version got for free: React updates a `defaultValue` on the
+  // DOM node when the prop changes, and the browser re-displays it as long as
+  // the input's dirty-value flag is clear — so a field the user never typed
+  // into tracked the real balance. `useState` initialises once, and this form
+  // is NOT remounted when the balance changes (`_card-controls.tsx` keys it on
+  // `handoff` alone, and `revalidateBalanceSurfaces` deliberately avoids
+  // `revalidatePath("/", "layout")` so client state survives).
+  //
+  // The failure that made this worth fixing is silent and expensive: open
+  // Reconcile on a card at -$2,000 and leave it open; add an $80 charge from
+  // the same row; then Save the still-open form. It posts the stale $2,000 as
+  // of today, and rule 1's strict `>` drops the just-entered charge out of the
+  // balance sum entirely. Money typed, accepted, and then quietly gone.
+  //
+  // Guarded on `touched` so it never overwrites what someone is in the middle
+  // of typing, and written as the "adjust state during render" pattern this
+  // codebase already uses in `_charge-dialog.tsx` and `_month-editor.tsx`.
+  const [touched, setTouched] = useState(false);
+  const [seenBalanceCents, setSeenBalanceCents] = useState(balanceCents);
+  if (balanceCents !== seenBalanceCents) {
+    setSeenBalanceCents(balanceCents);
+    if (!touched) setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
+  }
   const balanceId = useId();
   const dateId = useId();
   const balanceRef = useRef<HTMLInputElement>(null);
@@ -125,7 +164,11 @@ export function ReconcileForm({
           required
           // The user never types a minus sign. The stored value is negative;
           // this field shows and takes the magnitude (DS64, DS61).
-          defaultValue={centsToDollarString(Math.abs(balanceCents))}
+          value={balanceOwed}
+          onChange={(e) => {
+            setTouched(true);
+            setBalanceOwed(e.target.value);
+          }}
           aria-label={`Balance owed on ${accountName}`}
           aria-invalid={state.status === "error" && state.field === "balance"}
           className="w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]"
@@ -144,7 +187,8 @@ export function ReconcileForm({
           name="asOf"
           required
           max={today}
-          defaultValue={today}
+          value={asOf}
+          onChange={(e) => setAsOf(e.target.value)}
           aria-invalid={state.status === "error" && state.field === "date"}
           className="rounded-md border border-border bg-card px-3 py-2 text-base"
         />

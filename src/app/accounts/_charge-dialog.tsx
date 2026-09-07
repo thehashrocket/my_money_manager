@@ -56,6 +56,17 @@ export function ChargeDialog({
   const [state, formAction, pending] = useActionState(addCardActivityAction, IDLE_ACTIVITY);
   const [categoryId, setCategoryId] = useState("");
   const [kind, setKind] = useState<"charge" | "refund">("charge");
+  // CONTROLLED. React 19 resets a form submitted through a function action, so
+  // these three snapped back to empty on every REJECTED submit while
+  // `categoryId` and `kind` — already controlled — survived. That is worst
+  // exactly where this dialog is designed to stay open: D12's before-anchor
+  // refusal deliberately keeps it mounted to offer "Reconcile instead →", and
+  // the user was looking at their amount, date and merchant wiped while the
+  // refusal explained itself. Reset on the transition to `ok` instead, below,
+  // so a genuinely saved charge does leave a clean form behind.
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(today);
+  const [merchant, setMerchant] = useState("");
   const amountId = useId();
   const dateId = useId();
   const merchantId = useId();
@@ -76,7 +87,18 @@ export function ChargeDialog({
   const [handledState, setHandledState] = useState(state);
   if (state !== handledState) {
     setHandledState(state);
-    if (state.status === "ok") setOpen(false);
+    if (state.status === "ok") {
+      setOpen(false);
+      // Now that the fields are controlled, React's own reset no longer clears
+      // them — so clear them here, on SUCCESS only. Reopening the dialog after
+      // a saved charge shows an empty form; reopening after a refusal shows
+      // what you typed.
+      setAmount("");
+      setDate(today);
+      setMerchant("");
+      setCategoryId("");
+      setKind("charge");
+    }
   }
 
   return (
@@ -147,6 +169,8 @@ export function ChargeDialog({
                 min="0.01"
                 required
                 placeholder="80.00"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
                 className={`${FIELD} [font-variant-numeric:tabular-nums]`}
               />
             </div>
@@ -160,7 +184,8 @@ export function ChargeDialog({
                 name="date"
                 required
                 max={today}
-                defaultValue={today}
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
                 className={FIELD}
               />
             </div>
@@ -176,6 +201,8 @@ export function ChargeDialog({
               name="merchant"
               required
               placeholder="Costco"
+              value={merchant}
+              onChange={(e) => setMerchant(e.target.value)}
               className={FIELD}
             />
           </div>
