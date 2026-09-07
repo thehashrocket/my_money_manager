@@ -5,6 +5,9 @@ import {
   daysAgoIso,
   toLocalIso,
   formatLocalDateTime,
+  parseIsoUtc,
+  formatMonthDay,
+  formatLongDate,
 } from "./now";
 
 const ORIGINAL_TZ = process.env.TZ;
@@ -114,5 +117,61 @@ describe("now.ts", () => {
     it("daysAgoIso(1) lands on the date before the spring-forward, not shifted by the missing hour", () => {
       expect(daysAgoIso(1)).toBe("2026-03-08");
     });
+  });
+});
+
+/**
+ * `parseIsoUtc`, `formatMonthDay` and `formatLongDate` were added to this
+ * module alongside the liability work and are consumed by
+ * `resolveStalenessDisplay`'s label and by `createCardActivity`'s
+ * before-anchor refusal string — both user-facing.
+ *
+ * Deliberately NOT wrapped in the TZ harness above: all three pin
+ * `timeZone: "UTC"` precisely so a stored `YYYY-MM-DD` renders as the day it
+ * says regardless of the process timezone. Asserting that under both zones is
+ * the point of the last case here.
+ */
+describe("parseIsoUtc", () => {
+  it("anchors a stored ledger date at UTC midnight, not local midnight", () => {
+    const d = parseIsoUtc("2026-09-06");
+    expect(d).not.toBeNull();
+    expect(d!.toISOString()).toBe("2026-09-06T00:00:00.000Z");
+  });
+
+  it("returns null for an unparseable string rather than an Invalid Date", () => {
+    expect(parseIsoUtc("")).toBeNull();
+    expect(parseIsoUtc("not-a-date")).toBeNull();
+    expect(parseIsoUtc("2026-09")).toBeNull();
+  });
+
+  it("returns null when any component is zero — month 0 is not a month", () => {
+    expect(parseIsoUtc("2026-00-06")).toBeNull();
+    expect(parseIsoUtc("2026-09-00")).toBeNull();
+  });
+});
+
+describe("formatMonthDay / formatLongDate", () => {
+  it("renders a stored date as the day it says", () => {
+    expect(formatMonthDay("2026-09-06")).toBe("Sep 6");
+    expect(formatLongDate("2026-09-06")).toBe("September 6, 2026");
+  });
+
+  it("returns the input unchanged when it cannot be parsed", () => {
+    expect(formatMonthDay("whenever")).toBe("whenever");
+    expect(formatLongDate("")).toBe("");
+  });
+
+  it("renders the same day under any process timezone — the reason for timeZone: UTC", () => {
+    const originalTz = process.env.TZ;
+    try {
+      process.env.TZ = "Pacific/Kiritimati"; // UTC+14
+      const ahead = formatMonthDay("2026-09-06");
+      process.env.TZ = "Pacific/Midway"; // UTC-11
+      expect(formatMonthDay("2026-09-06")).toBe(ahead);
+      expect(ahead).toBe("Sep 6");
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    }
   });
 });

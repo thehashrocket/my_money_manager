@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { resolveRowDisplay, type ExpenseDisplayRow, type IncomeDisplayRow } from "./resolveRowDisplay";
+import {
+  resolveRowDisplay,
+  TONE_CLASS,
+  type ExpenseDisplayRow,
+  type IncomeDisplayRow,
+  type RowTone,
+} from "./resolveRowDisplay";
 
 function expenseRow(overrides: Partial<ExpenseDisplayRow> = {}): ExpenseDisplayRow {
   return {
@@ -353,5 +359,27 @@ describe("resolveRowDisplay — income tone at the exact plan boundary", () => {
       "open",
     );
     expect(result.tone).toBe("positive");
+  });
+});
+
+/**
+ * `TONE_CLASS` is the one RowTone → Tailwind map, imported by
+ * `_month-editor.tsx` and the dashboard's proximity list. A missing key would
+ * render `undefined` into a className and silently drop the money color, which
+ * is exactly the drift this map was extracted to end.
+ */
+describe("TONE_CLASS", () => {
+  it("has a class for every tone resolveRowDisplay can return", () => {
+    const tones: RowTone[] = ["positive", "negative", "neutral", "muted"];
+    for (const tone of tones) {
+      expect(TONE_CLASS[tone]).toBeTruthy();
+      expect(TONE_CLASS[tone]).not.toContain("undefined");
+    }
+    expect(Object.keys(TONE_CLASS).sort()).toEqual([...tones].sort());
+  });
+
+  it("covers whatever tone a real row actually resolves to", () => {
+    const overspent = resolveRowDisplay(expenseRow({ spentCents: 20000 }), "expense", "open");
+    expect(TONE_CLASS[overspent.tone]).toBeTruthy();
   });
 });
