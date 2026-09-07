@@ -60,6 +60,7 @@ docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuil
 - `pnpm db:generate` — generate Drizzle migration from `src/db/schema.ts`
 - `pnpm db:migrate` — apply pending migrations
 - `pnpm db:studio` — Drizzle Studio GUI
+- `pnpm db:seed-dev` — dev-only fixture ledger (`scripts/seed-dev.mjs`), never imported by the app. Exists because ~15 tasks in the liability plan verify "manually, with a mortgage present" and a fresh ledger has nothing to look at. Two guards, both load-bearing: it refuses without an explicit `DATA_DIR` (`dbPath()` falls back to `./data`, which IS the real ledger), and it refuses again if any ledger table has rows — the second check runs **before** `migrate()`, not after, because this script calls drizzle's migrator directly rather than going through `scripts/migrate.mjs` (rule 7), so a mistyped `DATA_DIR` would otherwise have already run rebuild migrations against the real ledger by the time the refusal printed. Run it as `DATA_DIR=./.context/seed pnpm db:seed-dev`.
 - `pnpm simplefin:claim` — one-time: exchange a SimpleFIN setup token for an access URL (writes `.env.local`)
 - `pnpm simplefin:sample` — dump a live `/accounts` payload to `.context/simplefin-sample.json` for analysis
 
