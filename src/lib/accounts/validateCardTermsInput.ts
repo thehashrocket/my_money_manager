@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { STARTING_BALANCE_DOLLARS_MAX } from "@/lib/import/accountAnchorFields";
+import { optionalPositiveDollarsSchema } from "@/lib/import/accountAnchorFields";
 
 /**
  * Pure validation for `updateCardTermsAction` — a card's credit limit and
@@ -11,22 +11,18 @@ import { STARTING_BALANCE_DOLLARS_MAX } from "@/lib/import/accountAnchorFields";
  * on the edit side, sharing `STARTING_BALANCE_DOLLARS_MAX` so creation and
  * repair cannot disagree about what magnitude is legal.
  *
- * `""` means CLEAR, not zero. An untouched or emptied number input posts an
- * empty string, and `z.coerce.number()` reads that as 0 — which
- * `resolveUtilizationDisplay` interprets as a card at 100% of no borrowing
- * power rather than as a card with no limit recorded. Same trap
- * `optionalPositiveDollars` documents on the creation side, and the reason
- * `z.literal("")` has to come first in the union.
+ * `""` means CLEAR, not zero — see `optionalPositiveDollarsSchema`, which
+ * both this and the creation path now share. `resolveUtilizationDisplay`
+ * guards `creditLimitCents <= 0`, so a stored 0 correctly hides the bar; what
+ * it costs is the DISTINCTION — the field then renders `0.00` instead of the
+ * `none` placeholder, so "no limit recorded" and "a $0 limit" become
+ * indistinguishable in the UI.
  */
-const optionalPositiveDollars = z
-  .union([z.literal(""), z.coerce.number().finite().min(0).max(STARTING_BALANCE_DOLLARS_MAX)])
-  .nullish()
-  .transform((v) => (v === "" || v === null || v === undefined ? null : v));
 
 export const cardTermsInputSchema = z
   .object({
-    creditLimit: optionalPositiveDollars,
-    minimumPayment: optionalPositiveDollars,
+    creditLimit: optionalPositiveDollarsSchema,
+    minimumPayment: optionalPositiveDollarsSchema,
   })
   .transform((v) => ({
     creditLimitCents: v.creditLimit === null ? null : Math.round(v.creditLimit * 100),

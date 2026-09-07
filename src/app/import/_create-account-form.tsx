@@ -41,6 +41,15 @@ const HELP = "mt-1 block text-base font-normal text-ink-3";
 export function CreateAccountForm({ today }: { today: string }) {
   const [state, formAction, pending] = useActionState(createAccountAction, IDLE_CREATE_ACCOUNT);
   const [type, setType] = useState<AccountType>("checking");
+  // CONTROLLED, and that is load-bearing rather than stylistic. React 19
+  // resets a form submitted through a function action — `requestFormReset`
+  // is queued before the action runs and the commit phase calls the native
+  // form.reset(). So an uncontrolled input is blanked on EVERY submit,
+  // including a rejected one, which would have left this form clearing the
+  // name on a validation error while pointing `aria-invalid` at the field it
+  // had just emptied. `type`, `balance` and `asOf` already survived because
+  // they were state; `name` was the one that did not.
+  const [name, setName] = useState("");
   const [balance, setBalance] = useState("");
   const [asOf, setAsOf] = useState(today);
   const nameId = useId();
@@ -49,6 +58,24 @@ export function CreateAccountForm({ today }: { today: string }) {
   const dateId = useId();
   const limitId = useId();
   const minPaymentId = useId();
+
+  // Controlled fields survive React's post-submit form reset, which is the
+  // point — but it also means a SUCCESSFUL create no longer clears them, so
+  // clear them here. Gated on the state CHANGING rather than on
+  // `status === "ok"` alone: `useActionState` keeps its last result for the
+  // life of the component, so a bare status check would re-clear on every
+  // subsequent render and fight the user's typing. Same transition check
+  // `_charge-dialog.tsx` uses, and for the same reason.
+  const [handledState, setHandledState] = useState(state);
+  if (state !== handledState) {
+    setHandledState(state);
+    if (state.status === "ok") {
+      setName("");
+      setBalance("");
+      setAsOf(today);
+      setType("checking");
+    }
+  }
 
   // Announced against the control, not only as loose text below it.
   const invalid = (field: CreateAccountField) =>
@@ -79,6 +106,8 @@ export function CreateAccountForm({ today }: { today: string }) {
           name="name"
           required
           placeholder={isCard ? "Visa" : "Checking"}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
           className={FIELD}
         />
       </div>

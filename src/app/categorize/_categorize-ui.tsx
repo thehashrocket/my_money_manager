@@ -83,7 +83,7 @@ function BacklogHeader({
 
 function AllCaughtUp() {
   return (
-    <div className="rounded-md border border-border bg-card px-5 py-12 text-center">
+    <div className="rounded-md border border-border bg-card px-5 py-10 text-center">
       <div className="text-3xl">✓</div>
       <h2 className="mt-2 text-lg font-semibold">All caught up.</h2>
       <p className="mt-1 text-sm text-muted-foreground">

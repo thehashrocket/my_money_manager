@@ -193,10 +193,9 @@ export async function revertLiabilityBalanceAction(
       return fail(`${account.name} has no previous balance to go back to.`);
     }
 
-    const restoredCents = account.priorStartingBalanceCents;
     db.update(schema.accounts)
       .set({
-        startingBalanceCents: restoredCents,
+        startingBalanceCents: account.priorStartingBalanceCents,
         startingBalanceDate: account.priorStartingBalanceDate,
         priorStartingBalanceCents: account.startingBalanceCents,
         priorStartingBalanceDate: account.startingBalanceDate,
@@ -210,9 +209,12 @@ export async function revertLiabilityBalanceAction(
       .run();
 
     revalidateBalanceSurfaces();
+    // Names the restored ANCHOR date, not a dollar figure: what is stored is
+    // the anchor, what the row shows is the derived balance, and they differ
+    // whenever activity was entered between the two reconciles.
     return {
       status: "ok",
-      message: `${account.name} is back to ${formatCents(restoredCents)}.`,
+      message: `${account.name} is back to where it was on ${account.priorStartingBalanceDate}.`,
     };
   } catch (err) {
     return fail(toMessage(err));

@@ -180,12 +180,12 @@ export function AccountRow({
           exactly when the error boundary's "one step to reverse" promise is
           supposed to be true. Both a reconciled card and a feed-refreshed
           loan can have one. */}
-      {isLiability && account.priorStartingBalanceCents !== null ? (
+      {isLiability && account.priorStartingBalanceDate !== null ? (
         <div className="mt-2">
           <RevertBalanceButton
             accountId={account.id}
             accountName={account.name}
-            priorBalanceCents={account.priorStartingBalanceCents}
+            priorBalanceDate={account.priorStartingBalanceDate}
           />
         </div>
       ) : null}

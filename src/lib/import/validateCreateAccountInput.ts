@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { accountClass } from "@/lib/accounts/accountClass";
 import {
-  STARTING_BALANCE_DOLLARS_MAX,
   isStartingBalanceCentsInBounds,
+  optionalPositiveDollarsSchema,
   owedDollarsToSignedCents,
   startingBalanceDateSchema,
   startingBalanceDollarsSchema,
@@ -31,16 +31,6 @@ import {
  * half-cents in opposite directions.
  */
 
-/** Cards only (D2=A). Optional; `""` from an untouched form field is NULL. */
-const optionalPositiveDollars = z
-  // `z.literal("")` must come FIRST: an untouched number input posts "", and
-  // z.coerce.number() would happily read that as 0 — storing a $0 credit
-  // limit, which resolveUtilizationDisplay reads as a card at 100% of no
-  // borrowing power rather than as a card with no limit recorded.
-  .union([z.literal(""), z.coerce.number().finite().min(0).max(STARTING_BALANCE_DOLLARS_MAX)])
-  .nullish()
-  .transform((v) => (v === "" || v === null || v === undefined ? null : v));
-
 const baseSchema = z.object({
   name: z
     .string()
@@ -49,8 +39,10 @@ const baseSchema = z.object({
   type: z.enum(["checking", "savings", "credit", "loan"]),
   startingBalance: startingBalanceDollarsSchema,
   startingBalanceDate: startingBalanceDateSchema,
-  creditLimit: optionalPositiveDollars,
-  minimumPayment: optionalPositiveDollars,
+  // Cards only (D2=A). Shared with the /accounts repair form so the two
+  // cannot disagree about what magnitude is legal.
+  creditLimit: optionalPositiveDollarsSchema,
+  minimumPayment: optionalPositiveDollarsSchema,
 });
 
 export const createAccountInputSchema = baseSchema

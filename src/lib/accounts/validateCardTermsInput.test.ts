@@ -20,7 +20,11 @@ describe("validateCardTermsInput", () => {
   // emptied number input posts "", and z.coerce.number() reads that as 0 —
   // which resolveUtilizationDisplay shows as a card at 100% of no borrowing
   // power rather than a card with no limit recorded.
-  it.each(["", null, undefined])("treats %j as CLEARED, never as zero", (empty) => {
+  // `Number(" ")` is 0 too, so a whitespace-only value would slip past the
+  // empty-string branch and store a $0 limit — which hides the bar correctly
+  // but makes "no limit recorded" and "a $0 limit" indistinguishable in the
+  // form, since the field then renders 0.00 instead of the `none` placeholder.
+  it.each(["", "   ", "\t", null, undefined])("treats %j as CLEARED, never as zero", (empty) => {
     const parsed = validateCardTermsInput({ creditLimit: empty, minimumPayment: empty });
     expect(parsed.success).toBe(true);
     if (parsed.success) {

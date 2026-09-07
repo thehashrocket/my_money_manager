@@ -50,6 +50,17 @@ export function CardTermsDisclosure({
 }) {
   const [open, setOpen] = useState(false);
   const [state, formAction, pending] = useActionState(updateCardTermsAction, IDLE);
+  // CONTROLLED. React 19 resets a form submitted through a function action,
+  // so uncontrolled inputs snap back to `defaultValue` on every submit —
+  // including a rejected one, which would revert the user's typed limit to
+  // the stored value while the error message about it stayed on screen,
+  // pointing at a field that no longer held the offending input.
+  const [limit, setLimit] = useState(
+    creditLimitCents === null ? "" : centsToDollarString(creditLimitCents),
+  );
+  const [minimum, setMinimum] = useState(
+    minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
+  );
   const limitId = useId();
   const minimumId = useId();
 
@@ -84,7 +95,8 @@ export function CardTermsDisclosure({
           placeholder="none"
           /* Empty CLEARS. "I no longer want a limit recorded" has to be
              expressible, or a card gets stuck at a limit it does not have. */
-          defaultValue={creditLimitCents === null ? "" : centsToDollarString(creditLimitCents)}
+          value={limit}
+          onChange={(e) => setLimit(e.target.value)}
           aria-label={`Credit limit on ${accountName}`}
           className={FIELD}
         />
@@ -100,9 +112,8 @@ export function CardTermsDisclosure({
           step="0.01"
           min="0"
           placeholder="none"
-          defaultValue={
-            minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents)
-          }
+          value={minimum}
+          onChange={(e) => setMinimum(e.target.value)}
           aria-label={`Minimum payment on ${accountName}`}
           className={FIELD}
         />
@@ -119,7 +130,15 @@ export function CardTermsDisclosure({
         type="button"
         variant="ghost"
         size="sm"
-        onClick={() => setOpen(false)}
+        onClick={() => {
+          // Discard edits along with the disclosure, so reopening shows what
+          // is actually stored rather than an abandoned draft.
+          setLimit(creditLimitCents === null ? "" : centsToDollarString(creditLimitCents));
+          setMinimum(
+            minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
+          );
+          setOpen(false);
+        }}
         className="min-h-11 w-full sm:w-auto"
       >
         Cancel

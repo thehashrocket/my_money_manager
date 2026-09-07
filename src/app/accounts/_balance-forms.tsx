@@ -2,7 +2,8 @@
 
 import { useActionState, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { centsToDollarString, formatCents } from "@/lib/money";
+import { centsToDollarString } from "@/lib/money";
+import { formatMonthDay } from "@/lib/now";
 import { IDLE, type AccountsActionState } from "./action-state";
 import {
   refreshLiabilityBalanceAction,
@@ -198,21 +199,28 @@ export function RefreshButton({
  *
  * Renders only when there IS a previous balance, so it appears the moment a
  * balance is first corrected rather than sitting inert on a fresh account.
- * The figure is named in the button, not hidden behind it: "Undo" alone asks
- * the user to remember what they typed a minute ago, and the whole point of
- * the row is that they should not have to.
+ *
+ * The button names the DATE it goes back to, not a dollar figure, and that is
+ * deliberate. What is stored is the prior ANCHOR; what the row displays is the
+ * derived balance (anchor + every row dated after the anchor date). Those are
+ * the same number only when no activity was entered between the two
+ * reconciles — and `createCardActivity` refuses rows on or before the anchor,
+ * so every hand-entered charge lands after it and makes them differ. Printing
+ * the anchor as "back to $2,000.00" would promise a figure the refreshed row
+ * then contradicts. The date is unambiguous, and the row shows the real
+ * balance a moment later.
  */
 export function RevertBalanceButton({
   accountId,
   accountName,
-  priorBalanceCents,
+  priorBalanceDate,
 }: {
   accountId: number;
   accountName: string;
-  priorBalanceCents: number;
+  priorBalanceDate: string;
 }) {
   const [state, formAction, pending] = useActionState(revertLiabilityBalanceAction, IDLE);
-  const owed = formatCents(Math.abs(priorBalanceCents));
+  const asOf = formatMonthDay(priorBalanceDate);
   return (
     <form action={formAction}>
       <input type="hidden" name="accountId" value={accountId} />
@@ -223,10 +231,10 @@ export function RevertBalanceButton({
         disabled={pending}
         className="min-h-11 w-full sm:w-auto"
       >
-        {pending ? "Going back…" : `Undo — back to ${owed}`}
+        {pending ? "Going back…" : `Undo — back to ${asOf}`}
       </Button>
       <span className="sr-only">
-        {`Put ${accountName}'s balance back to ${owed} owed`}
+        {`Put ${accountName}'s balance back to what it was on ${asOf}`}
       </span>
       <Status state={state} />
     </form>

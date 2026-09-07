@@ -179,7 +179,7 @@ function EmptyState({
   includeTransfers?: boolean;
 }) {
   return (
-    <div className="rounded-md border border-border bg-card px-5 py-12 text-center text-sm text-muted-foreground">
+    <div className="rounded-md border border-border bg-card px-5 py-10 text-center text-sm text-muted-foreground">
       {totalCount !== 0
         ? "This page is empty — try a lower page number."
         : includeTransfers

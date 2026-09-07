@@ -122,28 +122,19 @@ export async function updateAccountAnchorAction(
   const target = checkAssetAccount(accountId);
   if (!target.ok) throw new Error(target.reason);
 
-  // Records the anchor it replaces, same as /accounts' Reconcile and the sync
-  // balance pass. Without this the prior-anchor columns tracked only SOME
-  // anchor moves, so a revert offered on an account last edited here would
-  // restore a figure two moves old — the columns have to mean "the anchor
-  // immediately before the current one" on every path that writes one, or
-  // they mean nothing reliable on any of them.
-  const before = db
-    .select({
-      cents: schema.accounts.startingBalanceCents,
-      date: schema.accounts.startingBalanceDate,
-    })
-    .from(schema.accounts)
-    .where(eq(schema.accounts.id, accountId))
-    .get();
-
+  // Deliberately does NOT record a prior anchor.
+  //
+  // The prior-anchor columns exist to feed `revertLiabilityBalanceAction`,
+  // which refuses anything that is not a liability, and the Undo control is
+  // gated on `isLiability` too. This path is asset-only (`checkAssetAccount`
+  // above), so a prior anchor written here could never be read by anything —
+  // and this repo already has a documented habit of shipping data and code
+  // that nothing reaches. If assets ever get their own Undo, write it then.
   const result = db
     .update(schema.accounts)
     .set({
       startingBalanceCents: Math.round(startingBalance * 100),
       startingBalanceDate,
-      priorStartingBalanceCents: before?.cents ?? null,
-      priorStartingBalanceDate: before?.date ?? null,
       updatedAt: new Date(),
     })
     .where(eq(schema.accounts.id, accountId))
