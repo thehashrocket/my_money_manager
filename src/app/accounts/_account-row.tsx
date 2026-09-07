@@ -6,7 +6,7 @@ import { formatMonthDay } from "@/lib/now";
 import { resolveUtilizationDisplay } from "@/lib/accounts/resolveUtilizationDisplay";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import type { LeafCategory } from "@/lib/categories";
-import { RefreshButton } from "./_balance-forms";
+import { RefreshButton, RevertBalanceButton } from "./_balance-forms";
 import { CardControls } from "./_card-controls";
 
 /**
@@ -163,12 +163,30 @@ export function AccountRow({
           balanceCents={account.balanceCents}
           today={today}
           categories={categories}
+          creditLimitCents={account.creditLimitCents}
+          minimumPaymentCents={account.minimumPaymentCents}
           canAddCharge={!longTerm}
         />
       ) : null}
       {isLiability && action === "refresh" ? (
         <div className="mt-2">
           <RefreshButton accountId={account.id} accountName={account.name} />
+        </div>
+      ) : null}
+
+      {/* E19 — offered independently of the control above, because it answers
+          a different question. `action` decides how you SET a balance; this
+          appears whenever there is a previous one to go back to, which is
+          exactly when the error boundary's "one step to reverse" promise is
+          supposed to be true. Both a reconciled card and a feed-refreshed
+          loan can have one. */}
+      {isLiability && account.priorStartingBalanceCents !== null ? (
+        <div className="mt-2">
+          <RevertBalanceButton
+            accountId={account.id}
+            accountName={account.name}
+            priorBalanceCents={account.priorStartingBalanceCents}
+          />
         </div>
       ) : null}
     </li>

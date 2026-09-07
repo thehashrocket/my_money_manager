@@ -2,9 +2,13 @@
 
 import { useActionState, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { centsToDollarString } from "@/lib/money";
+import { centsToDollarString, formatCents } from "@/lib/money";
 import { IDLE, type AccountsActionState } from "./action-state";
-import { refreshLiabilityBalanceAction, updateLiabilityBalanceAction } from "./actions";
+import {
+  refreshLiabilityBalanceAction,
+  revertLiabilityBalanceAction,
+  updateLiabilityBalanceAction,
+} from "./actions";
 
 /**
  * The two per-row balance controls. Separate components rather than one with
@@ -180,6 +184,50 @@ export function RefreshButton({
         {pending ? "Refreshing…" : "Refresh"}
       </Button>
       <span className="sr-only">{`Refresh ${accountName}'s balance from the bank`}</span>
+      <Status state={state} />
+    </form>
+  );
+}
+
+/**
+ * E19 — "Undo" beside a balance that has a previous value recorded.
+ *
+ * The prior anchor was written on every reconcile from the start, and read by
+ * nothing, so `/accounts/error.tsx` promised "one step to reverse" with no
+ * control anywhere that could take that step. This is the control.
+ *
+ * Renders only when there IS a previous balance, so it appears the moment a
+ * balance is first corrected rather than sitting inert on a fresh account.
+ * The figure is named in the button, not hidden behind it: "Undo" alone asks
+ * the user to remember what they typed a minute ago, and the whole point of
+ * the row is that they should not have to.
+ */
+export function RevertBalanceButton({
+  accountId,
+  accountName,
+  priorBalanceCents,
+}: {
+  accountId: number;
+  accountName: string;
+  priorBalanceCents: number;
+}) {
+  const [state, formAction, pending] = useActionState(revertLiabilityBalanceAction, IDLE);
+  const owed = formatCents(Math.abs(priorBalanceCents));
+  return (
+    <form action={formAction}>
+      <input type="hidden" name="accountId" value={accountId} />
+      <Button
+        type="submit"
+        variant="ghost"
+        size="sm"
+        disabled={pending}
+        className="min-h-11 w-full sm:w-auto"
+      >
+        {pending ? "Going back…" : `Undo — back to ${owed}`}
+      </Button>
+      <span className="sr-only">
+        {`Put ${accountName}'s balance back to ${owed} owed`}
+      </span>
       <Status state={state} />
     </form>
   );

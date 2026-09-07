@@ -13,6 +13,7 @@ import {
 } from "@/lib/accounts/manualTransaction";
 import type { AccountsActionState, CardActivityState } from "./action-state";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
+import { validateCardTermsInput } from "@/lib/accounts/validateCardTermsInput";
 import {
   STARTING_BALANCE_DOLLARS_MAX,
   owedDollarsToSignedCents,
@@ -143,6 +144,144 @@ export async function updateLiabilityBalanceAction(
 
     revalidateBalanceSurfaces();
     return { status: "ok", message: `${account.name} is now ${formatCents(cents)}.` };
+  } catch (err) {
+    return fail(toMessage(err));
+  }
+}
+
+/**
+ * E19 — put the previous balance back.
+ *
+ * `updateLiabilityBalanceAction` and the sync balance pass both record the
+ * anchor they replaced, on the account row. Until this existed nothing ever
+ * READ those two columns, so `/accounts/error.tsx`'s promise that "the
+ * previous balance and date are kept, so the change is one step to reverse"
+ * described a mechanism with no button attached to it — the data was there
+ * and the user had no way to reach it short of raw SQL.
+ *
+ * SWAPS rather than clears. Putting the current anchor into the prior slot as
+ * it restores means the undo is itself undoable, and a mis-click costs one
+ * more click rather than the number you just replaced. A single-valued
+ * column can hold exactly one step of history either way; a swap spends it on
+ * the step the user is most likely to want.
+ */
+export async function revertLiabilityBalanceAction(
+  _prev: AccountsActionState,
+  formData: FormData,
+): Promise<AccountsActionState> {
+  try {
+    const accountId = Number(formData.get("accountId"));
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      return fail("That account no longer exists.");
+    }
+
+    const account = db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .get();
+    if (!account) return fail("That account no longer exists.");
+    if (accountClass(account.type) !== "liability") {
+      return fail(`${account.name} is not a credit card or loan.`);
+    }
+    // Reachable from a stale tab: the row rendered with an undo, then another
+    // tab reverted it. Naming the state rather than failing blankly.
+    if (
+      account.priorStartingBalanceCents === null ||
+      account.priorStartingBalanceDate === null
+    ) {
+      return fail(`${account.name} has no previous balance to go back to.`);
+    }
+
+    const restoredCents = account.priorStartingBalanceCents;
+    db.update(schema.accounts)
+      .set({
+        startingBalanceCents: restoredCents,
+        startingBalanceDate: account.priorStartingBalanceDate,
+        priorStartingBalanceCents: account.startingBalanceCents,
+        priorStartingBalanceDate: account.startingBalanceDate,
+        // The restored figure is a hand-set one however it got here, so it
+        // carries no provider date and starts DS57's 35-day manual clock.
+        balanceAsOf: null,
+        balanceSource: "manual",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.accounts.id, accountId))
+      .run();
+
+    revalidateBalanceSurfaces();
+    return {
+      status: "ok",
+      message: `${account.name} is back to ${formatCents(restoredCents)}.`,
+    };
+  } catch (err) {
+    return fail(toMessage(err));
+  }
+}
+
+/**
+ * The repair path for a card's terms — its credit limit and minimum payment.
+ *
+ * Both were write-once at account creation, so a mistyped $5,000 limit made
+ * the utilization bar wrong on every render forever and the only fix was raw
+ * SQL. That is the same gap CLAUDE.md rule 1 closed for `starting_balance_*`
+ * with `updateAccountAnchorAction`; a number the user typed once and can
+ * never correct is a bug regardless of how small the number is.
+ *
+ * Cards only, enforced here and not merely by where the form renders (D2=A).
+ * A mortgage row draws no utilization bar and shows no minimum payment, so
+ * storing either on one would persist a figure nothing ever reads.
+ *
+ * An empty field CLEARS the value rather than leaving it. "I no longer want a
+ * limit recorded" has to be expressible, and a form that can only ever raise
+ * a number is how you get a card stuck at a limit it does not have.
+ */
+export async function updateCardTermsAction(
+  _prev: AccountsActionState,
+  formData: FormData,
+): Promise<AccountsActionState> {
+  try {
+    const raw = Object.fromEntries(formData);
+    const accountId = Number(raw.accountId);
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      return fail("That account no longer exists.");
+    }
+
+    const parsed = validateCardTermsInput({
+      creditLimit: raw.creditLimit,
+      minimumPayment: raw.minimumPayment,
+    });
+    if (!parsed.success) {
+      const onLimit = parsed.error.issues[0]?.path.includes("creditLimit");
+      return fail(
+        onLimit
+          ? "Enter a credit limit this app accepts, or leave it blank."
+          : "Enter a minimum payment this app accepts, or leave it blank.",
+        "balance",
+      );
+    }
+
+    const account = db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .get();
+    if (!account) return fail("That account no longer exists.");
+    if (account.type !== "credit") {
+      return fail(`${account.name} is not a credit card.`);
+    }
+
+    db.update(schema.accounts)
+      .set({
+        creditLimitCents: parsed.data.creditLimitCents,
+        minimumPaymentCents: parsed.data.minimumPaymentCents,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.accounts.id, accountId))
+      .run();
+
+    revalidateBalanceSurfaces();
+    return { status: "ok", message: `Updated ${account.name}'s card details.` };
   } catch (err) {
     return fail(toMessage(err));
   }

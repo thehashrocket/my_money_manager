@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { LeafCategory } from "@/lib/categories";
 import { ReconcileDisclosure } from "./_balance-forms";
 import { ChargeDialog } from "./_charge-dialog";
+import { CardTermsDisclosure } from "./_card-terms-form";
 
 /**
  * The card row's action cluster, and the owner of DS56's handoff.
@@ -24,6 +25,8 @@ export function CardControls({
   balanceCents,
   today,
   categories,
+  creditLimitCents,
+  minimumPaymentCents,
   canAddCharge,
 }: {
   accountId: number;
@@ -31,6 +34,8 @@ export function CardControls({
   balanceCents: number;
   today: string;
   categories: LeafCategory[];
+  creditLimitCents: number | null;
+  minimumPaymentCents: number | null;
   /**
    * False for a long-term liability. A mortgage takes no hand-entered
    * charges (D3=A keeps it at zero transaction rows, and `manualTransaction`
@@ -61,6 +66,17 @@ export function CardControls({
           categories={categories}
           today={today}
           onReconcileInstead={() => setHandoff((n) => n + 1)}
+        />
+      ) : null}
+      {/* D2=A — a credit limit and a minimum payment are card-only concepts,
+          so this rides the same gate as the charge affordance rather than
+          appearing on a mortgage row that draws neither. */}
+      {canAddCharge ? (
+        <CardTermsDisclosure
+          accountId={accountId}
+          accountName={accountName}
+          creditLimitCents={creditLimitCents}
+          minimumPaymentCents={minimumPaymentCents}
         />
       ) : null}
     </div>

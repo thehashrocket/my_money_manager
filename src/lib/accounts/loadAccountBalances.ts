@@ -40,6 +40,14 @@ export type AccountBalance = {
   minimumPaymentCents: number | null;
   balanceAsOf: Date | null;
   balanceSource: BalanceSource | null;
+  /**
+   * The anchor immediately before the current one, or NULL when this account's
+   * balance has never been moved. Every writer of `starting_balance_*` records
+   * it, which is what makes a reconcile one click to reverse — the guarantee
+   * `/accounts/error.tsx` states in prose.
+   */
+  priorStartingBalanceCents: number | null;
+  priorStartingBalanceDate: string | null;
 };
 
 /**
@@ -93,6 +101,8 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
       minimumPaymentCents: a.minimumPaymentCents,
       balanceAsOf: a.balanceAsOf,
       balanceSource: a.balanceSource,
+      priorStartingBalanceCents: a.priorStartingBalanceCents,
+      priorStartingBalanceDate: a.priorStartingBalanceDate,
     };
   });
 }

@@ -255,3 +255,113 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
     expect(reload(checking.id)?.startingBalanceCents).toBe(500_000);
   });
 });
+
+/** The exact chain `revertLiabilityBalanceAction` runs, against the test db. */
+function revert(raw: { accountId: unknown }): AccountsActionState {
+  const accountId = Number(raw.accountId);
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    return fail("That account no longer exists.");
+  }
+  const account = handle.db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!account) return fail("That account no longer exists.");
+  if (accountClass(account.type) !== "liability") {
+    return fail(`${account.name} is not a credit card or loan.`);
+  }
+  if (account.priorStartingBalanceCents === null || account.priorStartingBalanceDate === null) {
+    return fail(`${account.name} has no previous balance to go back to.`);
+  }
+
+  handle.db
+    .update(schema.accounts)
+    .set({
+      startingBalanceCents: account.priorStartingBalanceCents,
+      startingBalanceDate: account.priorStartingBalanceDate,
+      priorStartingBalanceCents: account.startingBalanceCents,
+      priorStartingBalanceDate: account.startingBalanceDate,
+      balanceAsOf: null,
+      balanceSource: "manual",
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.accounts.id, accountId))
+    .run();
+
+  return { status: "ok", message: "reverted" };
+}
+
+
+describe("revertLiabilityBalanceAction (E19)", () => {
+  it("puts the previous balance and date back", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+    reconcile({ accountId: visa.id, balanceOwed: "2500", asOf: "2026-09-06" });
+    expect(reload(visa.id)?.startingBalanceCents).toBe(-250_000);
+
+    expect(revert({ accountId: visa.id }).status).toBe("ok");
+    const after = reload(visa.id);
+    expect(after?.startingBalanceCents).toBe(-200_000);
+    expect(after?.startingBalanceDate).toBe("2026-08-01");
+  });
+
+  it("SWAPS rather than clears, so the undo is itself undoable", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+    reconcile({ accountId: visa.id, balanceOwed: "2500", asOf: "2026-09-06" });
+    revert({ accountId: visa.id });
+
+    // A mis-clicked undo costs one more click, not the figure just typed.
+    expect(reload(visa.id)?.priorStartingBalanceCents).toBe(-250_000);
+    expect(revert({ accountId: visa.id }).status).toBe("ok");
+    expect(reload(visa.id)?.startingBalanceCents).toBe(-250_000);
+  });
+
+  it("refuses an account whose balance has never been moved", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+
+    const result = revert({ accountId: visa.id });
+    expect(result.status).toBe("error");
+    expect(reload(visa.id)?.startingBalanceCents).toBe(-200_000);
+  });
+
+  it("refuses an asset account", () => {
+    const checking = seedAccount({
+      name: "Checking",
+      type: "checking",
+      cents: 500_000,
+      anchor: "2026-08-01",
+    });
+
+    expect(revert({ accountId: checking.id }).status).toBe("error");
+  });
+
+  it("resets the balance source to manual, restarting DS57's clock", () => {
+    const loan = seedAccount({
+      name: "Car Loan",
+      type: "loan",
+      cents: -1_000_000,
+      anchor: "2026-08-01",
+    });
+    reconcile({ accountId: loan.id, balanceOwed: "9000", asOf: "2026-09-06" });
+    revert({ accountId: loan.id });
+
+    const after = reload(loan.id);
+    expect(after?.balanceSource).toBe("manual");
+    expect(after?.balanceAsOf).toBeNull();
+  });
+});
