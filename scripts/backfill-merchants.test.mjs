@@ -14,6 +14,9 @@ const rule = (over) => ({
   match_value: "OLD",
   priority: 50,
   updated_at: 1000,
+  // Joined in by the CLI from categories.archived_at. Null = live, which is
+  // the default here so every pre-existing case keeps meaning what it did.
+  category_archived_at: null,
   ...over,
 });
 
@@ -262,5 +265,130 @@ describe("planBackfill — subscription dismissals", () => {
     });
 
     expect(plan.dismissalPlan[0].action).toBe("keep");
+  });
+});
+
+describe("planBackfill — collisions with an archived category", () => {
+  /**
+   * buildRuleMatcher is a sort AND a skip filter (src/lib/rules.ts): a rule
+   * whose category is archived never fires, because rule 8 makes archiving
+   * inert rather than deleting. Replicating only the sort meant an archived
+   * rule could outrank the live one, win the collision, and get the live rule
+   * DELETED -- leaving the merchant with no effective rule at all, which is
+   * worse than either state the backfill started from.
+   */
+  it("ranks a live rule above an archived one that outranks it on every other key", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "JACK 430" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "JACK 342" }),
+      ],
+      rules: [
+        // Higher priority AND more recently updated -- would win outright on
+        // compareRules alone.
+        rule({
+          id: 41,
+          match_value: "JACK 430",
+          category_id: 10,
+          priority: 99,
+          updated_at: 9000,
+          category_archived_at: 1700000000,
+        }),
+        rule({
+          id: 77,
+          match_value: "JACK 342",
+          category_id: 20,
+          priority: 0,
+          updated_at: 1000,
+          category_archived_at: null,
+        }),
+      ],
+      dismissals: [],
+      normalize: () => "JACK IN THE BOX",
+    });
+
+    const [collision] = plan.collisions;
+    expect(collision.ranked[0].rule.id).toBe(77);
+    expect(plan.losingRuleIds).toEqual(new Set([41]));
+  });
+
+  it("still uses compareRules order when both categories are archived", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "JACK 430" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "JACK 342" }),
+      ],
+      rules: [
+        rule({ id: 41, match_value: "JACK 430", updated_at: 1000, category_archived_at: 1 }),
+        rule({ id: 77, match_value: "JACK 342", updated_at: 9000, category_archived_at: 1 }),
+      ],
+      dismissals: [],
+      normalize: () => "JACK IN THE BOX",
+    });
+
+    expect(plan.collisions[0].ranked[0].rule.id).toBe(77);
+  });
+});
+
+describe("planBackfill — contains/regex rule reach", () => {
+  /**
+   * These rules can never be rewritten (a substring is not a key), so the only
+   * thing the backfill can do about them is SAY what the normalizer change cost
+   * them. Rule 10 calls a dead `contains` rule the one permanently unrepairable
+   * damage class; AMAZON PRIME and GOOGLE ONE were each one edit from it.
+   */
+  it("reports a contains rule whose reach drops to zero", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "AMAZON PRIME" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "AMAZON PRIME" }),
+      ],
+      rules: [rule({ id: 5, match_type: "contains", match_value: "PRIME" })],
+      dismissals: [],
+      normalize: () => "AMAZON",
+    });
+
+    expect(plan.nonExactRuleCount).toBe(1);
+    expect(plan.reachChanges).toHaveLength(1);
+    expect(plan.reachChanges[0]).toMatchObject({ before: 2, after: 0 });
+    // Never rewritten, and never a collision candidate.
+    expect(plan.changedRules).toHaveLength(0);
+    expect(plan.losingRuleIds).toEqual(new Set());
+  });
+
+  it("stays silent when a contains rule keeps its reach", () => {
+    const plan = planBackfill({
+      txns: [txn({ id: 1, raw_memo: "a", normalized_merchant: "AMAZON PRIME XYZ" })],
+      rules: [rule({ id: 5, match_type: "contains", match_value: "PRIME" })],
+      dismissals: [],
+      normalize: () => "AMAZON PRIME",
+    });
+
+    expect(plan.reachChanges).toEqual([]);
+  });
+
+  it("reports a reach INCREASE too, since a merge can over-apply a rule", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "COSTCO" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "SAFEWAY" }),
+      ],
+      rules: [rule({ id: 5, match_type: "contains", match_value: "GROCER" })],
+      dismissals: [],
+      normalize: () => "GROCERY RUN",
+    });
+
+    expect(plan.reachChanges[0]).toMatchObject({ before: 0, after: 2 });
+  });
+
+  it("treats an invalid regex as matching nothing rather than throwing", () => {
+    const plan = planBackfill({
+      txns: [txn({ id: 1, raw_memo: "a", normalized_merchant: "OLD" })],
+      rules: [rule({ id: 5, match_type: "regex", match_value: "([unclosed" })],
+      dismissals: [],
+      normalize: () => "NEW",
+    });
+
+    expect(plan.reachChanges).toEqual([]);
   });
 });

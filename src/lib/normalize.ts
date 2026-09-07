@@ -2,12 +2,24 @@
  * Merchant normalization — turns a raw bank memo into the grouping key stored on
  * `transactions.normalized_merchant`.
  *
- * PHASE ORDER IS LOAD-BEARING at two boundaries — 1-before-2 and 3-before-4.
- * Both are pinned by tests; the steps WITHIN a phase are not load-bearing and
- * were measured reorderable without changing any key, so do not read this list
- * as a total order:
+ * ORDER IS LOAD-BEARING at the phase boundaries 1-before-2 and 3-before-4, and
+ * WITHIN a phase too — treat every ordering here as load-bearing unless a test
+ * says otherwise. An earlier version of this header claimed intra-phase steps
+ * were "measured reorderable without changing any key"; that is false, and it
+ * was an invitation to make a silent key-moving edit. Phase 3's phone rule has
+ * to run before TRAILING_STATE, because it matches the trailing state code as
+ * part of its own pattern and cannot fire once the state has been stripped.
+ * Swapping just those two statements fails seven tests — `GOOGLE *Google One
+ * 855-836-3987 CA` settles as `GOOGLE ONE 855-836-3987` — and the fixed-point
+ * loop does not rescue it, since `\s+\d{3,}$` will not strip `-5040`.
  *
- *   PHASE 1  leading noise      Card #:, POS/ATM/SBI prefixes
+ * Why that matters more here than in most files: a moved key is silent. Rule 10
+ * in CLAUDE.md has the full account — stored keys belong to the generation of
+ * the normalizer that wrote them, so any change here needs
+ * `pnpm db:backfill-merchants` to land with it.
+ *
+ *   PHASE 1  card + prefixes    Card #: (trailing, despite the phase name),
+ *                               then the POS/ATM/SBI leading prefixes
  *   PHASE 2  reference tokens   timestamp, MEMO: tail, processor domain, the * split
  *   PHASE 3  trailing noise     Ref#, phone, ACH date code, #store, state code
  *   PHASE 4  location + tail    residual domain, city, store number, .COM, punctuation
@@ -267,7 +279,13 @@ export function normalizeMerchant(raw: string): string {
   // ---- PHASES 3 + 4 — trailing noise, then location and tail --------------
   //
   // Run to a FIXED POINT rather than once. Every rule below only ever shortens
-  // the string, so this terminates; the cap is belt-and-braces.
+  // the string, so convergence is guaranteed — but the cap is NOT merely
+  // belt-and-braces, and an earlier comment here said it was. A string with
+  // more trailing groups than there are passes exits mid-convergence and
+  // returns a key that is not a fixed point: `FOO 111 222 333 444 555 666 777
+  // 888 999` settles at `FOO 111`, and normalizing THAT yields `FOO`. Nine
+  // trailing numeric groups is not real bank data, so the cap stays — but the
+  // idempotence guarantee below holds up to it, not unconditionally.
   //
   // Why a loop: each rule fires at most once per sweep, and one rule's output
   // re-creates another's precondition. `SAVEMART #12 MA MANTECA` loses ` MANTECA`

@@ -163,14 +163,14 @@ implementation must reproduce**, not aspirations:
 ## Tasks
 
 - [x] **T1 (P1, human: ~3h / CC: ~25min)** — normalize — Add classes 5, 6, 1, 2 to `normalizeMerchant` ✅ DONE 2026-09-07
-  - `PROCESSOR_PREFIXES` is an exported `Set` (TST, SQ, DD, EB, FD, FSP, WL, SPO, PP, PAYPAL, PY, IC),
+  - `PROCESSOR_PREFIXES` is an exported `Set` (TST, SQ, DD, EB, FD, FSP, WL, SPO, PP, PAYPAL, PY, IC, GOOGLE),
     the single thing deciding which side of the `*` the merchant is on.
   - Order matters, and the shipped order is NOT the one this bullet originally gave.
     The new classes sit BETWEEN the existing leading-noise rules and the existing
     trailing-noise rules, in four phases:
       1 leading noise (Card #:, POS/ATM/SBI)  2 reference tokens (timestamp, MEMO:,
       domain, star split)  3 trailing noise (Ref#, phone, ACH, #store, state)
-      4 location + tail (city, store number, residual domain, punctuation)
+      4 location + tail (residual domain, city, store number, .COM, punctuation)
     Why: `POS 0220 1937 794511 SQ *TAPPED APPLE LL Salida CA` splits on the star into
     pre=`POS 0220 1937 794511 SQ`, which is not a known processor, so a star-split-first
     order takes the brand-first branch and keeps the POS prefix as the merchant.
@@ -241,6 +241,13 @@ implementation must reproduce**, not aspirations:
 Read-only dry run against the live ledger (Docker volume, `readonly: true`, nothing
 written). **T1+T2 alone land within a few groups of the full six-class target that
 assumed the alias table.**
+
+These are the T1+T2 numbers, taken BEFORE the review round that added `GOOGLE` to
+`PROCESSOR_PREFIXES`, dropped `PRIME` from the qualifiers, and made the tail run to a
+fixed point. They are kept as the measurement that justified those decisions, not as a
+description of what shipped. The shipped figure is **363** groups (README, CHANGELOG),
+not the 361 below; the same applies to the "22 of 361 keys are not fixed points" figure
+that motivated the idempotence work, which the fixed-point loop then reduced to one.
 
 ```
                        BEFORE   T1+T2    PLAN TARGET (incl. aliases)

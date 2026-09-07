@@ -599,9 +599,16 @@ describe("normalizeMerchant — idempotence", () => {
    * This block previously asserted the same property over a hand-picked 14-memo
    * corpus that happened to exclude every counterexample -- including ones this
    * very file pins elsewhere -- so it could never fail while the invariant was
-   * false for 22 of the ledger's 361 keys. The corpus is now derived from every
-   * raw memo asserted anywhere in this file, and the tail rules run to a fixed
-   * point so the property holds by construction rather than by luck.
+   * false for 22 of the ledger's 361 keys (the count at that time; the
+   * fixed-point loop has since reduced it to one).
+   *
+   * The corpus below is still MAINTAINED BY HAND -- it is not derived from the
+   * file, and an earlier version of this comment claimed it was, which is the
+   * same "the corpus cannot miss anything" reasoning that let the original bug
+   * through. When you add a memo shape to a test above, add it here too. Two
+   * known non-fixed-point classes are deliberately excluded and pinned in their
+   * own tests instead: a key still containing a `*`, and a memo carrying more
+   * than one embedded timestamp.
    */
   const CORPUS = [
     "TST*THE BRASS TAP - Modesto CA Card #:8568",
@@ -658,22 +665,53 @@ describe("normalizeMerchant — idempotence", () => {
   });
 
   /**
-   * The one structural exception, pinned rather than hidden. A key that still
-   * contains a `*` is re-split on a second pass, because the split deliberately
-   * runs exactly once and only on the FIRST star -- that is what keeps a merchant
-   * whose own name contains a star intact. Making this a fixed point would mean
-   * splitting on every star, which loses more than it gains.
+   * The structural exceptions, pinned rather than hidden. There are TWO, not
+   * one -- an earlier version of this block named only the first, and the
+   * second is the shape that matters more to the backfill.
    *
-   * One live key is affected: `FD *CA DMV 658 *SVC ...` -> `CA DMV 658 *SVC`.
-   * It is harmless because every write path normalizes from `raw_memo`, never
-   * from an existing key.
+   * 1. A key that still contains a `*` is re-split on a second pass, because
+   *    the split deliberately runs exactly once and only on the FIRST star --
+   *    that is what keeps a merchant whose own name contains a star intact.
+   *    Making this a fixed point would mean splitting on every star, which
+   *    loses more than it gains. One live key is affected:
+   *    `FD *CA DMV 658 *SVC ...` -> `CA DMV 658 *SVC`.
+   *
+   * 2. A memo carrying more than one embedded timestamp keeps the second one
+   *    (the strip is not global -- see the class 5 KNOWN LIMIT above), and that
+   *    residue is then eaten on a second pass.
+   *
+   * Both are harmless for the three WRITE paths, which always normalize from
+   * `raw_memo` and never from an existing key. They are not harmless for
+   * scripts/backfill-merchants.src.mjs, whose orphan-rule fallback renormalizes
+   * a rule's own `match_value` when no row carries its key: for a key of either
+   * class that relocates the rule to a value no write path will ever produce.
+   * The backfill's `drifting` report and its post-`--apply` verification pass
+   * both exist to catch that.
    */
-  it("documents the star-bearing key as the one non-fixed-point", () => {
+  it("documents the two non-fixed-point classes", () => {
     const key = normalizeMerchant("FD *CA DMV 658 *SVC 800-777-0133 CA");
     expect(key).toBe("CA DMV 658 *SVC");
     expect(normalizeMerchant(key)).toBe("CA DMV");
 
     expect(normalizeMerchant("SQ *FOO*BAR Lodi CA")).toBe("FOO*BAR");
+
+    const twoStamps = normalizeMerchant(
+      "FOO 01/09/2026 12:43:41 BAR 02/10/2026 11:11:11",
+    );
+    expect(twoStamps).toBe("FOO BAR 02/10/2026 11:11:11");
+    expect(normalizeMerchant(twoStamps)).toBe("FOO BAR");
+  });
+
+  /**
+   * The cap on the fixed-point loop is reachable, so it is pinned. Nine
+   * trailing numeric groups is not real bank data -- this exists so that
+   * raising or lowering `pass < 8` shows up as a failing test rather than as a
+   * silent change to the idempotence guarantee.
+   */
+  it("stops at the pass cap, which bounds the idempotence guarantee", () => {
+    const key = normalizeMerchant("FOO 111 222 333 444 555 666 777 888 999");
+    expect(key).toBe("FOO 111");
+    expect(normalizeMerchant(key)).toBe("FOO");
   });
 });
 
