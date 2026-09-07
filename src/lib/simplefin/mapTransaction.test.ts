@@ -64,10 +64,11 @@ describe("mapTransaction", () => {
     expect(mapTransaction(POS_INBOUND).rawDescription).toBe("DEPOSIT");
   });
 
-  it("reuses the existing merchant normalizer unchanged", () => {
-    expect(mapTransaction(AIRBNB_CHARGE).normalizedMerchant).toBe(
-      "AIRBNB * TA9RWYS3 AIRBNB.COM",
-    );
+  it("delegates to the shared merchant normalizer rather than reimplementing it", () => {
+    // Was "AIRBNB * TA9RWYS3 AIRBNB.COM" before the class 1 brand-first split.
+    // The reference token is unique per booking, so the old value could never
+    // group and no trained rule could ever match a future Airbnb charge.
+    expect(mapTransaction(AIRBNB_CHARGE).normalizedMerchant).toBe("AIRBNB");
     expect(mapTransaction(AIRBNB_CHARGE).cardLastFour).toBe("8568");
   });
 
