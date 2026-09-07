@@ -12,6 +12,7 @@ import {
   readPendingImport,
   savePendingImport,
 } from "@/lib/pendingImport";
+import { checkAssetAccount } from "@/lib/import/assetAccountGuard";
 import { validateCreateAccountInput } from "@/lib/import/validateCreateAccountInput";
 import { validateImportIdInput } from "@/lib/import/validateImportIdInput";
 import { validateUndoImportCategorizationInput } from "@/lib/import/validateUndoImportCategorizationInput";
@@ -29,14 +30,30 @@ export async function createAccountAction(formData: FormData): Promise<void> {
   if (!parsed.success) {
     throw new Error(`Invalid account input — ${rejectionMessage(parsed.error)}`);
   }
-  const { name, type, startingBalance, startingBalanceDate } = parsed.data;
+  const {
+    name,
+    type,
+    startingBalanceCents,
+    startingBalanceDate,
+    creditLimitCents,
+    minimumPaymentCents,
+  } = parsed.data;
 
   db.insert(schema.accounts)
     .values({
       name,
       type,
-      startingBalanceCents: Math.round(startingBalance * 100),
+      // Already signed by validateCreateAccountInput — a liability's
+      // "Balance owed" was negated there, in the one place that decides an
+      // account's opening sign (DS64). Do not re-derive it here.
+      startingBalanceCents,
       startingBalanceDate,
+      creditLimitCents,
+      minimumPaymentCents,
+      // E4 — a hand-typed opening balance IS a manual reconcile, and DS57's
+      // 35-day clock is the right one to start. Leaving this NULL is what
+      // made every new card render with neither Refresh nor Reconcile.
+      balanceSource: "manual",
     })
     .run();
 
@@ -68,6 +85,14 @@ export async function updateAccountAnchorAction(
   }
   const { accountId, startingBalance, startingBalanceDate } = parsed.data;
 
+  // E18. This form is the raw signed twin of /accounts' Reconcile: it takes a
+  // signed balance with no relabelling and no negation, so offering it a Visa
+  // reintroduces the exact ledger-corruption path T15 was raised to P1 to
+  // close, in the second form on the same page. Liabilities get exactly one
+  // anchor surface and it is /accounts.
+  const target = checkAssetAccount(accountId);
+  if (!target.ok) throw new Error(target.reason);
+
   const result = db
     .update(schema.accounts)
     .set({
@@ -96,6 +121,13 @@ export async function uploadCsvAction(formData: FormData): Promise<void> {
     throw new Error(`Invalid upload — ${rejectionMessage(parsed.error)}`);
   }
   const { accountId, file } = parsed.data;
+
+  // E6. The picker is filtered to assets, but a stale tab rendered before the
+  // card existed still posts, and this is where a CSV import would otherwise
+  // move a credit card's anchor off another account's balance chain —
+  // forward-only, and therefore not undoable by re-importing.
+  const target = checkAssetAccount(accountId);
+  if (!target.ok) throw new Error(target.reason);
 
   const csv = await file.text();
   const pending = savePendingImport({

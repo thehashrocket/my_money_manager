@@ -1,11 +1,9 @@
 import { connection } from "next/server";
 import { db, schema } from "@/db";
+import { accountClass } from "@/lib/accounts/accountClass";
 import { todayIso } from "@/lib/now";
-import {
-  createAccountAction,
-  updateAccountAnchorAction,
-  uploadCsvAction,
-} from "./actions";
+import { CreateAccountForm } from "./_create-account-form";
+import { updateAccountAnchorAction, uploadCsvAction } from "./actions";
 
 export default async function ImportPage() {
   // Without this, Next 16 prerenders the route at build time. On the host
@@ -14,8 +12,19 @@ export default async function ImportPage() {
   // better-sqlite3 query below throws `SQLITE_CANTOPEN` and the image build
   // fails outright (see docs/plans/dockerize-postgres.md, F13).
   await connection();
-  const accounts = db.select().from(schema.accounts).all();
+  const allAccounts = db.select().from(schema.accounts).all();
   const today = todayIso();
+
+  // E6 + E18 — both surfaces below are asset-only, for two different reasons
+  // that happen to share a filter. A CSV imported into a credit card would
+  // move that card's anchor off another account's balance chain
+  // (forward-only, and silent), and the anchor-repair form is a raw signed
+  // twin of /accounts' Reconcile that would offer a Visa an un-negated
+  // balance field — the exact bug the create form above was raised to P1 to
+  // close. Liabilities have exactly one anchor surface, and it is /accounts.
+  // Both server actions re-check this; a stale tab still posts.
+  const accounts = allAccounts.filter((a) => accountClass(a.type) === "asset");
+  const liabilityCount = allAccounts.length - accounts.length;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-10">
@@ -30,7 +39,9 @@ export default async function ImportPage() {
         <h2 className="text-lg font-medium">Accounts</h2>
         {accounts.length === 0 ? (
           <p className="text-sm text-zinc-500">
-            No accounts yet. Create one below to get started.
+            {liabilityCount > 0
+              ? "No checking or savings accounts yet. Create one below to import a CSV."
+              : "No accounts yet. Create one below to get started."}
           </p>
         ) : (
           <>
@@ -88,6 +99,16 @@ export default async function ImportPage() {
               move it <em>forward</em>, so if it is set too late — leaving your
               imported history out of the balance — this is the only way to move
               it back.
+              {liabilityCount > 0 ? (
+                <>
+                  {" "}
+                  Credit cards and loans are not listed here; update those from{" "}
+                  <a href="/accounts" className="underline underline-offset-4">
+                    Accounts
+                  </a>
+                  .
+                </>
+              ) : null}
             </p>
           </>
         )}
@@ -136,75 +157,8 @@ export default async function ImportPage() {
       )}
 
       <section className="space-y-3">
-        <h2 className="text-lg font-medium">Add an account</h2>
-        <form
-          action={createAccountAction}
-          className="grid grid-cols-1 gap-3 rounded-md border border-zinc-200 p-4 sm:grid-cols-2"
-        >
-          <label className="block text-sm sm:col-span-1">
-            <span className="block mb-1 font-medium">Name</span>
-            <input
-              type="text"
-              name="name"
-              required
-              placeholder="Checking"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2"
-            />
-          </label>
-          <label className="block text-sm sm:col-span-1">
-            <span className="block mb-1 font-medium">Type</span>
-            <select
-              name="type"
-              required
-              defaultValue="checking"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2"
-            >
-              <option value="checking">checking</option>
-              <option value="savings">savings</option>
-            </select>
-          </label>
-          <label className="block text-sm sm:col-span-1">
-            <span className="block mb-1 font-medium">Starting balance (USD)</span>
-            <input
-              type="number"
-              name="startingBalance"
-              step="0.01"
-              required
-              placeholder="0.00"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2"
-            />
-            <span className="mt-1 block text-xs font-normal text-zinc-500">
-              The balance at the <em>close</em> of the starting balance date —
-              not necessarily today&apos;s balance. A CSV import re-derives this
-              from the file&apos;s running Balance column, so a rough figure is
-              fine.
-            </span>
-          </label>
-          <label className="block text-sm sm:col-span-1">
-            <span className="block mb-1 font-medium">Starting balance date</span>
-            <input
-              type="date"
-              name="startingBalanceDate"
-              required
-              defaultValue={today}
-              className="w-full rounded-md border border-zinc-300 px-3 py-2"
-            />
-            <span className="mt-1 block text-xs font-normal text-zinc-500">
-              Transactions dated <em>after</em> this day are summed onto the
-              starting balance; anything on or before it counts as already
-              included. Set it on or before your CSV&apos;s earliest row —
-              dating it today leaves the entire import out of your balance.
-            </span>
-          </label>
-          <div className="sm:col-span-2">
-            <button
-              type="submit"
-              className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-            >
-              Create account
-            </button>
-          </div>
-        </form>
+        <h2 className="font-display text-lg font-medium">Add an account</h2>
+        <CreateAccountForm today={today} />
       </section>
     </div>
   );
