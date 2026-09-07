@@ -13,12 +13,12 @@ afterEach(() => {
   handle.close();
 });
 
-function seedAccount(name: string) {
+function seedAccount(name: string, type: "checking" | "savings" | "credit" | "loan" = "checking") {
   const [row] = handle.db
     .insert(schema.accounts)
     .values({
       name,
-      type: "checking",
+      type,
       startingBalanceCents: 0,
       startingBalanceDate: "2026-01-01",
     })
@@ -39,5 +39,32 @@ describe("listAccounts", () => {
     const result = listAccounts(handle.db);
     expect(result.map((a) => a.name)).toEqual(["Checking", "Savings"]);
     expect(Object.keys(result[0]).sort()).toEqual(["id", "name"]);
+  });
+
+  it("includes a credit card — good, and unplanned (E15)", () => {
+    seedAccount("Checking");
+    seedAccount("Visa", "credit");
+
+    // A card carries manually-entered charges, so filtering /transactions by
+    // one is genuinely useful. This fell out of migration 0018's enum
+    // widening rather than being designed, which is exactly why E15 went
+    // looking for every unfiltered `select().from(accounts)`.
+    expect(listAccounts(handle.db).map((a) => a.name)).toEqual(["Checking", "Visa"]);
+  });
+
+  it("excludes a mortgage — a permanently empty filter option (E15)", () => {
+    seedAccount("Checking");
+    seedAccount("Mortgage", "loan");
+
+    // D3=A: a loan never gets a transaction row, and that is now enforced on
+    // all three write paths (E1 sync, E6 CSV, E17 manual). Offering it here
+    // can only ever produce "no transactions found", which teaches the user
+    // the filter is broken rather than that the account is empty.
+    expect(listAccounts(handle.db).map((a) => a.name)).toEqual(["Checking"]);
+  });
+
+  it("returns an empty list when the only account is a mortgage", () => {
+    seedAccount("Mortgage", "loan");
+    expect(listAccounts(handle.db)).toEqual([]);
   });
 });

@@ -1,5 +1,7 @@
 import { and, eq, gt, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { accountClass, type AccountClass } from "./accountClass";
+import type { BalanceSource } from "./resolveBalanceAction";
 
 type Db = typeof defaultDb;
 
@@ -10,6 +12,17 @@ export type AccountBalance = {
   id: number;
   name: string;
   type: AccountType;
+  /**
+   * `accountClass(type)`, carried on the row so callers don't each re-derive
+   * it. Still derived, never stored — see accountClass.ts.
+   */
+  class: AccountClass;
+  /**
+   * Negative for a liability: owing $2,000 is -200000. Every consumer already
+   * handled a negative balance (an overdrawn checking account), so nothing
+   * downstream needed a new branch — that is the whole argument for the sign
+   * convention.
+   */
   balanceCents: number;
   /** The anchor this balance was computed from. */
   startingBalanceDate: string;
@@ -20,6 +33,12 @@ export type AccountBalance = {
    * it. See `src/lib/simplefin/balanceFreshness.ts`.
    */
   ledgerAsOfDate: string;
+  /** Liability display fields. All NULL on an asset, and unread there. */
+  simplefinAccountId: string | null;
+  creditLimitCents: number | null;
+  minimumPaymentCents: number | null;
+  balanceAsOf: Date | null;
+  balanceSource: BalanceSource | null;
 };
 
 /**
@@ -64,9 +83,15 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
       id: a.id,
       name: a.name,
       type: a.type,
+      class: accountClass(a.type),
       balanceCents: a.startingBalanceCents + (row?.delta ?? 0),
       startingBalanceDate: a.startingBalanceDate,
       ledgerAsOfDate: row?.newestDate ?? a.startingBalanceDate,
+      simplefinAccountId: a.simplefinAccountId,
+      creditLimitCents: a.creditLimitCents,
+      minimumPaymentCents: a.minimumPaymentCents,
+      balanceAsOf: a.balanceAsOf,
+      balanceSource: a.balanceSource,
     };
   });
 }
