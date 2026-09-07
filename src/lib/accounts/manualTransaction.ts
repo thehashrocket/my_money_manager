@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { accountClass } from "./accountClass";
-import { isLongTermLiability } from "./isLongTermLiability";
+import { isCreditCard } from "./isCreditCard";
 import { loadAccountBalances } from "./loadAccountBalances";
 import { formatMonthDay } from "@/lib/now";
 import { startingBalanceDateSchema } from "@/lib/import/accountAnchorFields";
 import { normalizeMerchant } from "@/lib/normalize";
 import { formatCents } from "@/lib/money";
+import { checkChargeableCategory, type ChargeableCheck } from "@/lib/categories";
 
 type Db = typeof defaultDb;
 
@@ -109,6 +110,11 @@ function createManualBatch(tx: AnyDb): number {
  * under D3 (spend queries don't filter by account), D7 and D15 (the feed
  * balance pass is scoped to zero-row accounts) and E16. It was guaranteed by
  * button placement alone.
+ *
+ * Asks `isCreditCard` rather than spelling the predicate out as "a liability
+ * that isn't long-term". Those are equivalent today and would have diverged
+ * the moment a third liability type existed — this one ADMITTING a charge
+ * while `updateCardTermsAction` refused the same account's terms.
  */
 function requireCardAccount(
   accountId: number,
@@ -123,7 +129,7 @@ function requireCardAccount(
   if (!account) {
     return { ok: false, result: refused("not-found", "That account no longer exists.") };
   }
-  if (accountClass(account.type) !== "liability" || isLongTermLiability(account.type)) {
+  if (!isCreditCard(account.type)) {
     return {
       ok: false,
       result: refused(
@@ -136,8 +142,42 @@ function requireCardAccount(
   return { ok: true, account };
 }
 
-function currentBalanceCents(accountId: number, db: Db): number {
-  return loadAccountBalances(db).find((b) => b.id === accountId)?.balanceCents ?? 0;
+/**
+ * DS61 register: name the consequence, never the schema concept. "Parent" and
+ * "kind" mean nothing to someone who just typed a charge, so each of these
+ * says what to do instead.
+ */
+function chargeableRefusalMessage(check: Extract<ChargeableCheck, { ok: false }>): string {
+  switch (check.reason) {
+    case "not-found":
+      return "That category no longer exists. Pick another one.";
+    case "archived":
+      return `${check.name} is archived, so nothing new can be filed under it. Pick another category.`;
+    case "parent":
+      return `${check.name} is a heading, not a category you can file under. Pick one of the categories inside it.`;
+    case "fund":
+      return `${check.name} is a savings goal, so a card charge can't go there.`;
+    case "income":
+      return `${check.name} is income, and a charge is money going out. Pick a spending category.`;
+    default: {
+      const unreachable: never = check.reason;
+      throw new Error(`chargeableRefusalMessage: unhandled ${JSON.stringify(unreachable)}`);
+    }
+  }
+}
+
+/**
+ * Returns NULL when the account row is gone, never 0.
+ *
+ * `?? 0` was doing double duty here: 0 is a legitimate balance (a paid-off
+ * card) AND was the sentinel for "not found". So a concurrent delete, or a
+ * `cardAccountId` that survived on a stale form, quoted the user
+ * "Recorded. The balance is now $0.00." — telling them their card was paid
+ * off. The write had succeeded; the figure was invented, and indistinguishable
+ * from a real zero. Callers omit the number rather than fabricate one.
+ */
+function currentBalanceCents(accountId: number, db: Db): number | null {
+  return loadAccountBalances(db).find((b) => b.id === accountId)?.balanceCents ?? null;
 }
 
 export type CardActivityInput = {
@@ -212,6 +252,14 @@ export function createCardActivity(
       );
     }
 
+    // Inside the transaction, so a category archived between a check and the
+    // insert cannot slip through. See `checkChargeableCategory` for what each
+    // refusal is protecting against.
+    const category = checkChargeableCategory(tx, input.categoryId);
+    if (!category.ok) {
+      return refused("invalid", chargeableRefusalMessage(category), input.accountId);
+    }
+
     const amountCents = input.kind === "charge" ? -input.amountCents : input.amountCents;
     const rawMemo = input.merchant.trim();
     const batchId = createManualBatch(tx);
@@ -257,8 +305,11 @@ export function createCardActivity(
   const balanceCents = currentBalanceCents(input.accountId, db);
   return {
     ...result,
-    balanceCents,
-    message: `Recorded. The balance is now ${formatCents(balanceCents)}.`,
+    balanceCents: balanceCents ?? 0,
+    message:
+      balanceCents === null
+        ? "Recorded."
+        : `Recorded. The balance is now ${formatCents(balanceCents)}.`,
   };
 }
 
@@ -300,6 +351,36 @@ export function markAsCardPayment(
     }
     if (leg.amountCents >= 0) {
       return refused("invalid", "A card payment has to be money leaving an account.");
+    }
+
+    // THE SOURCE LEG MUST BE AN ASSET. `requireCardAccount` guards the target
+    // rigorously and the source was checked only for "not this account" and
+    // "negative" — which every charge on a DIFFERENT card also satisfies.
+    //
+    // Reachable in one click, no crafted request needed: the row menu offers
+    // every card as a payment target on every non-transfer row, and card rows
+    // carry that menu. Marking a real -$80 Visa charge as a payment to the
+    // Mastercard minted a +$80 mirror on the Mastercard (debt reduced by money
+    // nobody paid) AND transfer-paired the Visa charge, so real spending
+    // dropped out of every `transfer_pair_id IS NULL` sum and out of its
+    // envelope. `paidDownCents` counts paired positives, so `/accounts` then
+    // reported "paid down $80.00 this month" for money that was spent.
+    //
+    // A payment moves money from something you HAVE to something you OWE. Debt
+    // shuffled between two cards is a balance transfer, which this app does not
+    // model (D10=C gives card activity exactly three movements, and that is not
+    // one of them).
+    const legAccount = tx
+      .select({ type: schema.accounts.type, name: schema.accounts.name })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, leg.accountId))
+      .get();
+    if (!legAccount || accountClass(legAccount.type) !== "asset") {
+      return refused(
+        "invalid",
+        `A payment has to come from a checking or savings account, not from ${legAccount?.name ?? "that account"}.`,
+        input.cardAccountId,
+      );
     }
 
     // E10 — the idempotency guard, three-way, re-read INSIDE the write
@@ -386,13 +467,19 @@ export function markAsCardPayment(
     .from(schema.accounts)
     .where(eq(schema.accounts.id, input.cardAccountId))
     .get();
+  // The card name comes from the same read as the balance, so when the row is
+  // gone both are — hence one branch rather than two independent `??`
+  // fallbacks producing "It is now $0.00".
+  const named = card?.name ?? "the card";
   return {
     ...result,
-    balanceCents,
+    balanceCents: balanceCents ?? 0,
     // DS61 #16.
     message:
       result.message ||
-      `Recorded as a payment to ${card?.name ?? "the card"}. ${card?.name ?? "It"} is now ${formatCents(balanceCents)}.`,
+      (balanceCents === null
+        ? `Recorded as a payment to ${named}.`
+        : `Recorded as a payment to ${named}. ${named} is now ${formatCents(balanceCents)}.`),
   };
 }
 
@@ -434,22 +521,45 @@ export function unmarkCardPayment(
       return { status: "ok", message: "That transaction is not marked as a payment.", transactionId: leg.id, balanceCents: 0 };
     }
 
-    const mirror = tx
+    const partner = tx
       .select()
       .from(schema.transactions)
       .where(eq(schema.transactions.id, leg.transferPairId))
       .get();
 
-    // Only ever deletes a row this app synthesised. A real bank row that the
-    // matcher paired is unlinked, never removed — that is unlinkTransferPair's
-    // job, and deleting one would destroy imported history.
-    const isSyntheticMirror =
-      mirror !== undefined &&
-      mirror.importSource === "manual" &&
-      mirror.categoryId === null &&
-      mirror.transferPairId === leg.id;
+    // Half a link is not a pair. Guarded before either side is classified, so
+    // a dangling `transfer_pair_id` can't be read as "the other row is real".
+    if (partner === undefined || partner.transferPairId !== leg.id) {
+      return refused(
+        "invalid",
+        "That pair wasn't created here. Unlink it from the Sync page instead.",
+      );
+    }
 
-    if (!isSyntheticMirror) {
+    // WORKS FROM EITHER END. The row menu offers "Not a card payment" on both
+    // legs once "Show transfers" is on, and this used to derive the mirror
+    // from the PARTNER only — so invoking it on the mirror row itself made
+    // `partner` the real checking row, failed the synthetic test, and refused
+    // with "That pair wasn't created here. Unlink it from the Sync page
+    // instead." That sentence was false (it WAS created here) and it pointed
+    // the user at `unlinkTransferPair`, the one operation this function exists
+    // to keep them away from — which would leave the mirror behind,
+    // uncategorized and still inflating the card balance.
+    //
+    // Only ever deletes a row this app synthesised. A real bank row the
+    // matcher paired is unlinked, never removed — that is
+    // `unlinkTransferPair`'s job, and deleting one would destroy imported
+    // history.
+    const isSynthetic = (row: typeof leg) =>
+      row.importSource === "manual" && row.categoryId === null;
+
+    const [sourceLeg, mirror] = isSynthetic(partner)
+      ? [leg, partner]
+      : isSynthetic(leg)
+        ? [partner, leg]
+        : [null, null];
+
+    if (sourceLeg === null || mirror === null) {
       return refused(
         "invalid",
         "That pair wasn't created here. Unlink it from the Sync page instead.",
@@ -458,7 +568,7 @@ export function unmarkCardPayment(
 
     tx.update(schema.transactions)
       .set({ transferPairId: null })
-      .where(eq(schema.transactions.id, leg.id))
+      .where(eq(schema.transactions.id, sourceLeg.id))
       .run();
     // Clear the mirror's own link first: transfer_pair_id is ON DELETE SET
     // NULL, but clearing explicitly keeps the intent readable.
@@ -479,14 +589,20 @@ export function unmarkCardPayment(
       .run();
 
     cardAccountId = mirror.accountId;
-    return { status: "ok", message: "", transactionId: leg.id, balanceCents: 0 };
+    // `sourceLeg`, never `leg` — the two differ when this was invoked from the
+    // mirror's own row, and `leg` is the row that was just deleted. Handing
+    // back a deleted id is how a caller ends up refetching nothing.
+    return { status: "ok", message: "", transactionId: sourceLeg.id, balanceCents: 0 };
   });
 
   if (result.status !== "ok" || cardAccountId === null) return result;
   const balanceCents = currentBalanceCents(cardAccountId, db);
   return {
     ...result,
-    balanceCents,
-    message: `Payment removed. The balance is now ${formatCents(balanceCents)}.`,
+    balanceCents: balanceCents ?? 0,
+    message:
+      balanceCents === null
+        ? "Payment removed."
+        : `Payment removed. The balance is now ${formatCents(balanceCents)}.`,
   };
 }

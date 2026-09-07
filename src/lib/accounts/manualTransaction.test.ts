@@ -601,3 +601,248 @@ describe("createCardActivity — date validation", () => {
     expect(result.status).toBe("ok");
   });
 });
+
+/** A category not present in the migration seed, for the cases that need one. */
+function insertCategory(opts: {
+  name: string;
+  kind: "income" | "expense" | "fund";
+  parentId?: number | null;
+  archived?: boolean;
+}) {
+  const [row] = handle.db
+    .insert(schema.categories)
+    .values({
+      name: opts.name,
+      kind: opts.kind,
+      parentId: opts.parentId ?? null,
+      isSavingsGoal: opts.kind === "fund",
+      archivedAt: opts.archived ? new Date() : null,
+    })
+    .returning()
+    .all();
+  return row;
+}
+
+const chargeWith = (accountId: number, categoryId: number) =>
+  createCardActivity(
+    {
+      kind: "charge",
+      accountId,
+      date: "2026-09-03",
+      amountCents: 8_000,
+      merchant: "COSTCO WHSE",
+      categoryId,
+    },
+    handle.db,
+  );
+
+/**
+ * The category was accepted on trust: the action checked
+ * `Number.isInteger(id) && id > 0` and `createCardActivity` inserted it
+ * verbatim. `categorizeTransaction` and `bulkCategorize` both classify the
+ * category first; this path skipped that entirely.
+ */
+describe("createCardActivity — the category has to be one you can charge to", () => {
+  it("REFUSES an income category — the case that needed no adversary", () => {
+    // "Paycheck" is a migration-seeded income leaf, and income leaves were in
+    // the charge dialog's own picker. Filing an $80 charge here wrote -8000
+    // into income and silently reduced that month's leftToBudgetCents.
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const paycheck = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Paycheck"))
+      .get()!;
+    expect(paycheck.kind).toBe("income");
+
+    const result = chargeWith(visa.id, paycheck.id);
+
+    expect(result.status).toBe("refused");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+    expect(balanceOf(visa.id)).toBe(-200_000);
+  });
+
+  it("refuses a parent category — spend there belongs to no envelope", () => {
+    // "Food" is a header. loadMonthView renders it as a section heading, so a
+    // charge filed under it exists in the ledger and is invisible in the
+    // budget — the outcome D13=B exists to prevent.
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const food = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.name, "Food"))
+      .get()!;
+
+    const result = chargeWith(visa.id, food.id);
+
+    expect(result.status).toBe("refused");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("refuses an archived category (rule 8 hides it from every picker)", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const gone = insertCategory({ name: "Old Hobby", kind: "expense", archived: true });
+
+    const result = chargeWith(visa.id, gone.id);
+
+    expect(result.status).toBe("refused");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("refuses a savings-goal (fund) category", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const fund = insertCategory({ name: "Emergency Fund", kind: "fund" });
+
+    const result = chargeWith(visa.id, fund.id);
+
+    expect(result.status).toBe("refused");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("refuses an id that matches no category, as state rather than a raw FK error", () => {
+    // The FK would fire anyway, but as "FOREIGN KEY constraint failed" thrown
+    // out of db.transaction — which breaks the module's own contract that
+    // nothing throws for a reachable outcome (E20).
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+
+    const result = chargeWith(visa.id, 999_999);
+
+    expect(result.status).toBe("refused");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("still accepts an ordinary expense leaf", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const result = chargeWith(visa.id, seedCategory().id);
+    expect(result.status).toBe("ok");
+    expect(balanceOf(visa.id)).toBe(-208_000);
+  });
+});
+
+/**
+ * The target of a payment was guarded by `requireCardAccount`; the SOURCE leg
+ * was only checked for "not this account" and "is negative" — which every
+ * charge on a DIFFERENT card also satisfies.
+ */
+describe("markAsCardPayment — the money has to come from an asset", () => {
+  it("REFUSES a leg that lives on another credit card", () => {
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const mastercard = seedAccount({ name: "Mastercard", type: "credit" });
+    const charge = chargeWith(visa.id, seedCategory().id);
+    expect(charge.status).toBe("ok");
+    const visaCharge = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, visa.id))
+      .get()!;
+
+    const result = markAsCardPayment(
+      { transactionId: visaCharge.id, cardAccountId: mastercard.id },
+      handle.db,
+    );
+
+    expect(result.status).toBe("refused");
+    // No mirror minted on the Mastercard...
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.accountId, mastercard.id))
+        .all(),
+    ).toHaveLength(0);
+    expect(balanceOf(mastercard.id)).toBe(-200_000);
+    // ...and the real Visa charge is still unpaired, so it still counts as
+    // spending. Pairing it would have dropped it out of every
+    // `transfer_pair_id IS NULL` sum and out of its envelope.
+    const after = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, visaCharge.id))
+      .get()!;
+    expect(after.transferPairId).toBeNull();
+  });
+
+  it("still accepts a debit from a checking account", () => {
+    const checking = seedAccount({ name: "Checking", type: "checking" });
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const debit = seedCheckingDebit(checking.id, "2026-09-05", -50_000);
+
+    const result = markAsCardPayment(
+      { transactionId: debit.id, cardAccountId: visa.id },
+      handle.db,
+    );
+
+    expect(result.status).toBe("ok");
+    expect(balanceOf(visa.id)).toBe(-150_000);
+  });
+});
+
+/**
+ * E12's inverse used to derive the mirror from the PARTNER only, so calling it
+ * on the mirror's own row refused with "That pair wasn't created here. Unlink
+ * it from the Sync page instead." — false, and pointing at the one operation
+ * this function exists to keep the user away from.
+ */
+describe("unmarkCardPayment — works from either leg", () => {
+  function pairedPayment() {
+    const checking = seedAccount({ name: "Checking", type: "checking" });
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const debit = seedCheckingDebit(checking.id, "2026-09-05", -50_000);
+    const marked = markAsCardPayment(
+      { transactionId: debit.id, cardAccountId: visa.id },
+      handle.db,
+    );
+    expect(marked.status).toBe("ok");
+    const mirror = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, visa.id))
+      .get()!;
+    return { checking, visa, debit, mirror };
+  }
+
+  it("removes the payment when invoked from the MIRROR row", () => {
+    const { visa, debit, mirror } = pairedPayment();
+    expect(balanceOf(visa.id)).toBe(-150_000);
+
+    const result = unmarkCardPayment({ transactionId: mirror.id }, handle.db);
+
+    expect(result.status).toBe("ok");
+    // The mirror is gone and the card balance is back where it started.
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, mirror.id))
+        .get(),
+    ).toBeUndefined();
+    expect(balanceOf(visa.id)).toBe(-200_000);
+    // The real checking row survives, unpaired and unmarked — it is a bank row
+    // and deleting it would destroy imported history.
+    const source = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, debit.id))
+      .get()!;
+    expect(source.transferPairId).toBeNull();
+    expect(source.transferRejectedPartnerId).toBeNull();
+    // The surviving row's id comes back, not the deleted mirror's.
+    if (result.status === "ok") expect(result.transactionId).toBe(debit.id);
+  });
+
+  it("still removes the payment when invoked from the source row", () => {
+    const { visa, debit, mirror } = pairedPayment();
+
+    const result = unmarkCardPayment({ transactionId: debit.id }, handle.db);
+
+    expect(result.status).toBe("ok");
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, mirror.id))
+        .get(),
+    ).toBeUndefined();
+    expect(balanceOf(visa.id)).toBe(-200_000);
+  });
+});

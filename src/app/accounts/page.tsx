@@ -24,7 +24,11 @@ export default async function AccountsPage() {
 
   // DS67's dialog requires a category, so the picker's options come with the
   // page rather than through a second round trip.
-  const categories = listLeafCategories(db);
+  //
+  // `excludeIncome` because a charge is money going out: an income category is
+  // never a valid destination, and `checkChargeableCategory` refuses one
+  // server-side. Offering an option that always fails is its own small bug.
+  const categories = listLeafCategories(db, { excludeIncome: true });
   const balances = loadAccountBalancesForRequest();
   const rows: AccountRowData[] = balances.map((b) => ({
     ...b,
