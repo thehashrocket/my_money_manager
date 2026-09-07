@@ -27,15 +27,20 @@ function seedAccount(opts: {
   startingBalanceCents: number;
   startingBalanceDate: string;
   name?: string;
+  type?: "checking" | "savings" | "credit" | "loan";
+  creditLimitCents?: number;
+  balanceSource?: "feed" | "manual";
 }) {
   seq += 1;
   const [row] = handle.db
     .insert(schema.accounts)
     .values({
       name: opts.name ?? `Account-${seq}`,
-      type: "checking",
+      type: opts.type ?? "checking",
       startingBalanceCents: opts.startingBalanceCents,
       startingBalanceDate: opts.startingBalanceDate,
+      creditLimitCents: opts.creditLimitCents ?? null,
+      balanceSource: opts.balanceSource ?? null,
     })
     .returning()
     .all();
@@ -157,5 +162,101 @@ describe("loadAccountBalances", () => {
     expect(byId.get(a.id)?.ledgerAsOfDate).toBe("2026-04-17");
     expect(byId.get(b.id)?.balanceCents).toBe(15_000);
     expect(byId.get(b.id)?.ledgerAsOfDate).toBe("2026-04-20");
+  });
+
+  describe("liability accounts (migration 0018)", () => {
+    it("returns a negative anchor unchanged when no rows follow it", () => {
+      // The mortgage under D3=A: zero transaction rows, ever. Its balance is
+      // its anchor exactly, which is what makes D7/D15's feed refresh safe —
+      // there is no SUM to be imprecise about.
+      seedAccount({
+        name: "Mortgage",
+        type: "loan",
+        startingBalanceCents: -30_248_011,
+        startingBalanceDate: "2026-09-06",
+      });
+
+      const [balance] = loadAccountBalances(handle.db);
+      expect(balance.balanceCents).toBe(-30_248_011);
+      expect(balance.class).toBe("liability");
+    });
+
+    it("walks a card's debt toward zero with the SAME sum rule as an asset", () => {
+      // Rule 1 is unchanged by the sign convention: a charge is negative and
+      // a payment positive, so `anchor + SUM` just works. This is the entire
+      // argument for storing a liability negative rather than adding a
+      // `direction` column.
+      const visa = seedAccount({
+        name: "Visa",
+        type: "credit",
+        startingBalanceCents: -200_000,
+        startingBalanceDate: "2026-09-01",
+      });
+      const batch = seedBatch();
+      seedTxn({ accountId: visa.id, batchId: batch.id, date: "2026-09-03", amountCents: -8_000 });
+      seedTxn({ accountId: visa.id, batchId: batch.id, date: "2026-09-10", amountCents: 50_000 });
+
+      const [balance] = loadAccountBalances(handle.db);
+      expect(balance.balanceCents).toBe(-158_000);
+    });
+
+    it("carries `class` on every row, asset and liability alike", () => {
+      seedAccount({ name: "Checking", startingBalanceCents: 1, startingBalanceDate: "2026-01-01" });
+      seedAccount({
+        name: "Savings",
+        type: "savings",
+        startingBalanceCents: 1,
+        startingBalanceDate: "2026-01-01",
+      });
+      seedAccount({
+        name: "Visa",
+        type: "credit",
+        startingBalanceCents: -1,
+        startingBalanceDate: "2026-01-01",
+      });
+      seedAccount({
+        name: "Mortgage",
+        type: "loan",
+        startingBalanceCents: -1,
+        startingBalanceDate: "2026-01-01",
+      });
+
+      const byName = Object.fromEntries(
+        loadAccountBalances(handle.db).map((b) => [b.name, b.class]),
+      );
+      expect(byName).toEqual({
+        Checking: "asset",
+        Savings: "asset",
+        Visa: "liability",
+        Mortgage: "liability",
+      });
+    });
+
+    it("passes through the liability display columns the /accounts row needs", () => {
+      seedAccount({
+        name: "Visa",
+        type: "credit",
+        startingBalanceCents: -214_800,
+        startingBalanceDate: "2026-09-06",
+        creditLimitCents: 500_000,
+        balanceSource: "manual",
+      });
+
+      const [balance] = loadAccountBalances(handle.db);
+      expect(balance.creditLimitCents).toBe(500_000);
+      expect(balance.balanceSource).toBe("manual");
+      expect(balance.balanceAsOf).toBeNull();
+      expect(balance.minimumPaymentCents).toBeNull();
+    });
+
+    it("leaves the liability columns null on an asset account", () => {
+      seedAccount({ startingBalanceCents: 100, startingBalanceDate: "2026-01-01" });
+      const [balance] = loadAccountBalances(handle.db);
+      expect(balance.creditLimitCents).toBeNull();
+      expect(balance.minimumPaymentCents).toBeNull();
+      expect(balance.balanceAsOf).toBeNull();
+      expect(balance.balanceSource).toBeNull();
+      expect(balance.simplefinAccountId).toBeNull();
+    });
   });
 });

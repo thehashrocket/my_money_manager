@@ -3,7 +3,7 @@ import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents } from "@/lib/money";
 import { countRevertibleCategorizations } from "@/lib/categorize/undoImportCategorization";
-import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
+import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { readAccessUrl } from "@/lib/simplefin/accessUrl";
 import { listRemoteAccounts, type RemoteAccount } from "@/lib/simplefin/link";
 import {
@@ -106,7 +106,7 @@ export default function SyncPage() {
   const linkedCount = accounts.filter((a) => a.simplefinAccountId).length;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-10">
+    <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-10">
       <header>
         <h1 className="font-display text-xl font-semibold">Sync</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -339,7 +339,7 @@ async function RemoteSections({ host }: { host: string | null }) {
 
   const accounts = db.select().from(schema.accounts).all();
   const accountsById = new Map(accounts.map((a) => [a.id, a]));
-  const ledgerByAccountId = new Map(loadAccountBalances().map((b) => [b.id, b]));
+  const ledgerByAccountId = new Map(loadAccountBalancesForRequest().map((b) => [b.id, b]));
 
   return (
     <>

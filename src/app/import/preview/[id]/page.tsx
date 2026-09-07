@@ -31,7 +31,7 @@ export default async function PreviewPage({
   const canCommit = preview.totals.newRows > 0;
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-10 space-y-8">
+    <div className="mx-auto w-full max-w-6xl px-5 py-10 space-y-7">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Preview import</h1>
         <p className="text-sm text-zinc-500">

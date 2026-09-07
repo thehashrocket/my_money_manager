@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { resolveBatchLabel } from "@/lib/batchLabel";
 
@@ -30,17 +30,30 @@ export type UndoResult =
   | { status: "undone"; batchId: number; deletedCount: number };
 
 /**
- * Whether `batchId` is still the most recently created import batch of ANY
- * source. Undo is only safe while that holds — see the `stale` UndoResult
- * variant above.
+ * Whether `batchId` is still the most recently created import batch of any
+ * source THAT COULD HAVE DEDUPED AGAINST IT. Undo is only safe while that
+ * holds — see the `stale` UndoResult variant above.
  *
  * Takes `AnyDb`, not `Db`, so this can be re-checked from inside
  * `db.transaction((tx) => ...)` as well as against the singleton database.
+ *
+ * REGRESSION (T9/R2) — manual batches are ignored. The reason undo is
+ * withheld at all is that a LATER IMPORT may already have content-deduped
+ * against this batch's rows and skipped one, quietly relying on it being
+ * there; deleting them would then lose a transaction with nothing to say so.
+ * A hand-entered card charge dedups against nothing — it is typed, not
+ * matched — so it cannot create that dependency.
+ *
+ * Without this filter, `findLastSyncBatch` returns null the moment any manual
+ * row exists (E21 writes one batch per manual operation), so syncing and then
+ * entering a single card charge would make the sync's undo button silently
+ * disappear. Manual activity must never revoke a sync's undo.
  */
 function isLatestBatch(batchId: number, db: AnyDb): boolean {
   const latest = db
     .select({ id: schema.importBatches.id })
     .from(schema.importBatches)
+    .where(ne(schema.importBatches.source, "manual"))
     .orderBy(desc(schema.importBatches.id))
     .limit(1)
     .get();

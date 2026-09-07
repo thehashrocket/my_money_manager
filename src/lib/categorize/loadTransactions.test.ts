@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
@@ -447,5 +448,115 @@ describe("escapeLikePattern", () => {
 
   it("escapes a literal backslash", () => {
     expect(escapeLikePattern("a\\b")).toBe("a\\\\b");
+  });
+});
+
+/**
+ * E9/T12 — `includeTransfers`, the data half. T26 owns every pixel of the UI.
+ *
+ * The predicate had two states and one of them had never been exercised: for
+ * the whole life of this function, paired rows were unconditionally hidden.
+ */
+describe("loadTransactions — includeTransfers (D14=B)", () => {
+  function seedPair() {
+    const checking = seedAccount("Checking");
+    const visa = seedAccount("Visa");
+    const batch = seedBatch();
+    const leg = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      merchant: "PAYMENT TO VISA",
+      amountCents: -50_000,
+    });
+    const mirror = seedTxn({
+      accountId: visa.id,
+      batchId: batch.id,
+      merchant: "PAYMENT FROM CHECKING",
+      amountCents: 50_000,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: mirror.id })
+      .where(eq(schema.transactions.id, leg.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: leg.id })
+      .where(eq(schema.transactions.id, mirror.id))
+      .run();
+    const ordinary = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      merchant: "COSTCO",
+      amountCents: -8_000,
+    });
+    return { leg, mirror, ordinary, checking, visa };
+  }
+
+  const base = { page: 1, pageSize: 50 };
+
+  it("excludes paired rows by default — unchanged behaviour", () => {
+    const { ordinary } = seedPair();
+    const result = loadTransactions(handle.db, base);
+    expect(result.rows.map((r) => r.id)).toEqual([ordinary.id]);
+    expect(result.totalCount).toBe(1);
+  });
+
+  it("excludes them when explicitly false", () => {
+    seedPair();
+    expect(loadTransactions(handle.db, { ...base, includeTransfers: false }).totalCount).toBe(1);
+  });
+
+  it("includes both legs when true", () => {
+    // Without this, marking a checking debit as a card payment makes the row
+    // vanish from the page you use to manage transactions.
+    const { leg, mirror, ordinary } = seedPair();
+    const result = loadTransactions(handle.db, { ...base, includeTransfers: true });
+    expect(result.totalCount).toBe(3);
+    expect(new Set(result.rows.map((r) => r.id))).toEqual(
+      new Set([leg.id, mirror.id, ordinary.id]),
+    );
+  });
+
+  it("names the partner account on a revealed row, and leaves it null otherwise", () => {
+    // A revealed row without its partner is just a transaction that
+    // mysteriously does not count toward anything.
+    const { leg, mirror, ordinary, checking, visa } = seedPair();
+    const rows = loadTransactions(handle.db, { ...base, includeTransfers: true }).rows;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+
+    expect(byId[leg.id].transferPairId).toBe(mirror.id);
+    expect(byId[leg.id].transferPartnerAccountName).toBe(visa.name);
+    expect(byId[mirror.id].transferPartnerAccountName).toBe(checking.name);
+    expect(byId[ordinary.id].transferPairId).toBeNull();
+    expect(byId[ordinary.id].transferPartnerAccountName).toBeNull();
+  });
+
+  it("composes with the other filters rather than overriding them", () => {
+    const { visa } = seedPair();
+    const result = loadTransactions(handle.db, {
+      ...base,
+      includeTransfers: true,
+      accountId: visa.id,
+    });
+    expect(result.totalCount).toBe(1);
+    expect(result.rows[0].accountName).toBe(visa.name);
+  });
+
+  it("counts and pages over the same set it returns", () => {
+    seedPair();
+    const page1 = loadTransactions(handle.db, {
+      page: 1,
+      pageSize: 2,
+      includeTransfers: true,
+    });
+    expect(page1.totalCount).toBe(3);
+    expect(page1.rows).toHaveLength(2);
+    const page2 = loadTransactions(handle.db, {
+      page: 2,
+      pageSize: 2,
+      includeTransfers: true,
+    });
+    expect(page2.rows).toHaveLength(1);
   });
 });

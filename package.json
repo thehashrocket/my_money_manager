@@ -1,6 +1,6 @@
 {
   "name": "barcelona-v2",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "packageManager": "pnpm@10.32.1",
   "engines": {
@@ -21,6 +21,7 @@
     "db:export": "node scripts/db-export.mjs",
     "db:import": "node scripts/db-import.mjs",
     "db:seed-volume": "node scripts/seed-volume.mjs",
+    "db:seed-dev": "node scripts/seed-dev.mjs",
     "build:docker-artifacts": "node scripts/build-docker-artifacts.mjs",
     "simplefin:claim": "node scripts/simplefin-claim.mjs",
     "simplefin:sample": "node scripts/simplefin-fetch-sample.mjs"

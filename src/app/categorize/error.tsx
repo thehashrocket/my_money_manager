@@ -11,7 +11,7 @@ export default function CategorizeError({
   reset: () => void;
 }) {
   return (
-    <main className="mx-auto max-w-4xl p-6">
+    <main className="mx-auto max-w-4xl p-5">
       <RouteErrorCard title="Something went wrong loading the categorize queue" error={error} reset={reset} />
     </main>
   );

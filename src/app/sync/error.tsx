@@ -19,7 +19,7 @@ export default function SyncError({
   reset: () => void;
 }) {
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-4">
+    <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-4">
       <h1 className="font-display text-xl font-semibold">Sync hit an error</h1>
       <p className="text-sm text-muted-foreground">
         Nothing was imported. Your ledger is unchanged — every sync snapshots the

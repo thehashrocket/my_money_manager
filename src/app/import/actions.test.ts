@@ -5,6 +5,8 @@ import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { validateUndoImportCategorizationInput } from "@/lib/import/validateUndoImportCategorizationInput";
 import { undoImportCategorization } from "@/lib/categorize/undoImportCategorization";
+import { checkAssetAccount } from "@/lib/import/assetAccountGuard";
+import { validateCreateAccountInput } from "@/lib/import/validateCreateAccountInput";
 
 /**
  * Mirrors `updateAccountAnchorAction`'s mutation pipeline minus the Next.js
@@ -205,6 +207,100 @@ describe("undoImportCategorizationAction — validate → undo pipeline", () => 
   it("rejects a malformed batchId before undoImportCategorization would run", () => {
     const parsed = validateUndoImportCategorizationInput(
       Object.fromEntries(formData({ batchId: "not-a-number" })),
+    );
+    expect(parsed.success).toBe(false);
+  });
+});
+
+/**
+ * E6 + E18 — the two guards `uploadCsvAction` and `updateAccountAnchorAction`
+ * run before they write. The actions themselves can't be called under
+ * `:memory:` (they close over the singleton db and call redirect/
+ * revalidatePath), so these exercise the guard the actions delegate to, the
+ * same convention the anchor tests above use.
+ */
+describe("checkAssetAccount — the /import liability guards (T35)", () => {
+  function seedTyped(name: string, type: "checking" | "savings" | "credit" | "loan") {
+    const [row] = handle.db
+      .insert(schema.accounts)
+      .values({
+        name,
+        type,
+        startingBalanceCents: type === "credit" || type === "loan" ? -200_000 : 100_000,
+        startingBalanceDate: "2026-09-01",
+      })
+      .returning()
+      .all();
+    return row;
+  }
+
+  it("allows a checking account", () => {
+    const a = seedTyped("Checking", "checking");
+    expect(checkAssetAccount(a.id, handle.db)).toEqual({ ok: true, name: "Checking" });
+  });
+
+  it("allows a savings account", () => {
+    const a = seedTyped("Savings", "savings");
+    expect(checkAssetAccount(a.id, handle.db).ok).toBe(true);
+  });
+
+  it("REFUSES a credit card — F12, the silent anchor-corruption path (E6)", () => {
+    // A CSV imported here would land rows with checking sign conventions AND
+    // let deriveStartingBalance move the card's anchor off another account's
+    // running-balance chain. That move is forward-only under CLAUDE.md rule
+    // 1, so re-importing cannot undo it.
+    const visa = seedTyped("Visa", "credit");
+    const result = checkAssetAccount(visa.id, handle.db);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Visa");
+      expect(result.reason).toContain("Accounts page");
+      // DS61 register rule 2 — no schema concepts leak at the user.
+      expect(result.reason).not.toMatch(/anchor|starting balance|transfer pair/i);
+    }
+  });
+
+  it("REFUSES a loan — F18, the anchor-repair form's raw signed field (E18)", () => {
+    const mortgage = seedTyped("Mortgage", "loan");
+    expect(checkAssetAccount(mortgage.id, handle.db).ok).toBe(false);
+  });
+
+  it("refuses an account id that does not exist at all", () => {
+    const result = checkAssetAccount(9999, handle.db);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("not found");
+  });
+});
+
+describe("createAccountAction's validation chain accepts liabilities (T15)", () => {
+  it("accepts credit and loan, which the enum previously rejected", () => {
+    for (const type of ["credit", "loan"] as const) {
+      const parsed = validateCreateAccountInput(
+        Object.fromEntries(
+          formData({
+            name: "Visa",
+            type,
+            startingBalance: "2000",
+            startingBalanceDate: "2026-09-06",
+          }),
+        ),
+      );
+      expect(parsed.success).toBe(true);
+      // Stored negative. This is the assertion T15 exists for.
+      if (parsed.success) expect(parsed.data.startingBalanceCents).toBe(-200_000);
+    }
+  });
+
+  it("still rejects junk in the type field", () => {
+    const parsed = validateCreateAccountInput(
+      Object.fromEntries(
+        formData({
+          name: "X",
+          type: "brokerage",
+          startingBalance: "1",
+          startingBalanceDate: "2026-09-06",
+        }),
+      ),
     );
     expect(parsed.success).toBe(false);
   });

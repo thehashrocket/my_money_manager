@@ -77,3 +77,30 @@ describe("resolveBatchLabel", () => {
     expect(label).toBe(`CSV import — ${STAMP}`);
   });
 });
+
+describe("'manual' source (migration 0018, F7)", () => {
+  it("renders a label instead of throwing", () => {
+    // Failure mode F7. Before migration 0018 taught this switch about
+    // 'manual', the `never` exhaustiveness check at the bottom of
+    // deriveBatchLabel threw on any other value — so the first hand-entered
+    // card charge would have crashed every batch-label render in the app,
+    // including /sync's and /import/success's, neither of which has anything
+    // to do with manual entry.
+    expect(deriveBatchLabel("manual", WHEN)).toBe(`Manual entry — ${STAMP}`);
+  });
+
+  it("derives through resolveBatchLabel, since a manual batch stores no label", () => {
+    expect(resolveBatchLabel({ label: null, source: "manual", importedAt: WHEN })).toBe(
+      `Manual entry — ${STAMP}`,
+    );
+  });
+
+  it("still throws on a source that is not in the enum at all", () => {
+    // The column has no CHECK constraint, so a corrupted row is reachable and
+    // this throw is live code, not a formality.
+    expect(() =>
+      // @ts-expect-error guarding the runtime boundary, not the type
+      deriveBatchLabel("wire-transfer", WHEN),
+    ).toThrow(/unrecognized import_batches.source/);
+  });
+});

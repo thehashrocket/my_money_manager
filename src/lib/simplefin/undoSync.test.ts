@@ -33,7 +33,7 @@ function seedAccount(name = "Checking") {
   return row;
 }
 
-function seedBatch(source: "csv" | "simplefin", label: string | null) {
+function seedBatch(source: "csv" | "simplefin" | "manual", label: string | null) {
   const [row] = handle.db
     .insert(schema.importBatches)
     .values({ source, label })
@@ -46,7 +46,7 @@ function seedTxn(opts: {
   accountId: number;
   batchId: number;
   amountCents: number;
-  source?: "csv" | "simplefin";
+  source?: "csv" | "simplefin" | "manual";
   categoryId?: number | null;
   externalId?: string | null;
   rawMemo?: string;
@@ -342,5 +342,105 @@ describe("undo completeness — links a sync creates must not outlive it", () =>
       .select().from(schema.transactions)
       .where(eq(schema.transactions.id, csvLeg.id)).get();
     expect(survivor?.transferRejectedPartnerId).toBeNull();
+  });
+});
+
+/**
+ * REGRESSION R2 — IRON RULE, written before the code (T9).
+ *
+ * `isLatestBatch` compares against the newest `import_batches` row of ANY
+ * source. E21 gives every manual operation its own batch, so without a source
+ * filter, syncing and then entering one card charge makes `findLastSyncBatch`
+ * return null and the sync's undo button silently vanish.
+ *
+ * The reason undo is withheld at all is that a later IMPORT may have
+ * content-deduped against this batch's rows and skipped one, quietly relying
+ * on it being there. A hand-typed charge dedups against nothing, so it cannot
+ * create that dependency and must not revoke the undo.
+ */
+describe("REGRESSION R2 — a manual batch must not suppress a sync's undo", () => {
+  it("still offers undo when a manual batch is newer than the sync batch", () => {
+    const account = seedAccount();
+    const sync = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: sync.id, amountCents: -1200 });
+
+    // The user enters a card charge after syncing. Higher id, newer batch.
+    const manual = seedBatch("manual", null);
+    seedTxn({
+      accountId: account.id,
+      batchId: manual.id,
+      amountCents: -8000,
+      source: "manual",
+    });
+    expect(manual.id).toBeGreaterThan(sync.id);
+
+    const found = findLastSyncBatch(handle.db);
+    expect(found).not.toBeNull();
+    expect(found?.batchId).toBe(sync.id);
+  });
+
+  it("still ACTUALLY undoes, not just offers — the in-transaction re-check agrees", () => {
+    // undoSyncBatch re-runs isLatestBatch inside its own write transaction
+    // (the stale-tab guard). Both call sites have to agree, or undo is
+    // offered and then refuses.
+    const account = seedAccount();
+    const sync = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: sync.id, amountCents: -1200 });
+    const manual = seedBatch("manual", null);
+    seedTxn({
+      accountId: account.id,
+      batchId: manual.id,
+      amountCents: -8000,
+      source: "manual",
+    });
+
+    const result = undoSyncBatch(sync.id, handle.db);
+    expect(result).toEqual({ status: "undone", batchId: sync.id, deletedCount: 1 });
+
+    // The manual row is untouched — it was never part of the sync.
+    const remaining = handle.db.select().from(schema.transactions).all();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].importSource).toBe("manual");
+  });
+
+  it("still WITHHOLDS undo when a newer CSV batch exists — the real hazard", () => {
+    // The behaviour R2 must not break: a later CSV import content-dedups
+    // against this batch's rows with no source filter, so it can skip a row
+    // while relying on the sync's copy already being there.
+    const account = seedAccount();
+    const sync = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: sync.id, amountCents: -1200 });
+    seedBatch("csv", "later.csv");
+
+    expect(findLastSyncBatch(handle.db)).toBeNull();
+  });
+
+  it("still withholds undo when a newer SYNC batch exists", () => {
+    const account = seedAccount();
+    const first = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: first.id, amountCents: -1200 });
+    const second = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: second.id, amountCents: -300 });
+
+    // The newest sync batch is offered; the older one is not.
+    expect(findLastSyncBatch(handle.db)?.batchId).toBe(second.id);
+    expect(undoSyncBatch(first.id, handle.db).status).toBe("stale");
+  });
+
+  it("offers undo with several manual batches stacked on top", () => {
+    const account = seedAccount();
+    const sync = seedBatch("simplefin", null);
+    seedTxn({ accountId: account.id, batchId: sync.id, amountCents: -1200 });
+    for (let i = 0; i < 5; i += 1) {
+      const m = seedBatch("manual", null);
+      seedTxn({
+        accountId: account.id,
+        batchId: m.id,
+        amountCents: -100 * (i + 1),
+        source: "manual",
+      });
+    }
+
+    expect(findLastSyncBatch(handle.db)?.batchId).toBe(sync.id);
   });
 });

@@ -48,7 +48,7 @@ export function StateCard({
   return (
     <div
       className={cn(
-        "rounded-lg px-6 py-8 text-center shadow-soft",
+        "rounded-lg px-5 py-7 text-center shadow-soft",
         className,
       )}
       style={{ background: SURFACE[variant] }}

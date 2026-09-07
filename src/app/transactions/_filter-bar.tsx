@@ -17,6 +17,12 @@ export type TransactionsFilterValues = {
   amountMin: number | undefined;
   amountMax: number | undefined;
   pending: "posted" | "pending" | "all" | undefined;
+  /**
+   * T26/D14 — reveal transfer-paired rows. Carried here rather than in the
+   * component's own state so `filterValuesToSearchParams` stays the single
+   * place the URL is built; without that, page 2 silently drops the toggle.
+   */
+  includeTransfers: boolean | undefined;
 };
 
 /**
@@ -75,6 +81,13 @@ export function FilterBar({
           submitting any filter silently reverts to the 50-row default,
           matching Pagination's own `pageSize !== 50` rule below it. */}
       {pageSize !== 50 ? <input type="hidden" name="pageSize" value={pageSize} /> : null}
+      {/* T26/E9 — same reason as pageSize above. The "show transfers" switch
+          lives beside the result summary, not in this slab, so it has no
+          field here; without carrying it forward, submitting any filter would
+          silently turn transfers back off. */}
+      {values.includeTransfers ? (
+        <input type="hidden" name="includeTransfers" value="true" />
+      ) : null}
       <label className="col-span-2 flex flex-col gap-1 sm:col-span-4">
         <span className="text-xs text-muted-foreground">Search</span>
         <input
@@ -211,6 +224,7 @@ export function filterValuesToSearchParams(values: TransactionsFilterValues): UR
   if (values.amountMin !== undefined) params.set("amountMin", centsToDollarString(values.amountMin));
   if (values.amountMax !== undefined) params.set("amountMax", centsToDollarString(values.amountMax));
   if (values.pending !== undefined && values.pending !== "all") params.set("pending", values.pending);
+  if (values.includeTransfers) params.set("includeTransfers", "true");
   return params;
 }
 

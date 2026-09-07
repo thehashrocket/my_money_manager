@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { AmountParseError, centsToDollarString, formatCents, parseAmountToCents } from "./money";
+import {
+  AmountParseError,
+  MONEY_TONE_CLASS,
+  centsToDollarString,
+  formatCents,
+  moneyTone,
+  moneyToneClass,
+  parseAmountToCents,
+} from "./money";
 
 describe("formatCents", () => {
   it("formats positive integers with two decimals", () => {
@@ -21,8 +29,13 @@ describe("formatCents", () => {
   });
 
   it("handles large amounts", () => {
-    expect(formatCents(100_000_00)).toBe("$100000.00");
-    expect(formatCents(-100_000_00)).toBe("($100000.00)");
+    // Grouped, matching DESIGN.md's own money-display examples. The bare
+    // .toFixed(2) this replaced rendered "$100000.00", which nothing under
+    // four figures made visible — and a mortgage balance makes unreadable.
+    expect(formatCents(100_000_00)).toBe("$100,000.00");
+    expect(formatCents(-100_000_00)).toBe("($100,000.00)");
+    expect(formatCents(-30_248_011)).toBe("($302,480.11)");
+    expect(formatCents(500_000)).toBe("$5,000.00");
   });
 });
 
@@ -93,5 +106,74 @@ describe("centsToDollarString", () => {
     for (const cents of [0, 5, 50, 500, 7599, 123456]) {
       expect(parseAmountToCents(centsToDollarString(cents))).toBe(cents);
     }
+  });
+});
+
+describe("moneyTone", () => {
+  describe("asset context (the default)", () => {
+    it("reads a positive figure as positive", () => {
+      expect(moneyTone(1)).toBe("positive");
+      expect(moneyTone(200000)).toBe("positive");
+    });
+
+    it("reads a negative figure as negative — an overdrawn asset is an alarm", () => {
+      expect(moneyTone(-1)).toBe("negative");
+      expect(moneyTone(-200000)).toBe("negative");
+    });
+
+    it("reads zero as neutral, never red (DESIGN.md money rules)", () => {
+      expect(moneyTone(0)).toBe("neutral");
+    });
+
+    it("defaults to asset when no options object is passed at all", () => {
+      expect(moneyTone(-500)).toBe(moneyTone(-500, { context: "asset" }));
+    });
+  });
+
+  describe("liability context", () => {
+    it("does NOT paint a negative balance alarm-red — owing money is the normal state", () => {
+      expect(moneyTone(-200000, { context: "liability" })).toBe("plain");
+      expect(moneyTone(-1, { context: "liability" })).toBe("plain");
+      expect(MONEY_TONE_CLASS[moneyTone(-200000, { context: "liability" })]).not.toBe(
+        MONEY_TONE_CLASS.negative,
+      );
+    });
+
+    it("reads a positive balance as positive — that is a credit balance in your favour", () => {
+      expect(moneyTone(5000, { context: "liability" })).toBe("positive");
+    });
+
+    it("reads a paid-off zero as neutral", () => {
+      expect(moneyTone(0, { context: "liability" })).toBe("neutral");
+    });
+
+    it("never returns 'negative' for any input", () => {
+      for (const cents of [-1_000_000, -200000, -1, 0, 1, 200000]) {
+        expect(moneyTone(cents, { context: "liability" })).not.toBe("negative");
+      }
+    });
+  });
+
+  it("is total — every tone it returns has a class", () => {
+    for (const context of ["asset", "liability"] as const) {
+      for (const cents of [-1, 0, 1]) {
+        const tone = moneyTone(cents, { context });
+        expect(MONEY_TONE_CLASS[tone]).toBeTruthy();
+      }
+    }
+  });
+});
+
+describe("moneyToneClass", () => {
+  it("preserves the exact classes the three converted call sites emitted before D9", () => {
+    // page.tsx:53-57, page.tsx:104-108 and spine.tsx:92-95 all computed these
+    // three, so the extraction must be a no-op for asset figures.
+    expect(moneyToneClass(100)).toBe("text-money-pos");
+    expect(moneyToneClass(-100)).toBe("text-money-neg");
+    expect(moneyToneClass(0)).toBe("text-money-zero");
+  });
+
+  it("gives a liability's negative balance full-strength ink, not the muted zero token", () => {
+    expect(moneyToneClass(-200000, { context: "liability" })).toBe("text-foreground");
   });
 });

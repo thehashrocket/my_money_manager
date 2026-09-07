@@ -127,6 +127,13 @@
       "when": 1788541002733,
       "tag": "0017_category_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1788754724406,
+      "tag": "0018_liability_accounts",
+      "breakpoints": true
     }
   ]
 }

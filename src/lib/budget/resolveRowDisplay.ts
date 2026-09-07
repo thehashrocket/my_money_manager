@@ -6,7 +6,7 @@ import type { MonthPhase } from "./monthOfIso";
  * tested function. CLAUDE.md scopes tests to "categorization logic only";
  * a rule written in JSX is a rule this repo cannot test. Before this
  * function the same tone rule was written FIVE times across TWO color
- * systems (envelope-card.tsx's `resolveState`/`FILL_COLORS`, page.tsx's
+ * systems (the since-deleted envelope card's `resolveState`/`FILL_COLORS`, page.tsx's
  * `RemainingCell` text tone, and page.tsx's own desktop-table bar, which
  * used a third, raw-Tailwind palette) — this is one function, six dumb
  * renderers (3 kinds × 2 layouts).
@@ -18,6 +18,20 @@ import type { MonthPhase } from "./monthOfIso";
  */
 
 export type RowTone = "positive" | "negative" | "neutral" | "muted";
+
+/**
+ * The one `RowTone` → Tailwind class map. Lives here because this module owns
+ * `RowTone`, and because a second copy is exactly the failure this file's own
+ * docstring describes: the tone rule was written five times across two color
+ * systems before `resolveRowDisplay` existed. `_month-editor.tsx` and the
+ * dashboard's proximity list both import it.
+ */
+export const TONE_CLASS: Record<RowTone, string> = {
+  positive: "text-money-pos",
+  negative: "text-money-neg",
+  neutral: "text-money-zero",
+  muted: "text-ink-3",
+};
 export type BarTone = "ledger" | "amber" | "redbrown";
 
 export type PendingBadge = { type: "pending"; amountCents: number };

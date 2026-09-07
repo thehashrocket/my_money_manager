@@ -808,7 +808,7 @@ describe("commitImport — starting balance anchor", () => {
 
     expect(result.startingBalance).toBeNull();
     expect(result.warnings).toContain(
-      "Declined to move the starting-balance anchor: the derived balance ($200000000.00) is outside the allowed range.",
+      "Declined to move the starting-balance anchor: the derived balance ($200,000,000.00) is outside the allowed range.",
     );
     expect(account().startingBalanceCents).toBe(0);
     expect(account().startingBalanceDate).toBe("2026-01-01");

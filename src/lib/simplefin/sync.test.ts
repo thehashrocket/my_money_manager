@@ -10,6 +10,7 @@ import {
   findLinkedTransferPairs,
   linkTransfersByBucket,
   findAmbiguousTransfers,
+  refreshLiabilityBalancesOnly,
 } from "./sync";
 import { setAccountLink } from "./link";
 import { mapTransaction } from "./mapTransaction";
@@ -79,15 +80,23 @@ afterEach(() => {
   handle.close();
 });
 
-function seedAccount(opts: { simplefinAccountId?: string | null; name?: string } = {}) {
+function seedAccount(
+  opts: {
+    simplefinAccountId?: string | null;
+    name?: string;
+    type?: "checking" | "savings" | "credit" | "loan";
+    startingBalanceCents?: number;
+    startingBalanceDate?: string;
+  } = {},
+) {
   seq += 1;
   const [row] = handle.db
     .insert(schema.accounts)
     .values({
       name: opts.name ?? `Checking-${seq}`,
-      type: "checking",
-      startingBalanceCents: 0,
-      startingBalanceDate: "2026-01-01",
+      type: opts.type ?? "checking",
+      startingBalanceCents: opts.startingBalanceCents ?? 0,
+      startingBalanceDate: opts.startingBalanceDate ?? "2026-01-01",
       simplefinAccountId: opts.simplefinAccountId ?? null,
     })
     .returning()
@@ -95,7 +104,7 @@ function seedAccount(opts: { simplefinAccountId?: string | null; name?: string }
   return row;
 }
 
-function seedBatch(source: "csv" | "simplefin") {
+function seedBatch(source: "csv" | "simplefin" | "manual") {
   const [row] = handle.db
     .insert(schema.importBatches)
     .values({ source, label: `${source}.seed` })
@@ -110,7 +119,7 @@ function seedTxn(opts: {
   amountCents: number;
   rawMemo: string;
   date?: string;
-  source?: "csv" | "simplefin";
+  source?: "csv" | "simplefin" | "manual";
   externalId?: string | null;
 }) {
   seq += 1;
@@ -1074,5 +1083,914 @@ describe("syncSimpleFin — auto-categorization", () => {
       .where(eq(schema.transactions.externalId, "TRN-1"))
       .get();
     expect(audit[0].transactionId).toBe(matchedRow?.id);
+  });
+});
+
+/**
+ * E1 + E2 — the linked-account partition and the liability balance pass.
+ *
+ * D3=A ("the mortgage never gets a transaction row") was asserted in prose
+ * across four decisions and enforced by no code. These are the tests that
+ * make it a server invariant.
+ */
+describe("syncSimpleFin — liability partition and balance pass (E1/E2, T7)", () => {
+  /** The feed returns both accounts in one response, as it really does. */
+  function respondWithBoth(opts: {
+    checkingId: string;
+    checkingTxns: SimpleFinTransaction[];
+    loanId: string;
+    loanBalance: string;
+    loanBalanceDate?: number | null;
+    includeLoan?: boolean;
+  }) {
+    const accounts: SimpleFinResponse["accounts"] = [
+      {
+        id: opts.checkingId,
+        name: "REGULAR CHECKING",
+        balance: "0.00",
+        "available-balance": "0.00",
+        "balance-date": SEP_1_NOON,
+        transactions: opts.checkingTxns,
+      },
+    ];
+    if (opts.includeLoan !== false) {
+      accounts.push({
+        id: opts.loanId,
+        name: "HOME MORTGAGE",
+        balance: opts.loanBalance,
+        "available-balance": null,
+        "balance-date":
+          opts.loanBalanceDate === undefined ? SEP_1_NOON : opts.loanBalanceDate,
+        // The feed DOES send mortgage transactions. Staging them is the bug.
+        transactions: [feedTxn("LOAN-TXN-1", "-1850.00", "MORTGAGE PAYMENT")],
+      });
+    }
+    fetchAccountsMock.mockResolvedValue({ accounts } satisfies SimpleFinResponse);
+  }
+
+  it("does NOT stage a linked loan's transactions (F9)", async () => {
+    // The failure: interest, escrow and principal rows land in the categorize
+    // backlog and then in budget spend, double-counting the mortgage payment
+    // already budgeted on the checking side. And it self-disables — once the
+    // loan has rows, the zero-row-scoped balance pass skips it forever.
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK" });
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [feedTxn("CHK-1", "-12.00")],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const loanRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, loan.id))
+      .all();
+    expect(loanRows).toHaveLength(0);
+
+    const checkingRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, checking.id))
+      .all();
+    expect(checkingRows).toHaveLength(1);
+  });
+
+  it("still asks the feed for the loan — partition, not exclude (E2)", async () => {
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    // Dropping liability ids from `linked` would also drop them here, and
+    // then there would be no balance for the pass to write.
+    const [, opts] = fetchAccountsMock.mock.calls[0];
+    expect(opts.accountIds).toContain("ACT-LOAN");
+    expect(opts.accountIds).toContain("ACT-CHK");
+  });
+
+  it("moves the loan's anchor and records the prior value (D7, E19)", async () => {
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, loan.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(-30_248_011);
+    expect(after?.balanceSource).toBe("feed");
+    expect(after?.balanceAsOf).toBeInstanceOf(Date);
+    // E19 — there is no batch to hang the prior anchor on, so it goes on the
+    // account row. This is the mechanism /accounts/error.tsx reassures with.
+    expect(after?.priorStartingBalanceCents).toBe(-30_000_000);
+    expect(after?.priorStartingBalanceDate).toBe("2026-08-01");
+
+    expect(outcome.status).not.toBe("no-linked-accounts");
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.balanceUpdates).toHaveLength(1);
+      expect(outcome.balanceUpdates[0]).toMatchObject({
+        name: "Mortgage",
+        balanceCents: -30_248_011,
+        priorBalanceCents: -30_000_000,
+      });
+    }
+  });
+
+  it("writes NO transaction rows and NO import batch for the balance pass", async () => {
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    // An anchor move is not an import, and undoSyncBatch deletes rows only.
+    expect(handle.db.select().from(schema.importBatches).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("REPORTS the anchor move through the up-to-date early return (F8)", async () => {
+    // syncSimpleFin returns "up-to-date" before any write when nothing is
+    // inserted, and /sync renders that as "nothing new to import". A balance
+    // pass behind that return would mutate state while the UI denied it.
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status === "up-to-date") {
+      expect(outcome.balanceUpdates).toHaveLength(1);
+    }
+  });
+
+  it("SKIPS and warns when the provider sends no balance-date (D15)", async () => {
+    // balance-date is a nullable instant. Without one there is no defensible
+    // anchor date: today would assert a close-of-day balance for a figure
+    // that might be weeks old, and silently reset DS57's staleness clock.
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+      loanBalanceDate: null,
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, loan.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(-30_000_000);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.balanceUpdates).toHaveLength(0);
+      expect(outcome.warnings.join(" ")).toContain("no date for it");
+    }
+  });
+
+  it("warns on its own when the feed omits the liability entirely (F4)", async () => {
+    // The staging loop has this warning; a balance-only account is not in
+    // that loop, so without its own the mortgage would go completely silent.
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "0",
+      includeLoan: false,
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.warnings.join(" ")).toContain("Mortgage");
+    }
+  });
+
+  it("REFUSES to refresh a liability that has transaction rows (D15, E16)", async () => {
+    // Credit cards get manual reconcile only: balance-date is an instant, so
+    // collapsing it to a date on an account WITH rows silently drops every
+    // row later that same day out of the balance.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CARD",
+      name: "Visa",
+      type: "credit",
+      startingBalanceCents: -200_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const batch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: batch.id,
+      amountCents: -8_000,
+      rawMemo: "COSTCO",
+      source: "manual",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-CARD",
+      loanBalance: "-1580.00",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, card.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(-200_000);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.balanceUpdates).toHaveLength(0);
+      expect(outcome.warnings.join(" ")).toContain("has transactions");
+    }
+  });
+
+  it("does not report an update when the feed's balance already matches", async () => {
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_248_011,
+      startingBalanceDate: "2026-09-01",
+    });
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    respondWithBoth({
+      checkingId: "ACT-CHK",
+      checkingTxns: [],
+      loanId: "ACT-LOAN",
+      loanBalance: "-302480.11",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.balanceUpdates).toHaveLength(0);
+    }
+  });
+});
+
+describe("D11 — a manual row is never an automatic transfer-matcher candidate", () => {
+  it("does NOT auto-pair a manual card charge with an unrelated same-day deposit (F1)", () => {
+    // The concrete failure: a $250 charge on the Visa dated 09-15 and a $250
+    // reimbursement into checking on 09-15 form a balanced 1-and-1 bucket,
+    // which the counting argument auto-links WITHOUT ASKING. Neither leg has
+    // a bank_transaction_number, so the cross-source guard never fires
+    // either, and both rows silently leave every spend sum.
+    const checking = seedAccount({ name: "Checking" });
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const manual = seedBatch("manual");
+    const csv = seedBatch("csv");
+
+    const charge = seedTxn({
+      accountId: visa.id,
+      batchId: manual.id,
+      amountCents: -25_000,
+      rawMemo: "COSTCO WHOLESALE",
+      date: "2026-09-15",
+      source: "manual",
+    });
+    const reimbursement = seedTxn({
+      accountId: checking.id,
+      batchId: csv.id,
+      amountCents: 25_000,
+      rawMemo: "DEPOSIT",
+      date: "2026-09-15",
+    });
+
+    const result = linkTransfersByBucket("2026-09-01", handle.db);
+    expect(result.pairsLinked).toBe(0);
+
+    for (const id of [charge.id, reimbursement.id]) {
+      const row = handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, id))
+        .get();
+      expect(row?.transferPairId).toBeNull();
+    }
+  });
+
+  it("keeps manual rows out of the ambiguous review queue too", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const manual = seedBatch("manual");
+    const csv = seedBatch("csv");
+
+    seedTxn({
+      accountId: visa.id,
+      batchId: manual.id,
+      amountCents: -25_000,
+      rawMemo: "COSTCO",
+      date: "2026-09-15",
+      source: "manual",
+    });
+    seedTxn({
+      accountId: checking.id,
+      batchId: csv.id,
+      amountCents: 25_000,
+      rawMemo: "DEPOSIT",
+      date: "2026-09-15",
+    });
+    seedTxn({
+      accountId: checking.id,
+      batchId: csv.id,
+      amountCents: 25_000,
+      rawMemo: "DEPOSIT 2",
+      date: "2026-09-15",
+    });
+
+    expect(findAmbiguousTransfers("2026-09-01", handle.db)).toHaveLength(0);
+  });
+
+  it("still pairs two ordinary non-manual rows on the same day and amount", () => {
+    // Guard against over-filtering: the exclusion must not disturb the
+    // matcher's real job.
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const csv = seedBatch("csv");
+
+    const out = seedTxn({
+      accountId: checking.id,
+      batchId: csv.id,
+      amountCents: -25_000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-15",
+    });
+    const inn = seedTxn({
+      accountId: savings.id,
+      batchId: csv.id,
+      amountCents: 25_000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-15",
+    });
+
+    expect(linkTransfersByBucket("2026-09-01", handle.db).pairsLinked).toBe(1);
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, out.id))
+      .get();
+    expect(row?.transferPairId).toBe(inn.id);
+  });
+});
+
+describe("REGRESSION R1 — syncSimpleFin feeds resolveStartDate the ASSET partition only", () => {
+  it("does not widen the fetch window to the 45-day floor because of a zero-row loan", async () => {
+    // The end-to-end half of R1. The checking account has recent history, so
+    // the window should start a week before it. Before the partition, the
+    // mortgage's permanent null pinned every sync to the floor forever.
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK" });
+    const batch = seedBatch("simplefin");
+    seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -1_200,
+      rawMemo: "COFFEE",
+      date: "2026-09-01",
+      source: "simplefin",
+      externalId: "SEEDED-1",
+    });
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHK",
+          name: "REGULAR CHECKING",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [],
+        },
+        {
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    // 2026-09-01 minus the 7-day overlap. The 45-day floor would be
+    // 2026-07-19, and asking for that window every run re-checks six weeks of
+    // already-imported rows through content dedup on every sync.
+    const [, opts] = fetchAccountsMock.mock.calls[0];
+    const startIso = new Date(opts.startDate * 1000).toISOString().slice(0, 10);
+    expect(startIso).toBe("2026-08-25");
+    expect(startIso).not.toBe("2026-07-19");
+  });
+});
+
+/**
+ * THE SIGN, on the app's only untrusted input.
+ *
+ * This is the one anchor writer that does not route through
+ * `owedDollarsToSignedCents` — it stores whatever the provider sends, with no
+ * human in the loop. It validated range, date shape and future-dating, and
+ * never the sign. Every fixture above passes a negative or "0", so a provider
+ * reporting a balance as positive amount-owed had no coverage at all.
+ */
+describe("refreshLiabilityBalances — the sign guard (rule 9)", () => {
+  const SEP_1 = Math.floor(new Date("2026-09-01T12:00:00Z").getTime() / 1000);
+
+  function respondWithLoanBalance(balance: string, name = "HOME MORTGAGE") {
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-LIAB",
+          name,
+          balance,
+          "available-balance": null,
+          "balance-date": SEP_1,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+  }
+
+  it("REFUSES a positive balance on a loan and leaves the anchor alone", () => {
+    // A mortgage cannot be a credit balance. Writing +30,248,011 would put
+    // the debt on the asset side of net worth: `summarizeBalances` adds it to
+    // the liabilities total as a positive and `moneyTone` paints it green,
+    // leaving net worth wrong by twice the mortgage with nothing on screen to
+    // say so.
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LIAB",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWithLoanBalance("302480.11");
+
+    return syncSimpleFin({ now: NOW }, handle.db).then((outcome) => {
+      const after = handle.db
+        .select()
+        .from(schema.accounts)
+        .where(eq(schema.accounts.id, loan.id))
+        .get();
+      expect(after?.startingBalanceCents).toBe(-30_000_000);
+      expect(after?.startingBalanceDate).toBe("2026-08-01");
+      // Untouched means untouched: the undo slot is not spent either.
+      expect(after?.priorStartingBalanceCents).toBeNull();
+      // And it is not silent.
+      expect(outcome.status).not.toBe("no-linked-accounts");
+      if (outcome.status !== "no-linked-accounts") {
+        expect(outcome.warnings.join(" ")).toContain("Mortgage");
+        expect(outcome.balanceUpdates).toHaveLength(0);
+      }
+    });
+  });
+
+  it("ALLOWS a positive balance on a credit card, but says so", async () => {
+    // A card genuinely can carry a credit balance after an overpayment, and
+    // `summarizeBalances` treats one as real. Refusing here would strand a
+    // zero-row feed-linked card with no working control at all, since
+    // `resolveBalanceAction` gives it Refresh rather than Reconcile (E4).
+    const card = seedAccount({
+      simplefinAccountId: "ACT-LIAB",
+      name: "Visa",
+      type: "credit",
+      startingBalanceCents: -200_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWithLoanBalance("125.00", "VISA");
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, card.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(12_500);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.warnings.join(" ")).toContain("Visa");
+    }
+  });
+
+  it("still writes an ordinary negative balance with no warning about it", async () => {
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LIAB",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWithLoanBalance("-302480.11");
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, loan.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(-30_248_011);
+    if (outcome.status !== "no-linked-accounts") {
+      expect(outcome.warnings.join(" ")).not.toContain("Mortgage");
+    }
+  });
+});
+
+/**
+ * `/accounts`' per-row Refresh used to call `syncSimpleFin({})` — the entire
+ * import — and then report one balance, discarding `snapshot.consistent`,
+ * `response.errors`, the import counts and the ambiguous buckets. Clicking
+ * Refresh on the mortgage row imported forty checking transactions and said
+ * "Mortgage is unchanged."
+ */
+describe("refreshLiabilityBalancesOnly — the balance pass alone", () => {
+  const SEP_1 = Math.floor(new Date("2026-09-01T12:00:00Z").getTime() / 1000);
+
+  it("moves the liability anchor WITHOUT importing any transactions", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK" });
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    // The feed offers checking transactions; a balance-only refresh must not
+    // take them, and must not create a batch to hold them.
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHK",
+          name: "REGULAR CHECKING",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1,
+          transactions: [feedTxn("CHK-1", "-12.00")],
+        },
+        {
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
+          "available-balance": null,
+          "balance-date": SEP_1,
+          transactions: [feedTxn("LOAN-1", "-1850.00", "MORTGAGE PAYMENT")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await refreshLiabilityBalancesOnly({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("ok");
+    if (outcome.status === "ok") {
+      expect(outcome.updates).toHaveLength(1);
+      expect(outcome.updates[0].accountId).toBe(loan.id);
+    }
+    // The anchor moved...
+    const after = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, loan.id))
+      .get();
+    expect(after?.startingBalanceCents).toBe(-30_248_011);
+    // ...and nothing was imported, for either account.
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+    expect(handle.db.select().from(schema.importBatches).all()).toHaveLength(0);
+    expect(checking.id).toBeGreaterThan(0);
+  });
+
+  it("asks the feed for balances only, and only for the liabilities", async () => {
+    seedAccount({ simplefinAccountId: "ACT-CHK" });
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({ accounts: [] } satisfies SimpleFinResponse);
+
+    await refreshLiabilityBalancesOnly({ now: NOW }, handle.db);
+
+    const [, opts] = fetchAccountsMock.mock.calls[0];
+    expect(opts.balancesOnly).toBe(true);
+    expect(opts.accountIds).toEqual(["ACT-LOAN"]);
+  });
+
+  it("SURFACES a broken bank connection instead of reporting nothing", async () => {
+    // SimpleFIN reports a dead connection in `errors[]` on an HTTP 200.
+    // Dropping these is what `sync/actions.ts` documents as having made a dead
+    // connection render as a green "Already up to date".
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [],
+      errors: ["Connection to Star One CU failed"],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await refreshLiabilityBalancesOnly({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("ok");
+    if (outcome.status === "ok") {
+      expect(outcome.updates).toHaveLength(0);
+      // The old code matched warnings by `w.includes(account.name)`, and this
+      // string contains no local account name — so it found nothing and
+      // claimed "the bank reports the same balance".
+      expect(outcome.warnings).toContain("Connection to Star One CU failed");
+    }
+  });
+
+  it("reports no linked accounts rather than pretending success", async () => {
+    seedAccount({ simplefinAccountId: null });
+    const outcome = await refreshLiabilityBalancesOnly({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("no-linked-accounts");
+  });
+});
+
+/**
+ * `NOT_MANUAL` guards `linkTransfersByBucket` and `findAmbiguousTransfers`,
+ * and this query was missed out of it — so a hand-marked card payment showed
+ * up in `/sync`'s linked-transfer list beside a "Not a transfer" button wired
+ * to `unlinkTransferPair`. `unmarkCardPayment`'s docstring spells out what
+ * that does to a synthetic mirror: an orphan row in the categorize backlog,
+ * the card balance still inflated by the payment, no valid category, and a
+ * rejection marker blocking automatic re-pairing. None of it announced.
+ */
+describe("findLinkedTransferPairs — hand-marked card payments are not sync's business", () => {
+  it("EXCLUDES a pair whose mirror was created by hand", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const visa = seedAccount({ name: "Visa", type: "credit" });
+    const csvBatch = seedBatch("csv");
+    const manualBatch = seedBatch("manual");
+
+    const debit = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -50_000,
+      rawMemo: "PAYMENT",
+      date: "2026-09-05",
+    });
+    const mirror = seedTxn({
+      accountId: visa.id,
+      batchId: manualBatch.id,
+      amountCents: 50_000,
+      rawMemo: "PAYMENT TO VISA",
+      date: "2026-09-05",
+      source: "manual",
+    });
+    linkTransferPairManually(debit.id, mirror.id, handle.db);
+
+    // The pair genuinely exists in the ledger...
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId !== null)).toBe(true);
+
+    // ...and it does not belong on the surface that offers to un-link what
+    // THIS SYNC auto-linked. Its correct inverse is unmarkCardPayment (E12).
+    expect(findLinkedTransferPairs("2026-01-01", handle.db)).toEqual([]);
+  });
+
+  it("still lists an ordinary bank-to-bank pair", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: 20_000,
+      rawMemo: "DEPOSIT-OVERDRAFT",
+      date: "2026-09-01",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -20_000,
+      rawMemo: "WITHDRAWAL-OVERDRAFT",
+      date: "2026-09-01",
+    });
+    linkTransferPairManually(a.id, b.id, handle.db);
+
+    expect(findLinkedTransferPairs("2026-01-01", handle.db).length).toBe(1);
+  });
+});
+
+/**
+ * Second-pass fixes: the per-row Refresh must not act on, or report about,
+ * accounts other than its own, and the card credit-balance notice must not
+ * re-fire on an account that hasn't changed.
+ */
+describe("refreshLiabilityBalancesOnly — scoping and warning placement", () => {
+  const SEP_1 = Math.floor(new Date("2026-09-01T12:00:00Z").getTime() / 1000);
+
+  function seedTwoLiabilities() {
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const card = seedAccount({
+      simplefinAccountId: "ACT-VISA",
+      name: "Visa",
+      type: "credit",
+      startingBalanceCents: -200_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    return { loan, card };
+  }
+
+  it("does NOT move another liability's anchor, so its undo slot survives", async () => {
+    const { loan, card } = seedTwoLiabilities();
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
+          "available-balance": null,
+          "balance-date": SEP_1,
+          transactions: [],
+        },
+        {
+          id: "ACT-VISA",
+          name: "VISA",
+          balance: "-2148.32",
+          "available-balance": null,
+          "balance-date": SEP_1,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await refreshLiabilityBalancesOnly({ now: NOW, accountId: loan.id }, handle.db);
+
+    const visaAfter = handle.db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, card.id))
+      .get();
+    // Untouched — anchor unchanged and, critically, the single
+    // prior_starting_balance_* slot not spent on a row the user never clicked.
+    expect(visaAfter?.startingBalanceCents).toBe(-200_000);
+    expect(visaAfter?.priorStartingBalanceCents).toBeNull();
+  });
+
+  it("asks the feed only for the scoped account", async () => {
+    const { loan } = seedTwoLiabilities();
+    fetchAccountsMock.mockResolvedValue({ accounts: [] } satisfies SimpleFinResponse);
+
+    await refreshLiabilityBalancesOnly({ now: NOW, accountId: loan.id }, handle.db);
+
+    const [, opts] = fetchAccountsMock.mock.calls[0];
+    expect(opts.accountIds).toEqual(["ACT-LOAN"]);
+  });
+
+  it("does not report another account's warning", async () => {
+    const { loan } = seedTwoLiabilities();
+    // The feed returns nothing at all: unscoped, this produced a warning per
+    // liability, and the action rendered the union under one row's button.
+    fetchAccountsMock.mockResolvedValue({ accounts: [] } satisfies SimpleFinResponse);
+
+    const outcome = await refreshLiabilityBalancesOnly(
+      { now: NOW, accountId: loan.id },
+      handle.db,
+    );
+
+    expect(outcome.status).toBe("ok");
+    if (outcome.status === "ok") {
+      expect(outcome.warnings.join(" ")).not.toContain("Visa");
+      expect(outcome.warnings.join(" ")).toContain("Mortgage");
+    }
+  });
+
+  it("stops warning about a credit balance once it has settled", async () => {
+    // The notice is worth making when the balance is WRITTEN. Re-emitting it
+    // on every later refresh made a healthy overpaid card render a permanent
+    // red error, because the action treats "no update + a warning" as failure.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-VISA",
+      name: "Visa",
+      type: "credit",
+      startingBalanceCents: -200_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-VISA",
+          name: "VISA",
+          balance: "21.48",
+          "available-balance": null,
+          "balance-date": SEP_1,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const first = await refreshLiabilityBalancesOnly(
+      { now: NOW, accountId: card.id },
+      handle.db,
+    );
+    // First time: written, and announced.
+    if (first.status === "ok") {
+      expect(first.updates).toHaveLength(1);
+      expect(first.warnings.join(" ")).toContain("credit balance");
+    }
+
+    const second = await refreshLiabilityBalancesOnly(
+      { now: NOW, accountId: card.id },
+      handle.db,
+    );
+    // Second time: nothing moved, so nothing to say.
+    if (second.status === "ok") {
+      expect(second.updates).toHaveLength(0);
+      expect(second.warnings).toEqual([]);
+    }
   });
 });

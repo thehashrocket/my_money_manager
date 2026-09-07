@@ -68,6 +68,21 @@ function DropdownMenuItem({
   )
 }
 
+/**
+ * Required around `DropdownMenuLabel`: Base UI's `Menu.GroupLabel` reads
+ * `MenuGroupContext` and THROWS ("Menu group parts must be used within
+ * <Menu.Group> or <Menu.RadioGroup>") without it — which takes the whole
+ * route into its error boundary, not just the menu.
+ *
+ * Missing until the `⋯` row menu on /transactions became the first consumer
+ * of `DropdownMenuLabel` at all. `_category-menu.tsx`, this file's only other
+ * consumer, uses Trigger/Content/Item/Separator and never a label, so the
+ * gap had no way to surface.
+ */
+function DropdownMenuGroup({ ...props }: MenuPrimitive.Group.Props) {
+  return <MenuPrimitive.Group data-slot="dropdown-menu-group" {...props} />
+}
+
 function DropdownMenuLabel({ className, ...props }: MenuPrimitive.GroupLabel.Props) {
   return (
     <MenuPrimitive.GroupLabel
@@ -89,6 +104,7 @@ function DropdownMenuSeparator({ className, ...props }: MenuPrimitive.Separator.
 }
 
 export {
+  DropdownMenuGroup,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,

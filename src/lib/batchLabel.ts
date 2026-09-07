@@ -1,3 +1,5 @@
+import { schema } from "@/db";
+
 /**
  * `import_batches.label` is null for sync batches — there's no file, so
  * nothing meaningful to store. This derives the display string instead of
@@ -16,10 +18,9 @@ const STAMP_FORMAT = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-export function deriveBatchLabel(
-  source: "csv" | "simplefin",
-  importedAt: Date,
-): string {
+export type BatchSource = typeof schema.importBatches.$inferSelect["source"];
+
+export function deriveBatchLabel(source: BatchSource, importedAt: Date): string {
   // Local time, not UTC: this string is computed at render time (not stored,
   // see below), so nothing depends on the literal UTC form the way it might
   // if it were persisted — a local reading is just easier for the one user
@@ -30,6 +31,14 @@ export function deriveBatchLabel(
       return `SimpleFIN sync — ${stamp}`;
     case "csv":
       return `CSV import — ${stamp}`;
+    // Migration 0018 (D6=B). Without this case the `never` check below throws
+    // on every batch-label render the moment the first card charge exists —
+    // and `resolveBatchLabel` is called by /sync AND /import/success, so a
+    // hand-entered charge would take out two pages that have nothing to do
+    // with it. E21: one batch per manual operation, so this label describes a
+    // single entry, not a running drawer of them.
+    case "manual":
+      return `Manual entry — ${stamp}`;
     default: {
       const unreachable: never = source;
       throw new Error(`deriveBatchLabel: unrecognized import_batches.source ${JSON.stringify(unreachable)}`);
@@ -49,7 +58,7 @@ export function deriveBatchLabel(
  */
 export function resolveBatchLabel(batch: {
   label: string | null;
-  source: "csv" | "simplefin";
+  source: BatchSource;
   importedAt: Date;
 }): string {
   return batch.label && batch.label.trim() !== ""

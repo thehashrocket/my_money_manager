@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { loadMonthView, type FundRow, type IncomeLeafRow, type MonthViewSummary } from "@/lib/budget/loadMonthView";
 import { monthPhase, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
-import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
+import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { SummaryStrip, type SummaryStripCell } from "@/components/ledger/summary-strip";
@@ -169,7 +169,7 @@ export default async function BudgetMonthPage({
   const { year, month } = parsed.data;
   const view = loadMonthView(db, year, month);
   const phase = monthPhase(year, month);
-  const accounts = loadAccountBalances(db);
+  const accounts = loadAccountBalancesForRequest();
   const railTotalCents = accounts.reduce((sum, a) => sum + a.balanceCents, 0);
 
   // D14A layer 1 / DS22: total failure when NO category is kind='income' —
@@ -196,7 +196,7 @@ export default async function BudgetMonthPage({
   const priorMonthHasAllocations = hasAnyAllocations(db, prior.year, prior.month);
 
   return (
-    <main className="mx-auto max-w-5xl space-y-7 p-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-5xl space-y-7 p-5 [font-variant-numeric:tabular-nums]">
       {view.uncategorizedBacklog.count > 0 ? (
         <BacklogBanner backlog={view.uncategorizedBacklog} variant="budget" />
       ) : null}

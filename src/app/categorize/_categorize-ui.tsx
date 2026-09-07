@@ -69,7 +69,7 @@ function BacklogHeader({
   return (
     <div
       aria-live="polite"
-      className="sticky top-0 z-10 -mx-6 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-6 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100"
+      className="sticky top-0 z-10 -mx-5 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-5 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100"
     >
       <span>
         Backlog: <strong>{count}</strong> transaction{count === 1 ? "" : "s"} —{" "}
@@ -83,7 +83,7 @@ function BacklogHeader({
 
 function AllCaughtUp() {
   return (
-    <div className="rounded-md border border-border bg-card px-6 py-12 text-center">
+    <div className="rounded-md border border-border bg-card px-5 py-10 text-center">
       <div className="text-3xl">✓</div>
       <h2 className="mt-2 text-lg font-semibold">All caught up.</h2>
       <p className="mt-1 text-sm text-muted-foreground">

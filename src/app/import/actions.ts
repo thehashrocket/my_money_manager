@@ -12,11 +12,13 @@ import {
   readPendingImport,
   savePendingImport,
 } from "@/lib/pendingImport";
+import { checkAssetAccount } from "@/lib/import/assetAccountGuard";
 import { validateCreateAccountInput } from "@/lib/import/validateCreateAccountInput";
 import { validateImportIdInput } from "@/lib/import/validateImportIdInput";
 import { validateUndoImportCategorizationInput } from "@/lib/import/validateUndoImportCategorizationInput";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { validateUploadCsvInput } from "@/lib/import/validateUploadCsvInput";
+import type { CreateAccountField, CreateAccountState } from "./action-state";
 
 function rejectionMessage(error: ZodError): string {
   return error.issues
@@ -24,24 +26,68 @@ function rejectionMessage(error: ZodError): string {
     .join("; ");
 }
 
-export async function createAccountAction(formData: FormData): Promise<void> {
+/**
+ * Returns its outcome as state; it does NOT throw and does NOT redirect.
+ *
+ * A thrown Server Action unmounts the route into `import/error.tsx`'s generic
+ * card, so every DS61 message written for this form ("Enter what you owe as a
+ * positive number.") was replaced by "Something went wrong loading the import
+ * page" — and the whole form, the longest in the app, was wiped. `/accounts`
+ * made this call under T28/E20 for the same reason; this brings the account
+ * form to the same contract.
+ *
+ * The redirect is gone with it: it pointed at `/import`, the page the form is
+ * already on, so its only real effect was clearing the fields. `revalidatePath`
+ * refreshes the account list in place and the success message names what was
+ * created.
+ */
+export async function createAccountAction(
+  _prev: CreateAccountState,
+  formData: FormData,
+): Promise<CreateAccountState> {
   const parsed = validateCreateAccountInput(Object.fromEntries(formData));
   if (!parsed.success) {
-    throw new Error(`Invalid account input — ${rejectionMessage(parsed.error)}`);
+    const issue = parsed.error.issues[0];
+    const field = issue?.path[0];
+    return {
+      status: "error",
+      // The zod message itself, not a rewrite of it. Every message on this
+      // schema was written to DS61's register already — stating the
+      // consequence, naming no schema concept — so surfacing it directly is
+      // what makes that work visible instead of discarding it.
+      message: issue?.message ?? rejectionMessage(parsed.error),
+      field: typeof field === "string" ? (field as CreateAccountField) : undefined,
+    };
   }
-  const { name, type, startingBalance, startingBalanceDate } = parsed.data;
+  const {
+    name,
+    type,
+    startingBalanceCents,
+    startingBalanceDate,
+    creditLimitCents,
+    minimumPaymentCents,
+  } = parsed.data;
 
   db.insert(schema.accounts)
     .values({
       name,
       type,
-      startingBalanceCents: Math.round(startingBalance * 100),
+      // Already signed by validateCreateAccountInput — a liability's
+      // "Balance owed" was negated there, in the one place that decides an
+      // account's opening sign (DS64). Do not re-derive it here.
+      startingBalanceCents,
       startingBalanceDate,
+      creditLimitCents,
+      minimumPaymentCents,
+      // E4 — a hand-typed opening balance IS a manual reconcile, and DS57's
+      // 35-day clock is the right one to start. Leaving this NULL is what
+      // made every new card render with neither Refresh nor Reconcile.
+      balanceSource: "manual",
     })
     .run();
 
   revalidatePath("/import");
-  redirect("/import");
+  return { status: "ok", message: `${name} added.` };
 }
 
 /**
@@ -68,6 +114,22 @@ export async function updateAccountAnchorAction(
   }
   const { accountId, startingBalance, startingBalanceDate } = parsed.data;
 
+  // E18. This form is the raw signed twin of /accounts' Reconcile: it takes a
+  // signed balance with no relabelling and no negation, so offering it a Visa
+  // reintroduces the exact ledger-corruption path T15 was raised to P1 to
+  // close, in the second form on the same page. Liabilities get exactly one
+  // anchor surface and it is /accounts.
+  const target = checkAssetAccount(accountId);
+  if (!target.ok) throw new Error(target.reason);
+
+  // Deliberately does NOT record a prior anchor.
+  //
+  // The prior-anchor columns exist to feed `revertLiabilityBalanceAction`,
+  // which refuses anything that is not a liability, and the Undo control is
+  // gated on `isLiability` too. This path is asset-only (`checkAssetAccount`
+  // above), so a prior anchor written here could never be read by anything —
+  // and this repo already has a documented habit of shipping data and code
+  // that nothing reaches. If assets ever get their own Undo, write it then.
   const result = db
     .update(schema.accounts)
     .set({
@@ -96,6 +158,13 @@ export async function uploadCsvAction(formData: FormData): Promise<void> {
     throw new Error(`Invalid upload — ${rejectionMessage(parsed.error)}`);
   }
   const { accountId, file } = parsed.data;
+
+  // E6. The picker is filtered to assets, but a stale tab rendered before the
+  // card existed still posts, and this is where a CSV import would otherwise
+  // move a credit card's anchor off another account's balance chain —
+  // forward-only, and therefore not undoable by re-importing.
+  const target = checkAssetAccount(accountId);
+  if (!target.ok) throw new Error(target.reason);
 
   const csv = await file.text();
   const pending = savePendingImport({

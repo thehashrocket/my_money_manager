@@ -21,9 +21,54 @@ export const accounts = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     name: text("name").notNull(),
-    type: text("type", { enum: ["checking", "savings"] }).notNull(),
+    // `credit` and `loan` were added by migration 0018. There is no CHECK
+    // constraint on this column anywhere in drizzle/ — the enum is a
+    // TypeScript-level fiction — so widening it needed no SQL. Read the
+    // asset/liability split through `accountClass(type)`, never by comparing
+    // the string here: a derived function can't disagree with itself the way
+    // a second stored column could (failure mode F6).
+    type: text("type", { enum: ["checking", "savings", "credit", "loan"] }).notNull(),
+    // A LIABILITY'S BALANCE IS STORED NEGATIVE. Owing $2,000 on a card is
+    // -200000. A charge is negative, a payment is positive. Not a style
+    // choice: it keeps rule 1's balance sum, rule 4's transfer-pair
+    // definition, every `transfer_pair_id IS NULL` spend filter and
+    // formatCents' accounting parens all working unchanged.
     startingBalanceCents: integer("starting_balance_cents").notNull(),
     startingBalanceDate: text("starting_balance_date").notNull(),
+    // Optional, credit cards only (D2=A): drives the utilization bar via
+    // resolveUtilizationDisplay. NULL means "no utilization to show" and is
+    // the normal state for a loan — but it must NOT be what decides the
+    // muted long-term treatment, or a card added without a limit renders as
+    // a mortgage (E7). That reads `isLongTermLiability(type)` instead.
+    creditLimitCents: integer("credit_limit_cents"),
+    // Static reference data you type once. Explicitly NOT tracked, not
+    // reconciled, and never compared against payments actually made — that
+    // distinction is why it dodges the "minimum-payment tracking is not V1"
+    // exclusion rather than violating it. Cards only, per D2=A.
+    minimumPaymentCents: integer("minimum_payment_cents"),
+    // THE PROVIDER'S OWN `balance-date`, NOT when we fetched it (D15).
+    // classifyBalanceFreshness exists precisely because a successful fetch
+    // can still serve a stale provider snapshot; storing fetch time here
+    // would mark a frozen balance as fresh. NULL after a manual reconcile —
+    // resolveStalenessDisplay falls back to startingBalanceDate.
+    balanceAsOf: integer("balance_as_of", { mode: "timestamp" }),
+    // Which path last moved this account's anchor. HISTORY, not capability:
+    // it feeds DS57's staleness threshold only (7 days for `feed`, 35 for
+    // `manual`). What a row can DO is derived by resolveBalanceAction from
+    // the feed link plus hasAnyTransactionRows, because asking one column
+    // both questions left every freshly created card able to do neither (E4).
+    // Set to 'manual' at account creation: a hand-typed balance owed IS a
+    // manual reconcile, and 35 days is the right clock to start.
+    balanceSource: text("balance_source", { enum: ["feed", "manual"] }),
+    // The anchor immediately before the most recent move, same idea as
+    // import_batches.prior_starting_balance_* but account-scoped: /sync's
+    // liability balance pass and /accounts' Reconcile both move an anchor
+    // with no import batch to hang the prior value on (D7, E19). This is
+    // also the real mechanism /accounts/error.tsx reassures the user with —
+    // no snapshot is taken for an anchor write, and claiming one would be a
+    // false reassurance shown at the moment something broke.
+    priorStartingBalanceCents: integer("prior_starting_balance_cents"),
+    priorStartingBalanceDate: text("prior_starting_balance_date"),
     // SimpleFIN's opaque account id (e.g. "ACT-d326a3ba-..."). NULL means this
     // account is CSV-only and sync skips it — that is how the mortgage account
     // the feed also returns stays out of a checking/savings-only app.
@@ -100,7 +145,12 @@ export const categoryRules = sqliteTable(
 
 export const importBatches = sqliteTable("import_batches", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  source: text("source", { enum: ["csv", "simplefin"] }).notNull(),
+  // `manual` added by migration 0018 (D6=B). One batch per manual operation,
+  // never one reused forever: every other column on this table is scoped to a
+  // single atomic write, and reuse would freeze importedAt and permanently
+  // falsify four of them (E21). deriveBatchLabel must handle it or every
+  // batch-label render throws.
+  source: text("source", { enum: ["csv", "simplefin", "manual"] }).notNull(),
   // The real uploaded filename for a CSV batch. Null for a sync batch — there
   // is no file, so display code derives a label from `source` + `importedAt`
   // instead of a synthetic string stored here (see deriveBatchLabel).
@@ -181,7 +231,13 @@ export const transactions = sqliteTable(
     categoryId: integer("category_id").references(() => categories.id, {
       onDelete: "set null",
     }),
-    importSource: text("import_source", { enum: ["csv", "simplefin"] }).notNull(),
+    // `manual` added by migration 0018 — a hand-entered card charge, refund,
+    // or payment mirror. Excluded from the automatic transfer matcher's
+    // candidacy (D11): a manual row carries no bank_transaction_number, so
+    // the cross-source guard never fires for it, and a $250 charge plus an
+    // unrelated same-day $250 deposit is a balanced 1-and-1 bucket the
+    // counting argument would auto-link without asking.
+    importSource: text("import_source", { enum: ["csv", "simplefin", "manual"] }).notNull(),
     importBatchId: integer("import_batch_id")
       .notNull()
       .references(() => importBatches.id, { onDelete: "restrict" }),

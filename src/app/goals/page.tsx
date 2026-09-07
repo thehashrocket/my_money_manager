@@ -10,7 +10,7 @@ export default async function GoalsPage() {
   const view = loadGoals(db);
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-8 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-3xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       <div className="space-y-1">
         <h1 className="font-display text-xl font-semibold">Savings Goals</h1>
         {/* DS11(i): the subhead used to be the exact claim ("track

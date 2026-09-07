@@ -3,7 +3,7 @@ import { connection } from "next/server";
 import { z } from "zod";
 import { db } from "@/db";
 import { listLeafCategories, type LeafCategory } from "@/lib/categories";
-import { listAccounts, type AccountOption } from "@/lib/accounts/listAccounts";
+import { listAccounts, listCardAccounts, type AccountOption } from "@/lib/accounts/listAccounts";
 import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 import { loadTransactions } from "@/lib/categorize/loadTransactions";
 import { AmountParseError, centsToDollarString, parseAmountToCents } from "@/lib/money";
@@ -60,6 +60,9 @@ const searchParamsSchema = z.object({
   amountMin: amountSchema,
   amountMax: amountSchema,
   pending: z.enum(["posted", "pending", "all"]).optional(),
+  // Only ever emitted as the literal "true" by filterValuesToSearchParams;
+  // `.strict()` above means anything else 404s rather than being ignored.
+  includeTransfers: z.literal("true").optional().transform((v) => v === "true"),
   search: z
     .string()
     .max(MAX_SEARCH_LENGTH)
@@ -84,8 +87,17 @@ export default async function TransactionsPage({
   const parsed = searchParamsSchema.safeParse(flatten(raw));
   if (!parsed.success) notFound();
 
-  const { categoryId, accountId, dateFrom, dateTo, amountMin, amountMax, pending, search } =
-    parsed.data;
+  const {
+    categoryId,
+    accountId,
+    dateFrom,
+    dateTo,
+    amountMin,
+    amountMax,
+    pending,
+    search,
+    includeTransfers,
+  } = parsed.data;
   if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) notFound();
   if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) notFound();
 
@@ -103,6 +115,7 @@ export default async function TransactionsPage({
     amountMaxCents: amountMax,
     isPending,
     search,
+    includeTransfers,
     page,
     pageSize,
   });
@@ -116,6 +129,7 @@ export default async function TransactionsPage({
   const leafCategories = listLeafCategories(db);
   const allCategoriesForLabels = listLeafCategories(db, { includeArchived: true });
   const accounts = listAccounts(db);
+  const cardAccounts = listCardAccounts(db);
   // E5: unscoped (all-time), matching this page's existing behavior — only
   // /budget's own banner is month-scoped (X4).
   const uncategorizedBacklog = loadUncategorizedBacklog(db);
@@ -133,10 +147,11 @@ export default async function TransactionsPage({
     amountMin,
     amountMax,
     pending,
+    includeTransfers,
   };
 
   return (
-    <main className="mx-auto max-w-5xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-5xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       <header className="space-y-2">
         <h1 className="font-display text-[var(--text-3xl)] leading-none tracking-[-0.015em]">
           Transactions
@@ -167,6 +182,7 @@ export default async function TransactionsPage({
         totalCount={totalCount}
         totalPages={totalPages}
         searchParams={filterValues}
+        cardAccounts={cardAccounts}
       />
     </main>
   );
