@@ -6,10 +6,12 @@ import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
 import { paidDownCents } from "@/lib/accounts/paidDownCents";
 import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
+import { listLeafCategories } from "@/lib/categories";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import { currentMonth, todayIso } from "@/lib/now";
 import { StateCard } from "@/components/ledger/state-card";
 import { AccountRow, SubtotalRow, type AccountRowData } from "./_account-row";
+import type { LeafCategory } from "@/lib/categories";
 
 export default async function AccountsPage() {
   // Same reason as /import and the Spine: without this Next 16 prerenders the
@@ -19,6 +21,9 @@ export default async function AccountsPage() {
   const { year, month } = currentMonth();
   const today = todayIso();
 
+  // DS67's dialog requires a category, so the picker's options come with the
+  // page rather than through a second round trip.
+  const categories = listLeafCategories(db);
   const balances = loadAccountBalances(db);
   const rows: AccountRowData[] = balances.map((b) => ({
     ...b,
@@ -109,6 +114,7 @@ export default async function AccountsPage() {
                 key={a.id}
                 account={a}
                 today={today}
+                categories={categories}
                 showLongTermHeading={i === firstLongTermIndex}
               />
             ))
@@ -164,21 +170,23 @@ export default async function AccountsPage() {
 function LiabilityListItem({
   account,
   today,
+  categories,
   showLongTermHeading,
 }: {
   account: AccountRowData;
   today: string;
+  categories: LeafCategory[];
   showLongTermHeading: boolean;
 }) {
   if (!showLongTermHeading) {
-    return <AccountRow account={account} today={today} />;
+    return <AccountRow account={account} today={today} categories={categories} />;
   }
   return (
     <>
       <li className="px-4 pt-3 sm:px-5">
         <h3 className="font-mono text-xs uppercase tracking-wide text-ink-3">Long-term</h3>
       </li>
-      <AccountRow account={account} today={today} />
+      <AccountRow account={account} today={today} categories={categories} />
     </>
   );
 }

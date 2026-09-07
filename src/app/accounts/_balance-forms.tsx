@@ -3,12 +3,8 @@
 import { useActionState, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
-import {
-  IDLE,
-  refreshLiabilityBalanceAction,
-  updateLiabilityBalanceAction,
-  type AccountsActionState,
-} from "./actions";
+import { IDLE, type AccountsActionState } from "./action-state";
+import { refreshLiabilityBalanceAction, updateLiabilityBalanceAction } from "./actions";
 
 /**
  * The two per-row balance controls. Separate components rather than one with
@@ -99,7 +95,12 @@ export function ReconcileForm({
   }, [autoFocus]);
 
   return (
-    <form action={formAction} className="mt-2 flex flex-wrap items-end gap-3">
+    <form
+      action={formAction}
+      /* `w-full` so the expanded form claims its own row inside CardControls'
+         wrapping flex container rather than sitting beside "Add a charge". */
+      className="mt-2 flex w-full flex-wrap items-end gap-3"
+    >
       <input type="hidden" name="accountId" value={accountId} />
       <div>
         <label

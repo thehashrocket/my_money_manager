@@ -6,6 +6,12 @@ import { db, schema } from "@/db";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
 import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
+import {
+  createCardActivity,
+  markAsCardPayment,
+  unmarkCardPayment,
+} from "@/lib/accounts/manualTransaction";
+import type { AccountsActionState, CardActivityState } from "./action-state";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { formatCents } from "@/lib/money";
 import { syncSimpleFin } from "@/lib/simplefin/sync";
@@ -28,13 +34,6 @@ import { syncSimpleFin } from "@/lib/simplefin/sync";
  * instead, and CLAUDE.md already wrote the rationale for it: "a throw would
  * take out the undo button and the balance check along with the page."
  */
-export type AccountsActionState =
-  | { status: "idle" }
-  | { status: "ok"; message: string }
-  | { status: "error"; message: string; field?: "balance" | "date" };
-
-export const IDLE: AccountsActionState = { status: "idle" };
-
 function fail(message: string, field?: "balance" | "date"): AccountsActionState {
   return { status: "error", message, field };
 }
@@ -187,5 +186,110 @@ export async function refreshLiabilityBalanceAction(
       : { status: "ok", message: `${account.name} is unchanged — the bank reports the same balance.` };
   } catch (err) {
     return fail(toMessage(err));
+  }
+}
+
+/**
+ * D10 path 2 (DS67) — a hand-entered charge or refund on a card.
+ *
+ * Carries `reason` through to the client, because DS56's "Reconcile instead →"
+ * recovery must only appear for the D12 before-anchor refusal — offering it
+ * after "enter an amount greater than zero" would be noise.
+ */
+export async function addCardActivityAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    const raw = Object.fromEntries(formData);
+    const accountId = Number(raw.accountId);
+    const categoryId = Number(raw.categoryId);
+    const amount = Number(raw.amount);
+    const kind = raw.kind === "refund" ? "refund" : "charge";
+
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      return { status: "error", message: "That account no longer exists." };
+    }
+    if (!Number.isInteger(categoryId) || categoryId <= 0) {
+      // D13=B depends on this: an uncategorized charge lands in the backlog
+      // instead of in an envelope, and card spending stops being visible to
+      // the budget for that row.
+      return { status: "error", message: "Pick a category for this charge." };
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { status: "error", message: "Enter an amount greater than zero." };
+    }
+
+    const result = createCardActivity(
+      {
+        kind,
+        accountId,
+        date: String(raw.date ?? ""),
+        amountCents: Math.round(amount * 100),
+        merchant: String(raw.merchant ?? ""),
+        categoryId,
+      },
+      db,
+    );
+
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+
+    revalidateBalanceSurfaces();
+    // A charge changes an envelope's spend, so the month view has to go too.
+    revalidatePath("/budget/[year]/[month]", "page");
+    return { status: "ok", message: result.message };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
+  }
+}
+
+/** D10 path 1 — mark an existing debit as a payment to a card. */
+export async function markAsCardPaymentAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    const transactionId = Number(formData.get("transactionId"));
+    const cardAccountId = Number(formData.get("cardAccountId"));
+    if (!Number.isInteger(transactionId) || !Number.isInteger(cardAccountId)) {
+      return { status: "error", message: "That transaction no longer exists." };
+    }
+
+    const result = markAsCardPayment({ transactionId, cardAccountId }, db);
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+    revalidateBalanceSurfaces();
+    revalidatePath("/budget/[year]/[month]", "page");
+    return { status: "ok", message: result.message };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
+  }
+}
+
+/**
+ * E12 — the inverse of the above, and the operation DS61 string 16's 10-second
+ * Undo performs. NOT `unlinkTransferPair`: see `unmarkCardPayment`.
+ */
+export async function unmarkCardPaymentAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    const transactionId = Number(formData.get("transactionId"));
+    if (!Number.isInteger(transactionId)) {
+      return { status: "error", message: "That transaction no longer exists." };
+    }
+    const result = unmarkCardPayment({ transactionId }, db);
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+    revalidateBalanceSurfaces();
+    revalidatePath("/budget/[year]/[month]", "page");
+    return { status: "ok", message: result.message };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
   }
 }

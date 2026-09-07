@@ -4,6 +4,7 @@ import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { accountClass } from "./accountClass";
 import { isLongTermLiability } from "./isLongTermLiability";
 import { loadAccountBalances } from "./loadAccountBalances";
+import { formatMonthDay } from "./resolveStalenessDisplay";
 import { normalizeMerchant } from "@/lib/normalize";
 import { formatCents } from "@/lib/money";
 
@@ -190,7 +191,7 @@ export function createCardActivity(
         // DS61 #12. States the consequence, names no schema concept, and the
         // caller pairs it with "Reconcile instead →" — which is genuinely the
         // right fix, since a fresh reconcile already includes this charge.
-        `This is dated before your last reconcile (${account.startingBalanceDate}), so it wouldn't count toward the balance.`,
+        `This is dated before your last reconcile (${formatMonthDay(account.startingBalanceDate)}), so it wouldn't count toward the balance.`,
         input.accountId,
       );
     }

@@ -121,6 +121,9 @@ describe("createCardActivity — charges", () => {
       // DS56 needs the account id to open the right row's reconcile form.
       expect(result.accountId).toBe(visa.id);
       expect(result.message).toContain("wouldn't count toward the balance");
+      // A human date, not a raw ISO string, inside a user-facing sentence.
+      expect(result.message).toContain("Sep 20");
+      expect(result.message).not.toContain("2026-09-20");
     }
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
   });

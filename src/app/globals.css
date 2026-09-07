@@ -681,31 +681,6 @@
 }
 
 /* ============================================================
-   Envelope card — the signature component.
-   Defined in CSS because the folded-flap ::before pseudo
-   is non-trivial to express as Tailwind utilities.
-   ============================================================ */
-.envelope {
-  position: relative;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 16px 18px 14px;
-  overflow: hidden;
-}
-.envelope::before {
-  content: "";
-  position: absolute;
-  top: -22px;
-  right: -22px;
-  width: 60px;
-  height: 60px;
-  background: var(--bg-inset);
-  transform: rotate(45deg);
-  border-bottom: 1px solid var(--border);
-}
-
-/* ============================================================
    Base layer
    ============================================================ */
 @layer base {

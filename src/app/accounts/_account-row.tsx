@@ -7,7 +7,9 @@ import {
 } from "@/lib/accounts/resolveStalenessDisplay";
 import { resolveUtilizationDisplay } from "@/lib/accounts/resolveUtilizationDisplay";
 import { formatCents, moneyToneClass } from "@/lib/money";
-import { ReconcileDisclosure, RefreshButton } from "./_balance-forms";
+import type { LeafCategory } from "@/lib/categories";
+import { RefreshButton } from "./_balance-forms";
+import { CardControls } from "./_card-controls";
 
 /**
  * One ruled row in the ASSETS or LIABILITIES list.
@@ -34,11 +36,11 @@ export type AccountRowData = AccountBalance & {
 export function AccountRow({
   account,
   today,
-  focusReconcile = false,
+  categories = [],
 }: {
   account: AccountRowData;
   today: string;
-  focusReconcile?: boolean;
+  categories?: LeafCategory[];
 }) {
   const isLiability = account.class === "liability";
   const longTerm = isLongTermLiability(account.type);
@@ -129,14 +131,17 @@ export function AccountRow({
         </p>
       ) : null}
 
-      {/* DS55 — exactly one of these, never both, never neither. */}
+      {/* DS55 — exactly one balance control, never both, never neither.
+          `CardControls` also owns DS56's handoff: the charge dialog's
+          before-anchor refusal opens the reconcile form focused, which needs
+          both to share client state. */}
       {isLiability && !longTerm && action === "reconcile" ? (
-        <ReconcileDisclosure
+        <CardControls
           accountId={account.id}
           accountName={account.name}
           balanceCents={account.balanceCents}
           today={today}
-          startOpen={focusReconcile}
+          categories={categories}
         />
       ) : null}
       {isLiability && action === "refresh" ? (
