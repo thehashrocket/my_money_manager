@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
+import { isCreditCard } from "@/lib/accounts/isCreditCard";
 import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
 import {
   createCardActivity,
@@ -20,7 +21,7 @@ import {
 } from "@/lib/import/accountAnchorFields";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
-import { syncSimpleFin } from "@/lib/simplefin/sync";
+import { refreshLiabilityBalancesOnly } from "@/lib/simplefin/sync";
 
 /**
  * T28 / E20 — EVERY ACTION ON THIS ROUTE RETURNS ITS OUTCOME AS STATE AND
@@ -124,6 +125,33 @@ export async function updateLiabilityBalanceAction(
     // negated signed figure the validator bounds-checked, so re-derive the
     // owed magnitude to hand the helper the positive number it expects.
     const cents = owedDollarsToSignedCents(-startingBalance);
+
+    // NOTHING MOVED, SO DON'T SPEND THE UNDO ON IT.
+    //
+    // `prior_starting_balance_*` holds exactly one step of history (rule 9),
+    // and the write below overwrites it unconditionally — so a save that
+    // changes nothing used to destroy the real previous anchor and leave the
+    // row offering "Undo — back to <today>", restoring the number already on
+    // screen.
+    //
+    // SCOPE, precisely: this fires when the balance AND the date both match,
+    // which is a double-submit, a stale resubmit, or a same-day re-save. It
+    // does NOT fire on the open-look-Save flow when the account was last
+    // anchored on an earlier date, because the form defaults `asOf` to today
+    // and re-dating the same figure is a genuine assertion — "I confirm I
+    // still owe this, as of today" — which moves the anchor under rule 1's
+    // strict `>` and legitimately earns a prior-anchor record.
+    //
+    // The feed's balance pass has had this guard from the start
+    // (`refreshLiabilityBalances`: "Nothing moved; do not manufacture a
+    // report."). This is the same check on the hand-entered path.
+    if (
+      cents === account.startingBalanceCents &&
+      startingBalanceDate === account.startingBalanceDate
+    ) {
+      return { status: "ok", message: `${account.name} is unchanged.` };
+    }
+
     db.update(schema.accounts)
       .set({
         startingBalanceCents: cents,
@@ -269,18 +297,29 @@ export async function updateCardTermsAction(
       .where(eq(schema.accounts.id, accountId))
       .get();
     if (!account) return fail("That account no longer exists.");
-    if (account.type !== "credit") {
+    if (!isCreditCard(account.type)) {
       return fail(`${account.name} is not a credit card.`);
     }
 
-    db.update(schema.accounts)
-      .set({
-        creditLimitCents: parsed.data.creditLimitCents,
-        minimumPaymentCents: parsed.data.minimumPaymentCents,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.accounts.id, accountId))
-      .run();
+    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears.
+    //
+    // `optionalPositiveDollarsSchema` is `.nullish()`, so a field missing from
+    // the request parsed to `null` exactly like an emptied one — making this
+    // endpoint destructive by omission. A POST carrying only `accountId` and
+    // `creditLimit` silently NULLed the minimum payment.
+    //
+    // Empty-clears is deliberate and documented ("I no longer want a limit
+    // recorded" has to be expressible). Absent-clears was an accident of the
+    // same schema serving both, and it is the same absent-vs-zero distinction
+    // rule 9 insists on one field over. The form always posts both, so this
+    // only ever fires for a hand-made request.
+    const patch: Partial<typeof schema.accounts.$inferInsert> = { updatedAt: new Date() };
+    if (raw.creditLimit !== undefined) patch.creditLimitCents = parsed.data.creditLimitCents;
+    if (raw.minimumPayment !== undefined) {
+      patch.minimumPaymentCents = parsed.data.minimumPaymentCents;
+    }
+
+    db.update(schema.accounts).set(patch).where(eq(schema.accounts.id, accountId)).run();
 
     revalidateBalanceSurfaces();
     return { status: "ok", message: `Updated ${account.name}'s card details.` };
@@ -312,6 +351,16 @@ export async function refreshLiabilityBalanceAction(
       .where(eq(schema.accounts.id, accountId))
       .get();
     if (!account) return fail("That account no longer exists.");
+    // Server-side, not merely by where the button renders — the same argument
+    // `assetAccountGuard` and `requireCardAccount` make. `resolveBalanceAction`
+    // answers "refresh" for ANY zero-row feed-linked account, assets included,
+    // but the balance pass only ever considers liabilities. Without this, a
+    // posted checking-account id sails past the gate below, finds no update
+    // and no warning, and gets told "unchanged — the bank reports the same
+    // balance" about an account the pass never looked at.
+    if (accountClass(account.type) !== "liability") {
+      return fail(`${account.name} is not a credit card or loan.`);
+    }
 
     if (resolveBalanceAction(account, hasAnyTransactionRows(accountId, db)) !== "refresh") {
       // Reachable from a stale tab: the row rendered with Refresh, then the
@@ -320,27 +369,50 @@ export async function refreshLiabilityBalanceAction(
       return fail(`${account.name} has activity of its own now, so update it with Reconcile.`);
     }
 
-    // The balance pass lives inside syncSimpleFin so there is exactly one
-    // implementation of "what does the feed say this is worth" — including
-    // its bounds checks, its missing-balance-date refusal, and its prior-
-    // anchor bookkeeping. This button just runs a sync.
-    const outcome = await syncSimpleFin({}, db);
+    // The BALANCE PASS ONLY. This used to call `syncSimpleFin({})` — the
+    // entire import — so one click on the mortgage row pulled 45 days of
+    // checking transactions, wrote a snapshot and an undoable batch, ran
+    // auto-categorization and the transfer matcher, and then reported a single
+    // balance. `refreshLiabilityBalancesOnly` shares the same anchor-writing
+    // code (its bounds checks, its missing-date refusal, its sign guard and
+    // its prior-anchor bookkeeping), so there is still exactly one
+    // implementation of "what does the feed say this is worth".
+    // Scoped to THIS account. Left unscoped, a per-row button moved every
+    // feed-linked zero-row liability's anchor — spending each one's single
+    // undo slot — and `outcome.warnings` became the union across all of them,
+    // so refreshing the mortgage could render a warning about the Visa in red
+    // under the mortgage's own button.
+    const outcome = await refreshLiabilityBalancesOnly({ accountId }, db);
     revalidateBalanceSurfaces();
 
     if (outcome.status === "no-linked-accounts") {
       return fail("No accounts are linked to SimpleFIN yet.");
     }
-    const update = outcome.balanceUpdates.find((u) => u.accountId === accountId);
+
+    const update = outcome.updates.find((u) => u.accountId === accountId);
     if (update) {
-      return { status: "ok", message: `${account.name} is now ${formatCents(update.balanceCents)}.` };
+      // Warnings can accompany a SUCCESSFUL write — the credit-balance notice
+      // is the case, and it is exactly the moment its "if that is wrong, use
+      // Reconcile" copy was written for. Reporting only in the no-update
+      // branch swallowed it precisely when it mattered.
+      const note = outcome.warnings.length > 0 ? ` ${outcome.warnings.join(" ")}` : "";
+      return {
+        status: "ok",
+        message: `${account.name} is now ${formatCents(update.balanceCents)}.${note}`,
+      };
     }
-    // No update and no crash means the feed agreed with what we already had,
-    // or declined to date its figure. Either way the ledger is unchanged, and
-    // saying so beats a success message that implies movement.
-    const warned = outcome.warnings.find((w) => w.includes(account.name));
-    return warned
-      ? fail(warned)
-      : { status: "ok", message: `${account.name} is unchanged — the bank reports the same balance.` };
+
+    // NO UPDATE IS NOT AUTOMATICALLY SUCCESS. The old code matched warnings by
+    // `w.includes(account.name)` and, finding none, claimed "the bank reports
+    // the same balance" — a positive factual claim about the bank that a
+    // failed connection never established. Substring matching also
+    // mis-attributed: refreshing "Visa" would surface a warning about "Visa
+    // Signature". Any warning at all means this refresh cannot be described as
+    // a clean no-op, so report it rather than narrating past it.
+    if (outcome.warnings.length > 0) {
+      return fail(outcome.warnings.join(" "));
+    }
+    return { status: "ok", message: `${account.name} is unchanged — the bank reports the same balance.` };
   } catch (err) {
     return fail(toMessage(err));
   }
