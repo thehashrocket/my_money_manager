@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { accountClass } from "@/lib/accounts/accountClass";
+import { isCreditCard } from "@/lib/accounts/isCreditCard";
 import {
   isStartingBalanceCentsInBounds,
   optionalPositiveDollarsSchema,
@@ -79,7 +80,7 @@ export const createAccountInputSchema = baseSchema
     }
     // D2=A: a mortgage row renders no utilization bar and no minimum payment,
     // so accepting either here would store a number nothing ever reads.
-    if (v.type !== "credit") {
+    if (!isCreditCard(v.type)) {
       if (v.creditLimit !== null) {
         ctx.addIssue({
           code: "custom",

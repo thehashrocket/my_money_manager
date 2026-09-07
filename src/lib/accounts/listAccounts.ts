@@ -1,6 +1,7 @@
-import { eq } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { isLongTermLiability } from "./isLongTermLiability";
+import { CARD_TYPES } from "./isCreditCard";
 
 type Db = typeof defaultDb;
 
@@ -54,7 +55,7 @@ export function listCardAccounts(db: Db): AccountOption[] {
   return db
     .select({ id: schema.accounts.id, name: schema.accounts.name })
     .from(schema.accounts)
-    .where(eq(schema.accounts.type, "credit"))
+    .where(inArray(schema.accounts.type, [...CARD_TYPES]))
     .all()
     .sort((a, b) => a.name.localeCompare(b.name));
 }

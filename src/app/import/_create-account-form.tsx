@@ -2,6 +2,7 @@
 
 import { useActionState, useId, useState } from "react";
 import { accountClass } from "@/lib/accounts/accountClass";
+import { isCreditCard } from "@/lib/accounts/isCreditCard";
 import type { AccountType } from "@/lib/accounts/loadAccountBalances";
 import { formatCents } from "@/lib/money";
 import { formatLongDate } from "@/lib/now";
@@ -82,7 +83,7 @@ export function CreateAccountForm({ today }: { today: string }) {
     state.status === "error" && state.field === field;
 
   const isLiability = accountClass(type) === "liability";
-  const isCard = type === "credit";
+  const isCard = isCreditCard(type);
 
   const owedCents = Math.round(Number(balance) * 100);
   const echo =
