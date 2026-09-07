@@ -92,7 +92,7 @@ export default async function SuccessPage({
       : null;
 
   return (
-    <div className="mx-auto w-full max-w-2xl px-6 py-16 space-y-6">
+    <div className="mx-auto w-full max-w-2xl px-5 py-16 space-y-7">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Import complete</h1>
         <p className="text-sm text-zinc-500">

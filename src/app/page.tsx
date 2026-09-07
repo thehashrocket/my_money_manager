@@ -53,7 +53,7 @@ export default async function Home() {
   );
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-3xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       {view.uncategorizedBacklog.count > 0 ? (
         <BacklogBanner backlog={view.uncategorizedBacklog} variant="budget" />
       ) : null}
@@ -293,7 +293,7 @@ function SpendingTrends({ trends }: { trends: TrendData }) {
 
 function EmptyState() {
   return (
-    <main className="flex min-h-[60vh] items-center justify-center p-6">
+    <main className="flex min-h-[60vh] items-center justify-center p-5">
       <div className="max-w-sm rounded-lg border border-border bg-muted/40 px-8 py-10 text-center">
         <div className="mb-3 font-mono text-3xl text-muted-foreground">∅</div>
         <p className="mb-4 text-sm text-muted-foreground">No accounts yet.</p>

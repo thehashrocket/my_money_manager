@@ -4,7 +4,7 @@ import { StateCard } from "@/components/ledger/state-card";
  * chart on every render; a slow query used to flash blank. */
 export default function DashboardLoading() {
   return (
-    <main className="mx-auto max-w-3xl p-6">
+    <main className="mx-auto max-w-3xl p-5">
       <StateCard variant="loading" title="Loading your dashboard…" />
     </main>
   );

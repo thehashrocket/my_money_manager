@@ -106,7 +106,7 @@ export default function SyncPage() {
   const linkedCount = accounts.filter((a) => a.simplefinAccountId).length;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-10">
+    <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-10">
       <header>
         <h1 className="font-display text-xl font-semibold">Sync</h1>
         <p className="mt-1 text-sm text-muted-foreground">

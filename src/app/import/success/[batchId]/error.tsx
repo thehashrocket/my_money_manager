@@ -11,7 +11,7 @@ export default function ImportSuccessError({
   reset: () => void;
 }) {
   return (
-    <main className="mx-auto max-w-2xl p-6">
+    <main className="mx-auto max-w-2xl p-5">
       <RouteErrorCard
         title="Something went wrong loading the import result"
         reassurance={

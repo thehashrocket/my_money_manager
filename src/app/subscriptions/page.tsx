@@ -15,7 +15,7 @@ export default async function SubscriptionsPage() {
   const { active, dismissed } = loadSubscriptions();
 
   return (
-    <main className="mx-auto max-w-3xl p-6 space-y-8 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-3xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       <div className="space-y-1">
         <h1 className="font-display text-xl font-semibold">Subscriptions</h1>
         <p className="text-sm text-muted-foreground">

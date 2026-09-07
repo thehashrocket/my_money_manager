@@ -47,7 +47,7 @@ export default async function AccountsPage() {
 
   if (rows.length === 0) {
     return (
-      <main className="mx-auto max-w-3xl p-6">
+      <main className="mx-auto max-w-3xl p-5">
         <h1 className="mb-6 font-display text-xl font-semibold">Accounts</h1>
         <StateCard
           variant="empty"
@@ -66,7 +66,7 @@ export default async function AccountsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl space-y-8 p-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-3xl space-y-7 p-5 [font-variant-numeric:tabular-nums]">
       {/* Newsreader, modest. Not a hero. */}
       <h1 className="font-display text-xl font-semibold">Accounts</h1>
 

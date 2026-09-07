@@ -27,7 +27,7 @@ export default async function ImportPage() {
   const liabilityCount = allAccounts.length - accounts.length;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-10 space-y-10">
+    <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-10">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Import CSV</h1>
         <p className="text-sm text-zinc-500 mt-1">

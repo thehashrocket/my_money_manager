@@ -17,7 +17,7 @@ export default function BudgetMonthError({
   reset: () => void;
 }) {
   return (
-    <main className="mx-auto max-w-5xl p-6">
+    <main className="mx-auto max-w-5xl p-5">
       <RouteErrorCard
         title="Something went wrong loading your budget"
         reassurance={

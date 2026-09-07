@@ -196,7 +196,7 @@ export default async function BudgetMonthPage({
   const priorMonthHasAllocations = hasAnyAllocations(db, prior.year, prior.month);
 
   return (
-    <main className="mx-auto max-w-5xl space-y-7 p-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-5xl space-y-7 p-5 [font-variant-numeric:tabular-nums]">
       {view.uncategorizedBacklog.count > 0 ? (
         <BacklogBanner backlog={view.uncategorizedBacklog} variant="budget" />
       ) : null}

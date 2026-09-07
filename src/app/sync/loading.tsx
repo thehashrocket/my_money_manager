@@ -5,7 +5,7 @@ import { StateCard } from "@/components/ledger/state-card";
  * from was short exactly this one file. */
 export default function SyncLoading() {
   return (
-    <main className="mx-auto max-w-3xl p-6">
+    <main className="mx-auto max-w-3xl p-5">
       <StateCard variant="loading" title="Loading your sync status…" />
     </main>
   );

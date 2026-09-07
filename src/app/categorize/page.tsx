@@ -22,7 +22,7 @@ export default async function CategorizePage() {
   const uncategorizedBacklog = loadUncategorizedBacklog(db);
 
   return (
-    <main className="mx-auto max-w-4xl p-6 space-y-6">
+    <main className="mx-auto max-w-4xl p-5 space-y-7">
       <header className="space-y-1">
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <Link

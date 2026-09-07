@@ -11,7 +11,7 @@ export default function SubscriptionsError({
   reset: () => void;
 }) {
   return (
-    <main className="mx-auto max-w-3xl p-6">
+    <main className="mx-auto max-w-3xl p-5">
       <RouteErrorCard title="Something went wrong loading your subscriptions" error={error} reset={reset} />
     </main>
   );

@@ -151,7 +151,7 @@ export default async function TransactionsPage({
   };
 
   return (
-    <main className="mx-auto max-w-5xl p-6 space-y-6 [font-variant-numeric:tabular-nums]">
+    <main className="mx-auto max-w-5xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       <header className="space-y-2">
         <h1 className="font-display text-[var(--text-3xl)] leading-none tracking-[-0.015em]">
           Transactions

@@ -111,7 +111,7 @@ function BacklogStrip({
   return (
     <div
       aria-live="polite"
-      className="sticky top-0 z-10 -mx-6 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-6 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100"
+      className="sticky top-0 z-10 -mx-5 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-5 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100"
     >
       <span>
         Backlog: <strong>{count}</strong> uncategorized —{" "}
@@ -179,7 +179,7 @@ function EmptyState({
   includeTransfers?: boolean;
 }) {
   return (
-    <div className="rounded-md border border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
+    <div className="rounded-md border border-border bg-card px-5 py-12 text-center text-sm text-muted-foreground">
       {totalCount !== 0
         ? "This page is empty — try a lower page number."
         : includeTransfers

@@ -72,6 +72,26 @@ Whisper only. `shadow-soft` for raised surfaces. `shadow-lift` for floating pane
 ### Spacing cadence
 4 / 8 / 12 / 16 / 20 / 28 / 40 / 56 px. Avoid the shadcn 24/48/64 cadence.
 
+**Adopted app-wide as of v0.16.0.** This rule was documented from the start
+and followed almost nowhere: every page shell in `src/app/` used `p-6` (24px)
+and section rhythm was a mix of `space-y-6` (24px) and `space-y-8` (32px,
+which is not on the scale at all). The settled values are:
+
+| Role | Class | px |
+|---|---|---|
+| Page gutter | `p-5` | 20 |
+| Section rhythm | `space-y-7` | 28 |
+
+`space-y-7` was already what `/budget/[year]/[month]` used, so the rhythm
+matched the most on-system page rather than inventing a third answer. The
+gutter went down rather than up because a 375px screen has little to spare and
+this branch's 44px touch targets already claim vertical space.
+
+One coupling to remember: the sticky backlog strips (`_categorize-ui.tsx`,
+`_transactions-ui.tsx`, `BacklogBanner.tsx`) bleed to full width with a
+negative margin that must EQUAL the page gutter (`-mx-5` against `p-5`). Change
+one without the other and the strip overhangs the page by the difference.
+
 ### Motion (DS41)
 Two durations, one easing, defined once in `globals.css`'s `:root`:
 
