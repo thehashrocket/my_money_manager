@@ -59,6 +59,9 @@ export function ReconcileDisclosure(props: {
           size="sm"
           onClick={() => setOpen(true)}
           aria-expanded={false}
+          /* DS66 — 44px minimum touch target, and full width below `sm` so
+             the row's actions stack rather than crowd (DS65). */
+          className="min-h-11 w-full sm:w-auto"
         >
           Reconcile
         </Button>
@@ -143,7 +146,12 @@ export function ReconcileForm({
           className="rounded-md border border-border bg-card px-3 py-2 text-base"
         />
       </div>
-      <Button type="submit" variant="primary" disabled={pending}>
+      <Button
+        type="submit"
+        variant="primary"
+        disabled={pending}
+        className="min-h-11 w-full sm:w-auto"
+      >
         {pending ? "Saving…" : "Save"}
       </Button>
       <div className="w-full">
@@ -164,7 +172,13 @@ export function RefreshButton({
   return (
     <form action={formAction}>
       <input type="hidden" name="accountId" value={accountId} />
-      <Button type="submit" variant="outline" size="sm" disabled={pending}>
+      <Button
+        type="submit"
+        variant="outline"
+        size="sm"
+        disabled={pending}
+        className="min-h-11 w-full sm:w-auto"
+      >
         {pending ? "Refreshing…" : "Refresh"}
       </Button>
       <span className="sr-only">{`Refresh ${accountName}'s balance from the bank`}</span>

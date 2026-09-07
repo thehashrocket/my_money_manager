@@ -69,7 +69,13 @@ export function ChargeDialog({
       {/* A separate trigger button beside a CONTROLLED Dialog, not a nested
           DialogTrigger — the same shape `_category-menu.tsx` uses, and for
           the same reason it documents there. */}
-      <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setOpen(true)}
+        className="min-h-11 w-full sm:w-auto"
+      >
         Add a charge
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -194,7 +200,7 @@ export function ChargeDialog({
           ) : null}
 
           <DialogFooter>
-            <Button type="submit" variant="primary" disabled={pending}>
+            <Button type="submit" variant="primary" disabled={pending} className="min-h-11">
               {pending ? "Saving…" : "Save"}
             </Button>
           </DialogFooter>

@@ -97,6 +97,7 @@ export function TransactionRowMenu({
             size="icon-sm"
             aria-label="More actions"
             disabled={isPending}
+            className="min-h-11 min-w-11"
           >
             <span aria-hidden>⋯</span>
           </Button>

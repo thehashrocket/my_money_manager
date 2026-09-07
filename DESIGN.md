@@ -41,7 +41,7 @@ Tailwind utilities: `text-terracotta`, `text-ledger`, `text-redbrown`, `text-amb
 | Left to Budget: month started, still unassigned | `left-to-budget.tsx`'s `AMBER_MIXED` | Yes |
 | F1 misconfiguration (no income category) | `_reclassify-income.tsx`'s banner | Yes |
 | Sync warnings (drift, stale balance, connection issue) | `sync/page.tsx`, `sync/ActionForm.tsx` | Yes (banners); `text-amber-700 dark:text-amber-400` at `sync/page.tsx:478` does not — raw Tailwind, not the mixed formula |
-| Expense envelope progress bar, warn/over fill (DS40) | `budget/[year]/[month]/page.tsx`'s `BAR_CLASS.amber`, `envelope-card.tsx`'s `FILL_COLORS.warn` | N/A — a fill color, not text; the 3:1 contrast concern DS8′/DS13 raised is text-specific |
+| Expense envelope progress bar, warn/over fill (DS40) | `budget/[year]/[month]/_month-editor.tsx`'s `BAR_CLASS.amber` (`envelope-card.tsx`'s `FILL_COLORS` is gone — D8 deleted the component, which held a drifted redbrown-on-overspend copy of this rule) | N/A — a fill color, not text; the 3:1 contrast concern DS8′/DS13 raised is text-specific |
 | Import preview: calendar-invalid rows, pending badge | `import/preview/[id]/page.tsx` | **No** — raw `amber-300`/`amber-50`/`amber-800`/`amber-700`, not Ledger Paper tokens at all |
 | Categorize/transactions sticky backlog banners | `categorize/_categorize-ui.tsx`, `transactions/_transactions-ui.tsx` | **No** — raw `amber-400`/`amber-100`/`amber-900`/`amber-950`/`amber-100` |
 | Uncategorized row badge | `transactions/_transaction-row.tsx` | **No** — raw `amber-200`/`amber-900`/`amber-900`/`amber-100` |
@@ -53,8 +53,15 @@ Tailwind utilities: `text-terracotta`, `text-ledger`, `text-redbrown`, `text-amb
 - **Positive**: no sign, `text-money-pos` in summaries. Neutral in transaction rows.
 - **Negative**: parentheses `($1,204.50)`, `text-money-neg` in totals and overspend. Neutral in rows.
 - **Zero**: `$0.00`, `text-money-zero` (never red).
+- **Liability balance** (stored negative): `plain` — full-strength body ink,
+  never `text-money-neg`. See "Money weight" below.
 - Always `[font-variant-numeric:tabular-nums]` wherever money appears.
-- `formatCents()` from `src/lib/money.ts` already emits parens for negatives — use it everywhere.
+- Thousands are grouped: `($302,480.11)`. `formatCents()` emits both the parens
+  and the separators — use it everywhere. (It used a bare `.toFixed(2)` until
+  liability accounts made four-figure-plus amounts routine, so the formatter
+  and this rule silently disagreed.)
+- **Parens are SILENT to a screen reader.** Any always-negative figure needs
+  an explicit `aria-label` (`owed $2,148.00`, `negative $291,212.87`) — DS66.
 
 ### Radii
 `radius-xs` (4px) → `radius-sm` (6px) → `radius-md` (10px) → `radius-lg` (14px) → `radius-xl` (20px). Use `999px` only for chips and pill toggles.
@@ -90,7 +97,8 @@ Fixed left rail, 240px. Main content: `pl-[290px]` (240 + 50 gutter). Below 820p
 │ ‹ April 2026 ›      │  ← month picker, links to /budget/year/month
 │                     │
 │ ◇ Dashboard  ←──── active tab: translateX(8px), right border erased
-│ ▣ Budget            │
+│ ▤ Accounts          │  ← DS68: position 2 — the two "where do I stand"
+│ ▣ Budget            │     surfaces before the three "what do I do" ones
 │ ≡ Transactions      │
 │ ! Categorize [12]   │  ← amber chip when backlog > 0
 │ ↻ Subscriptions     │  ← disabled, tooltip "Coming Weekend 4"
@@ -99,12 +107,22 @@ Fixed left rail, 240px. Main content: `pl-[290px]` (240 + 50 gutter). Below 820p
 │ ⟳ Sync              │
 │ ↥ Import            │
 │                     │
-│ Checking  $3,482    │  ← balance peek, mono sm
+│ PEEK · BALANCES ›   │  ← DS68: a <Link> to /accounts, with a visible
+│                     │     affordance (hover underline + persistent ›).
+│ Checking  $3,482    │  ← balance peek, mono sm — ASSETS ONLY (DS50)
 │ Savings   $8,210    │
 │ ──────────────      │
-│ total   $11,692     │  ← text-money-pos (ledger green)
-└─────────────────────┘
+│ cash    $11,692     │  ← D4=A: "cash", not "total". Liabilities never
+└─────────────────────┘     render here.
 ```
+
+**The peek is assets-only, and the subtotal is `cash` (DS50 + D4=A).** The rail
+answers "can I afford this", and net worth cannot. Listing a mortgage above a
+subtotal labelled `cash` would produce a figure that visibly does not sum its
+own rows — a closure violation on every page in the app. Debt lives on `/` and
+`/accounts`, which you reach deliberately. Side benefit: no truncation rule is
+needed in a 240px rail, where `($302,480.11)` in 13px mono leaves ~100px for a
+name and `.peek-acct` has no `min-width` or ellipsis.
 
 **Rail background**: subtle horizontal gradient — 10% terracotta tint at far left fading to `--paper-1`.
 
@@ -132,16 +150,43 @@ Spine is implemented at `src/components/ledger/spine.tsx`. Mounted as a Server C
 │                                                      │
 │  April 2026  ← page heading, Newsreader, text-xl     │
 │                                                      │
-│  ┌──────────────┐  ┌──────────────┐                  │
-│  │ Checking     │  │ Savings      │  ← AccountTile   │
-│  │ $3,482.19    │  │ $8,210.04    │                  │
-│  └──────────────┘  └──────────────┘                  │
-│  Total  $11,692.23  ← ledger green, mono             │
+│  ASSETS                     ← DS49: ruled row-lists,  │
+│  ┌──────────────────────────────┐   not a card grid   │
+│  │ Checking          $3,482.19  │                     │
+│  │ ──────────────────────────── │                     │
+│  │ Savings           $8,210.04  │                     │
+│  │ ──────────────────────────── │                     │
+│  │ Cash             $11,692.23  │ ← recessed subtotal │
+│  └──────────────────────────────┘                     │
+│  LIABILITIES                                          │
+│  ┌──────────────────────────────┐                     │
+│  │ Visa             ($1,448.00) │                     │
+│  │ Mortgage      ($302,480.11)  │ ← muted (DS59)      │
+│  │ ──────────────────────────── │                     │
+│  │ Debt          ($304,351.61)  │                     │
+│  │   paid down $500.00 this mo. │ ← DS58, omitted at 0│
+│  └──────────────────────────────┘                     │
+│  ══════════════════════════════   ← ledger double rule│
+│  NET WORTH      ($291,212.87)  ← SAME size as the two │
+│                                   subtotals (DS51)    │
 │                                                      │
 │  ┌──────────────────────────────────────────────┐    │
 │  │ This month                                   │    │
 │  │ Allocated $4,200  Spent $2,140  Remaining $2,060 │ │
 │  └──────────────────────────────────────────────┘    │
+│                                                      │
+│  CLOSEST TO LIMIT           ← DS53, ruled list, 5/3   │
+│  ┌──────────────────────────────────────────────┐    │
+│  │ Groceries                    ($100.00) left  │    │
+│  │ ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▮  │    │
+│  │ $600.00 of $500.00 · $100.00 over            │    │
+│  └──────────────────────────────────────────────┘    │
+│  (section omitted entirely when no leaf has either   │
+│   an allocation or spend this month)                 │
+│                                                      │
+│  Spending — last 6 months  ← demoted one slot: the   │
+│                              only section read       │
+│                              monthly, not daily      │
 │                                                      │
 │  ┌──────────────────────────────────────────────┐    │
 │  │ ! 14 uncategorized transactions  ($842.00)   │    │
@@ -156,7 +201,9 @@ Spine is implemented at `src/components/ledger/spine.tsx`. Mounted as a Server C
 ### Data sources
 | Section | Source |
 |---------|--------|
-| Account tiles + total | `loadAccountBalances()` from `src/lib/accounts/loadAccountBalances.ts` |
+| Asset / liability row-lists | `loadAccountBalances()` + `summarizeBalances()` (`src/lib/accounts/`) |
+| `paid down … this month` | `paidDownCents()` — paired positives only (E13) |
+| Closest to limit | `rankByProximity(view.sections.flatMap(s => s.categories), phase, 5 \| 3)` — the SAME `loadMonthView` object the summary strip already reads. No new query. |
 | Monthly summary strip | `loadMonthView(db, year, month).summary` from `src/lib/budget/loadMonthView.ts` |
 | Backlog tile | `loadMonthView(db, year, month).uncategorizedBacklog` |
 
@@ -168,7 +215,39 @@ Spine is implemented at `src/components/ledger/spine.tsx`. Mounted as a Server C
 
 3. **BacklogBanner**: reuse `src/app/_components/BacklogBanner.tsx` with `variant="budget"`. Show only when `backlog.count > 0`. The banner already uses `--accent-amber` tokens.
 
-4. **Account tiles**: `--bg-raised`, `--radius-lg`, `--shadow-soft`. Account name in `text-sm text-ink-2 font-mono uppercase tracking-wide`. Balance in `text-2xl font-mono`. Type badge (`checking` / `savings`) as a neutral chip.
+4. **Balance section — ruled row-lists, NOT tiles (DS49).** `AccountTile` (a
+   `grid-cols-1 sm:grid-cols-2` of bordered boxes) is gone. Codex's
+   outside-voice pass hard-rejected it on two counts — "#1 generic SaaS card
+   grid as first impression" and "#7 app UI made of stacked cards instead of
+   layout" — and adding liability tiles plus proximity tiles on top of it is
+   what makes the mosaic. A card whose entire content is a name and a number
+   is a `<div>` with a border tax. Same idiom as `/accounts`, deliberately:
+   two surfaces answering "where do I stand" should not look like two
+   different products.
+
+   Account name in `font-display text-base`; balance in `font-mono text-lg`
+   with `moneyToneClass(cents, { context })`. Subtotal rows (`Cash`, `Debt`)
+   are recessed `--bg-inset`, carry no date and no action, and are the last
+   row INSIDE their panel. Net worth sits under a ledger double-rule at
+   **subtotal size** (DS51) — the rule already carries the "bottom line"
+   signal, and type size on top of it is shouting a six-figure negative at
+   someone who opened the page already anxious about debt.
+
+   A mortgage renders muted with no bar and no action (DS59), derived from
+   `isLongTermLiability(type)` and never from the absence of a credit limit
+   (E7). Every liability figure carries `aria-label={`owed ${…}`}` — DESIGN.md
+   mandates accounting parens, and parens are SILENT to a screen reader
+   (DS66).
+
+9. **Closest to limit (DS53)** sits between the summary strip and the trend
+   chart. Ranked by `rankByProximity` (`src/lib/budget/rankByProximity.ts`),
+   **not** by `barPct`: `resolveRowDisplay` caps `barPct` at 100 *and*
+   flattens zero-allocation overspend to exactly 100, so an envelope at
+   100.0%, one at 400%, and one with no budget and $600 spent all sort
+   identically. Four keys — overflow badge amount desc, `barPct` desc,
+   absolute headroom asc, then name. 5 rows desktop / 3 mobile via a
+   `hidden sm:block` pair. Rows use `display.amountPlaceholder` to say
+   "no budget set" rather than rendering `of $0.00` (DS14).
 
 5. **Monthly summary strip**: renders through the shared `SummaryStrip` (`src/components/ledger/summary-strip.tsx`, `cells: {label, cents, tone?}[]` contract) with `variant="plain"` — the dashboard's original bordered-card look, kept on purpose (DS45) rather than importing the budget page's `"ledger"` ruled-surface restyle onto a page whose own redesign hasn't been reviewed (§8). `"ledger"` is what `/budget/[year]/[month]` uses. Delete `"plain"` when the dashboard lands its own restyle — at that point every caller is `"ledger"`.
 
@@ -184,20 +263,113 @@ Spine is implemented at `src/components/ledger/spine.tsx`. Mounted as a Server C
 - No subscription insights (those live on `/subscriptions`)
 - No goals progress (that lives on `/goals`)
 
-The 6-month trend chart did land here in v0.7.0 — `SpendingTrends` sits between the monthly summary and the backlog tile, rendered by `src/components/ledger/trend-chart.tsx`.
+The 6-month trend chart did land here in v0.7.0 — `SpendingTrends` is
+rendered by `src/components/ledger/trend-chart.tsx`, and now sits one slot
+lower, below `Closest to limit` (DS49): it is the only section on this page
+read monthly rather than daily.
 
 ---
 
-## Envelope card
+## Accounts page (`/accounts`)
 
-Signature component. Already implemented at `src/components/ledger/envelope-card.tsx`.
+The second "where do I stand" surface, in the same idiom as the dashboard's
+balance section. Grouped ruled row-lists with the subtotal as the last row
+inside each panel, and a ledger double-rule above net worth.
 
-Key detail: `::before` pseudo-element creates a folded-flap corner top-right (`position: absolute; top: -22px; right: -22px; width: 60px; height: 60px; background: var(--bg-inset); transform: rotate(45deg); border-bottom: 1px solid var(--border)`).
+```
+  Accounts                                    ← Newsreader, modest. Not a hero.
 
-Progress bar fill states (`FILL_COLORS` in `envelope-card.tsx`, tone from `resolveRowDisplay`'s `barTone`):
-- Normal (`"ledger"`): `bg-[var(--accent-ledger)]`
-- Warning/over (`"amber"`, ≥80% including past 100% — DS8′/DS40): `bg-[var(--accent-amber)]`
-- (`"redbrown"` exists as a `BarTone` but `resolveRowDisplay` never returns it for a bar fill — overspend renders as a `redbrown` 2px overflow tick instead, layered on the still-amber bar. See T15/DS40 for the amber warn/over split this table doesn't yet capture.)
+  ASSETS                                      ← mono uppercase, --ink-3, --text-xs
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ Checking          updated Sep 6              $3,482.19           │  ← no icon (DS60)
+  │ ──────────────────────────────────────────────────────────────── │
+  │ Savings           updated Sep 6              $8,210.04           │
+  │ ──────────────────────────────────────────────────────────────── │
+  │ Cash                                        $11,692.23           │  ← recessed --bg-inset,
+  └──────────────────────────────────────────────────────────────────┘     no date, no action
+
+  LIABILITIES
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ Visa                                       ($2,148.00)           │
+  │   ▬▬▬▬▬▬▬▬▬░░░░░░░░░░░  $2,148.00 of $5,000.00                   │  ← terracotta, no
+  │   min. payment $50.00 · reconciled Sep 6                         │     threshold (DS62)
+  │   paid down $500.00 this month                                   │  ← omitted at $0 (DS58)
+  │   [ Reconcile ] [ Add a charge ]                                 │  ← 44px targets (DS66)
+  │ ──────────────────────────────────────────────────────────────── │
+  │ LONG-TERM                                                        │  ← a real <h3> (DS66)
+  │ Mortgage                                 ($302,480.11)           │  ← muted ink, no bar (DS59)
+  │   as of Sep 6                            [ Refresh ]             │
+  │ ──────────────────────────────────────────────────────────────── │
+  │ Debt                                     ($304,628.11)           │
+  │   paid down $500.00 this month                                   │
+  └──────────────────────────────────────────────────────────────────┘
+  ════════════════════════════════════════════════════════════════════  ← ledger double rule
+  NET WORTH                                   ($292,935.88)             ← SAME size as the two
+                                                                           subtotals (DS51)
+```
+
+**No icon badges (DS60).** Every generated mockup put a circular tinted icon
+badge left of each account name. That is AI-slop blacklist item 3, and it is
+not this app's icon idiom: the Spine established bare monochrome text glyphs
+(`◇ ▤ ▣ ≡ ! ↻ ★ ⟳ ↥`) with no circles and no tint. The account name is set in
+a serif display face and already says "Checking".
+
+**Rows are inert.** No chevrons, no drill-in. A per-account detail page has
+almost nothing to show — a card carries a handful of manual rows and the
+mortgage has literally zero by D3=A — so it would be a route that renders an
+empty list.
+
+**Exactly one balance action per row, never both, never neither (DS55).**
+Derived by `resolveBalanceAction(account, hasAnyRows)`: a feed-linked account
+with no transaction rows offers `Refresh`, everything else offers `Reconcile`.
+It is per-row rather than a page-level button because eligibility is a
+per-account property — a page-level "Refresh balances" would silently do
+nothing for the Visa and owe the user a sentence like "1 refreshed, 2
+skipped".
+
+**Zero liabilities keeps the section (DS54).** One neutral `--bg-inset` row
+reading "No liabilities tracked yet" plus "Add a credit card or loan →".
+Hiding it would leave a page named Accounts with no path to the account type
+the feature exists to add.
+
+---
+
+## Utilization bar
+
+`resolveUtilizationDisplay(balanceCents, creditLimitCents) → { pct, hasLimit }`.
+
+**Always terracotta. There is no warn threshold, and this is deliberate.** A
+"your utilization is high" state would be financial advice — the one thing
+cut from every generated mockup (variant C invented *"Your debt is 20.7% of
+your assets. A good rule of thumb is to keep this under 30%. Learn more →"*:
+invented advice with an external link, in an app whose premise is that nothing
+leaves the machine). `--accent-amber` also already carries eight distinct
+meanings per the amber inventory below; 43% utilized is not a warning and must
+not add a ninth.
+
+`hasLimit: false` means render no bar at all — absence of a limit is absence of
+something to show, and is NOT what decides the muted long-term treatment (E7).
+The bar is `aria-hidden`; the `$2,148.00 of $5,000.00` caption beside it is the
+accessible value.
+
+---
+
+## Money weight — the muted long-term treatment
+
+A third money weight beside the three states above: `text-ink-3` on a
+liability whose `isLongTermLiability(type)` is true.
+
+A mortgage is a fact about your life; a card balance is a problem you are
+solving this month. Rendered identically, a $302k figure sets the emotional
+register of a page whose real subject is the $2,148 you can act on. Because
+lower-contrast ink is invisible to a screen reader, `LONG-TERM` is a real
+grouping heading, never muting alone (DS66).
+
+`moneyTone(cents, { context })` (`src/lib/money.ts`) owns the sign→token rule
+for all four tones. In `liability` context a negative balance returns `plain`
+(full-strength body ink), never `negative`: owing money is the normal state of
+the account, and an alarm that can never be cleared is not an alarm, it is
+just a red page.
 
 ---
 

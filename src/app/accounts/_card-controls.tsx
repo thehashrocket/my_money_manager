@@ -37,7 +37,7 @@ export function CardControls({
   const [handoff, setHandoff] = useState(0);
 
   return (
-    <div className="mt-2 flex flex-wrap items-start gap-2">
+    <div className="mt-2 flex flex-col flex-wrap items-stretch gap-2 sm:flex-row sm:items-start">
       <ReconcileDisclosure
         key={handoff}
         accountId={accountId}

@@ -54,7 +54,7 @@ export default async function AccountsPage() {
           primaryAction={
             <Link
               href="/import"
-              className="text-base font-medium text-terracotta underline-offset-4 hover:underline"
+              className="inline-flex min-h-11 items-center text-base font-medium text-terracotta underline-offset-4 hover:underline"
             >
               Import a CSV to get started →
             </Link>
@@ -103,7 +103,7 @@ export default async function AccountsPage() {
               <p className="text-base text-ink-2">No liabilities tracked yet</p>
               <Link
                 href="/import"
-                className="mt-1 inline-block text-base font-medium text-terracotta underline-offset-4 hover:underline"
+                className="mt-1 inline-flex min-h-11 items-center text-base font-medium text-terracotta underline-offset-4 hover:underline"
               >
                 Add a credit card or loan →
               </Link>
