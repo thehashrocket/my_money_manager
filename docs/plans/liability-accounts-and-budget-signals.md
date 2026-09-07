@@ -1,6 +1,6 @@
 # Liability accounts and budget-proximity signals
 
-**Status:** reviewed via `/plan-eng-review` (2026-09-06), `/plan-design-review` (2026-09-06), and a **second `/plan-eng-review` (2026-09-07)** against the design review's 12 previously-uninspected tasks. 15 engineering decisions (D1–D15) + 20 design decisions (DS49–DS68) + **22 second-review decisions (E1–E22)** locked, **39 tasks**, ready to implement
+**Status:** IMPLEMENTED 2026-09-07 on `thehashrocket/budget-progress-credit-cards` (all 39 tasks; see the branch's commits). Originally reviewed via `/plan-eng-review` (2026-09-06), `/plan-design-review` (2026-09-06), and a **second `/plan-eng-review` (2026-09-07)** against the design review's 12 previously-uninspected tasks. 15 engineering decisions (D1–D15) + 20 design decisions (DS49–DS68) + **22 second-review decisions (E1–E22)** locked, **39 tasks**, ready to implement
 **Branch:** `thehashrocket/budget-progress-credit-cards`
 **Base:** `origin/main` @ `2521d02` (v0.15.0)
 **Next migration number:** `0018` (verified: `origin/main` ships through `drizzle/0017_category_kind.sql`; worktree level with origin)
@@ -1323,114 +1323,114 @@ Found by the second engineering review — existing code the plan had NOT accoun
 
 Synthesized from this review's findings. Each derives from a specific finding above.
 
-- [ ] **T1 (P1, human: ~3h / CC: ~15min)** — `src/lib/money.ts` — extract `moneyTone(cents, {context})`, own commit, before any liability work
+- [x] **T1 (P1, human: ~3h / CC: ~15min)** — `src/lib/money.ts` — extract `moneyTone(cents, {context})`, own commit, before any liability work
   - Surfaced by: Code Quality D9 — the sign→token rule exists six times and `spine.tsx:92-95` already diverged
   - Files: `src/lib/money.ts`, `src/lib/money.test.ts`
   - Verify: `pnpm test money`
-- [ ] **T2 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `accountClass.ts` with an exhaustive switch + test
+- [x] **T2 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `accountClass.ts` with an exhaustive switch + test
   - Surfaced by: Architecture — failure mode F6, a new enum value silently defaulting to asset
   - Files: `src/lib/accounts/accountClass.ts`, `.test.ts`
   - Verify: `pnpm test accountClass`
-- [ ] **T3 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `summarizeBalances.ts` + test
+- [x] **T3 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `summarizeBalances.ts` + test
   - Surfaced by: Step 0 — `page.tsx:63` and `spine.tsx:40` flat-sum every account
   - Files: `src/lib/accounts/summarizeBalances.ts`, `.test.ts`
   - Verify: `pnpm test summarizeBalances`
-- [ ] **T4 (P1, human: ~4h / CC: ~20min)** — `src/db/` — migration 0018: three enum widenings + `credit_limit_cents`, `balance_as_of`, `balance_source`, **`minimum_payment_cents` (E3)**, **`prior_starting_balance_cents` / `prior_starting_balance_date` on `accounts` (E19)**
+- [x] **T4 (P1, human: ~4h / CC: ~20min)** — `src/db/` — migration 0018: three enum widenings + `credit_limit_cents`, `balance_as_of`, `balance_source`, **`minimum_payment_cents` (E3)**, **`prior_starting_balance_cents` / `prior_starting_balance_date` on `accounts` (E19)**
   - Surfaced by: Architecture D6/D15 — enums need no SQL, the columns do. **E3: `minimum_payment_cents` is rendered in four places (DS61 #14, DS65, the mockup, T15) and was created by no migration. E19: D7 says the prior anchor 'goes on the account row itself' and T4 never added those columns.** Six columns, not three — 0018 is this PR's only migration.
   - Files: `src/db/schema.ts`, `drizzle/0018_*.sql`
   - Verify: `pnpm db:migrate` then `pnpm test`
-- [ ] **T5 (P1, human: ~1d / CC: ~35min)** — `src/app/page.tsx`, `src/components/ledger/spine.tsx` — segment totals; relabel "Total" → "Cash"; **convert the dashboard balance section from the `AccountTile` grid to ruled row-lists (DS49)**; **Spine peek filters to assets only (DS50)**; **update DESIGN.md §Navigation ASCII + §Dashboard layout in this PR**
+- [x] **T5 (P1, human: ~1d / CC: ~35min)** — `src/app/page.tsx`, `src/components/ledger/spine.tsx` — segment totals; relabel "Total" → "Cash"; **convert the dashboard balance section from the `AccountTile` grid to ruled row-lists (DS49)**; **Spine peek filters to assets only (DS50)**; **update DESIGN.md §Navigation ASCII + §Dashboard layout in this PR**
   - Surfaced by: D4=A — the rail silently becomes net worth on every page; DS49/DS50 — Codex hard rejections #1 + #7, and a `Cash` subtotal that visibly excludes the mortgage row above it
   - Files: `src/app/page.tsx`, `src/components/ledger/spine.tsx`, `src/app/globals.css`, `DESIGN.md`
   - Verify: manual — dashboard + rail with a mortgage present, at 1280px and 375px
-- [ ] **T6 (P1, human: ~2d / CC: ~1h)** — `src/app/accounts/` — new route + `updateLiabilityBalanceAction` delegating to `validateUpdateAnchorInput`; **grouped ruled row-lists per the approved mockup**; per-row Reconcile/Refresh, mutually exclusive (DS55); zero-liabilities row (DS54); staleness labels (DS57); muted long-term treatment (DS59); `StateCard`/`RouteErrorCard` boundaries; `MobileCards` collapse (DS65)
+- [x] **T6 (P1, human: ~2d / CC: ~1h)** — `src/app/accounts/` — new route + `updateLiabilityBalanceAction` delegating to `validateUpdateAnchorInput`; **grouped ruled row-lists per the approved mockup**; per-row Reconcile/Refresh, mutually exclusive (DS55); zero-liabilities row (DS54); staleness labels (DS57); muted long-term treatment (DS59); `StateCard`/`RouteErrorCard` boundaries; `MobileCards` collapse (DS65)
   - Surfaced by: D10=C path 3 — reconcile needs its own labelled home; DS54–DS59 — the plan specified one line of UI for this whole route
   - Files: `src/app/accounts/{page,actions,error,loading}.tsx`, `src/app/accounts/_account-row.tsx`
   - Verify: manual against `variant-D-remix.png` + `pnpm test` on the validator
-- [ ] **T7 (P1, human: ~1d / CC: ~30min)** — `src/lib/simplefin/sync.ts` — **`partitionLinkedAccounts` (E1/E2)** + balance pass, zero-row accounts only, before the early return
+- [x] **T7 (P1, human: ~1d / CC: ~30min)** — `src/lib/simplefin/sync.ts` — **`partitionLinkedAccounts` (E1/E2)** + balance pass, zero-row accounts only, before the early return
   - Surfaced by: D15=A + Codex — `balance-date` is an instant, and `sync.ts:342` returns "up-to-date" before writes. **E1/E2: `sync.ts:175-179` has no type filter, so linking the mortgage imports its transactions and then permanently disables this very pass. Must PARTITION not exclude — liability ids stay in `accountIds` at `sync.ts:197` or there is no balance to write — and `resolveStartDate` reads the asset partition only.**
   - Files: `src/lib/simplefin/sync.ts`, `sync.test.ts`, `src/lib/simplefin/resolveStartDate.test.ts`, `src/app/sync/actions.ts`
   - Verify: `pnpm test sync resolveStartDate` — incl. **REGRESSION R1**
-- [ ] **T8 (P1, human: ~1d / CC: ~35min)** — `src/lib/accounts/manualTransaction.ts` — charge + payment write path, `'manual'` source end to end
+- [x] **T8 (P1, human: ~1d / CC: ~35min)** — `src/lib/accounts/manualTransaction.ts` — charge + payment write path, `'manual'` source end to end
   - Surfaced by: D6=B + D10=C + Codex — third write path, `batchLabel.ts:19` throws on unknown source
   - Files: `src/lib/accounts/manualTransaction.ts`, `.test.ts`, `src/lib/batchLabel.ts`, `src/db/schema.ts`
   - Verify: `pnpm test manualTransaction batchLabel`
-- [ ] **T9 (P1, human: ~2h / CC: ~10min)** — `src/lib/simplefin/undoSync.ts` — **REGRESSION:** `isLatestBatch` ignores manual batches; test first
+- [x] **T9 (P1, human: ~2h / CC: ~10min)** — `src/lib/simplefin/undoSync.ts` — **REGRESSION:** `isLatestBatch` ignores manual batches; test first
   - Surfaced by: D6 — `undoSync.ts:40-48` has no source filter, so one manual row kills a sync's undo silently
   - Files: `src/lib/simplefin/undoSync.ts`, `undoSync.test.ts`
   - Verify: `pnpm test undoSync`
-- [ ] **T10 (P1, human: ~2h / CC: ~10min)** — `src/lib/simplefin/sync.ts:791` — exclude `import_source='manual'` from matcher candidacy + test
+- [x] **T10 (P1, human: ~2h / CC: ~10min)** — `src/lib/simplefin/sync.ts:791` — exclude `import_source='manual'` from matcher candidacy + test
   - Surfaced by: D11 — a manual charge can be silently auto-paired with an unrelated same-day, same-amount deposit
   - Files: `src/lib/simplefin/sync.ts`, `matchTransfers.test.ts`
   - Verify: `pnpm test matchTransfers`
-- [ ] **T11 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/manualTransaction.ts` — refuse rows dated on/before the anchor
+- [x] **T11 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/manualTransaction.ts` — refuse rows dated on/before the anchor
   - Surfaced by: D12=B — rule 1's strict `>` silently drops a back-dated charge from the balance
   - Files: `src/lib/accounts/manualTransaction.ts`, `.test.ts`
   - Verify: `pnpm test manualTransaction`
-- [ ] **T12 (P2, human: ~2h / CC: ~10min)** — `src/lib/categorize/` — `includeTransfers` predicate on `loadTransactions` **(data layer only — T26 owns all UI)**
+- [x] **T12 (P2, human: ~2h / CC: ~10min)** — `src/lib/categorize/` — `includeTransfers` predicate on `loadTransactions` **(data layer only — T26 owns all UI)**
   - Surfaced by: D14=B + Codex — `loadTransactions.ts:67` excludes paired rows, so a marked payment vanishes. **E9: T12 and T26 were the same feature with contradictory placement, both live. Split on the lib/UI seam this plan uses everywhere else; the predicate has two states and one of them has never been exercised.**
   - Files: `src/lib/categorize/loadTransactions.ts`, `loadTransactions.test.ts`
   - Verify: `pnpm test loadTransactions` — both states
-- [ ] **T13 (P2, human: ~6h / CC: ~30min)** — `src/app/page.tsx` — "Closest to limit" **ruled list** (not tiles) via `resolveRowDisplay`, severity sort, 5 desktop / 3 mobile, section omitted when empty (DS53)
+- [x] **T13 (P2, human: ~6h / CC: ~30min)** — `src/app/page.tsx` — "Closest to limit" **ruled list** (not tiles) via `resolveRowDisplay`, severity sort, 5 desktop / 3 mobile, section omitted when empty (DS53)
   - Surfaced by: Step 0 — item 1's rule already exists; DS53 — `barPct` is capped at 100 *and* zero-allocation overspend flattens to exactly 100, so sorting by it ranks nothing
   - Files: `src/app/page.tsx`
   - Verify: manual — 79% / 80% / 120% / no-allocation-with-spend must produce four distinct positions
-- [ ] **T14 (P2, human: ~2h / CC: ~10min)** — `src/components/ledger/` — delete `envelope-card.tsx` and its dead `.envelope` CSS if unadopted; **remove DESIGN.md §"Envelope card"** (it documents the deleted file as "the signature component")
+- [x] **T14 (P2, human: ~2h / CC: ~10min)** — `src/components/ledger/` — delete `envelope-card.tsx` and its dead `.envelope` CSS if unadopted; **remove DESIGN.md §"Envelope card"** (it documents the deleted file as "the signature component")
   - Surfaced by: D8=A — zero callers, drifted copy of `resolveRowDisplay`'s tone rule
   - Files: `src/components/ledger/envelope-card.tsx`, `src/app/globals.css`, `DESIGN.md`
   - Verify: `pnpm build`
-- [ ] **T15 (P1, human: ~1d / CC: ~40min)** — `src/lib/import/`, `src/app/import/` — `credit`/`loan` in the create-account enum and `<select>`; **"Balance owed" positive-input-negated-internally flow, replaced helper copy, confirmation echo, `credit_limit_cents` + `minimum_payment_cents` fields (DS64)**; **restyle the account form to Ledger Paper tokens**
+- [x] **T15 (P1, human: ~1d / CC: ~40min)** — `src/lib/import/`, `src/app/import/` — `credit`/`loan` in the create-account enum and `<select>`; **"Balance owed" positive-input-negated-internally flow, replaced helper copy, confirmation echo, `credit_limit_cents` + `minimum_payment_cents` fields (DS64)**; **restyle the account form to Ledger Paper tokens**
   - Surfaced by: Architecture — the enum needs no SQL, but three TypeScript sites gate it; DS64 + Codex F1 — the live form is asset-worded with no sign guidance, so `2000` for a Visa adds $2,000 to Cash, silently. **Priority raised P2 → P1: this is a ledger-corruption path, not a polish item.**
   - Files: `src/lib/import/validateCreateAccountInput.ts`, `src/app/import/page.tsx`, `src/app/import/actions.ts`, `src/app/import/actions.test.ts`
   - Verify: `pnpm test import` + manual — create a `credit` account entering `2000`, assert the stored anchor is `-200000` and the dashboard `Cash` is unchanged. **See T36 for the two guards on the same page (E6 CSV target, E18 anchor-repair form).**
 
 ### Design review tasks (DS49–DS68)
 
-- [ ] **T16 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `resolveUtilizationDisplay(balanceCents, creditLimitCents) → {pct, hasLimit}` + test; always terracotta, no threshold
+- [x] **T16 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `resolveUtilizationDisplay(balanceCents, creditLimitCents) → {pct, hasLimit}` + test; always terracotta, no threshold
   - Surfaced by: DS62 — computing pct inline would recreate, in this PR, the duplication D8/D9 exist to delete; a rule in JSX is untestable here
   - Files: `src/lib/accounts/resolveUtilizationDisplay.ts`, `.test.ts`
   - Verify: `pnpm test resolveUtilizationDisplay` — no limit, over-limit, zero balance
-- [ ] **T17 (P1, human: ~4h / CC: ~20min)** — `src/lib/accounts/` — `paidDownCents(accountId, year, month)` + test; two callers (card row, dashboard `Debt`)
+- [x] **T17 (P1, human: ~4h / CC: ~20min)** — `src/lib/accounts/` — `paidDownCents(accountId, year, month)` + test; two callers (card row, dashboard `Debt`)
   - Surfaced by: DS58 — D13=B correctly makes a payment invisible to spend, leaving no feedback anywhere that you paid down debt
   - Files: `src/lib/accounts/paidDownCents.ts`, `.test.ts`, `src/app/accounts/page.tsx`, `src/app/page.tsx`
   - Verify: `pnpm test paidDownCents` — zero-payment month omits the line; mortgage (no rows) returns null, not 0
-- [ ] **T18 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` — "Add a charge" `Dialog`: amount, date, merchant, **required** category via `CategoryCombobox`
+- [x] **T18 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` — "Add a charge" `Dialog`: amount, date, merchant, **required** category via `CategoryCombobox`
   - Surfaced by: DS67 — D10 path 2 had a data model and no interface; a NULL-category charge silently breaks D13's argument for that row
   - Files: `src/app/accounts/_charge-dialog.tsx`, `src/app/accounts/actions.ts`
   - Verify: manual — charge appears in its envelope on `/budget` in the month charged
-- [ ] **T19 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` — D12 refusal message + inline "Reconcile instead →" prefilled with today, focus moved to the balance field and announced
+- [x] **T19 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` — D12 refusal message + inline "Reconcile instead →" prefilled with today, focus moved to the balance field and announced
   - Surfaced by: DS56 + DS66 — the plan specified the refusal and none of its words or its recovery
   - Files: `src/app/accounts/_charge-dialog.tsx`, `src/app/accounts/_reconcile-form.tsx`
   - Verify: manual — enter a charge dated before the anchor; refusal appears, the link opens reconcile focused
-- [ ] **T20 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — staleness classifier: `balance_as_of ?? starting_balance_date`, amber at 7d (`feed`) / 35d (`manual`) + test
+- [x] **T20 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — staleness classifier: `balance_as_of ?? starting_balance_date`, amber at 7d (`feed`) / 35d (`manual`) + test
   - Surfaced by: DS57 — the plan's 7-day rule reads `balance_as_of`, which D10 path 3 sets to NULL on every manual reconcile, i.e. on every credit card
   - Files: `src/lib/accounts/classifyBalanceStaleness.ts`, `.test.ts`
   - Verify: `pnpm test classifyBalanceStaleness` — both sources, both sides of each boundary, NULL `balance_as_of`
-- [ ] **T21 (P1, human: ~2h / CC: ~10min)** — `src/app/transactions/` — wire the **EXISTING** `DropdownMenu` into a `⋯` row menu holding "Mark as payment to →"
+- [x] **T21 (P1, human: ~2h / CC: ~10min)** — `src/app/transactions/` — wire the **EXISTING** `DropdownMenu` into a `⋯` row menu holding "Mark as payment to →"
   - Surfaced by: DS52 + DS63 — the row already carries ten elements. **E8: `src/components/ui/dropdown-menu.tsx` ALREADY EXISTS (99 lines, Base UI `Menu`, built for DS20) with ZERO consumers, verified by grep across `src/`. It is not new. DS63's "deliberate fifth component" premise is false in both directions. Spend the halved budget exercising the keyboard behaviour instead — the component has never rendered.**
   - Files: `src/components/ui/dropdown-menu.tsx` (**existing — import, do not create**), `src/app/transactions/_transaction-row.tsx`
   - Verify: manual — keyboard only: open, arrow, Escape, focus returns to the trigger
-- [ ] **T22 (P1, human: ~4h / CC: ~20min)** — a11y sweep on every new always-negative figure: `aria-label` for parens, `sr-only` LONG-TERM heading, `aria-hidden` on the utilization bar, 44px touch targets
+- [x] **T22 (P1, human: ~4h / CC: ~20min)** — a11y sweep on every new always-negative figure: `aria-label` for parens, `sr-only` LONG-TERM heading, `aria-hidden` on the utilization bar, 44px touch targets
   - Surfaced by: DS66 — DESIGN.md mandates parens for negatives, and parens are silent to a screen reader
   - Files: `src/app/accounts/`, `src/app/page.tsx`, `src/components/ledger/spine.tsx`
   - Verify: manual — VoiceOver reads "owed two thousand one hundred forty eight dollars", not "dollar 2,148"
-- [ ] **T23 (P2, human: ~6h / CC: ~30min)** — `src/app/accounts/`, `src/app/page.tsx` — `MobileCards`-style collapse below 640px on both row-list surfaces
+- [x] **T23 (P2, human: ~6h / CC: ~30min)** — `src/app/accounts/`, `src/app/page.tsx` — `MobileCards`-style collapse below 640px on both row-list surfaces
   - Surfaced by: DS65 — the approved row packs seven fields into 880px and is unusable at 375px
   - Files: `src/app/accounts/_account-row.tsx`, `src/app/page.tsx`
   - Verify: manual at 375px — nothing truncated, action button ≥44px
-- [ ] **T24 (P2, human: ~2h / CC: ~12min)** — `src/components/ledger/spine.tsx` — "Accounts" tab in position 2; peek header becomes a `<Link>` with a visible affordance
+- [x] **T24 (P2, human: ~2h / CC: ~12min)** — `src/components/ledger/spine.tsx` — "Accounts" tab in position 2; peek header becomes a `<Link>` with a visible affordance
   - Surfaced by: DS68 — a top-level route with no nav entry is reachable only by URL and fails the trunk test
   - Files: `src/components/ledger/spine.tsx`, `src/app/globals.css`, `DESIGN.md`
   - Verify: manual — tab highlights on `/accounts`; peek header is obviously clickable without hover
-- [ ] **T25 (P2, human: ~3h / CC: ~12min)** — apply the DS61 copy deck + register across every new string; prose floor at `--text-base`
+- [x] **T25 (P2, human: ~3h / CC: ~12min)** — apply the DS61 copy deck + register across every new string; prose floor at `--text-base`
   - Surfaced by: DS61 + DS66b — twelve unwritten strings, three of which leak the storage model at the user
   - Files: `src/app/accounts/`, `src/app/import/page.tsx`, `src/app/transactions/`
   - Verify: manual — grep the new surfaces for `anchor`, `starting balance`, `transfer pair`; expect zero user-visible hits
-- [ ] **T26 (P2, human: ~4h / CC: ~20min)** — `src/app/transactions/` — "show transfers" toggle **beside the result summary**, not inside the filter slab; revealed rows carry the `--accent-indigo` paired chip and name their partner account
+- [x] **T26 (P2, human: ~4h / CC: ~20min)** — `src/app/transactions/` — "show transfers" toggle **beside the result summary**, not inside the filter slab; revealed rows carry the `--accent-indigo` paired chip and name their partner account
   - Surfaced by: D14=B + Codex F5 — the filter card already holds eight controls, and a visibility switch on the result set is not a filter narrowing it
   - Files: `src/app/transactions/_transactions-ui.tsx`, `src/app/transactions/_filter-bar.tsx`, `src/lib/categorize/loadTransactions.ts`
   - Verify: manual — toggle survives pagination (must be carried by `filterValuesToSearchParams`, or page 2 silently drops it)
-- [ ] **T27 (P3, human: ~2h / CC: ~10min)** — `DESIGN.md` — document the three new visual concepts: the terracotta utilization bar, the muted long-term money weight, and `DropdownMenu` as the fifth locked shadcn component
+- [x] **T27 (P3, human: ~2h / CC: ~10min)** — `DESIGN.md` — document the three new visual concepts: the terracotta utilization bar, the muted long-term money weight, and `DropdownMenu` as the fifth locked shadcn component
   - Surfaced by: Pass 5 — DESIGN.md defines exactly three money states and TODOS locks exactly four shadcn components; this PR adds one of each and a bar variant
   - Files: `DESIGN.md`, `TODOS.md`
   - Verify: read-through — no undocumented token or component introduced by this PR
@@ -1438,51 +1438,51 @@ Synthesized from this review's findings. Each derives from a specific finding ab
 
 ### Second eng-review tasks (E1–E22)
 
-- [ ] **T28 (P1, human: ~3h / CC: ~15min)** — `docs/plans/` + `src/app/accounts/` — **decide and record the server-action shape BEFORE any `/accounts` action is written: returned state, `/sync`-style; `error.tsx` is the backstop only**
+- [x] **T28 (P1, human: ~3h / CC: ~15min)** — `docs/plans/` + `src/app/accounts/` — **decide and record the server-action shape BEFORE any `/accounts` action is written: returned state, `/sync`-style; `error.tsx` is the backstop only**
   - Surfaced by: E20 (Codex #4) — DS54–57 promises inline row errors, a form that keeps your input, a toast with the row restored, and DS56's focus handoff. A thrown action unmounts the route and none of those survive. T6 delegates to `validateUpdateAnchorInput`, whose existing caller `updateAccountAnchorAction` (`import/actions.ts:66-91`) is throw-and-redirect — the path of least resistance is the wrong pattern.
   - Files: this plan (S0 in the parallelization table), then `src/app/accounts/actions.ts`
   - Verify: read-through — no `throw` in any `/accounts` action; every one returns a typed result
-- [ ] **T29 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `resolveBalanceAction(account, hasAnyRows)`, total over both inputs; set `balance_source='manual'` at account creation
+- [x] **T29 (P1, human: ~3h / CC: ~15min)** — `src/lib/accounts/` — `resolveBalanceAction(account, hasAnyRows)`, total over both inputs; set `balance_source='manual'` at account creation
   - Surfaced by: E4 — `balance_source` is nullable and nothing set it at creation, so DS55's "never both, never neither" failed for every new card, and DS57's threshold table had no NULL row. Capability is derived; history is stored.
   - Files: `src/lib/accounts/resolveBalanceAction.ts`, `.test.ts`, `src/app/import/actions.ts`
   - Verify: `pnpm test resolveBalanceAction` — three branches + totality
-- [ ] **T30 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `hasAnyTransactionRows(accountId)`: `EXISTS`, **no anchor filter**, one helper for D7's scope, E1's partition and T29
+- [x] **T30 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `hasAnyTransactionRows(accountId)`: `EXISTS`, **no anchor filter**, one helper for D7's scope, E1's partition and T29
   - Surfaced by: E16 — "zero transaction rows" was undefined. `loadAccountBalances`'s existing anchor-filtered aggregate makes the count free and wrong: reconcile a card to today and every row it owns sits before the anchor, making it "zero-row" and therefore eligible for a feed refresh, which D15 forbids.
   - Files: `src/lib/accounts/hasAnyTransactionRows.ts`, `.test.ts`
   - Verify: `pnpm test hasAnyTransactionRows` — a card reconciled to today is NOT zero-row
-- [ ] **T31 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `isLongTermLiability(type)` exhaustive switch; rewire DS59 so the bar reads `credit_limit_cents` and LONG-TERM/muted reads `type`
+- [x] **T31 (P1, human: ~2h / CC: ~10min)** — `src/lib/accounts/` — `isLongTermLiability(type)` exhaustive switch; rewire DS59 so the bar reads `credit_limit_cents` and LONG-TERM/muted reads `type`
   - Surfaced by: E7 — DS59 derived the muted LONG-TERM treatment from the absence of `credit_limit_cents`, which DS64 makes optional, so a card added without a limit rendered as a mortgage. DS59's own last sentence has the answer.
   - Files: `src/lib/accounts/isLongTermLiability.ts`, `.test.ts`, `src/app/accounts/_account-row.tsx`
   - Verify: `pnpm test isLongTermLiability` + manual — a credit account with no limit shows no bar and is NOT under LONG-TERM
-- [ ] **T32 (P1, human: ~5h / CC: ~25min)** — `src/lib/accounts/manualTransaction.ts` — three guards in the shared write path: **D12 scoped to charges/refunds only (payments accept any date)**, **three-way in-transaction idempotency**, **`type='loan'` rejected**
+- [x] **T32 (P1, human: ~5h / CC: ~25min)** — `src/lib/accounts/manualTransaction.ts` — three guards in the shared write path: **D12 scoped to charges/refunds only (payments accept any date)**, **three-way in-transaction idempotency**, **`type='loan'` rejected**
   - Surfaced by: E5 — the anchor defaults to today, so D12-as-written failed "Mark as payment" for 100% of existing history AND left each checking leg unpaired, double-counting the payment as spend. E10 — "idempotency guard" named no key, and guarding on `transfer_pair_id IS NOT NULL` alone silently succeeds on a row the matcher already auto-paired elsewhere. E17 (Codex #1) — nothing stopped a charge or payment landing on the mortgage, which is the premise D3/D7/D15/E16 all rest on.
   - Files: `src/lib/accounts/manualTransaction.ts`, `.test.ts`
   - Verify: `pnpm test manualTransaction` — pre-anchor payment ACCEPTED, pre-anchor charge REFUSED, all three idempotency branches, loan target rejected
-- [ ] **T33 (P1, human: ~4h / CC: ~20min)** — `src/lib/accounts/` + `src/app/accounts/` — `unmarkCardPayment`: clear both `transfer_pair_id`s and **DELETE** the synthetic mirror; no rejection marker. Two entry points — the DS61 10s Undo and the row menu.
+- [x] **T33 (P1, human: ~4h / CC: ~20min)** — `src/lib/accounts/` + `src/app/accounts/` — `unmarkCardPayment`: clear both `transfer_pair_id`s and **DELETE** the synthetic mirror; no rejection marker. Two entry points — the DS61 10s Undo and the row menu.
   - Surfaced by: E12 — `unlinkTransferPair` was built for two real bank rows the matcher wrongly joined. Applied to a synthetic mirror it strands a category-NULL row in the backlog (`spine.tsx:24-32` counts exactly that state), leaves the card balance inflated, and rejection-marks the pair so re-pairing is blocked.
   - Files: `src/lib/accounts/manualTransaction.ts`, `.test.ts`, `src/app/accounts/actions.ts`
   - Verify: `pnpm test manualTransaction` — mirror deleted, balance restored, backlog count unchanged, row re-markable to another card
-- [ ] **T34 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` + `src/lib/accounts/` — charge/refund sign choice in DS67's dialog (category still required); narrow `paidDownCents` to `transfer_pair_id IS NOT NULL AND amount_cents > 0`
+- [x] **T34 (P1, human: ~4h / CC: ~20min)** — `src/app/accounts/` + `src/lib/accounts/` — charge/refund sign choice in DS67's dialog (category still required); narrow `paidDownCents` to `transfer_pair_id IS NOT NULL AND amount_cents > 0`
   - Surfaced by: E13 — a return has nowhere to go, so the envelope keeps money you got back; and `paidDownCents = SUM(> 0)` is correct today only because the payment mirror is the only positive row a card can have. Everything downstream already handles a positive card row.
   - Files: `src/app/accounts/_charge-dialog.tsx`, `src/lib/accounts/paidDownCents.ts`, `.test.ts`
   - Verify: `pnpm test paidDownCents` — an unpaired positive row is EXCLUDED
-- [ ] **T35 (P1, human: ~4h / CC: ~20min)** — `src/app/import/` — two guards on one page: **filter the CSV target `<select>` to assets AND reject a liability `accountId` in the import action (E6)**; **scope the anchor-repair form to asset accounts (E18)**
+- [x] **T35 (P1, human: ~4h / CC: ~20min)** — `src/app/import/` — two guards on one page: **filter the CSV target `<select>` to assets AND reject a liability `accountId` in the import action (E6)**; **scope the anchor-repair form to asset accounts (E18)**
   - Surfaced by: E6 — `import/page.tsx:17` selects all accounts unfiltered and feeds the CSV target at `:105-116`, so after T15 a CSV imported into the Visa moves its anchor off another account's balance chain, forward-only and silent. E18 (Codex #2) — the anchor-repair form at `:29` is a raw signed twin of Reconcile, reintroducing the exact bug T15 was raised to P1 to prevent, in the second form on the same page.
   - Files: `src/app/import/page.tsx`, `src/app/import/actions.ts`, `actions.test.ts`
   - Verify: `pnpm test import` — liability `accountId` POSTed directly to the CSV action is refused
-- [ ] **T36 (P1, human: ~2h / CC: ~10min)** — `src/app/accounts/error.tsx` — reassurance copy states the **real** guarantee: the previous balance and date are kept and the change is one click to reverse
+- [x] **T36 (P1, human: ~2h / CC: ~10min)** — `src/app/accounts/error.tsx` — reassurance copy states the **real** guarantee: the previous balance and date are kept and the change is one click to reverse
   - Surfaced by: E19 (Codex #3) — DS54–57 justified the `reassurance` slot on "rule 5's snapshot guarantee." Verified false: `createSnapshot` has exactly two production callers, `importBatch.ts:305` and `sync.ts:351`, and no anchor write is one of them. A reassurance shown at the moment something broke must not be a false one.
   - Files: `src/app/accounts/error.tsx`
   - Verify: read-through — the string names the prior-anchor mechanism, not a snapshot
-- [ ] **T37 (P2, human: ~1h / CC: ~5min)** — `src/lib/accounts/listAccounts.ts` — filter long-term liabilities out of the picker; credit cards stay
+- [x] **T37 (P2, human: ~1h / CC: ~5min)** — `src/lib/accounts/listAccounts.ts` — filter long-term liabilities out of the picker; credit cards stay
   - Surfaced by: E15 — `listAccounts.ts:17` selects every account with no type filter and feeds the `/transactions` account filter. The Visa appearing is good and unplanned; the mortgage appearing is a permanently-empty option, since D3=A is now enforced on both write paths by E1 and E6.
   - Files: `src/lib/accounts/listAccounts.ts`, `listAccounts.test.ts`
   - Verify: `pnpm test listAccounts` — credit included, loan excluded
-- [ ] **T38 (P2, human: ~2h / CC: ~10min)** — `src/lib/accounts/manualTransaction.ts` — one `import_batches` row **per manual operation**, not one reused forever
+- [x] **T38 (P2, human: ~2h / CC: ~10min)** — `src/lib/accounts/manualTransaction.ts` — one `import_batches` row **per manual operation**, not one reused forever
   - Surfaced by: E21 (Codex #5) — every column on that table is scoped to one atomic write. Reuse freezes `importedAt`, requires a read-modify-write increment on `transaction_count` for a number nobody reads, and permanently falsifies four columns. This is *less* code than the lazy-reuse design D6=B specified.
   - Files: `src/lib/accounts/manualTransaction.ts`, `.test.ts`
   - Verify: `pnpm test manualTransaction` — two charges produce two batches, each `transaction_count: 1`
-- [ ] **T39 (P1, human: ~1h / CC: ~5min)** — this plan — restate the founding premise: identical storage and aggregation, divergent write paths and refresh models
+- [x] **T39 (P1, human: ~1h / CC: ~5min)** — this plan — restate the founding premise: identical storage and aggregation, divergent write paths and refresh models
   - Surfaced by: E22 (Codex, "main miss") — "a credit card and a mortgage are one feature" is right about storage and wrong about behaviour, and the gap generated nine divergence bugs (D3, D15, DS59, E4, E5, E7, E16, E17, and Codex #1). The remedy is a paragraph, not a re-architecture: the shared column is the expensive half and is why they still ship as one PR.
   - Files: `docs/plans/liability-accounts-and-budget-signals.md` (§"The insight that shapes this plan")
   - Verify: read-through — the opening section names both columns of the E22 table
