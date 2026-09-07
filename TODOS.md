@@ -17,7 +17,9 @@ Short-term checklist. For the full roadmap see [PLAN.md](./PLAN.md). For context
 - [x] First Drizzle migration — all tables at once: `accounts`, `transactions`, `categories`, `category_rules`, `budget_periods`, `import_batches`
 - [x] better-sqlite3 DB client singleton in `src/db/index.ts` (globalThis-cached, Proxy-wrapped for HMR-safe reopen)
 - [x] CSV parser in `src/lib/parseCsv.ts` — handles both checking and savings memo variants
-- [x] Merchant normalizer in `src/lib/normalize.ts` — 12 rules total, pure function, Vitest-covered
+- [x] Merchant normalizer in `src/lib/normalize.ts` — four-phase pure-function pipeline, Vitest-covered
+- [x] Merchant-key backfill (`pnpm db:backfill-merchants`) — renormalizes rows and rewrites trained rules; see `docs/plans/merchant-normalization.md` T4
+- [ ] `docs/plans/merchant-normalization.md` T3 / T5 / T6 — alias table, alias CRUD, re-run auto-categorization over the backlog. **Priority:** P2. T3 was measured worth only ~5 groups, so re-justify before building it.
 - [x] Transfer-pair matcher in `src/lib/transferPair.ts` — memo-independent, keys on (txn±1, date, |amount|, opposite signs, different accounts)
 - [x] Import preview UI — CSV upload → `/import/preview/{id}` stat cards + row list with duplicate/pending/error shading + confirm/cancel server actions
 - [x] Pre-import DB snapshot in `src/lib/snapshot.ts` — copy `data/money.db` to `data/money.db.pre-import-{ts}` before any write; 10-snapshot retention
@@ -1196,3 +1198,68 @@ correctness-shaped was fixed in the PR; these are the ones deliberately left.
 - [ ] **P4** — **The dashboard's `BalanceRow` and `/accounts`' `AccountRow` re-implement the same name+amount header.** Same `isLongTermLiability` mute, same `moneyToneClass` context ternary, same `owed …` aria-label, differing only by `sm:px-5` and a tabular-nums utility — so DS59/DS66 have two implementations one Tailwind edit apart. `NetWorthRow` and `SubtotalRow` were extracted into `components/ledger/balance-list.tsx` for exactly this reason; this is the third candidate and the least trivial, because `AccountRow` also owns the utilization bar, staleness label and four action affordances the dashboard deliberately omits. (`src/app/page.tsx`, `src/app/accounts/_account-row.tsx`)
 
 - [ ] **P4** — **`revertLiabilityBalanceAction` is a toggle, not an idempotent undo.** It swaps current and prior anchor, so submitting twice returns to where you started and reports success both times. That is deliberate — it makes the undo itself undoable, which is worth more on a single-user local app than one-shot semantics — but it means a stale second tab re-applies the balance the user just reverted, and the `has no previous balance to go back to` guard can never fire after the first revert. If this ever bites, the fix is a hidden `expectedCents` on the form, refusing when it no longer matches the stored anchor. (`src/app/accounts/actions.ts`)
+
+## Follow-ups from the `/pr-review-toolkit:review-pr` pass on PR #41 (2026-09-07)
+
+Fixed in the same pass, listed for the record: the normalizer header's false
+"intra-phase steps are reorderable" claim (it invited a silent key-moving edit —
+swapping phase 3's phone rule and `TRAILING_STATE` fails seven tests); the
+backfill wrapper's dead stale-image detection (keyed on exit 127 and an
+`err.message` that `stdio: "inherit"` guarantees is empty — a missing script
+argument exits 1); the backfill's rollback snapshot sharing `PRE_MIGRATE_PREFIX`,
+which `docker/entrypoint.src.mjs` prunes to 10 on every container boot (now
+`BACKFILL_PREFIX`, unpruned); and the post-`--apply` verification block, whose
+checks were unfalsifiable and whose results never reached the exit code.
+
+Left open:
+
+- [x] **The collision ranking now models `buildRuleMatcher`'s archived-category
+      skip.** `src/lib/rules.ts` skips a rule whose category is archived (rule 8
+      makes archiving inert, not deleting), so replicating only `compareRules`'
+      sort let an archived rule outrank and DELETE the live rule that was
+      actually firing. The rules query now joins `categories.archived_at`,
+      archived-category rules sort last, and the `<= KEPT` / `-- deleted` lines
+      mark them `(ARCHIVED — never fires)`. `conflicting` deliberately still
+      counts an archived rule's category: that over-asks for
+      `--resolve-conflicts`, which is the right direction for the one flag
+      gating money movement.
+- [x] **`contains`/`regex` rules are now reported, though still never
+      rewritten** (a substring is not a key — rule 10). The plan counts each
+      non-exact rule's reach against the old keys and the new ones and prints
+      any that change, flagging a drop to zero as `DEAD, and no backfill can
+      repair it`. Reported rather than refused on purpose: the normalizer change
+      is what kills such a rule, at the moment it lands — refusing here would
+      only withhold the repair for the rows.
+- [x] **A degraded snapshot (`consistent: false`) now REFUSES rather than warns**,
+      behind `--allow-degraded-snapshot`, exiting 3. This is not inconsistency
+      with `commitImport`, which warns and proceeds: that path persists its
+      warning to `import_batches.snapshot_warning` where `/import/success`
+      renders it AND has a logical undo, so a degraded snapshot costs a safety
+      net that is already doubled. This has neither, and rule 5's measured
+      failure mode is a fallback copy that would not open at all
+      (`SQLITE_CORRUPT`) — with a reader pinned, which this script always has by
+      construction, since you reach it through `docker compose exec` into the
+      running app container. The snapshot file is deliberately not deleted on
+      the refusal path: `consistent: false` often still means a restorable plain
+      copy, and discarding it to tidy an error path would throw away a
+      possibly-good rollback point.
+- [ ] **`runCli` has no test coverage at all.** `planBackfill` is well covered;
+      every line that touches disk is not. The two-pass temp-value rewrite is
+      the one piece of write logic the planner cannot express, and deleting it
+      leaves the whole suite green. **Priority:** P2. Fix: a tmp-file
+      better-sqlite3 DB with the real `drizzle/` migrations, seeded with a
+      swap-shaped collision (rule A `"X"→"Y"` while rule B holds `"Y"→"X"`).
+      The wrapper is now testable too — `main` takes an injectable `exec`.
+- [ ] **"Largest group wins" has no defined tie-break.** `sort` by count
+      descending is stable, so a 1-vs-1 split resolves to whichever key the
+      `SELECT` (which has no `ORDER BY`) happened to return first. The CLI
+      prints `x1, x1` with no marker that the choice was arbitrary.
+      **Priority:** P3.
+- [ ] **Deleted subscription dismissals are reported as a count, never by
+      name.** `dismissalPlan` carries `from`/`next` and throws them away.
+      Collisions get a full per-rule listing; dismissals get an integer, and the
+      rows are unreachable from the UI by construction. **Priority:** P3.
+- [ ] **A plain dry run exits 2 on a category-conflicting collision**, before
+      the `DRY RUN — nothing written` line, and suggests a command strictly more
+      dangerous than the read-only one that was asked for. Intentional, but
+      undocumented as a *dry-run* behavior. **Priority:** P3.

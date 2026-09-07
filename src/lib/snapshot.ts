@@ -28,6 +28,21 @@ export const PRE_MIGRATE_PREFIX = "money.db.pre-migrate-";
  * pre-import snapshot. Nothing ever prunes this pool; it's cleaned up by hand.
  */
 export const EXPORT_PREFIX = "money.db.export-";
+/**
+ * A fourth pool, for `pnpm db:backfill-merchants --apply`
+ * (scripts/backfill-merchants.src.mjs). It cannot share PRE_MIGRATE_PREFIX,
+ * which reads like the natural home for it: docker/entrypoint.src.mjs
+ * snapshots under that prefix on EVERY container boot and then prunes it to
+ * SNAPSHOT_RETENTION, and compose.yaml runs `restart: unless-stopped`. The
+ * backfill rewrites every row's merchant key and DELETEs losing category_rules
+ * in one irreversible pass with no logical undo, so this snapshot is its only
+ * rollback point — and the deleted rules (with their priority/updated_at) are
+ * not re-derivable from raw_memo the way the merchant keys are. Ten boots after
+ * a bad backfill, a shared pool would have evicted it silently.
+ *
+ * Nothing prunes this pool, same as EXPORT_PREFIX; it's cleaned up by hand.
+ */
+export const BACKFILL_PREFIX = "money.db.pre-backfill-";
 
 export type SnapshotResult = {
   snapshotPath: string;

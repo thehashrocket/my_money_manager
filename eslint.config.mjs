@@ -16,6 +16,10 @@ const eslintConfig = defineConfig([
     // inline drizzle-orm's own source, which isn't ours to lint.
     "docker/entrypoint.mjs",
     "scripts/snapshot-cli.mjs",
+    // Gitignored design artifacts and throwaway data probes. Never shipped, and
+    // absent from a fresh clone, so linting them only breaks `pnpm lint` on the
+    // one machine that has them.
+    ".context/**",
   ]),
 ]);
 
