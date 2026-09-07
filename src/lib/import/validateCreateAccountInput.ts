@@ -2,6 +2,7 @@ import { z } from "zod";
 import { accountClass } from "@/lib/accounts/accountClass";
 import {
   STARTING_BALANCE_DOLLARS_MAX,
+  isStartingBalanceCentsInBounds,
   owedDollarsToSignedCents,
   startingBalanceDateSchema,
   startingBalanceDollarsSchema,
@@ -61,6 +62,27 @@ export const createAccountInputSchema = baseSchema
         // DS61 register rule 1: state the consequence, not the rule. Rule 2:
         // never name a schema concept — no "anchor", no "starting balance".
         message: "Enter what you owe as a positive number.",
+      });
+    }
+    // The bound is checked on the NEGATED cents, not on the typed dollars.
+    //
+    // `startingBalanceDollarsSchema` bounds what you type to [-$1M, $100M],
+    // but a liability negates after that check — so a $2,000,000 loan passed
+    // as a positive, then stored -200,000,000 cents, outside the range every
+    // other anchor writer enforces. Worse, it was unrecoverable: reconcile
+    // reshapes owed into -owed before `validateUpdateAnchorInput`, where
+    // -2,000,000 < -1,000,000 fails, and reconcile is the ONLY path D15
+    // allows for a liability balance. Creation could mint an account that
+    // nothing in the app could ever correct.
+    if (
+      accountClass(v.type) === "liability" &&
+      v.startingBalance >= 0 &&
+      !isStartingBalanceCentsInBounds(owedDollarsToSignedCents(v.startingBalance))
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["startingBalance"],
+        message: "That balance is larger than this app accepts.",
       });
     }
     // D2=A: a mortgage row renders no utilization bar and no minimum payment,

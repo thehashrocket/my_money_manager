@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { validateCreateAccountInput } from "./validateCreateAccountInput";
-import { owedDollarsToSignedCents } from "./accountAnchorFields";
+import {
+  isStartingBalanceCentsInBounds,
+  owedDollarsToSignedCents,
+} from "./accountAnchorFields";
 
 const valid = {
   name: "Checking",
@@ -300,5 +303,40 @@ describe("the liability negation is shared with reconcile", () => {
     const parsed = validateCreateAccountInput({ ...valid, startingBalance: 1234.56 });
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.startingBalanceCents).toBe(123_456);
+  });
+});
+
+describe("a liability creation must be reconcilable afterwards", () => {
+  // REGRESSION. The dollar bound applied to what you TYPE, but a liability
+  // negates after that check, so a $2,000,000 loan was accepted and stored
+  // -200,000,000 cents — outside the range every other anchor writer
+  // enforces. It was also unrecoverable: reconcile reshapes owed into -owed
+  // before validateUpdateAnchorInput, where -2,000,000 fails the -1,000,000
+  // floor, and reconcile is the only path D15 allows for a liability balance.
+  it("refuses an owed balance whose negated cents fall outside the shared bound", () => {
+    const parsed = validateCreateAccountInput({
+      name: "Mortgage",
+      type: "loan",
+      startingBalance: 2_000_000,
+      startingBalanceDate: "2026-04-16",
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("anything it DOES accept lands inside the bound reconcile also enforces", () => {
+    for (const owed of [0, 1, 2148.32, 300_000, 1_000_000]) {
+      const parsed = validateCreateAccountInput({
+        name: "Mortgage",
+        type: "loan",
+        startingBalance: owed,
+        startingBalanceDate: "2026-04-16",
+      });
+
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(isStartingBalanceCentsInBounds(parsed.data.startingBalanceCents)).toBe(true);
+      }
+    }
   });
 });
