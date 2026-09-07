@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import type { LeafCategory } from "@/lib/categories";
-import { IDLE_ACTIVITY, type CardActivityState } from "./action-state";
+import { IDLE_ACTIVITY } from "./action-state";
 import { addCardActivityAction } from "./actions";
 
 /**
@@ -110,7 +110,12 @@ export function ChargeDialog({
             {(["charge", "refund"] as const).map((k) => (
               <label
                 key={k}
-                className={`cursor-pointer rounded-md border px-3 py-1.5 text-base capitalize ${
+                /* The real radio is `sr-only`, so the UA draws its focus ring
+                   on a clipped 1px box — invisible. Without this, a keyboard
+                   user tabbing into the group cannot tell which option is
+                   focused: focused and unfocused render identically until an
+                   arrow key changes the checked state. */
+                className={`cursor-pointer rounded-md border px-3 py-1.5 text-base capitalize has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--accent-terracotta)] ${
                   kind === k
                     ? "border-terracotta bg-[var(--bg-inset)] text-ink-1"
                     : "border-border text-ink-3"
@@ -226,4 +231,3 @@ export function ChargeDialog({
   );
 }
 
-export type { CardActivityState };

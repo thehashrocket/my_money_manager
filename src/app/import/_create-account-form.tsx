@@ -204,7 +204,11 @@ export function CreateAccountForm({ today }: { today: string }) {
       ) : null}
 
       <div className="flex flex-wrap items-center gap-4 sm:col-span-2">
-        <Button type="submit" variant="primary">
+        {/* `min-h-11` / `w-full sm:w-auto` to match every other new control on
+            this branch — the default Button size is 34px, which would have
+            left the primary CTA of account creation below the 44px floor its
+            own secondary buttons one route over already clear. */}
+        <Button type="submit" variant="primary" className="min-h-11 w-full sm:w-auto">
           Create account
         </Button>
         {/* DS61 #3 — restates what will be STORED, in the words the user

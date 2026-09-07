@@ -157,8 +157,13 @@ function ResultSummary({
         /* No `page` — omitting it resets to page 1, which is what any change
            to the visible result set should do. */
         href={buildHref({ ...searchParams, includeTransfers: !on })}
-        className="font-medium underline-offset-4 hover:underline"
-        aria-pressed={on}
+        /* `aria-pressed` is only valid on role=button. On a link assistive
+           tech drops it (and axe flags it), so the state it was added to
+           announce was never announced — the link text carries it instead,
+           flipping between "Show transfers" and "Hide transfers".
+           `min-h-11` brings the target to the 44px floor the rest of this
+           branch's controls use; a bare text-xs link was ~16px tall. */
+        className="inline-flex min-h-11 items-center px-1 font-medium underline-offset-4 hover:underline"
       >
         {on ? "Hide transfers" : "Show transfers"}
       </Link>

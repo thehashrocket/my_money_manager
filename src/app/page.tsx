@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { connection } from "next/server";
 import Link from "next/link";
 import { db } from "@/db";
@@ -43,6 +44,7 @@ export default async function Home() {
   const liabilities = accounts
     .filter((a) => a.class === "liability")
     .sort((a, b) => Number(isLongTermLiability(a.type)) - Number(isLongTermLiability(b.type)));
+  const closestToLimit = rankByProximity(allLeaves, phase, 5);
   const debtPaidDownCents = liabilities.reduce(
     (sum, a) => sum + (paidDownCents(a.id, year, month, db) ?? 0),
     0,
@@ -67,9 +69,13 @@ export default async function Home() {
 
       {/* DS49 — between "This month" and the trend chart. The chart is the one
           section read monthly rather than daily, so it is demoted one slot. */}
+      {/* Ranked once. `rankByProximity` returns `rows.slice(0, limit)` off an
+          identically-ordered array, so the mobile list is exactly the first
+          three of the desktop five — calling it twice re-walked every leaf and
+          re-sorted to reach a result already in hand. */}
       <ClosestToLimit
-        desktop={rankByProximity(allLeaves, phase, 5)}
-        mobile={rankByProximity(allLeaves, phase, 3)}
+        desktop={closestToLimit}
+        mobile={closestToLimit.slice(0, 3)}
         year={year}
         month={month}
       />
@@ -124,6 +130,7 @@ function BalanceSection({
   summary: { assetsCents: number; liabilitiesCents: number; netWorthCents: number };
   debtPaidDownCents: number;
 }) {
+  const firstLongTermIndex = liabilities.findIndex((a) => isLongTermLiability(a.type));
   return (
     <section className="space-y-4">
       <div>
@@ -142,8 +149,22 @@ function BalanceSection({
             Liabilities
           </h2>
           <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg border border-border bg-card shadow-soft">
-            {liabilities.map((a) => (
-              <BalanceRow key={a.id} account={a} />
+            {liabilities.map((a, i) => (
+              <Fragment key={a.id}>
+                {/* DS66 — the muting on a long-term row is lower-contrast ink,
+                    which is invisible to a screen reader. LONG-TERM has to be
+                    a real grouping heading, never muting alone. /accounts
+                    renders the same heading; the dashboard sorted for it and
+                    then omitted it, so the only signal here was colour. */}
+                {i === firstLongTermIndex ? (
+                  <li className="px-4 pt-3">
+                    <h3 className="font-mono text-xs uppercase tracking-wide text-ink-3">
+                      Long-term
+                    </h3>
+                  </li>
+                ) : null}
+                <BalanceRow account={a} />
+              </Fragment>
             ))}
             <SubtotalRow
               label="Debt"

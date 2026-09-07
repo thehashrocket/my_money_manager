@@ -1,5 +1,6 @@
 import { and, isNull, sql } from "drizzle-orm";
 import { connection } from "next/server";
+import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents, moneyToneClass } from "@/lib/money";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
@@ -89,9 +90,9 @@ export async function Spine() {
             nothing, and there is no hover on touch, so the affordance is
             visible: an underline on hover plus a persistent `›`. This also
             fixes a small existing oddity — these balances were a dead end. */}
-        <a className="peek-title peek-title-link" href="/accounts">
+        <Link className="peek-title peek-title-link" href="/accounts">
           Peek · balances <span aria-hidden>›</span>
-        </a>
+        </Link>
         {balances.length === 0 ? (
           <div className="peek-empty">No accounts yet</div>
         ) : (

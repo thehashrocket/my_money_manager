@@ -541,12 +541,21 @@
   text-transform: uppercase;
   margin-bottom: 8px;
 }
-/* DS68 — the peek header links to /accounts. `display: block` so the whole
-   header row is the target (it clears 44px with its own margin-bottom), and a
-   persistent `›` because there is no hover on touch and a header that merely
-   happens to be clickable signals nothing. */
+/* DS68 — the peek header links to /accounts, with a persistent `›` because
+   there is no hover on touch and a header that merely happens to be clickable
+   signals nothing.
+
+   The 44px comes from `min-height`, not from `margin-bottom`. A margin sits
+   OUTSIDE the border box and is not part of the hit area, so the earlier
+   version was a ~13px target (10.5px text, no padding) with a comment
+   asserting it was already compliant — the worst combination, because it
+   tells the next reader not to check. The margin is dropped since the taller
+   box now supplies the separation itself. */
 .spine-peek .peek-title-link {
-  display: block;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  margin-bottom: 0;
   text-decoration: none;
   transition: color var(--motion-quick) var(--motion-ease);
 }
