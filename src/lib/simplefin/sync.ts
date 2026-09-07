@@ -12,9 +12,10 @@ import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
-import { parseAmountToCents } from "@/lib/money";
+import { formatCents, parseAmountToCents } from "@/lib/money";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
+import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import {
   isStartingBalanceCentsInBounds,
   startingBalanceDateSchema,
@@ -42,6 +43,8 @@ const OVERLAP_DAYS = 7;
 const DAY_SECONDS = 86_400;
 /** Pulling up to 45 days of rows is slower than a balance check, but bounded. */
 const SYNC_TIMEOUT_MS = 60_000;
+/** A balances-only request carries no transaction history, so it gets less rope. */
+const BALANCE_TIMEOUT_MS = 30_000;
 
 /**
  * What is known about an account before the ledger is re-read.
@@ -299,11 +302,56 @@ function refreshLiabilityBalances(
       continue;
     }
 
+    // THE SIGN. Rule 9 stores a liability negative, and this is the only
+    // anchor writer that does not route through `owedDollarsToSignedCents` —
+    // it takes whatever the provider sends, on the app's only untrusted input,
+    // with no human in the loop. A provider reporting a card as positive
+    // amount-owed ("2148.00") would write +214800, which `summarizeBalances`
+    // then adds to the Debt total as a positive and `moneyTone` paints green
+    // as a credit balance: net worth wrong by twice the number, no error, and
+    // a figure that looks entirely plausible.
+    //
+    // Split by type rather than refused outright, because "a liability is
+    // always negative" is NOT an invariant — `summarizeBalances` deliberately
+    // blesses a positive card balance as a real credit balance from an
+    // overpayment. So:
+    //
+    //   loan/mortgage  a positive balance is meaningless. Refuse. (You cannot
+    //                  overpay your way into the bank owing you a house.)
+    //   credit card    a positive balance is legal but rare. Write it, and say
+    //                  so, because it is far likelier to be a sign-convention
+    //                  mismatch than a real overpayment.
+    //
+    // Refusing BOTH was the first draft and is wrong: a card with a genuine
+    // credit balance and no rows resolves to Refresh, not Reconcile
+    // (`resolveBalanceAction`), so a blanket refusal would leave it with no
+    // working control at all — E4's failure, which `_account-row.tsx` already
+    // documents getting caught by once.
+    // The loan half of the guard REFUSES, so it has to run before the no-op
+    // check — a refusal is about the figure itself, not about whether it moved.
+    if (balanceCents > 0 && isLongTermLiability(account.type)) {
+      warnings.push(
+        `SimpleFIN reported a positive balance for "${account.name}", which a loan cannot have, so it was ignored.`,
+      );
+      continue;
+    }
+
     if (
       balanceCents === account.startingBalanceCents &&
       asOfIso === account.startingBalanceDate
     ) {
       continue; // Nothing moved; do not manufacture a report.
+    }
+
+    // The card half only ANNOUNCES, so it belongs after the no-op check.
+    // Warning before it re-emitted on every single sync for an account that
+    // was perfectly healthy and hadn't changed — and since the action treats
+    // "no update + a warning" as a failure, a stable overpaid card rendered a
+    // red error under its Refresh button forever.
+    if (balanceCents > 0) {
+      warnings.push(
+        `SimpleFIN reports "${account.name}" as ${formatCents(balanceCents)} — a credit balance. If that is wrong, set it with Reconcile on the Accounts page.`,
+      );
     }
 
     db.update(schema.accounts)
@@ -330,6 +378,87 @@ function refreshLiabilityBalances(
   }
 
   return { updates, warnings };
+}
+
+export type BalanceRefreshOutcome =
+  | { status: "no-linked-accounts" }
+  | { status: "ok"; updates: LiabilityBalanceUpdate[]; warnings: string[] };
+
+/**
+ * The balance pass ALONE — no import, no snapshot, no batch, no matcher.
+ *
+ * `/accounts`' per-row Refresh used to call `syncSimpleFin({})`, the whole
+ * import: 45 days of transactions for every linked asset account, a
+ * `VACUUM INTO` snapshot, an undoable batch, auto-categorization, the transfer
+ * matcher, and snapshot pruning. It then reported one balance and discarded
+ * the rest of `SyncOutcome` — including `snapshot.consistent`, which rule 5
+ * says in so many words not to ignore, and `response.errors`, whose omission
+ * is what `sync/actions.ts` documents as having "made a dead connection render
+ * as a green 'Already up to date'". Clicking Refresh on the mortgage row
+ * imported forty checking transactions and said "Mortgage is unchanged."
+ *
+ * Reporting was the symptom; scope was the defect. DS55 offers Refresh per row
+ * precisely because eligibility is a per-account property (E4), so the control
+ * has no business running a global import. This is the operation the button
+ * always claimed to be.
+ *
+ * `balancesOnly` is the feed's own parameter and was already built, tested and
+ * used by `link.ts` for the same reason — linking needs names and balances,
+ * not history. Nothing new had to be added to the client for this.
+ *
+ * `accountId` narrows the pass to ONE account, and `/accounts`' per-row button
+ * always passes it. Without it the "per-row" control still moved the anchor on
+ * every feed-linked zero-row liability — and since each of those writes
+ * overwrites that account's single `prior_starting_balance_*` slot (rule 9),
+ * one click on the mortgage could spend the undo on a card the user never
+ * touched. It also scopes `warnings`, so a row can never report a different
+ * account's failure as its own.
+ */
+export async function refreshLiabilityBalancesOnly(
+  opts: { now?: Date; signal?: AbortSignal; accountId?: number } = {},
+  db: Db = defaultDb,
+): Promise<BalanceRefreshOutcome> {
+  const now = opts.now ?? new Date();
+  const warnings: string[] = [];
+
+  const linked = db
+    .select()
+    .from(schema.accounts)
+    .where(isNotNull(schema.accounts.simplefinAccountId))
+    .all();
+
+  if (linked.length === 0) return { status: "no-linked-accounts" };
+
+  const { balanceOnlyAccounts } = partitionLinkedAccounts(linked);
+  const scoped =
+    opts.accountId === undefined
+      ? balanceOnlyAccounts
+      : balanceOnlyAccounts.filter((a) => a.id === opts.accountId);
+  if (scoped.length === 0) {
+    return { status: "ok", updates: [], warnings };
+  }
+
+  const creds = readAccessUrl();
+  const response = await fetchAccounts(creds, {
+    // No history is wanted, so ask for none: `balancesOnly` makes the window
+    // irrelevant, and `now` keeps the request honest if a provider ignores it.
+    startDate: Math.floor(now.getTime() / 1000),
+    accountIds: scoped.map((a) => a.simplefinAccountId!),
+    balancesOnly: true,
+    signal: opts.signal ?? AbortSignal.timeout(BALANCE_TIMEOUT_MS),
+  });
+
+  // A bank connection can fail while the HTTP request succeeds — SimpleFIN
+  // reports that in `errors[]` on a 200. Dropping these is exactly what turned
+  // a dead connection into a green success message on `/sync`.
+  for (const err of response.errors ?? []) warnings.push(err);
+
+  const byExternalId = new Map<string, SimpleFinAccount>();
+  for (const a of response.accounts ?? []) byExternalId.set(a.id, a);
+
+  const pass = refreshLiabilityBalances(scoped, byExternalId, db, now);
+  warnings.push(...pass.warnings);
+  return { status: "ok", updates: pass.updates, warnings };
 }
 
 /**
@@ -967,6 +1096,22 @@ export function findLinkedTransferPairs(
       and(
         gte(schema.transactions.date, sinceIso),
         isNotNull(schema.transactions.transferPairId),
+        // NOT_MANUAL, which `linkTransfersByBucket` and
+        // `findAmbiguousTransfers` already carry and this query was missed
+        // out of. Without it a card-payment pair created by
+        // `markAsCardPayment` showed up in `/sync`'s linked-transfer list
+        // beside a "Not a transfer" button wired to `unlinkTransferPair` —
+        // and `unmarkCardPayment`'s docstring spells out what that does to a
+        // synthetic mirror: an orphan row in the categorize backlog, the card
+        // balance still inflated by the payment, no valid category, and a
+        // rejection marker blocking automatic re-pairing. None of it
+        // announced.
+        //
+        // These pairs do not belong on that surface anyway: it exists to show
+        // what THIS SYNC auto-linked and offer to undo it. A payment the user
+        // marked by hand was never auto-linked, and its correct inverse is
+        // `unmarkCardPayment` from the row menu (E12).
+        NOT_MANUAL,
       ),
     )
     .all();
