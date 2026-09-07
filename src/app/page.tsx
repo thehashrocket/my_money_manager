@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { loadAccountBalances, type AccountBalance } from "@/lib/accounts/loadAccountBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { loadMonthlyTrends, type TrendData } from "@/lib/trends/loadMonthlyTrends";
-import { formatCents } from "@/lib/money";
+import { formatCents, moneyToneClass } from "@/lib/money";
 import { currentMonth } from "@/lib/now";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { TrendChart } from "@/components/ledger/trend-chart";
@@ -48,15 +48,7 @@ export default async function Home() {
           <span className="font-mono text-sm text-ink-3 uppercase tracking-wide">
             Total
           </span>
-          <span
-            className={`font-mono text-lg font-semibold ${
-              totalCents > 0
-                ? "text-money-pos"
-                : totalCents < 0
-                  ? "text-money-neg"
-                  : "text-money-zero"
-            }`}
-          >
+          <span className={`font-mono text-lg font-semibold ${moneyToneClass(totalCents)}`}>
             {formatCents(totalCents)}
           </span>
         </div>
@@ -99,15 +91,7 @@ function AccountTile({ account }: { account: AccountBalance }) {
           {account.type}
         </span>
       </div>
-      <div
-        className={`font-mono text-2xl font-semibold ${
-          account.balanceCents > 0
-            ? "text-money-pos"
-            : account.balanceCents < 0
-              ? "text-money-neg"
-              : "text-money-zero"
-        }`}
-      >
+      <div className={`font-mono text-2xl font-semibold ${moneyToneClass(account.balanceCents)}`}>
         {formatCents(account.balanceCents)}
       </div>
     </div>

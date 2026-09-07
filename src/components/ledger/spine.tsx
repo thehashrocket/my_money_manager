@@ -1,7 +1,7 @@
 import { and, isNull, sql } from "drizzle-orm";
 import { connection } from "next/server";
 import { db, schema } from "@/db";
-import { formatCents } from "@/lib/money";
+import { formatCents, moneyToneClass } from "@/lib/money";
 import { loadAccountBalances } from "@/lib/accounts/loadAccountBalances";
 import { SpineMonth } from "./spine-month";
 import { SpineTabs, type TabItem } from "./spine-tabs";
@@ -87,13 +87,7 @@ export async function Spine() {
             <div className="peek-total">
               <span className="peek-label">total</span>
               <span
-                className={
-                  totalCents < 0
-                    ? "peek-amt money-neg"
-                    : totalCents === 0
-                      ? "peek-amt money-zero"
-                      : "peek-amt money-pos"
-                }
+                className={`peek-amt ${moneyToneClass(totalCents)}`}
                 style={{ fontSize: "17px" }}
               >
                 {formatCents(totalCents)}
