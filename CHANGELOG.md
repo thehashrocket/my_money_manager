@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+_A second review pass over the v0.16.0 liability work, before it merges. Nine
+findings, all in code this release introduced._
+
+- **The bank feed could silently invert a debt into an asset.** A balance arriving from SimpleFIN was checked for range and date but never for sign, on the only untrusted input in the app. A provider reporting a card as positive amount-owed would have added the debt to the wrong side of net worth — wrong by twice the balance, with a number that looks entirely plausible. A loan now refuses a positive balance outright; a card, which genuinely can hold a credit balance after an overpayment, accepts it with a notice.
+- **Refreshing one account's balance ran a full transaction sync.** Clicking "Refresh" on the mortgage row imported up to 45 days of transactions for every linked account, wrote an import batch, ran auto-categorization and the transfer matcher — then reported one balance and discarded the rest, including a degraded-snapshot warning and a dead bank connection. It now refreshes that one account's balance and nothing else, and says so honestly when the bank reports a problem instead of claiming "the bank reports the same balance".
+- **Saving a reconcile that changed nothing destroyed the ability to undo the previous one.** Only one prior balance is kept, and a no-op save spent it.
+- **The reconcile and add-a-charge forms cleared what you typed when they rejected it.** The same React 19 behaviour that was fixed for two other forms in this release, missed on these two. The charge dialog was the worse case: it deliberately stays open on a refusal to offer "Reconcile instead", with your amount, date and merchant blanked behind the message.
+- **A charge on one credit card could be marked as a payment to a different one**, minting money on the second card and dropping real spending out of the budget entirely. A payment now has to come from a checking or savings account.
+- **A hand-entered charge could be filed under an income category, a heading, a savings goal, or an archived category.** Income categories were in the picker, so filing a charge under "Paycheck" — which quietly reduces that month's income — needed no trickery at all.
+- **Un-marking a card payment failed when done from the card's own row**, refusing with a message that was untrue and that pointed at an operation which would have left the card balance wrong. Hand-marked payments also no longer appear on `/sync` beside a "Not a transfer" button that would corrupt them.
+- **The test that guards the balance sign convention contained the very bug it was guarding**, so it would have passed if the fix were reverted. There is now a direct test of the one function that owns the sign.
+- **The docs described a mortgage as having no Reconcile**, which would have reintroduced a fixed bug where an unlinked car loan had no way to correct its balance at all.
+
+### Changed
+- **"Is this a credit card" had five different spellings in the codebase**, one of them not equivalent to the others. They agree only while there are exactly two liability types; a third would have split them silently, with nothing failing to compile. There is now one `isCreditCard`, exhaustive like its two siblings.
+- **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
+- **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
+
 ## [0.16.0] - 2026-09-07
 
 _Credit cards and loans. The app has tracked what you have since day one; this
@@ -17,7 +36,7 @@ a problem you are solving this month._
 ### Added
 - **Credit cards and loans are real account types.** Add one from `/import` by entering what you owe as a positive number ("Balance owed") — you never type a minus sign anywhere in the app. Cards can carry a credit limit and a minimum payment; loans and mortgages carry neither, on purpose.
 - **A new `/accounts` page**, second in the nav, where debt is managed. Assets and liabilities as ruled lists, a `Cash` subtotal, a `Debt` subtotal, and a net worth bottom line. Each card row shows how much of its limit is used, when the balance was last confirmed, and how much you paid down this month.
-- **Reconcile** — set what a card actually owes today, which is the one way a card's balance moves. **Refresh** — pull a linked account's balance straight from the bank feed, offered only where it can work (a feed-linked account with no transactions of its own).
+- **Reconcile** — set what a liability actually owes today. It is the one way the *anchor* moves by hand, and the only way at all for anything not linked to the feed, a car loan included. **Refresh** — pull a linked account's balance straight from the bank feed, offered only where it can work (a feed-linked account with no transactions of its own).
 - **Undo a balance change.** Every reconcile records the balance it replaced, and the row offers to go back to it. Undoing is itself undoable.
 - **Edit a card's credit limit and minimum payment** after the fact, so a mistyped limit is a fix rather than something you live with.
 - **Add a charge or a refund to a card by hand**, categorized, so card spending counts toward its envelope in the month you spent it. A charge dated before your last reconcile is refused — it would count as spending without moving the balance — and the refusal hands you straight to Reconcile, which already includes it.

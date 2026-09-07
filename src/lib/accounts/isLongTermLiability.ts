@@ -2,8 +2,14 @@ import type { AccountType } from "./loadAccountBalances";
 
 /**
  * Whether a liability gets DS59's muted long-term treatment: lower-contrast
- * ink on the balance, no utilization bar, no Reconcile, grouped under a
- * `LONG-TERM` sub-label.
+ * ink on the balance, grouped under a `LONG-TERM` sub-label, and none of the
+ * card-only affordances (no hand-entered charges, no card-terms form).
+ *
+ * It does NOT decide the balance control. A long-term liability still gets
+ * Reconcile or Refresh like any other — `resolveBalanceAction` owns that
+ * choice alone, and ANDing this predicate into it left an unlinked car loan
+ * with neither control and an uncorrectable balance. See the DS55 block in
+ * `_account-row.tsx`.
  *
  * A mortgage is a fact about your life; a card balance is a problem you are
  * solving this month. Rendered identically, a $302k figure sets the
