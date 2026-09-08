@@ -31,16 +31,29 @@
 -- carrying an external_id whose account has since moved, and for those the join
 -- resolves to whatever the account points at now — a WRONG tag, not a NULL one.
 --
--- Verified rather than assumed, immediately before applying this migration:
+-- Verified rather than assumed, immediately before applying this migration.
+-- Note the two failure modes need DIFFERENT checks, and the row counts alone
+-- only settle the first: a re-pointed account is still LINKED, so a wrong tag
+-- hides in the "linked" bucket rather than showing up as an unlinked one.
 --
---   rows with external_id, account linked ....... 35  (24 on ACT-d326a3ba,
---                                                      11 on ACT-bb8ad7b1)
---   rows with external_id, account UNLINKED ..... 0
---   sync rows total ............................. 35   (0 untagged)
---   csv rows ................................... 1527  (all external_id NULL)
+--   (a) backfills to NULL — sync row whose account is now unlinked:
+--         rows with external_id, account linked ..... 35  (24 on ACT-d326a3ba,
+--                                                          11 on ACT-bb8ad7b1)
+--         rows with external_id, account UNLINKED ...  0
+--         csv rows ................................ 1527  (all external_id NULL)
 --
--- Zero ambiguous rows, so the backfill is exact on this ledger. Re-run that
--- check before applying to any other one.
+--   (b) backfills to a WRONG tag — account re-pointed inside the v0.8.0 window.
+--       `accounts.updated_at` is bumped by every setAccountLink call, so a row
+--       imported BEFORE its account's last link change is the ambiguous one:
+--         sync rows imported before their account's last link change ..... 0
+--       And more decisively, both accounts holding external_id rows were
+--       CREATED 2026-09-03 (15:49 and 15:55 UTC) — after the window closed on
+--       2026-09-02 18:37 PDT. No account that holds one of these rows existed
+--       while the clearing was missing, so (b) is ruled out by construction
+--       here, not merely unobserved.
+--
+-- Both checks are clean, so the backfill is exact on this ledger. Run BOTH
+-- before applying to any other one — (a) alone does not test for (b).
 --
 -- Ordering matters: the backfill runs BEFORE the new unique index is created,
 -- so the index is built over final data and a genuine (feed, id) collision

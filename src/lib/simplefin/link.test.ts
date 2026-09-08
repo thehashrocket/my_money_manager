@@ -346,3 +346,84 @@ describe("setAccountLink — the legacy-orphan warning's own predicates", () => 
     expect(read(a.id)?.simplefinAccountId).toBeNull();
   });
 });
+
+describe("setAccountLink — rows no id pass can match, and rows held elsewhere", () => {
+  it("warns about a row with an external_id but NO feed tag, which `isNull(externalId)` was blind to", () => {
+    // Exactly what migration 0020 leaves behind for a sync row whose account
+    // was UNLINKED when it ran: the backfill is `WHERE external_id IS NOT
+    // NULL`, so the row keeps its id and gets NULL provenance. Its exposure is
+    // identical to a legacy orphan's — no id-based pass can match a NULL tag —
+    // but a warning keyed on external_id would never see it.
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      externalId: "TRN-kept",
+      simplefinSourceAccountId: null,
+    });
+
+    const result = setAccountLink(a.id, "ACT-different", handle.db);
+
+    expect(result.warning).toMatch(/1 transaction on this account was imported/);
+  });
+
+  it("does NOT warn about a row that HAS a feed tag — a tagged row is matchable by id", () => {
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      externalId: "TRN-tagged",
+      simplefinSourceAccountId: "ACT-abc123",
+    });
+
+    expect(setAccountLink(a.id, "ACT-different", handle.db).warning).toBeNull();
+  });
+
+  it("warns when claiming a feed whose rows are filed under a DIFFERENT account", () => {
+    // The under-count the provenance fix creates by design: the id pass is
+    // feed-scoped, so this account will import none of those rows and report
+    // "up to date" while its balance stays short by the whole overlap. Accepted
+    // (option (c) over (b)), but not silent.
+    const a = seedAccount("Old Checking");
+    const b = seedAccount("New Checking");
+    const batch = seedBatch();
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      externalId: "TRN-a",
+      simplefinSourceAccountId: "ACT-feed",
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      externalId: "TRN-b",
+      simplefinSourceAccountId: "ACT-feed",
+    });
+
+    const result = setAccountLink(b.id, "ACT-feed", handle.db);
+
+    expect(result.warning).toMatch(/2 transactions from this feed are already filed under Old Checking/);
+    expect(result.warning).toMatch(/will NOT re-import them/);
+    expect(result.warning).toMatch(/balance will be short/);
+  });
+
+  it("does NOT warn when the feed's rows are already on THIS account", () => {
+    // The ordinary re-save / re-point-back case. Nothing is stranded.
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-feed", handle.db);
+    const batch = seedBatch();
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      externalId: "TRN-a",
+      simplefinSourceAccountId: "ACT-feed",
+    });
+
+    setAccountLink(a.id, null, handle.db);
+    expect(setAccountLink(a.id, "ACT-feed", handle.db).warning).toBeNull();
+  });
+});

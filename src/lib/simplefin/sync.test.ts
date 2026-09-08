@@ -767,9 +767,11 @@ describe("transfer_pair_rejections — automatic matchers never resurface a reje
 
 /**
  * The `existing` lookup used to be bounded by startIso while the partial unique
- * index on (account_id, external_id) is not bounded at all. A feed row whose
- * DERIVED date fell before the window escaped both dedup paths — reachable via
- * postedToIsoDate's documented `posted === 0 -> transacted_at` fallback.
+ * index (`transactions_feed_external_id_unique`, over
+ * `(simplefin_source_account_id, external_id)`) is not bounded at all. A feed
+ * row whose DERIVED date fell before the window escaped both dedup paths —
+ * reachable via postedToIsoDate's documented `posted === 0 -> transacted_at`
+ * fallback.
  */
 describe("syncSimpleFin — rows dated before the fetch window", () => {
   /** 2026-08-01T12:00:00Z: before startIso (2026-08-25), after the 45-day floor. */
@@ -938,11 +940,14 @@ describe("syncSimpleFin — pending rows", () => {
 });
 
 /**
- * Proves the P2 relink fix (`src/lib/simplefin/link.ts`) end to end: not just
- * that `external_id` gets cleared (covered in `link.test.ts`), but that a
- * real resync against the write path afterward actually resolves rather than
- * throwing a raw SqliteError off the `(account_id, external_id)` partial
- * unique index.
+ * Proves the relink fix (`src/lib/simplefin/link.ts`) end to end. The original
+ * v0.8.3 fix cleared `external_id` to dodge a unique-constraint crash; that
+ * clearing was itself the double-count bug, so it is gone and `link.test.ts`
+ * now pins the opposite guarantee — external_id and its feed tag SURVIVE a
+ * relink. What this covers is the other half: a real resync against the write
+ * path afterward resolves cleanly rather than throwing a raw SqliteError off
+ * `transactions_feed_external_id_unique`, the partial unique index over
+ * `(simplefin_source_account_id, external_id)`.
  */
 describe("syncSimpleFin — relink then resync", () => {
   it("relinking away and back to the same feed, then resyncing, does not throw and does not duplicate the row", async () => {

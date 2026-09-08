@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
@@ -124,12 +124,21 @@ export function setAccountLink(
   const linkChanged = account.simplefinAccountId !== simplefinAccountId;
 
   return db.transaction((tx) => {
-    let warning: string | null = null;
+    const warnings: string[] = [];
 
     if (linkChanged) {
-      // Legacy orphans only — rows a PRE-FIX relink stripped. Nothing in this
-      // function creates them any more, so this query can only return rows
-      // that predate the provenance column, and the count can only fall.
+      // Every sync row that NO id-based pass can ever match, which is exactly
+      // "provenance is NULL" — not "external_id is NULL".
+      //
+      // Those are two different sets and the difference is reachable. A legacy
+      // orphan (stripped by a pre-fix relink) has both columns NULL, so it is
+      // still caught. But migration 0020 backfills only `WHERE external_id IS
+      // NOT NULL`, so a sync row whose account was unlinked when 0020 ran keeps
+      // its external_id and gets NULL provenance — same total exposure, and an
+      // `isNull(externalId)` query is structurally blind to it. Keying on the
+      // column that actually decides matchability makes this a strict superset
+      // and removes the blind spot; a row WITH a tag is excluded by
+      // construction, so nothing false is added.
       //
       // Queried directly rather than derived from any write this call made,
       // which is what keeps it honest now that there is no write to derive it
@@ -141,7 +150,7 @@ export function setAccountLink(
           and(
             eq(schema.transactions.accountId, localAccountId),
             eq(schema.transactions.importSource, "simplefin"),
-            isNull(schema.transactions.externalId),
+            isNull(schema.transactions.simplefinSourceAccountId),
           ),
         )
         .all();
@@ -161,7 +170,53 @@ export function setAccountLink(
         // are on their own. Reconciling or deleting them is the only complete
         // answer, which is why the warning says so.
         const n = atRisk.length;
-        warning = `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} and will import ${n === 1 ? "it" : "them"} again — reconcile or delete ${n === 1 ? "it" : "them"} here. Relinking no longer creates this.`;
+        warnings.push(
+          `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} and will import ${n === 1 ? "it" : "them"} again — reconcile or delete ${n === 1 ? "it" : "them"} here. Relinking no longer creates this.`,
+        );
+      }
+
+      // The other side of the same coin, and the one the provenance fix
+      // CREATED. Scoping the id pass by feed means a feed's rows are recognized
+      // wherever they live — so an account claiming a feed whose rows sit on a
+      // DIFFERENT local account imports none of them and reports "up to date".
+      // No duplicate, which is the bug we set out to fix; but the rows stay on
+      // the old account, so this account's balance is short by the whole
+      // overlap and rule 1's drift check will report phantom missing rows
+      // against it.
+      //
+      // That is the accepted cost of recording provenance instead of moving
+      // rows (option (c) over (b) — see TODOS.md). Accepted is not the same as
+      // silent, and this is the one moment a person can act on it, so it says
+      // so here rather than surfacing later as an unexplained balance gap.
+      if (simplefinAccountId) {
+        const heldElsewhere = tx
+          .select({ accountId: schema.transactions.accountId })
+          .from(schema.transactions)
+          .where(
+            and(
+              eq(
+                schema.transactions.simplefinSourceAccountId,
+                simplefinAccountId,
+              ),
+              ne(schema.transactions.accountId, localAccountId),
+            ),
+          )
+          .all();
+
+        if (heldElsewhere.length > 0) {
+          const n = heldElsewhere.length;
+          const otherIds = [...new Set(heldElsewhere.map((r) => r.accountId))];
+          const others = tx
+            .select({ name: schema.accounts.name })
+            .from(schema.accounts)
+            .where(inArray(schema.accounts.id, otherIds))
+            .all()
+            .map((a) => a.name);
+
+          warnings.push(
+            `${n} transaction${n === 1 ? "" : "s"} from this feed ${n === 1 ? "is" : "are"} already filed under ${others.join(", ")}. Syncing here will NOT re-import ${n === 1 ? "it" : "them"} — that is the de-dup working — but ${n === 1 ? "it stays" : "they stay"} on the other account, so this account's balance will be short by that amount until you move or re-enter ${n === 1 ? "it" : "them"}.`,
+          );
+        }
       }
     }
 
@@ -170,6 +225,6 @@ export function setAccountLink(
       .where(eq(schema.accounts.id, localAccountId))
       .run();
 
-    return { warning };
+    return { warning: warnings.length > 0 ? warnings.join(" ") : null };
   });
 }
