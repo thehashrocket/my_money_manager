@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-09-08
+
+**Upgrading:** this release changes how imported transactions are stored, so it carries a database migration. Under Docker, rebuild before starting: `docker compose build`, then `docker compose up` (the container applies the migration itself, taking a backup first). Take a manual backup with `pnpm db:export` beforehand if you want a verified one — this migration has no undo.
+
+### Fixed
+- **Re-pointing a bank connection to a different account could silently import every transaction a second time.** Connecting a feed, then later pointing it at a different account in the app, used to erase the record of where each already-imported row came from. Nothing looked wrong: the next sync simply could not tell those rows apart from new ones, so it imported the whole overlapping window again — every amount counted twice, no error, no warning, and the only sign would have been balances quietly drifting away from your bank. The fix records which feed produced each row and never erases it, so re-pointing a connection is now just a label change and your transactions survive it intact. This was the last known way for this app to duplicate money on its own.
+- **A transaction with no record of its source is no longer invisible to duplicate detection.** There was one shape of row — carrying the bank's own transaction id but no note of which feed sent it — that fell through every duplicate check *and* the database's own uniqueness rule, which would have re-imported it on every single sync from then on. It could only arise from the migration in this release running while one of your accounts was disconnected, and there were none on your ledger when it ran. It is now caught by content instead, so the shape is harmless however it comes about.
+- **Re-connecting an account now tells you when its transactions are stranded somewhere else.** If you connect a feed whose transactions are already filed under a different account, sync correctly refuses to import them again — but they stay where they are, leaving the new account's balance short by that amount with nothing to explain it. The app now says so at the moment you make the connection, and names the account holding them.
+- **The warning about older un-tagged transactions no longer misses half of them, or overstates what happens next.** It was looking for the wrong marker, so one group of at-risk rows never triggered it at all. It also said a duplicate "may" not be recognised; for the case it describes, it definitely won't be, and it now says so.
+
+### Changed
+- **Duplicate detection for automatic sync is now scoped to the bank feed a transaction came from, rather than the account it happens to sit in.** A bank's transaction id is unique within its own feed, which is what the check was always trying to rely on; the account was only ever standing in for that, and stopped being a fair substitute the moment a connection moved. Nothing changes in day-to-day use — the same rows are recognised as duplicates as before — but reconnecting or re-pointing a feed no longer disturbs anything.
+- **Re-connecting a feed no longer rewrites any of your transactions.** It updates the connection and nothing else.
+
+### Notes
+- One case is documented rather than fixed, deliberately: if you generate a completely new connection token (`pnpm simplefin:claim`) *and* wire the resulting feed to a different account than the one holding the old transactions, the overlap can still import twice. Widening the check to cover it would mean treating identical same-day transactions in two different accounts as duplicates, which they legitimately are not. Re-pointing the *same* account — the ordinary case — is covered, and the app now warns you in the situation where this could bite.
+
 ## [0.20.0] - 2026-09-08
 
 ### Changed
