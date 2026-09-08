@@ -169,7 +169,8 @@ function buildPredicates(filter: FilterPredicateInput): SQL[] {
  *
  * The WHERE clause itself is `buildPredicates` above — shared with
  * `summarizeByCategory`, which is the only reason the header and the list
- * under it cannot describe different row sets.
+ * under it cannot disagree about which rows match. (Which rows, not which
+ * instant — see that function's docstring.)
  *
  * Sort: `date DESC, id DESC` — newest first, stable tiebreaker.
  */

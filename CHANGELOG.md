@@ -133,6 +133,28 @@ own memos, and links straight to those exact rows._
 - **Three controls in the filter bar had no focus ring**, including "Apply
   filters" — the ones `DESIGN.md` names as the reason the shared constant
   exists.
+- **Filing a merchant from `/categorize` left `/transactions` showing it as
+  uncategorized.** The drilldown makes the two pages a round trip, but only one
+  direction marked the other stale, so the page you returned to still listed
+  the rows you had just filed, under a header breakdown that no longer matched
+  the ledger. It cleared on a hard reload, which is not a thing anyone should
+  have to know.
+- **"Show transfers" could suppress the stale-link diagnosis.** On a merchant
+  link that no longer matches anything, the empty state correctly blames the
+  key. One click of the transfers toggle — which only ever ADDS rows — flipped
+  the copy to "the merchant key itself may still be fine", on a page that had
+  got emptier for no new reason. A widening toggle is no longer counted as a
+  filter that could have emptied the list.
+- **A transaction with no merchant name was invisible on `/categorize`.** One
+  blank Memo cell in a CSV produces an empty merchant key, and while
+  `/transactions` labelled that row, `/categorize` rendered a nameless row with
+  a screen-reader label reading "Category for " and no way to drill into it.
+  Both sides now name it the same way.
+- **Two docstrings promised more than the code delivers.** The merchant header
+  was documented as unable to describe a row set the list is not showing; it
+  shares the list's predicates, not its read instant, so it can lag by one
+  commit. And the pending-pick pruner justified itself with a second-tab
+  scenario it cannot cover, since session storage is per-tab.
 
 ## [0.17.0] - 2026-09-07
 
