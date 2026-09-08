@@ -1,8 +1,12 @@
-import type { AmbiguousBucket } from "@/lib/simplefin/matchTransfers";
+import type {
+  AmbiguousBucket,
+  CrossAccountBucket,
+  SameAccountBucket,
+} from "@/lib/simplefin/matchTransfers";
 import type { TransferRow } from "@/lib/simplefin/sync";
 import { formatCents } from "@/lib/money";
 import { ActionForm } from "./ActionForm";
-import type { SyncActionState } from "./actions";
+import { resolveSameAccountReversalAction, resolveTransferAction } from "./actions";
 
 /**
  * One bucket of same-day, same-amount, opposite-sign rows that the app refuses
@@ -13,10 +17,15 @@ import type { SyncActionState } from "./actions";
  * server action. Copying ~55 lines of JSX to change two strings is how the two
  * halves of a surface drift apart; this file is the one definition.
  *
- * `action` is a prop rather than a `reason`-based lookup on purpose. The
- * same-account opt-in is carried by WHICH ACTION RUNS, never by form data, so
- * the two queues must not be able to reach each other's handler — see
- * `resolveSameAccountReversalAction`.
+ * `action` is DERIVED from `kind`, not passed in. It was a prop, with a
+ * docblock arguing that this kept the two queues from reaching each other's
+ * handler — which had it exactly backwards. A prop is what made the mismatch
+ * expressible: `<ReviewQueue buckets={reversals} action={resolveTransferAction} />`
+ * typechecked, and rendered a queue whose every button threw "A transfer pair
+ * must span two different accounts." A lookup keyed on the discriminant is
+ * what makes the two unable to cross. The bucket types are split for the same
+ * reason (`CrossAccountBucket` / `SameAccountBucket`), so `kind` cannot
+ * disagree with the rows either.
  *
  * A select with more than one candidate opens on "Choose…" rather than on an
  * arbitrary first row. Found by looking at the rendered page: the live
@@ -28,30 +37,53 @@ import type { SyncActionState } from "./actions";
  * keeps its default, because there is no choice to make and the placeholder
  * would be pure friction on 12 of today's 14 buckets.
  */
-export function ReviewQueue({
-  title,
-  blurb,
-  buckets,
-  accountsById,
-  alsoIn,
-  action,
-}: {
-  title: string;
-  blurb: string;
-  buckets: AmbiguousBucket<TransferRow>[];
-  accountsById: Map<number, { name: string }>;
+/**
+ * The two queues, defined once. `title` feeds both the heading here and the
+ * "also listed under" cross-reference in the OTHER queue, so the two can never
+ * name each other wrongly — previously `alsoIn.queue` was free text
+ * hand-copied at both call sites.
+ */
+const QUEUES = {
+  transfer: {
+    title: "Transfers needing review",
+    blurb:
+      "Same day, same amount, opposite signs, but not auto-linked — see each item below for why. Pick the two halves of each transfer, or leave it if it isn't actually one.",
+    action: resolveTransferAction,
+    other: "reversal",
+  },
+  reversal: {
+    title: "Reversals needing review",
+    blurb:
+      "A charge and its cancellation on ONE account — a reversed transfer, a disputed charge with a provisional credit, or a returned payment. No matcher can pair these automatically, because the same shape also turns up as pure coincidence (an unrelated refund that happens to match a real charge to the cent, on the same day). Link them only if they are genuinely two halves of one movement; a merchandise refund is NOT one, and already nets against spending on its own.",
+    action: resolveSameAccountReversalAction,
+    other: "transfer",
+  },
+} as const;
+
+export type ReviewQueueKind = keyof typeof QUEUES;
+
+type ReviewQueueProps = {
+  accountsById: ReadonlyMap<number, { name: string }>;
   /**
    * Row ids this queue shares with the other one (see `overlappingRowIds`).
    * The overlap is a real ambiguity rather than a bucketing bug, so neither
-   * queue hides it — but a user must not resolve it in one place without
-   * knowing the other reading exists.
+   * queue hides it — but a user must not act in one place without knowing the
+   * other reading exists.
    */
-  alsoIn?: { ids: Set<number>; queue: string };
-  action: (
-    prev: SyncActionState,
-    formData: FormData,
-  ) => Promise<SyncActionState>;
-}) {
+  sharedRowIds?: ReadonlySet<number>;
+} & (
+  | { kind: "transfer"; buckets: CrossAccountBucket<TransferRow>[] }
+  | { kind: "reversal"; buckets: SameAccountBucket<TransferRow>[] }
+);
+
+export function ReviewQueue({
+  kind,
+  buckets,
+  accountsById,
+  sharedRowIds,
+}: ReviewQueueProps) {
+  const { blurb, action, other } = QUEUES[kind];
+  const title = `${QUEUES[kind].title} (${buckets.length})`;
   const headingId = `review-queue-${slug(title)}`;
 
   return (
@@ -70,15 +102,20 @@ export function ReviewQueue({
         // this renders on the server.
         const bucketLabelId = `bucket-${bucketKey}`;
         const overlaps =
-          alsoIn !== undefined &&
+          sharedRowIds !== undefined &&
           [...bucket.positives, ...bucket.negatives].some((r) =>
-            alsoIn.ids.has(r.id),
+            sharedRowIds.has(r.id),
           );
         return (
           <ActionForm
             key={bucketKey}
             action={action}
             ariaLabelledBy={bucketLabelId}
+            // This card is gone from the list the moment it succeeds, so its
+            // confirmation has to be published somewhere that outlives it —
+            // otherwise "Link as reversal" and "Not a reversal" are visually
+            // identical outcomes on a one-candidate bucket.
+            announceSuccess
             className="space-y-3 rounded-md border border-border p-4"
           >
             <p
@@ -88,8 +125,7 @@ export function ReviewQueue({
               {bucket.date} · {formatCents(bucket.absAmountCents)}
               {bucket.reason === "same-account" && (
                 <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">
-                  {accountsById.get(bucket.positives[0].accountId)?.name ??
-                    bucket.positives[0].accountId}
+                  {accountsById.get(bucket.accountId)?.name ?? bucket.accountId}
                 </span>
               )}
             </p>
@@ -106,10 +142,11 @@ export function ReviewQueue({
                     "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
                 }}
               >
-                Also listed under <strong>{alsoIn?.queue}</strong>. Same rows,
-                two readings — the money can only be paired once, so whichever
-                you resolve first removes it from both. Check the other one
-                before deciding here.
+                Also listed under <strong>{QUEUES[other].title}</strong>. Same
+                rows, two readings — the money can only be paired once, so{" "}
+                <strong>linking</strong> it in either place removes it from
+                both. Saying it is <em>not</em> a pair only answers this
+                reading; the other one stays. Check there before deciding here.
               </p>
             )}
             <div className="grid gap-3 sm:grid-cols-2">
@@ -265,7 +302,7 @@ function elide(text: string, max: number): string {
 function optionLabel(
   reason: AmbiguousBucket<TransferRow>["reason"],
   row: TransferRow,
-  accountsById: Map<number, { name: string }>,
+  accountsById: ReadonlyMap<number, { name: string }>,
 ): string {
   const memo = row.rawMemo.trim();
   if (reason === "same-account") {

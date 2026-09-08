@@ -14,6 +14,7 @@ import { setAccountLink } from "@/lib/simplefin/link";
 import {
   validateLinkAccountInput,
   validateResolveTransferInput,
+  validateResolveReversalInput,
   validateUndoSyncInput,
   validateUnlinkTransferInput,
 } from "@/lib/simplefin/validateSyncInputs";
@@ -216,43 +217,55 @@ export async function resolveTransferAction(
  * ONE account. A SEPARATE action from `resolveTransferAction` on purpose — the
  * same-account opt-in is carried by which action ran, not by a form field, so
  * a crafted or stale POST to the ordinary transfer action can never set it.
- * Validation is otherwise identical, and `linkTransferPairManually` still
- * enforces same-day, opposite signs and equal magnitude underneath.
+ * Validation is otherwise identical. `linkTransferPairManually` still enforces
+ * opposite signs and equal magnitude unconditionally, plus same-day and
+ * not-hand-entered FOR THE SAME-ACCOUNT CASE specifically — those two live
+ * inside its `a.accountId === b.accountId` branch, so a pair of cross-account
+ * ids posted here is date-unchecked exactly as it is on the ordinary transfer
+ * action.
+ *
+ * The real protection is that guard set, not which action ran. This action is
+ * an ordinary Server Action whose id is in the page whenever the queue
+ * renders, and it does not verify that `(aId, bId)` came from a bucket the
+ * user was shown. What the split buys is narrower and still worth having: a
+ * post to `resolveTransferAction` can never turn ITSELF into a same-account
+ * link. Do not relax a guard in `linkTransferPairManually` on the strength of
+ * the split alone.
  */
 export async function resolveSameAccountReversalAction(
   _prev: SyncActionState,
   formData: FormData,
 ): Promise<SyncActionState> {
-  const parsed = validateResolveTransferInput(Object.fromEntries(formData));
-  if (!parsed.success) {
-    return fail(`Invalid reversal pairing — ${rejectionMessage(parsed.error)}`);
-  }
-
   // Two buttons, one form, because both need the SAME two <select> values —
   // "these are a reversal" and "these are not" are answers to one question, and
   // the rejection is pair-scoped so it has to name the pair the user picked.
-  // Anything that is not exactly "reject" links, so a missing or tampered
-  // intent falls back to the path with the stricter guards rather than the one
-  // that writes a durable "never ask me again".
-  const reject = formData.get("intent") === "reject";
+  // `intent` is validated with everything else rather than read raw off
+  // FormData; see `resolveReversalInputSchema` for why the fail-safe default
+  // is "link".
+  const parsed = validateResolveReversalInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    return fail(`Invalid reversal pairing — ${rejectionMessage(parsed.error)}`);
+  }
+  const { aId, bId, intent } = parsed.data;
 
   try {
-    if (reject) {
-      rejectTransferPairManually(parsed.data.aId, parsed.data.bId);
-    } else {
-      linkTransferPairManually(parsed.data.aId, parsed.data.bId, undefined, {
-        allowSameAccountReversal: true,
-      });
+    if (intent === "reject") {
+      const outcome = rejectTransferPairManually(aId, bId);
+      revalidateAll();
+      return ok(
+        outcome === "recorded"
+          ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
+          : "You had already marked these two as not a reversal — nothing changed.",
+      );
     }
+    linkTransferPairManually(aId, bId, undefined, {
+      allowSameAccountReversal: true,
+    });
   } catch (err) {
     return fail(toMessage(err));
   }
   revalidateAll();
-  return ok(
-    reject
-      ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
-      : "Linked as a reversal — both rows are now excluded from spending.",
-  );
+  return ok("Linked as a reversal — both rows are now excluded from spending.");
 }
 
 export async function unlinkTransferAction(
@@ -263,11 +276,22 @@ export async function unlinkTransferAction(
   if (!parsed.success) {
     return fail(`Invalid unlink request — ${rejectionMessage(parsed.error)}`);
   }
+  let outcome;
   try {
-    unlinkTransferPair(parsed.data.id);
+    outcome = unlinkTransferPair(parsed.data.id);
   } catch (err) {
     return fail(toMessage(err));
   }
   revalidateAll();
+  // A no-op is NOT reported as a completed correction. `unlinkTransferPair`
+  // returns early when the row is already unpaired, and that path records no
+  // rejection — so the ordinary success message would be claiming a durable
+  // "not a transfer" that was never written. Same reasoning as
+  // `undoSyncAction`'s `nothing-to-undo` branch above.
+  if (outcome === "already-unpaired") {
+    return fail(
+      "These rows were already unpaired — nothing was changed, and no “not a transfer” was recorded. Reload the page to see the current state.",
+    );
+  }
   return ok("Unpaired — both rows count towards spending again.");
 }

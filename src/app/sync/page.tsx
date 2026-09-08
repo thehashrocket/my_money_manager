@@ -19,12 +19,11 @@ import {
   type BalanceFreshness,
 } from "@/lib/simplefin/balanceFreshness";
 import { ReviewQueue } from "./_review-queue";
+import { ActionFeedbackProvider } from "./_action-feedback";
 import { SyncButton } from "./SyncButton";
 import { ActionForm } from "./ActionForm";
 import {
   linkAccountAction,
-  resolveTransferAction,
-  resolveSameAccountReversalAction,
   undoSyncAction,
   unlinkTransferAction,
 } from "./actions";
@@ -118,7 +117,10 @@ export default function SyncPage() {
   const linkedCount = accounts.filter((a) => a.simplefinAccountId).length;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-10">
+    // Wraps the whole page so the status region survives the revalidate that
+    // removes a resolved review bucket — see ActionFeedbackProvider.
+    <ActionFeedbackProvider>
+      <div className="mx-auto w-full max-w-3xl px-5 py-10 space-y-10">
       <header>
         <h1 className="font-display text-xl font-semibold">Sync</h1>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -160,24 +162,20 @@ export default function SyncPage() {
       {/* ---- transfers needing a decision ---- */}
       {ambiguous.length > 0 && (
         <ReviewQueue
-          title={`Transfers needing review (${ambiguous.length})`}
-          blurb="Same day, same amount, opposite signs, but not auto-linked — see each item below for why. Pick the two halves of each transfer, or leave it if it isn't actually one."
+          kind="transfer"
           buckets={ambiguous}
           accountsById={accountsById}
-          alsoIn={{ ids: sharedRowIds, queue: "Reversals needing review" }}
-          action={resolveTransferAction}
+          sharedRowIds={sharedRowIds}
         />
       )}
 
       {/* ---- same-account reversals: a charge and its cancellation ---- */}
       {sameAccountReversals.length > 0 && (
         <ReviewQueue
-          title={`Reversals needing review (${sameAccountReversals.length})`}
-          blurb="A charge and its cancellation on ONE account — a reversed transfer, a disputed charge with a provisional credit, or a returned payment. No matcher can pair these automatically, because the same shape also turns up as pure coincidence (an unrelated refund that happens to match a real charge to the cent, on the same day). Link them only if they are genuinely two halves of one movement; a merchandise refund is NOT one, and already nets against spending on its own."
+          kind="reversal"
           buckets={sameAccountReversals}
           accountsById={accountsById}
-          alsoIn={{ ids: sharedRowIds, queue: "Transfers needing review" }}
-          action={resolveSameAccountReversalAction}
+          sharedRowIds={sharedRowIds}
         />
       )}
 
@@ -291,7 +289,8 @@ export default function SyncPage() {
           </div>
         </section>
       )}
-    </div>
+      </div>
+    </ActionFeedbackProvider>
   );
 }
 

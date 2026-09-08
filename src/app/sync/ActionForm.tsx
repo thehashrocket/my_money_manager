@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
+import { useActionFeedback } from "./_action-feedback";
 import type { SyncActionState } from "./actions";
 
 const INITIAL: SyncActionState = { status: "idle" };
@@ -14,6 +15,7 @@ export function ActionForm({
   action,
   className,
   ariaLabelledBy,
+  announceSuccess,
   children,
 }: {
   action: (
@@ -28,9 +30,26 @@ export function ActionForm({
    * names over and over with nothing saying which decision is in focus.
    */
   ariaLabelledBy?: string;
+  /**
+   * Set on a form that DISAPPEARS when it succeeds — the review queues, whose
+   * resolved bucket leaves the list on the revalidate that follows. Its
+   * success message is republished to the page-level region
+   * (`ActionFeedbackProvider`) which survives that unmount.
+   *
+   * Only successes: a failure skips `revalidateAll()`, so the form is still
+   * on screen and its inline `role="alert"` is the right place for it — nearer
+   * the controls that caused it than a banner at the top of a long page.
+   */
+  announceSuccess?: boolean;
   children: React.ReactNode | ((pending: boolean) => React.ReactNode);
 }) {
   const [state, formAction, pending] = useActionState(action, INITIAL);
+  const publish = useActionFeedback();
+
+  useEffect(() => {
+    if (!announceSuccess || publish === null) return;
+    if (state.status === "ok" || state.status === "warning") publish(state);
+  }, [announceSuccess, publish, state]);
 
   return (
     <form action={formAction} className={className} aria-labelledby={ariaLabelledBy}>
