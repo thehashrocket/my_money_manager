@@ -25,11 +25,16 @@ type Props = {
  *   increments back on Undo. Matches the server-rendered count on first paint;
  *   diverges while a 10s Undo window is open, then re-syncs on page reload or
  *   on a Next revalidation round-trip.
- * - The set of merchants finished this sitting. Rows self-dismissed from their
- *   own state before, which meant the page could not say how far through the
- *   list you were — `groups.length` was computed here and never rendered
- *   (T15). Lifting it makes the progress counter possible and keeps "which
- *   rows are gone" in one place.
+ * - TWO sets of merchant keys, not one, because "hide this row" and "count this
+ *   as done" have different lifetimes and one set could not honour both.
+ *   `done` is the progress denominator's numerator and survives the whole
+ *   sitting. `hidden` only bridges the gap between a submit and the
+ *   revalidation that drops the row server-side, so it is CLEARED on every new
+ *   server payload — the list the server just sent is authoritative about what
+ *   is left. Sharing one set meant a merchant that came back (an import mid
+ *   sitting, an undo from another tab, a re-categorization) stayed invisible
+ *   for the rest of the session with no way to reach it, since the only
+ *   removal path was that row's own Undo and the row was already unmounted.
  * - Nothing else: the per-row pending pick lives in `sessionStorage`, because
  *   it has to outlive this component (D19).
  *
@@ -42,11 +47,22 @@ export function CategorizeUi({
   initialBacklog,
 }: Props) {
   const [count, setCount] = useState(initialBacklog.count);
-  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
+  const [done, setDone] = useState<ReadonlySet<string>>(new Set());
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set());
+
+  // Adjust-state-during-render, not an effect: clearing `hidden` in a
+  // `useEffect` would paint one frame with the previous payload's hidden set
+  // applied to the new list, which is a visible flicker on exactly the rows
+  // this fix exists to bring back.
+  const [renderedGroups, setRenderedGroups] = useState(initialGroups);
+  if (renderedGroups !== initialGroups) {
+    setRenderedGroups(initialGroups);
+    setHidden(new Set());
+  }
 
   const groups = useMemo(
-    () => initialGroups.filter((g) => !dismissed.has(g.normalizedMerchant)),
-    [initialGroups, dismissed],
+    () => initialGroups.filter((g) => !hidden.has(g.normalizedMerchant)),
+    [initialGroups, hidden],
   );
 
   // A pick parked for a merchant this page no longer lists is finished
@@ -56,12 +72,14 @@ export function CategorizeUi({
   }, [initialGroups]);
 
   const onDismissedChange = (merchant: string, isDismissed: boolean) => {
-    setDismissed((prev) => {
+    const apply = (prev: ReadonlySet<string>) => {
       const next = new Set(prev);
       if (isDismissed) next.add(merchant);
       else next.delete(merchant);
       return next;
-    });
+    };
+    setDone(apply);
+    setHidden(apply);
   };
 
   if (initialGroups.length === 0) {
@@ -73,16 +91,34 @@ export function CategorizeUi({
       <BacklogHeader
         count={count}
         totalCents={initialBacklog.totalCents}
-        doneMerchants={dismissed.size}
+        /* NOT `done.size`. `done` is monotonic and `hidden` is cleared on
+           each server payload, so a merchant that comes back is listed again
+           while still sitting in `done` — and the numerator would count it as
+           finished with its own uncategorized row rendered directly beneath
+           the counter saying so. Both halves of the fraction have to answer
+           the returning-merchant case the same way, or the fix that made the
+           denominator honest leaves the numerator lying. */
+        doneMerchants={
+          [...done].filter(
+            (m) => !groups.some((g) => g.normalizedMerchant === m),
+          ).length
+        }
         /* Derived from what is LEFT plus what is done, never from
            `initialGroups.length`. Both actions call `revalidatePath`, so the
            server list drops a merchant the moment it is categorized — reading
            the denominator off it made the counter read "1 of 5" one submit
-           after it read "0 of 6", overstating progress: the denominator shrank with the numerator, so one
- * submit moved it two steps instead of one. This form
-           holds steady across the revalidation and still grows if an import
-           adds merchants mid-sitting. */
-        totalMerchants={groups.length + dismissed.size}
+           after it read "0 of 6", overstating progress: the denominator shrank
+           with the numerator, so one submit moved it two steps instead of one.
+           This form holds steady across the revalidation and still grows if an
+           import adds merchants mid-sitting.
+
+           A UNION, not `groups.length + done.size`: now that `hidden` is
+           cleared on each payload, a merchant that comes back is in both sets
+           at once, and adding the sizes would count it twice and inflate the
+           denominator past the work that actually exists. */
+        totalMerchants={
+          new Set([...groups.map((g) => g.normalizedMerchant), ...done]).size
+        }
       />
       {groups.length === 0 ? (
         <AllCaughtUp />
