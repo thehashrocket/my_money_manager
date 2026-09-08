@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { readAccessUrl } from "./accessUrl";
 import { fetchAccounts } from "./client";
@@ -65,15 +65,21 @@ export async function listRemoteAccounts(
 
 export type SetAccountLinkResult = {
   /**
-   * Set whenever this account's feed link changes (unlink or re-point) and
-   * this account currently holds simplefin-sourced rows with no external_id
-   * — whether cleared just now or by an earlier relink. Clearing external_id
-   * fixes the SQL-level crash (the partial unique index on
-   * (account_id, external_id) colliding on resync) but NOT the double-count
-   * risk: sync's content-dedup fallback in src/lib/simplefin/sync.ts is
-   * scoped to the account being synced, so it cannot see these rows if a
-   * different account claims the feed next. The user is expected to delete
-   * or reconcile them manually in that case.
+   * Set only when this account still holds LEGACY orphans: simplefin-sourced
+   * rows with no external_id, left behind by a relink from before
+   * `transactions.simplefin_source_account_id` existed.
+   *
+   * Re-pointing a link no longer creates these. The clearing that did — and
+   * the double-count it caused, because it erased the only record of which
+   * feed a row came from — is gone; provenance is recorded at write time and
+   * survives any number of relinks. So this set can only ever SHRINK, and on
+   * a ledger that never relinked before the fix it is empty forever.
+   *
+   * It is still worth reporting: those rows carry no tag any sync can match,
+   * so they remain exposed to exactly the old double-count if another account
+   * claims this feed. Nothing can repair them automatically — the feed they
+   * came from is unknowable after the fact, which is the whole reason the
+   * column exists.
    */
   warning: string | null;
 };
@@ -103,49 +109,32 @@ export function setAccountLink(
     }
   }
 
-  // Re-pointing this account's link (unlinking, or linking to a different
-  // feed account) orphans external_id on rows already imported under the old
-  // link: the partial unique index is scoped to (account_id, external_id),
-  // so a resync under whatever account claims the old feed id next would not
-  // recognize those rows and would crash with a unique-constraint violation.
-  // Clearing it here fixes THAT crash. It does NOT, by itself, prevent the
-  // double-count if a different account later claims the feed — sync's
-  // content-dedup fallback is scoped to the account being synced (see the
-  // warning message below) and has no visibility into another account's
-  // rows. Both writes happen in one transaction so a crash mid-way never
-  // leaves the account still pointed at the old link while its rows have
-  // already lost their external_id.
-  const clearOrphaned = Boolean(
-    account.simplefinAccountId &&
-      account.simplefinAccountId !== simplefinAccountId,
-  );
+  // Re-pointing a link USED TO clear external_id on this account's rows, to
+  // dodge a collision on the old partial unique index over
+  // (account_id, external_id). That index is now over
+  // (simplefin_source_account_id, external_id) — scoped by FEED — so there is
+  // no collision to dodge: a SimpleFIN id is unique within its own feed
+  // account, which is precisely what the index asserts, and moving a local
+  // account's link cannot change which feed a row already came from.
+  //
+  // Deleting the clearing is the fix, not a simplification of it. The clearing
+  // erased the only record of a row's origin, which is what left sync unable to
+  // tell one feed's rows from another's and made the cross-account double-count
+  // unpreventable rather than merely undetected.
   const linkChanged = account.simplefinAccountId !== simplefinAccountId;
 
   return db.transaction((tx) => {
-    if (clearOrphaned) {
-      tx.update(schema.transactions)
-        .set({ externalId: null })
-        .where(
-          and(
-            eq(schema.transactions.accountId, localAccountId),
-            isNotNull(schema.transactions.externalId),
-          ),
-        )
-        .run();
-    }
 
     let warning: string | null = null;
 
     if (linkChanged) {
-      // Counting rows cleared by the UPDATE above (its `changes`) undercounts
-      // — or misses the warning entirely: a row orphaned by an EARLIER relink
-      // is exactly as exposed as one cleared just now, since neither carries
-      // a tag a future sync can see, but `changes` is 0 for it whenever this
-      // call had nothing new to clear (every row already cleared by a prior
-      // relink, or this call is a fresh link with no clearing to do at all).
-      // Querying the current at-risk set directly, instead of trusting the
-      // UPDATE's own count, means the warning can't silently disappear just
-      // because the clearing work happened to already be done.
+      // Legacy orphans only — rows a PRE-FIX relink stripped. Nothing in this
+      // function creates them any more, so this query can only return rows
+      // that predate the provenance column, and the count can only fall.
+      //
+      // Queried directly rather than derived from any write this call made,
+      // which is what keeps it honest now that there is no write to derive it
+      // from: the exposure belongs to the rows, not to this particular relink.
       const atRisk = tx
         .select({ id: schema.transactions.id })
         .from(schema.transactions)
@@ -159,18 +148,16 @@ export function setAccountLink(
         .all();
 
       if (atRisk.length > 0) {
-        // Deliberately NOT "future syncs will dedup these automatically": the
-        // content-dedup fallback in src/lib/simplefin/sync.ts is scoped to
-        // the account being synced (eq(transactions.accountId, account.id)),
-        // by design — it exists to catch a row re-sent by the feed onto the
-        // SAME account it was already imported into, not a row that moved to
-        // a DIFFERENT local account. If some other account claims this feed
-        // id next, its sync has no way to see these rows at all and will
-        // insert them fresh, double-counting every amount. Clearing
-        // external_id only fixes the SQL-level crash (the unique index
-        // collision); it does not, by itself, prevent that double-count.
+        // Still deliberately NOT "future syncs will dedup these automatically".
+        // Rows written from here on carry their feed, so sync recognizes them
+        // wherever they live — but these rows carry neither an external_id nor
+        // a provenance tag, so no id-based pass can ever match them. Content
+        // dedup gives them a partial safety net (they now qualify, being
+        // external_id NULL) bounded by the 45-day window; older than that,
+        // they are on their own. Reconciling or deleting them is still the
+        // only complete answer.
         const n = atRisk.length;
-        warning = `${n} previously-imported transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "carries" : "carry"} no SimpleFIN de-dup tag. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as a duplicate — delete or reconcile ${n === 1 ? "it" : "them"} here first, or you'll double-count ${n === 1 ? "it" : "them"}.`;
+        warning = `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync may not recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} — reconcile or delete ${n === 1 ? "it" : "them"} here to be sure. Relinking no longer creates this.`;
       }
     }
 

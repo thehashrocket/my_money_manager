@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNull, isNotNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import {
   createSnapshot,
@@ -548,28 +548,37 @@ export async function syncSimpleFin(
   const counts: AccountSyncCounts[] = [];
 
   for (const account of importAccounts) {
-    const remote = byExternalId.get(account.simplefinAccountId!);
+    // Non-null by construction: `importAccounts` comes from the linked-account
+    // query. Named once because three separate predicates below key off it, and
+    // `accounts.$inferSelect` types the column as nullable.
+    const feedId = account.simplefinAccountId!;
+    const remote = byExternalId.get(feedId);
     if (!remote) {
       warnings.push(
         `SimpleFIN returned nothing for "${account.name}" — the connection may need re-authorising.`,
       );
     }
 
-    // Deliberately NOT bounded by date. The partial unique index on
-    // (account_id, external_id) is not bounded either, so any window here that
-    // is narrower than the set of rows the feed can return leaves a gap where a
-    // row escapes the in-memory check and hits the constraint instead — which
-    // aborts the whole batch with a raw SqliteError. A feed row's date comes
-    // from `posted`, but postedToIsoDate falls back to `transacted_at`, so a
-    // derived date can legitimately precede startIso. Matching the index
-    // exactly is cheap: external_id is indexed and NULL for every CSV row.
+    // Scoped by FEED, not by the local account — this is the whole cross-account
+    // double-count fix. Keyed on `account_id`, this query could not see rows the
+    // same feed had already produced under a DIFFERENT local account, so
+    // re-pointing a link made every one of those rows look new and sync
+    // re-imported the lot, silently. Keyed on the feed, provenance answers the
+    // question directly: "has this feed already given us this id, anywhere?"
+    //
+    // Deliberately NOT bounded by date, and it must keep matching the partial
+    // unique index exactly. The index is unbounded too, so any narrower window
+    // here leaves a gap where a row escapes the in-memory check and hits the
+    // constraint instead — aborting the whole batch with a raw SqliteError. A
+    // feed row's date comes from `posted`, but postedToIsoDate falls back to
+    // `transacted_at`, so a derived date can legitimately precede startIso.
     const seenExternalIds = new Set(
       db
         .select({ externalId: schema.transactions.externalId })
         .from(schema.transactions)
         .where(
           and(
-            eq(schema.transactions.accountId, account.id),
+            eq(schema.transactions.simplefinSourceAccountId, feedId),
             isNotNull(schema.transactions.externalId),
           ),
         )
@@ -593,9 +602,22 @@ export async function syncSimpleFin(
       .where(
         and(
           eq(schema.transactions.accountId, account.id),
-          // Rows with an external_id came from a sync and are caught above; only
-          // CSV rows can collide by content.
-          isNull(schema.transactions.externalId),
+          // A row is a content-dedup candidate when THIS feed cannot already
+          // have claimed it by id. Two cases qualify, and the second is why this
+          // is not simply `external_id IS NULL`:
+          //
+          //  1. CSV rows (external_id NULL) — the original case: the feed
+          //     re-sends days already imported from a file.
+          //  2. Rows from a DIFFERENT feed. Re-running `simplefin:claim` mints
+          //     fresh account ids for the same real bank account, so the same
+          //     transaction can arrive under a new feed id and the id pass above
+          //     will not recognize it. Before provenance existed, relink cleared
+          //     external_id and these rows fell into case 1 by accident; keeping
+          //     the tag is what makes the case have to be named.
+          or(
+            isNull(schema.transactions.externalId),
+            ne(schema.transactions.simplefinSourceAccountId, feedId),
+          ),
           gte(schema.transactions.date, contentFloorIso),
         ),
       )
@@ -742,6 +764,10 @@ export async function syncSimpleFin(
             importBatchId: batch.id,
             importRowHash: row.importRowHash,
             externalId: row.externalId,
+            // Provenance: WHICH feed produced this row. Deliberately captured
+            // at write time rather than joined through `accounts` on read —
+            // the account's link can move, the row's origin cannot.
+            simplefinSourceAccountId: account.simplefinAccountId,
             // Always false: pending rows are skipped above, so anything that
             // reaches here has posted.
             isPending: false,

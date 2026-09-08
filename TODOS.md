@@ -103,7 +103,7 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 ## Follow-ups from v0.8.0 ship review
 
 - [x] **P2** — Re-pointing a SimpleFIN link orphans `external_id`s, crashing the next sync with a unique-constraint violation. Fixed: `setAccountLink` now clears `external_id` on the old account's rows whenever the link changes (unlink, or re-point to a different feed account), so the resync no longer hits the `(account_id, external_id)` unique index collision. Surfaces a warning through the existing `ok(message, warnings)` pattern on `/sync`. Ship-review Red Team caught that the original TODO wording ("content dedup alone will cover the re-import") is false — see the new P1 below. (`src/lib/simplefin/link.ts`)
-- [ ] **P1** — The relink fix above stops the crash but not the double-count it was meant to prevent. `sync.ts`'s content-dedup fallback (`existingByContent`) is scoped to `eq(transactions.accountId, account.id)` — by design, to catch a CSV row the feed re-sends onto the SAME account, not a row that moved to a DIFFERENT one. So if account B claims a feed account A used to hold, B's sync cannot see A's now-`external_id`-cleared rows at all, and re-imports them fresh: every affected amount is silently double-counted, with no error. `setAccountLink`'s warning now says this explicitly ("delete or reconcile them here first, or you'll double-count them") instead of promising a safety net that doesn't exist — but nothing enforces the user actually acting on it. Real fix needs either (a) a review-list UI on `/sync` for orphaned rows, matching the existing "transfers needing review" pattern, with a delete/dismiss action, or (b) reassigning `account_id` on relink — but (b) only round-trips correctly when an account was linked to exactly one feed across its life; clearing `external_id` erases the provenance needed to do it safely on a second relink. Decided during `/ship` 2026-09-02 to ship the crash fix now with the honest warning rather than block on this — full fix is its own dedicated pass. (`src/lib/simplefin/link.ts`, `src/lib/simplefin/sync.ts`) Still open, but a PR review pass the same day found and fixed a bug in the warning *itself*: it was gated on the clearing `UPDATE`'s own `changes` count, which is 0 (and so silently produces no warning at all) on a second relink once every row was already cleared by an earlier one — exactly the unlink/relink loop a troubleshooting user would run. The warning now queries the account's current at-risk rows directly instead of trusting that count. `src/lib/simplefin/sync.test.ts`'s "cross-account relink double-count (known P1 gap)" test pins down today's actual double-count behavior so the real fix above can be verified against it, not just believed.
+- [x] **P1 — DONE (2026-09-08)** — The relink fix stopped the crash but not the double-count it was meant to prevent, because the crash fix WAS the cause: clearing `external_id` erased the only record of which feed a row came from, and `sync.ts`'s content-dedup fallback is scoped to the account being synced, so account B claiming a feed account A used to hold re-imported every row fresh and silently. Fixed by recording provenance instead of erasing it. New nullable `transactions.simplefin_source_account_id` (migration `0020`, hand-edited — the generated SQL had no backfill, and without one SQLite's NULLs-are-distinct rule would have defeated the new unique index for every existing row AND made all 35 of them invisible to the id pass, re-importing them on the very next sync: the exact double-count, caused by its own fix). The partial unique index moved from `(account_id, external_id)` to `(simplefin_source_account_id, external_id)` — scoped by FEED, which is what a SimpleFIN id is actually unique within; `account_id` was only ever a proxy, and a wrong one the moment a link moves. `setAccountLink` no longer clears anything. The backfill joins through `accounts.simplefin_account_id`, which is normally the wrong question, and is exact HERE only because the old clearing means a row that still carries an `external_id` has by construction never been through a relink — that argument is written into the migration header and is why nothing could repair a row already stripped. Verified against a `VACUUM INTO` copy of the live ledger: 1,562 rows preserved, 35 backfilled across both real feed ids (11 + 24), 0 tagged-without-provenance, 0 provenance-without-tag, `integrity_check` ok, `foreign_key_check` clean. Chosen over the two options this entry originally proposed: (a) a `/sync` review list for orphaned rows only DETECTS the corruption, the same posture as the unenforced prose warning it would replace; (b) reassigning `account_id` on relink is documented right here as only round-tripping when an account was linked to exactly one feed in its life, and the clearing is exactly what destroyed the evidence needed to check that — (b) becomes safe as a later follow-up now that provenance exists. One regression was caught during implementation and is covered: re-running `pnpm simplefin:claim` mints FRESH feed ids for the same real bank account, so the id pass cannot match; the content-dedup fallback therefore now accepts rows tagged with a DIFFERENT feed, not just untagged CSV rows, which the pre-fix clearing had been providing by accident. `sync.test.ts`'s pinning test ("known P1 gap") is inverted rather than deleted, and `link.test.ts`'s four clearing tests now assert preservation; a fifth covers the one unrepairable residue, LEGACY orphans stripped before the column existed, which `setAccountLink` still warns about and which can now only ever shrink. 1,638 tests pass, `tsc --noEmit` clean. (`src/db/schema.ts`, `drizzle/0020_happy_mojo.sql`, `src/lib/simplefin/link.ts`, `src/lib/simplefin/sync.ts`)
 - [x] **P2** — `syncNowAction` discards `outcome.warnings`. Fixed: `SyncActionState` carries `warnings` and a `warning` status, rendered by `ActionStatus`. A sync carrying warnings is never shown as a plain success, so a dark account can no longer report "Already up to date." (`src/app/sync/actions.ts`)
 - [x] **P3** — Test gaps: `warnings[]` forwarding, the pending-row refusal, the cross-source candidacy guard, the whitespace dedup case, the out-of-window dedup case, unlink round-trips and WAL snapshot consistency are all covered (375 → 402 tests). Still uncovered: `findAmbiguousTransfers`'s window + stateless-resolution contract, and a non-zero `driftCents` case. (`src/lib/simplefin/`)
 
@@ -1432,3 +1432,59 @@ and rule 6 carry the user-facing and design halves. What is left open is here.
 - [ ] **P3** — **`import_batch_categorizations.rule_id` does not survive a remove/restore cycle.** The FK is `onDelete: 'set null'`, so removing a rule nulls provenance on every row it ever auto-filed, and `restorePriorRule` re-inserting under the same id does not put those pointers back. No consequence today: that column has writers only (`importBatch.ts`, `simplefin/sync.ts`) and no readers. The first reader has to know, so it is written down in `restorePriorRule`'s docblock as well as here.
 
 - [ ] **P4** — **`LOSSY_MERCHANT_KEYS` is a curated set and nothing tells you when it is stale.** Unchanged from the earlier triage: the three entries have live evidence today (`ONLINE` 39 rows, `MOBILE` 27, and `""` at 0 rows but reachable, per `merchantLabel`'s existence). A future `normalize.ts` change could retire a key or mint a new lossy one and nothing would notice. A `db:backfill-merchants`-style report over the live ledger is the shape of the fix.
+
+## Follow-ups from the `/plan-eng-review` "what next" pass (2026-09-08, round 3)
+
+Third triage in one day, run against the live ledger. The finding was the
+premise: v0.18.0, v0.19.0 and v0.20.0 were each produced BY a "what next" pass,
+each shipped real engineering, and across all three not one measured product
+fact moved — backlog 437, budgeted months 1, funds 0, rollover categories 0,
+manual rows 0, all unchanged. Open items in this file went 63 → 100 over the
+same three releases. Codex (gpt-5.4) ran as the outside voice and corrected the
+sequencing (fix the P1 *before* the usage pass, not after) and the gate-#2
+recipe (it needs a fund, not a manual card charge — manual rows were removed
+from the gate as misframed). Decisions: D1=A (P1 first, then a one-session usage
+pass), D2=B (leave `AMAZON`/`COSTCO WHSE` uncategorized), D3=C (feed-provenance
+column).
+
+- [ ] **P3** — **Structurally-undecidable backlog rows are indistinguishable from
+      undecided ones, and after D2=B that is permanent.** `BacklogBanner`
+      (`src/app/_components/BacklogBanner.tsx`) renders `backlog.count` as a raw
+      number with no notion of *why* a row is still uncategorized. D2=B files 178
+      of 180 merchant groups and deliberately leaves `AMAZON` (53) and
+      `COSTCO WHSE` (53) alone, because their memos carry zero separating signal —
+      every Costco memo is `COSTCO WHSE #1031 MANTECA CA Card #:NNNN` byte-for-byte
+      except the card last-4, and every Amazon memo is `AMAZON MKTPL*<opaque>`.
+      So the amber strip permanently reads 106 and never reaches zero, which is
+      exactly the "trains you to ignore it" cost the decision accepted. The verdict
+      already exists as a pure function — `classifyKeyTrainability`
+      (`src/lib/categorize/keyTrainability.ts`) returns `multi-category` for both
+      keys — so this is a join in the read model, not new logic: report
+      "N undecided · M undecidable" and let the CTA target only the N. Note the
+      honest fix for these two groups is split transactions (`TODOS.md:1111`),
+      which is on the V1 exclusion list; this item makes the residue legible, it
+      does not resolve it. Blocked by: nothing.
+      (`src/app/_components/BacklogBanner.tsx`, `src/lib/budget/loadMonthView.ts`)
+
+- [ ] **P2** — **v0.16.0's liability feature has no rows behind it, and nothing in
+      the docs says so.** Measured 2026-09-08: accounts 3 (`Fixed Rate 1st Mortgage`)
+      and 4 (`Citi Bank`, `-$2,206.43` owed) are both feed-linked and both hold
+      **zero transaction rows**; all 1,562 rows sit on accounts 1 and 2. Three
+      consequences, none of which look like a bug from the code: `paidDownCents`
+      returns $0 by construction (its cross-account `EXISTS` can never match with
+      no rows to pair), no utilization bar renders (`credit_limit_cents` is NULL,
+      which DS64 makes legitimate), and the "paid down this month" line is absent
+      on both `/accounts` and the dashboard. Meanwhile 21 rows of debt paydown sit
+      in checking filed as ordinary spend with no partner to pair against:
+      `CITI CARD ONLINEPAYMENT` 4 rows / $1,120.00, `AMEX EPAYMENT ACH PMT` 7,
+      `BANK OF AMERICA PAYMENT` 6, `MOBILE DEPOSIT STAR ONE CU` 7 — all with
+      `transfer_pair_id IS NULL`. The 4 Citi rows are fixable today through the
+      existing `/transactions` row menu ("Mark as payment to Citi Bank"); AMEX and
+      BofA are not accounts at all, so they have no repair path and are arguably
+      correct as spend. This is the same shape as the fund and rollover stories:
+      the largest release in the repo (39 tasks) renders an anchor balance and
+      nothing else. Do not read the liability surfaces as verified until the card
+      carries rows. Blocked by: getting the Citi feed to import transactions, which
+      is also the action most likely to trigger the relink P1 above — sequence
+      accordingly. (`src/lib/accounts/paidDownCents.ts`,
+      `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`)

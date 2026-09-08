@@ -138,8 +138,27 @@ function seedTxn(opts: {
   date?: string;
   source?: "csv" | "simplefin" | "manual";
   externalId?: string | null;
+  /**
+   * Which feed the row came from. Defaults to the ACCOUNT's current link
+   * whenever an `externalId` is given, which is the same argument migration
+   * 0020's backfill makes: before provenance existed, a relink cleared
+   * `external_id`, so a row that has one has never been through a relink and
+   * its account's current link IS its origin.
+   *
+   * Pass it explicitly to build the one state that argument excludes — a row
+   * whose account has since been re-pointed elsewhere.
+   */
+  simplefinSourceAccountId?: string | null;
 }) {
   seq += 1;
+  const externalId = opts.externalId ?? null;
+  const linkedFeedId = externalId
+    ? (handle.db
+        .select({ feedId: schema.accounts.simplefinAccountId })
+        .from(schema.accounts)
+        .where(eq(schema.accounts.id, opts.accountId))
+        .get()?.feedId ?? null)
+    : null;
   const [row] = handle.db
     .insert(schema.transactions)
     .values({
@@ -152,7 +171,11 @@ function seedTxn(opts: {
       importSource: opts.source ?? "csv",
       importBatchId: opts.batchId,
       importRowHash: `hash-${seq}`,
-      externalId: opts.externalId ?? null,
+      externalId,
+      simplefinSourceAccountId:
+        opts.simplefinSourceAccountId !== undefined
+          ? opts.simplefinSourceAccountId
+          : linkedFeedId,
     })
     .returning()
     .all();
@@ -945,17 +968,20 @@ describe("syncSimpleFin — relink then resync", () => {
 });
 
 /**
- * Documents the known, tracked P1 gap (TODOS.md: "the relink fix above stops
- * the crash but not the double-count it was meant to prevent") rather than a
- * bug in this PR's own logic — the fix deliberately ships the crash fix with
- * an honest warning instead of solving this, per the ship-review decision
- * recorded there. This test pins down TODAY's behavior so it fails loudly,
- * for the right reason, the day someone claims the P1 follow-up without
- * actually re-checking this path. Delete or update once that follow-up
- * lands.
+ * The former P1 gap, now closed. This block used to PIN the double-count —
+ * "a different account claiming a freed feed cannot see the old account's
+ * orphaned rows, so it re-imports them" — because the fix of the day cleared
+ * `external_id` on relink, which stopped the crash by erasing the only record
+ * of where a row came from.
+ *
+ * `transactions.simplefin_source_account_id` records that provenance at write
+ * time, so nothing is cleared and the id pass keys on the FEED rather than on
+ * the local account. The assertions below are the exact inverse of what they
+ * were; if this file ever goes back to expecting two rows, the regression is
+ * the one that cost real money.
  */
-describe("syncSimpleFin — cross-account relink double-count (known P1 gap)", () => {
-  it("a different account claiming a freed feed cannot see the old account's orphaned rows, so it re-imports them", async () => {
+describe("syncSimpleFin — cross-account relink (former P1 double-count)", () => {
+  it("a different account claiming a freed feed recognizes the old account's rows and does not re-import them", async () => {
     const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Old Checking" });
     respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
     await syncSimpleFin({ now: NOW }, handle.db);
@@ -967,13 +993,40 @@ describe("syncSimpleFin — cross-account relink double-count (known P1 gap)", (
     respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
-    expect(outcome.status).toBe("synced");
-    if (outcome.status !== "synced") throw new Error("unreachable");
-    expect(outcome.insertedCount).toBe(1);
-
+    expect(outcome.status).toBe("up-to-date");
     const all = handle.db.select().from(schema.transactions).all();
-    expect(all).toHaveLength(2);
-    expect(all.filter((r) => r.amountCents === -487)).toHaveLength(2);
+    expect(all).toHaveLength(1);
+    expect(all.filter((r) => r.amountCents === -487)).toHaveLength(1);
+  });
+
+  it("keeps the row's ORIGINAL feed tag when its account is relinked, so provenance never follows the link", () => {
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    return syncSimpleFin({ now: NOW }, handle.db).then(() => {
+      setAccountLink(a.id, "ACT-2", handle.db);
+      const [row] = handle.db.select().from(schema.transactions).all();
+      // The account now points at ACT-2; the row still came from ACT-1.
+      expect(row.simplefinSourceAccountId).toBe("ACT-1");
+      expect(row.externalId).toBe("TRN-a");
+    });
+  });
+
+  it("re-imports under a NEW feed id only when content dedup cannot vouch for the row", async () => {
+    // Re-running `simplefin:claim` mints fresh account ids for the same real
+    // bank account. The id pass cannot match (the id genuinely differs), so the
+    // content-dedup fallback is the only thing standing between the user and a
+    // duplicated ledger — which is why it accepts rows tagged with a DIFFERENT
+    // feed, not just untagged CSV rows.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    setAccountLink(a.id, "ACT-2", handle.db);
+    respondWith("ACT-2", [feedTxn("TRN-different-id", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(1);
   });
 });
 
