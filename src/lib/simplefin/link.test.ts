@@ -44,6 +44,8 @@ function seedTxn(opts: {
   externalId: string | null;
   /** Defaults to the account's link at seed time, as the real write path does. */
   simplefinSourceAccountId?: string | null;
+  /** Defaults to "simplefin"; the legacy-orphan query filters on this. */
+  source?: "csv" | "simplefin" | "manual";
 }) {
   txnSeq += 1;
   const linkedFeedId = opts.externalId
@@ -62,7 +64,7 @@ function seedTxn(opts: {
       rawMemo: `MEMO ${txnSeq}`,
       normalizedMerchant: `MEMO ${txnSeq}`,
       amountCents: 1000,
-      importSource: "simplefin",
+      importSource: opts.source ?? "simplefin",
       importBatchId: opts.batchId,
       importRowHash: `hash-${txnSeq}`,
       externalId: opts.externalId,
@@ -263,5 +265,84 @@ describe("setAccountLink", () => {
       .where(eq(schema.transactions.id, otherTxn.id))
       .get();
     expect(reread?.externalId).toBe("ext-b");
+  });
+});
+
+/**
+ * The legacy-orphan warning is the ONE thing `setAccountLink` still reports,
+ * and every clause of its query is load-bearing: it names a count the user is
+ * asked to act on. The pre-provenance tests covered the plural wording via the
+ * clearing path that no longer exists, so the branch lost its only exercise
+ * when the clearing went away.
+ */
+describe("setAccountLink — the legacy-orphan warning's own predicates", () => {
+  /** A row a PRE-0020 relink stripped: simplefin-sourced, no id, no feed tag. */
+  function seedLegacyOrphan(accountId: number, batchId: number) {
+    return seedTxn({
+      accountId,
+      batchId,
+      externalId: null,
+      simplefinSourceAccountId: null,
+    });
+  }
+
+  it("uses PLURAL wording for more than one legacy orphan", () => {
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedLegacyOrphan(a.id, batch.id);
+    seedLegacyOrphan(a.id, batch.id);
+
+    const result = setAccountLink(a.id, "ACT-different", handle.db);
+
+    expect(result.warning).toMatch(/2 transactions/);
+    expect(result.warning).toMatch(/were imported/);
+    expect(result.warning).toMatch(/as duplicates/);
+    expect(result.warning).toMatch(/delete them here/);
+  });
+
+  it("does NOT count CSV rows, which have no external_id by construction", () => {
+    // Without the import_source filter every CSV row on the account would be
+    // reported as a stripped sync row — a scary, permanent, false warning on
+    // any ledger that imports files at all.
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedTxn({ accountId: a.id, batchId: batch.id, externalId: null, source: "csv" });
+
+    expect(setAccountLink(a.id, "ACT-different", handle.db).warning).toBeNull();
+  });
+
+  it("does NOT count another account's legacy orphans", () => {
+    const a = seedAccount("Checking");
+    const b = seedAccount("Savings");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedLegacyOrphan(b.id, batch.id);
+
+    expect(setAccountLink(a.id, "ACT-different", handle.db).warning).toBeNull();
+  });
+
+  it("stays silent when the link did NOT change, orphans or not", () => {
+    // The warning is about a link MOVE. Re-saving the same value must not nag
+    // about rows the move-that-did-not-happen cannot expose.
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedLegacyOrphan(a.id, batch.id);
+
+    expect(setAccountLink(a.id, "ACT-abc123", handle.db).warning).toBeNull();
+  });
+
+  it("warns on UNLINK too — freeing the feed is exactly when they get exposed", () => {
+    const a = seedAccount("Checking");
+    setAccountLink(a.id, "ACT-abc123", handle.db);
+    const batch = seedBatch();
+    seedLegacyOrphan(a.id, batch.id);
+
+    const result = setAccountLink(a.id, null, handle.db);
+
+    expect(result.warning).toMatch(/1 transaction on this account was imported/);
+    expect(read(a.id)?.simplefinAccountId).toBeNull();
   });
 });

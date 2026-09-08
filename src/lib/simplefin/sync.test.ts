@@ -1030,6 +1030,200 @@ describe("syncSimpleFin — cross-account relink (former P1 double-count)", () =
   });
 });
 
+/**
+ * The dedup passes AFTER provenance: what each one can and cannot see, now that
+ * the id pass is keyed on the FEED and the content pass admits rows tagged with
+ * a different one. Both directions matter — a pass that sees too little
+ * double-counts, and one that sees too much silently swallows real money.
+ */
+describe("syncSimpleFin — feed-scoped dedup, both directions", () => {
+  /** Two feed accounts in one response; `respondWith` only models one. */
+  function respondWithTwo(
+    first: { id: string; transactions: SimpleFinTransaction[] },
+    second: { id: string; transactions: SimpleFinTransaction[] },
+  ): void {
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [first, second].map((a) => ({
+        id: a.id,
+        name: "REGULAR SAVINGS",
+        balance: "0.00",
+        "available-balance": "0.00",
+        "balance-date": SEP_1_NOON,
+        transactions: a.transactions,
+      })),
+    } satisfies SimpleFinResponse);
+  }
+
+  it("keeps two rows sharing an external_id when they come from DIFFERENT feeds", async () => {
+    // A SimpleFIN id is unique WITHIN its feed account, never globally. Keying
+    // the id pass (or the unique index) on the id alone would drop the second
+    // account's row as a phantom duplicate.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    const b = seedAccount({ simplefinAccountId: "ACT-2", name: "Savings" });
+    respondWithTwo(
+      { id: "ACT-1", transactions: [feedTxn("TRN-shared", "-4.87", "MEMO A")] },
+      { id: "ACT-2", transactions: [feedTxn("TRN-shared", "-4.87", "MEMO B")] },
+    );
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.map((r) => [r.accountId, r.simplefinSourceAccountId, r.externalId]),
+    ).toEqual([
+      [a.id, "ACT-1", "TRN-shared"],
+      [b.id, "ACT-2", "TRN-shared"],
+    ]);
+  });
+
+  it("the unique index still refuses the SAME (feed, external_id) twice", () => {
+    // The in-memory id pass is the first line; this index is the backstop that
+    // makes a double-count impossible rather than merely unlikely.
+    const a = seedAccount({ simplefinAccountId: "ACT-1" });
+    const batch = seedBatch("simplefin");
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      source: "simplefin",
+      externalId: "TRN-a",
+    });
+
+    expect(() =>
+      seedTxn({
+        accountId: a.id,
+        batchId: batch.id,
+        amountCents: -487,
+        rawMemo: "SOMETHING ELSE",
+        source: "simplefin",
+        externalId: "TRN-a",
+      }),
+    ).toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it("still imports GENUINELY new rows arriving under a re-minted feed id", async () => {
+    // The mirror of the re-claim test above: admitting different-feed rows to
+    // content dedup must not turn into "suppress everything the new feed
+    // sends". Only a matching (date, amount, memo) is absorbed.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    setAccountLink(a.id, "ACT-2", handle.db);
+    respondWith("ACT-2", [
+      feedTxn("TRN-new-1", "-4.87"),
+      feedTxn("TRN-new-2", "-12.00", "TRADER JOES 123 MANTECA CA"),
+    ]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.map((r) => r.simplefinSourceAccountId)).toEqual(["ACT-1", "ACT-2"]);
+  });
+
+  it("cannot content-vouch for a different-feed row older than the lookback floor", async () => {
+    // The content fallback is bounded by MAX_LOOKBACK_DAYS, so the safety net
+    // under a re-minted feed id has an edge. Pinned rather than fixed: widening
+    // it would content-match against arbitrarily old history.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    const batch = seedBatch("simplefin");
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-01-05",
+      source: "simplefin",
+      externalId: "TRN-old",
+    });
+
+    setAccountLink(a.id, "ACT-2", handle.db);
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-2",
+          name: "REGULAR SAVINGS",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            {
+              ...feedTxn("TRN-re-minted", "-4.87"),
+              posted: Math.floor(new Date("2026-01-05T12:00:00Z").getTime() / 1000),
+              transacted_at: Math.floor(new Date("2026-01-05T12:00:00Z").getTime() / 1000),
+            },
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+  });
+
+  it("is BLIND to a row carrying an external_id but no feed tag (the state 0020 leaves unhandled)", async () => {
+    // `NULL <> 'ACT-1'` is NULL, not true, so such a row matches neither
+    // `simplefin_source_account_id = feed` (the id pass) nor the content pass's
+    // different-feed clause — it is invisible to both and re-imports.
+    //
+    // Unreachable from the app: every sync write records the feed, and nothing
+    // clears external_id any more. This pins the consequence so the day some
+    // path DOES produce one, the cost is written down rather than discovered.
+    const a = seedAccount({ simplefinAccountId: "ACT-1" });
+    const batch = seedBatch("simplefin");
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      source: "simplefin",
+      externalId: "TRN-a",
+      simplefinSourceAccountId: null,
+    });
+
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.simplefinSourceAccountId)).toEqual([null, "ACT-1"]);
+  });
+
+  it("tags a row with the feed of the account SYNCING it, not the one that held it before", async () => {
+    // Provenance is captured at write time from `account.simplefinAccountId`.
+    // A second local account claiming a feed writes its OWN rows under that
+    // feed — the tag follows the write, never the row's neighbours.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Old Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    setAccountLink(a.id, null, handle.db);
+    const b = seedAccount({ name: "New Checking" });
+    setAccountLink(b.id, "ACT-1", handle.db);
+    respondWith("ACT-1", [feedTxn("TRN-b", "-9.99", "TRADER JOES 123 MANTECA CA")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    const written = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, b.id))
+      .all();
+    expect(written).toHaveLength(1);
+    expect(written[0].simplefinSourceAccountId).toBe("ACT-1");
+    expect(written[0].externalId).toBe("TRN-b");
+  });
+});
+
 // Same gap as the CSV path (see importBatch.test.ts): `applyRuleAtImport` was
 // never called from either write path, so a synced row landed uncategorized
 // even when a rule for that merchant already existed.
