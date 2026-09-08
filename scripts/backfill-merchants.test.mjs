@@ -392,3 +392,53 @@ describe("planBackfill — contains/regex rule reach", () => {
     expect(plan.reachChanges).toEqual([]);
   });
 });
+
+describe("planBackfill — unevidenced rewrites", () => {
+  /**
+   * The lowest-confidence branch in the planner: no surviving row carries the
+   * rule's old key, so there is nothing to join through and the rule's own
+   * match_value is renormalized instead. That is a guess, and it used to be
+   * reported identically to the rewrites that were derived from rows.
+   */
+  it("flags a rule no row corroborates, separately from the rewrite count", () => {
+    const plan = planBackfill({
+      txns: [txn({ id: 1, raw_memo: "a", normalized_merchant: "SOMETHING ELSE" })],
+      rules: [rule({ id: 9, match_value: "OLD MERCHANT" })],
+      dismissals: [],
+      // Idempotent for its own outputs, so `drifts` is genuinely false here
+      // rather than false by accident.
+      normalize: (s) => ({ "OLD MERCHANT": "OLD", "SOMETHING ELSE": "NEW" })[s] ?? s,
+    });
+
+    expect(plan.unevidenced).toHaveLength(1);
+    expect(plan.unevidenced[0]).toMatchObject({ next: "OLD", drifts: false });
+    expect(plan.unevidenced[0].rule.id).toBe(9);
+  });
+
+  it("does not flag a rule whose key rows still carry", () => {
+    const plan = planBackfill({
+      txns: [txn({ id: 1, raw_memo: "a", normalized_merchant: "OLD MERCHANT" })],
+      rules: [rule({ id: 9, match_value: "OLD MERCHANT" })],
+      dismissals: [],
+      normalize: () => "NEW",
+    });
+
+    expect(plan.unevidenced).toEqual([]);
+    expect(plan.changedRules).toHaveLength(1);
+  });
+
+  it("marks the drifting case, where the guess lands on a key no write path emits", () => {
+    // normalize is not idempotent for this value: X -> Y -> Z. A row would have
+    // settled at Y via raw_memo, but the rule is derived from its own value and
+    // any later re-normalization moves again, so the rule matches nothing.
+    const steps = { "OLD MERCHANT": "MID", MID: "FINAL" };
+    const plan = planBackfill({
+      txns: [txn({ id: 1, raw_memo: "a", normalized_merchant: "UNRELATED" })],
+      rules: [rule({ id: 9, match_value: "OLD MERCHANT" })],
+      dismissals: [],
+      normalize: (s) => steps[s] ?? s,
+    });
+
+    expect(plan.unevidenced[0]).toMatchObject({ next: "MID", drifts: true });
+  });
+});
