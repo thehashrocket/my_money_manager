@@ -297,9 +297,12 @@ disappeared from the hover panel while its bar stayed on screen. In the
 tooltip those figures take the three-way money tone rather than a fixed
 `text-money-neg`: outflow reads `text-money-neg`, a net refund reads
 `text-money-pos`, and exactly zero is muted, because painting $0.00 red reads
-as an outflow. A group that
-nets to exactly zero is dropped from the chart and its legend, so "empty"
-means nothing to draw rather than no rows.
+as an outflow. A group is dropped from a *month* whose net is exactly zero,
+but the legend keeps any group that draws in at least one month — a $50 charge
+in March refunded in April nets to zero across the six-month window while
+drawing a real bar in both, and filtering the legend on the window total blanked
+the chart over two months of activity. So "empty" means nothing to draw rather
+than no rows, and that question has one answer (`hasDrawableData`).
 
 ---
 
