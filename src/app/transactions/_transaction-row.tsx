@@ -1,12 +1,15 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
+import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
+import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionRowMenu } from "./_row-menu";
 import {
   categorizeTransactionAction,
@@ -24,7 +27,21 @@ type Props = {
   cardAccounts: AccountOption[];
   /** Refresh the page after a pairing change, which alters what this list shows. */
   onPairingChanged: () => void;
+  /** The whole active filter set — a row's merchant link MERGES into it (D23). */
+  filterValues: TransactionsFilterValues;
 };
+
+/**
+ * D17 — shared by every row variant and by `TransactionColumnHeaders`, so a
+ * column cannot drift out from under its own label.
+ *
+ * Row 1 is the transaction as a ledger line (merchant · category · date ·
+ * account · amount). Row 2 carries the bank memo under the merchant and the
+ * per-row controls to its right, which is what lets T8's new memo line cost
+ * nothing in height: the controls already needed two lines' worth of room.
+ */
+export const TXN_ROW_GRID =
+  "grid grid-cols-1 items-baseline gap-x-4 gap-y-1.5 px-4 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_7rem]";
 
 /**
  * One row on `/transactions`. Picker + Remember + Apply-to-past + Submit,
@@ -46,6 +63,7 @@ export function TransactionRowForm({
   onPairingChanged,
   onCategorized,
   onUndone,
+  filterValues,
 }: Props) {
   const [pickerValue, setPickerValue] = useState<string>(
     row.categoryId !== null ? String(row.categoryId) : "",
@@ -59,6 +77,8 @@ export function TransactionRowForm({
   const [remember, setRemember] = useState(false);
   const [applyToPast, setApplyToPast] = useState(false);
   const [isPending, startTransition] = useTransition();
+
+  const merchantFiltered = filterValues.merchant !== undefined;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -124,88 +144,238 @@ export function TransactionRowForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className={`flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm transition-opacity ${
-        currentCategoryId !== null
-          ? "border-border/50 bg-muted/40 opacity-50 hover:opacity-100"
-          : "border-border bg-card"
+      /* D17 [HARD REJECTION] — was `rounded-md border p-3` inside a
+         `ul.space-y-2`, i.e. a stack of card slabs rather than a list.
+         DS49 already made this exact move on the dashboard.
+         The `opacity-50` dimming of already-filed rows is now conditional:
+         under a merchant filter the filed rows are the whole point (D3 shows
+         all of a merchant's history because "49 already filed as Gas" is the
+         answer), so dimming them would leave the one row you already knew
+         about as the only thing at full contrast. */
+      className={`${TXN_ROW_GRID} transition-opacity ${
+        currentCategoryId !== null && !merchantFiltered
+          ? "opacity-60 hover:opacity-100"
+          : ""
       }`}
     >
       <input type="hidden" name="transactionId" value={row.id} />
-      <div className="flex min-w-0 flex-[2_1_16rem] items-baseline gap-2">
-        <span className="truncate font-medium" title={row.rawDescription}>
-          {row.normalizedMerchant}
-        </span>
-        {currentCategoryName ? (
-          <span className="rounded-sm bg-muted px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-            {currentCategoryName}
-          </span>
-        ) : (
-          <span className="rounded-sm bg-amber-200/60 px-1 py-0.5 text-[10px] uppercase tracking-wide text-amber-900 dark:bg-amber-900/50 dark:text-amber-100">
-            Uncategorized
-          </span>
-        )}
-      </div>
-      <div className="flex items-baseline gap-3 text-xs text-muted-foreground">
-        <span>{row.date}</span>
-        <span>{row.accountName}</span>
+      <PrimaryLabel row={row} filterValues={filterValues} />
+      <MemoLine row={row} merchantFiltered={merchantFiltered} />
+      <span className="sm:col-start-2 sm:row-start-1">
+        <CategoryBadge name={currentCategoryName} />
+      </span>
+      <span className="font-mono text-xs text-ink-2 sm:col-start-3 sm:row-start-1">
+        {row.date}
+      </span>
+      <span className="flex items-baseline gap-2 truncate text-xs text-ink-2 sm:col-start-4 sm:row-start-1">
+        <span className="truncate">{row.accountName}</span>
         {row.isPending ? (
-          <span className="rounded-sm bg-muted px-1 text-[10px] uppercase tracking-wide">
+          <span className="shrink-0 rounded-sm bg-muted px-1 font-mono text-[10px] uppercase tracking-wide">
             Pending
           </span>
         ) : null}
-      </div>
-      <span className="ml-auto w-24 text-right [font-variant-numeric:tabular-nums]">
+      </span>
+      <span className="font-mono sm:col-start-5 sm:row-start-1 sm:text-right">
         {formatCents(row.amountCents)}
       </span>
-      <label className="sr-only" htmlFor={`cat-${row.id}`}>
-        Category for transaction {row.id}
-      </label>
-      <CategoryCombobox
-        id={`cat-${row.id}`}
-        name="categoryId"
-        value={pickerValue}
-        onValueChange={setPickerValue}
-        categories={leafCategories}
-        required
-        className="min-w-[10rem]"
-      />
-      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          name="rememberMerchant"
-          value="true"
-          checked={remember}
-          onChange={(e) => setRemember(e.target.checked)}
-          className="h-4 w-4"
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:col-span-4 sm:col-start-2 sm:row-start-2 sm:justify-end">
+        <label className="sr-only" htmlFor={`cat-${row.id}`}>
+          Category for transaction {row.id}
+        </label>
+        <CategoryCombobox
+          id={`cat-${row.id}`}
+          name="categoryId"
+          value={pickerValue}
+          onValueChange={setPickerValue}
+          categories={leafCategories}
+          required
+          className="min-w-[10rem]"
         />
-        Remember
-      </label>
-      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          name="applyToPast"
-          value="true"
-          checked={applyToPast}
-          onChange={(e) => setApplyToPast(e.target.checked)}
-          className="h-4 w-4"
+        {/* Stacked rather than side by side (round2-B) — two short checkbox
+            labels in a column are the same height as the memo line beside
+            them, so the new second line costs the list no extra height. */}
+        <div className="flex flex-col gap-0.5">
+          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+            <input
+              type="checkbox"
+              name="rememberMerchant"
+              value="true"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="h-4 w-4"
+            />
+            Remember
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+            <input
+              type="checkbox"
+              name="applyToPast"
+              value="true"
+              checked={applyToPast}
+              onChange={(e) => setApplyToPast(e.target.checked)}
+              className="h-4 w-4"
+            />
+            Apply to past
+          </label>
+        </div>
+        <button
+          type="submit"
+          disabled={isPending || !pickerValue || pickerValue === String(currentCategoryId)}
+          className={`h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
+        >
+          {isPending ? "Saving…" : "Save"}
+        </button>
+        <TransactionRowMenu
+          transactionId={row.id}
+          isTransfer={false}
+          transferPartnerAccountName={null}
+          cardAccounts={cardAccounts}
+          onChanged={onPairingChanged}
         />
-        Apply to past
-      </label>
-      <button
-        type="submit"
-        disabled={isPending || !pickerValue || pickerValue === String(currentCategoryId)}
-        className="h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {isPending ? "Saving…" : "Save"}
-      </button>
-      <TransactionRowMenu
-        transactionId={row.id}
-        isTransfer={false}
-        transferPartnerAccountName={null}
-        cardAccounts={cardAccounts}
-        onChanged={onPairingChanged}
-      />
+      </div>
     </form>
+  );
+}
+
+/**
+ * D17 — column headers. T8 turns every row into two lines, and an unlabelled
+ * second line has nothing orienting it; all four mockups added a header row
+ * unprompted for exactly that reason. Hidden below `sm`, where the row stacks.
+ */
+export function TransactionColumnHeaders({
+  merchantFiltered,
+}: {
+  merchantFiltered: boolean;
+}) {
+  return (
+    <div
+      aria-hidden
+      className={`${TXN_ROW_GRID} hidden border-b border-[var(--rule-strong)] bg-[var(--bg-inset)] py-2 font-mono text-[10px] uppercase tracking-wide text-ink-3 sm:grid`}
+    >
+      <span>{merchantFiltered ? "Memo" : "Merchant / memo"}</span>
+      <span>Category</span>
+      <span>Date</span>
+      <span>Account</span>
+      <span className="text-right">Amount</span>
+    </div>
+  );
+}
+
+/**
+ * The row's headline.
+ *
+ * Under an active merchant filter every visible row carries the SAME key, so
+ * repeating it 59 times says nothing — the memo is promoted into the primary
+ * slot and the merchant name is dropped entirely (the header block above the
+ * list already names it, once). Without a merchant filter the merchant name
+ * leads, and links into that filter.
+ *
+ * D23 — the link MERGES into the active filters rather than replacing them.
+ * Replacing would silently discard a date range you had deliberately set (and
+ * `pageSize`), producing a much larger result set from what reads as a
+ * narrowing action. And a row already matching the active merchant links to
+ * the page it is standing on, so it renders as plain text instead.
+ */
+function PrimaryLabel({
+  row,
+  filterValues,
+}: {
+  row: TransactionRow;
+  filterValues: TransactionsFilterValues;
+}) {
+  const memo = row.rawMemo.trim();
+  if (filterValues.merchant !== undefined) {
+    return (
+      <span
+        className="min-w-0 truncate font-mono text-xs text-ink-1 sm:col-start-1 sm:row-start-1"
+        title={memo || row.normalizedMerchant}
+      >
+        {memo || row.normalizedMerchant}
+      </span>
+    );
+  }
+  return (
+    <Link
+      href={buildHref({ ...filterValues, merchant: row.normalizedMerchant })}
+      /* One of these per row; the destination is dynamic and has its own
+         `loading.tsx`, so eager prefetch buys a shell the route already
+         provides (D8). */
+      prefetch={false}
+      title={row.normalizedMerchant}
+      className={`block min-w-0 truncate font-medium text-terracotta underline underline-offset-4 visited:text-ink-2 hover:no-underline sm:col-start-1 sm:row-start-1 ${FOCUS_RING}`}
+    >
+      {row.normalizedMerchant}
+    </Link>
+  );
+}
+
+/**
+ * D9 — the bank's own text for the row, readable without hovering.
+ *
+ * `normalized_merchant` is a deliberately lossy key, so a merchant-filtered
+ * list used to render 59 rows all labelled `AMAZON`. The memo is what tells
+ * them apart. `payee` is not used for this: it is NULL on 99.2% of rows
+ * (1,527 of 1,540) because only the SimpleFIN feed carries it.
+ *
+ * Suppressed when the memo IS the key — true on 151 rows (9.8%) — so one row
+ * in ten does not render its first line twice. Also suppressed when the memo
+ * has already been promoted into the primary slot above.
+ *
+ * Two lines below `sm`, one line above it. Real bank memos run 48-72 chars,
+ * and the desktop escape hatch for the overflow is the `title` tooltip — which
+ * does not exist on touch. Truncating to one line at 375px would throw away
+ * most of the only text that distinguishes 59 rows all labelled `AMAZON`,
+ * with nothing to reveal the rest, which is the exact failure D9 exists to
+ * fix. `line-clamp-2` rather than full wrapping keeps the row height bounded.
+ */
+function MemoLine({
+  row,
+  merchantFiltered,
+}: {
+  row: TransactionRow;
+  merchantFiltered: boolean;
+}) {
+  const memo = row.rawMemo.trim();
+  if (merchantFiltered || memo === "" || memo === row.normalizedMerchant) return null;
+  return (
+    <span
+      className="min-w-0 line-clamp-2 font-mono text-[var(--text-xs)] text-ink-3 sm:col-start-1 sm:row-start-2 sm:truncate"
+      title={memo}
+    >
+      {memo}
+    </span>
+  );
+}
+
+/**
+ * D20 — monochrome, with one exception. 19 categories against 5 accents means
+ * any cycling palette invents a relationship between whichever categories
+ * happen to collide, so the badge carries the name and nothing else. Amber is
+ * the exception because `Uncategorized` is not a category, it is a STATE —
+ * the same state the backlog strip above the list is counting.
+ *
+ * T14/D21: the shared `color-mix(… var(--accent-amber) …)` formula, not
+ * Tailwind's raw `amber-*` palette. DESIGN.md's audit named this badge as one
+ * of the three surfaces that had drifted off the token entirely.
+ */
+function CategoryBadge({ name }: { name: string | null }) {
+  if (name !== null) {
+    return (
+      <span className="inline-block max-w-full truncate rounded-sm bg-muted px-1 py-0.5 font-mono text-[10px] uppercase tracking-wide text-ink-2">
+        {name}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-block rounded-sm px-1 py-0.5 font-mono text-[10px] uppercase tracking-wide"
+      style={{
+        background: "color-mix(in oklch, var(--accent-amber) 22%, var(--background))",
+        color: "color-mix(in oklch, var(--accent-amber) 55%, var(--foreground))",
+      }}
+    >
+      Uncategorized
+    </span>
   );
 }
 
@@ -226,25 +396,26 @@ export function TransferRowItem({
   row,
   cardAccounts,
   onPairingChanged,
+  filterValues,
 }: {
   row: TransactionRow;
   cardAccounts: AccountOption[];
   onPairingChanged: () => void;
+  filterValues: TransactionsFilterValues;
 }) {
+  const merchantFiltered = filterValues.merchant !== undefined;
   return (
     <div
-      className="flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm"
+      className={TXN_ROW_GRID}
       style={{
-        borderColor: "color-mix(in oklch, var(--accent-indigo) 30%, transparent)",
-        background: "color-mix(in oklch, var(--accent-indigo) 6%, var(--card))",
+        background: "color-mix(in oklch, var(--accent-indigo) 6%, transparent)",
       }}
     >
-      <div className="flex min-w-0 flex-[2_1_16rem] items-baseline gap-2">
-        <span className="truncate font-medium" title={row.rawDescription}>
-          {row.normalizedMerchant}
-        </span>
+      <PrimaryLabel row={row} filterValues={filterValues} />
+      <MemoLine row={row} merchantFiltered={merchantFiltered} />
+      <span className="sm:col-start-2 sm:row-start-1">
         <span
-          className="rounded-sm px-1 py-0.5 text-[10px] uppercase tracking-wide"
+          className="inline-block max-w-full truncate rounded-sm px-1 py-0.5 font-mono text-[10px] uppercase tracking-wide"
           style={{
             background: "color-mix(in oklch, var(--accent-indigo) 18%, var(--background))",
             color: "color-mix(in oklch, var(--accent-indigo) 60%, var(--foreground))",
@@ -254,21 +425,25 @@ export function TransferRowItem({
             ? `Paired · ${row.transferPartnerAccountName}`
             : "Paired"}
         </span>
-      </div>
-      <div className="flex items-baseline gap-3 text-xs text-muted-foreground">
-        <span>{row.date}</span>
-        <span>{row.accountName}</span>
-      </div>
-      <span className="ml-auto w-24 text-right [font-variant-numeric:tabular-nums]">
+      </span>
+      <span className="font-mono text-xs text-ink-2 sm:col-start-3 sm:row-start-1">
+        {row.date}
+      </span>
+      <span className="truncate text-xs text-ink-2 sm:col-start-4 sm:row-start-1">
+        {row.accountName}
+      </span>
+      <span className="font-mono sm:col-start-5 sm:row-start-1 sm:text-right">
         {formatCents(row.amountCents)}
       </span>
-      <TransactionRowMenu
-        transactionId={row.id}
-        isTransfer
-        transferPartnerAccountName={row.transferPartnerAccountName}
-        cardAccounts={cardAccounts}
-        onChanged={onPairingChanged}
-      />
+      <div className="flex items-center sm:col-span-4 sm:col-start-2 sm:row-start-2 sm:justify-end">
+        <TransactionRowMenu
+          transactionId={row.id}
+          isTransfer
+          transferPartnerAccountName={row.transferPartnerAccountName}
+          cardAccounts={cardAccounts}
+          onChanged={onPairingChanged}
+        />
+      </div>
     </div>
   );
 }

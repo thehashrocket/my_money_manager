@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { flatten, searchParamsSchema } from "@/lib/transactions/searchParams";
 import { buildHref, filterValuesToSearchParams, type TransactionsFilterValues } from "./_filter-bar";
 
 const emptyValues: TransactionsFilterValues = {
@@ -11,6 +12,7 @@ const emptyValues: TransactionsFilterValues = {
   amountMax: undefined,
   pending: undefined,
   includeTransfers: undefined,
+  merchant: undefined,
 };
 
 describe("filterValuesToSearchParams", () => {
@@ -24,7 +26,8 @@ describe("filterValuesToSearchParams", () => {
       amountMin: 500,
       amountMax: 10000,
       pending: "posted",
-    includeTransfers: undefined,
+      includeTransfers: undefined,
+      merchant: "AMAZON",
     };
     const params = filterValuesToSearchParams(values);
     expect(params.get("search")).toBe("amazon");
@@ -35,6 +38,7 @@ describe("filterValuesToSearchParams", () => {
     expect(params.get("amountMin")).toBe("5.00");
     expect(params.get("amountMax")).toBe("100.00");
     expect(params.get("pending")).toBe("posted");
+    expect(params.get("merchant")).toBe("AMAZON");
   });
 
   it('omits pending when it is "all" (today\'s default)', () => {
@@ -71,58 +75,89 @@ describe("buildHref", () => {
     expect(url.searchParams.get("dateFrom")).toBe("2026-04-01");
     expect(url.searchParams.get("dateTo")).toBe("2026-04-30");
   });
+
+  it("the merchant chip's × drops only the merchant, keeping the date range (D18)", () => {
+    const active = buildHref({
+      ...emptyValues,
+      merchant: "AMAZON",
+      dateFrom: "2026-04-01",
+      dateTo: "2026-04-30",
+    });
+    expect(new URL(active, "http://localhost").searchParams.get("merchant")).toBe("AMAZON");
+
+    const cleared = buildHref({
+      ...emptyValues,
+      merchant: undefined,
+      dateFrom: "2026-04-01",
+      dateTo: "2026-04-30",
+    });
+    const url = new URL(cleared, "http://localhost");
+    expect(url.searchParams.has("merchant")).toBe(false);
+    expect(url.searchParams.get("dateFrom")).toBe("2026-04-01");
+    expect(url.searchParams.get("dateTo")).toBe("2026-04-30");
+  });
 });
 
 /**
- * T26/E9 — the toggle has to survive the URL round trip, or page 2 silently
- * turns transfers back off. Both carriers are exercised:
- * `filterValuesToSearchParams` (used by Pagination and by the toggle link
- * itself) and the hidden input in the filter form.
+ * D5 — the regression guard, driven by the KEYS of `TransactionsFilterValues`
+ * rather than a hand-written list of them.
+ *
+ * A filter reaches the URL through two independent gates and has to clear
+ * both: `filterValuesToSearchParams` must SERIALIZE it (or page 2 silently
+ * drops it — the list reads as filtered while showing all 1,540 rows), and
+ * `searchParamsSchema` must ACCEPT it (or the link 404s, since the schema is
+ * `.strict()`). This app has now shipped the silent half twice, on `pageSize`
+ * and on `includeTransfers`; the previous version of this test hand-enumerated
+ * field names, so it could only ever catch the fields someone remembered.
+ *
+ * The exhaustiveness is a type check, not a convention: `ALL_FILTERS_ACTIVE`
+ * is annotated `TransactionsFilterValues`, whose properties are all required,
+ * so adding field #11 to that type fails `tsc` here until the fixture sets it
+ * — and the loops below then cover it automatically. The `undefined` assertion
+ * closes the other half of that door: satisfying the compiler with
+ * `newField: undefined` would otherwise pass a test that exercised nothing.
  */
-describe("includeTransfers round-trips through the query string", () => {
-  const base = {
-    search: undefined,
-    accountId: undefined,
-    categoryId: undefined,
-    dateFrom: undefined,
-    dateTo: undefined,
-    amountMin: undefined,
-    amountMax: undefined,
-    pending: undefined,
-    includeTransfers: undefined,
-  } satisfies TransactionsFilterValues;
+const ALL_FILTERS_ACTIVE: TransactionsFilterValues = {
+  search: "amazon",
+  accountId: 3,
+  categoryId: 7,
+  dateFrom: "2026-04-01",
+  dateTo: "2026-04-30",
+  amountMin: 500,
+  amountMax: 10000,
+  // "all" is deliberately omitted by the serializer as the default, so the
+  // fixture has to use a value that is actually carried.
+  pending: "posted",
+  includeTransfers: true,
+  merchant: "ARCO#05450AMERI",
+};
 
-  it("emits nothing when off, so the default URL stays clean", () => {
-    expect(filterValuesToSearchParams(base).has("includeTransfers")).toBe(false);
-    expect(
-      filterValuesToSearchParams({ ...base, includeTransfers: false }).has("includeTransfers"),
-    ).toBe(false);
+describe("every TransactionsFilterValues key survives the URL round trip", () => {
+  const keys = Object.keys(ALL_FILTERS_ACTIVE) as (keyof TransactionsFilterValues)[];
+
+  it("the fixture actually populates every field (guards the guard)", () => {
+    const unset = keys.filter((k) => ALL_FILTERS_ACTIVE[k] === undefined);
+    expect(unset).toEqual([]);
   });
 
-  it("emits the literal 'true' when on — the only value the page's schema accepts", () => {
-    const params = filterValuesToSearchParams({ ...base, includeTransfers: true });
-    expect(params.get("includeTransfers")).toBe("true");
+  const params = filterValuesToSearchParams(ALL_FILTERS_ACTIVE);
+  const parsed = searchParamsSchema.safeParse(
+    flatten(Object.fromEntries(params.entries())),
+  );
+
+  it("the serialized query string is accepted by the page's strict schema", () => {
+    expect(parsed.success).toBe(true);
   });
 
-  it("survives alongside every other filter", () => {
-    const params = filterValuesToSearchParams({
-      search: "costco",
-      accountId: 3,
-      categoryId: 7,
-      dateFrom: "2026-09-01",
-      dateTo: "2026-09-30",
-      amountMin: 1000,
-      amountMax: 50000,
-      pending: "posted",
-      includeTransfers: true,
+  for (const key of keys) {
+    it(`${key} is serialized into the query string`, () => {
+      expect(params.has(key)).toBe(true);
     });
-    expect(params.get("includeTransfers")).toBe("true");
-    expect(params.get("search")).toBe("costco");
-    expect(params.get("accountId")).toBe("3");
-  });
 
-  it("is preserved by buildHref, which Pagination uses for page 2", () => {
-    const href = buildHref({ ...base, includeTransfers: true });
-    expect(href).toContain("includeTransfers=true");
-  });
+    it(`${key} is parsed back out by searchParamsSchema`, () => {
+      expect(parsed.success).toBe(true);
+      if (!parsed.success) return;
+      expect(parsed.data[key]).not.toBe(undefined);
+    });
+  }
 });

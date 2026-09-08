@@ -1,23 +1,34 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
-import { z } from "zod";
 import { db } from "@/db";
 import { listLeafCategories, type LeafCategory } from "@/lib/categories";
 import { listAccounts, listCardAccounts, type AccountOption } from "@/lib/accounts/listAccounts";
 import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
-import { loadTransactions } from "@/lib/categorize/loadTransactions";
-import { AmountParseError, centsToDollarString, parseAmountToCents } from "@/lib/money";
-import { FilterBar, MAX_SEARCH_LENGTH, type TransactionsFilterValues } from "./_filter-bar";
+import {
+  loadTransactions,
+  summarizeByCategory,
+  type CategoryBreakdownRow,
+} from "@/lib/categorize/loadTransactions";
+import { centsToDollarString } from "@/lib/money";
+import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import {
+  flatten,
+  searchParamsSchema,
+  type RawSearchParams,
+} from "@/lib/transactions/searchParams";
+import { buildHref, FilterBar, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionsUi } from "./_transactions-ui";
 
 const DEFAULT_PAGE_SIZE = 50;
-const MAX_PAGE_SIZE = 500;
 
 /**
  * `/transactions` — filtered, paginated transaction list with inline
  * categorize. Entry points:
  * - `/budget` row link → `?categoryId=<leafId>&dateFrom=<first>&dateTo=<last>`
  *   for drilldown into one category's transactions for one month
+ * - `/categorize` row link → `?merchant=<normalized_merchant>` for drilldown
+ *   into one merchant's transactions (D2 — exact, not `search=`)
  * - standalone → no filter, newest first
  * - `_filter-bar.tsx`'s GET form → any combination of search/account/
  *   category/date-range/amount-range/pending
@@ -25,58 +36,14 @@ const MAX_PAGE_SIZE = 500;
  * Invalid searchParams (non-int, out-of-range, calendar-invalid dates,
  * unparseable amounts) route through `notFound()` so URL tampering lands in
  * Next's 404 UI rather than a server error banner (matches
- * `/budget/[year]/[month]` behavior).
+ * `/budget/[year]/[month]` behavior). The schema itself lives in
+ * `@/lib/transactions/searchParams` (D11) so the round-trip test can reach
+ * both halves of the carry-forward contract.
  *
  * Transfer-paired rows are excluded from the list server-side (see
  * `loadTransactions`); the categorize action additionally refuses them as a
  * defense-in-depth check.
  */
-const amountSchema = z
-  .string()
-  .optional()
-  .transform((raw, ctx) => {
-    if (raw === undefined || raw.trim() === "") return undefined;
-    try {
-      return Math.abs(parseAmountToCents(raw));
-    } catch (err) {
-      if (err instanceof AmountParseError) {
-        ctx.addIssue({ code: "custom", message: "invalid amount" });
-        return z.NEVER;
-      }
-      throw err;
-    }
-  });
-
-const searchParamsSchema = z.object({
-  categoryId: z
-    .union([
-      z.literal("none"),
-      z.coerce.number().int().positive(),
-    ])
-    .optional(),
-  accountId: z.coerce.number().int().positive().optional(),
-  dateFrom: z.iso.date().optional(),
-  dateTo: z.iso.date().optional(),
-  amountMin: amountSchema,
-  amountMax: amountSchema,
-  pending: z.enum(["posted", "pending", "all"]).optional(),
-  // Only ever emitted as the literal "true" by filterValuesToSearchParams;
-  // `.strict()` above means anything else 404s rather than being ignored.
-  includeTransfers: z.literal("true").optional().transform((v) => v === "true"),
-  search: z
-    .string()
-    .max(MAX_SEARCH_LENGTH)
-    .optional()
-    .transform((v) => {
-      const trimmed = v?.trim();
-      return trimmed ? trimmed : undefined;
-    }),
-  page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).optional(),
-}).strict();
-
-type RawSearchParams = Record<string, string | string[] | undefined>;
-
 export default async function TransactionsPage({
   searchParams,
 }: {
@@ -97,6 +64,7 @@ export default async function TransactionsPage({
     pending,
     search,
     includeTransfers,
+    merchant,
   } = parsed.data;
   if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) notFound();
   if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) notFound();
@@ -106,7 +74,7 @@ export default async function TransactionsPage({
   const page = parsed.data.page ?? 1;
   const pageSize = parsed.data.pageSize ?? DEFAULT_PAGE_SIZE;
 
-  const { rows, totalCount } = loadTransactions(db, {
+  const predicateInput = {
     categoryId,
     accountId,
     dateFrom,
@@ -116,9 +84,21 @@ export default async function TransactionsPage({
     isPending,
     search,
     includeTransfers,
+    merchant,
+  };
+
+  const { rows, totalCount } = loadTransactions(db, {
+    ...predicateInput,
     page,
     pageSize,
   });
+
+  // D18 — only the merchant header renders a filing breakdown, so only the
+  // merchant case pays for the extra aggregate. It shares `loadTransactions`'
+  // own predicates, so it can never describe a different row set than the
+  // list beneath it.
+  const categoryBreakdown =
+    merchant !== undefined ? summarizeByCategory(db, predicateInput) : null;
 
   // X3/B7: the picker excludes archived categories (you can't re-file a
   // transaction into one), but a `?categoryId=` filter can point at a
@@ -138,7 +118,7 @@ export default async function TransactionsPage({
   const activeCategoryName = resolveActiveCategoryName(categoryId, allCategoriesForLabels);
   const activeAccountName = resolveActiveAccountName(accountId, accounts);
 
-  const filterValues = {
+  const filterValues: TransactionsFilterValues = {
     search,
     accountId,
     categoryId,
@@ -148,28 +128,18 @@ export default async function TransactionsPage({
     amountMax,
     pending,
     includeTransfers,
+    merchant,
   };
 
   return (
     <main className="mx-auto max-w-5xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
-      <header className="space-y-2">
-        <h1 className="font-display text-[var(--text-3xl)] leading-none tracking-[-0.015em]">
-          Transactions
-        </h1>
-        <FilterSummary
-          categoryName={activeCategoryName}
-          categoryId={categoryId}
-          accountName={activeAccountName}
-          accountId={accountId}
-          dateFrom={dateFrom}
-          dateTo={dateTo}
-          amountMinCents={amountMin}
-          amountMaxCents={amountMax}
-          pending={pending}
-          search={search}
-          totalCount={totalCount}
-        />
-      </header>
+      <FilterHeader
+        values={filterValues}
+        categoryName={activeCategoryName}
+        accountName={activeAccountName}
+        totalCount={totalCount}
+        categoryBreakdown={categoryBreakdown}
+      />
 
       <FilterBar values={filterValues} leafCategories={leafCategories} accounts={accounts} pageSize={pageSize} />
 
@@ -186,22 +156,6 @@ export default async function TransactionsPage({
       />
     </main>
   );
-}
-
-/**
- * The filter bar is a plain GET form (D4) — every field name is present on
- * every submit, so an untouched input arrives as `key=""` rather than the
- * key being absent. Blank means "no filter" everywhere in this schema, so
- * `""` is normalized to `undefined` here rather than let a coerced field
- * (`z.coerce.number()`, `z.iso.date()`) reject it as invalid input.
- */
-function flatten(raw: RawSearchParams): Record<string, string | undefined> {
-  const out: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(raw)) {
-    const value = Array.isArray(v) ? v[0] : v;
-    out[k] = value === "" ? undefined : value;
-  }
-  return out;
 }
 
 function resolveActiveCategoryName(
@@ -221,52 +175,174 @@ function resolveActiveAccountName(
   return accounts.find((a) => a.id === accountId)?.name ?? null;
 }
 
-function FilterSummary({
+/**
+ * D18 — the header block. Replaces a `parts.join(" · ")` `<p>` that could
+ * only ever state facts, with the one place this page answers three
+ * questions at once: what am I looking at, how do I stop looking at part of
+ * it, and how do I finish what I came here to do.
+ *
+ * The merchant drilldown is the reason it exists. You arrive from
+ * `/categorize` in the middle of a task, so the header carries the return
+ * link back (mirroring `categorize/page.tsx`'s own `← Budget`), the filing
+ * history that made D3 show ALL of a merchant's rows rather than just its
+ * uncategorized ones, and the finishing action.
+ */
+function FilterHeader({
+  values,
   categoryName,
-  categoryId,
   accountName,
-  accountId,
-  dateFrom,
-  dateTo,
-  amountMinCents,
-  amountMaxCents,
-  pending,
-  search,
   totalCount,
+  categoryBreakdown,
 }: {
+  values: TransactionsFilterValues;
   categoryName: string | null;
-  categoryId: number | "none" | undefined;
   accountName: string | null;
-  accountId: number | undefined;
-  dateFrom: string | undefined;
-  dateTo: string | undefined;
-  amountMinCents: number | undefined;
-  amountMaxCents: number | undefined;
-  pending: TransactionsFilterValues["pending"];
-  search: string | undefined;
   totalCount: number;
+  categoryBreakdown: CategoryBreakdownRow[] | null;
 }) {
-  const parts: string[] = [];
-  if (search !== undefined) parts.push(`"${search}"`);
-  if (categoryName !== null) parts.push(categoryName);
-  else if (categoryId !== undefined) parts.push(`Category ${categoryId}`);
-  if (accountName !== null) parts.push(accountName);
-  else if (accountId !== undefined) parts.push(`Account ${accountId}`);
-  if (dateFrom !== undefined || dateTo !== undefined) {
-    parts.push(`${dateFrom ?? "…"} – ${dateTo ?? "…"}`);
-  }
-  if (amountMinCents !== undefined || amountMaxCents !== undefined) {
-    const min = amountMinCents !== undefined ? `$${centsToDollarString(amountMinCents)}` : "$0";
-    const max = amountMaxCents !== undefined ? `$${centsToDollarString(amountMaxCents)}` : "…";
-    parts.push(`${min} – ${max}`);
-  }
-  if (pending === "posted") parts.push("Posted only");
-  else if (pending === "pending") parts.push("Pending only");
-  const label = parts.length > 0 ? parts.join(" · ") : "All transactions";
+  const { merchant } = values;
   return (
-    <p className="text-sm text-muted-foreground">
-      {label} — <strong className="text-foreground">{totalCount}</strong> row
-      {totalCount === 1 ? "" : "s"}
-    </p>
+    <header className="space-y-3">
+      {merchant !== undefined ? (
+        <Link
+          href="/categorize"
+          className={`inline-flex min-h-11 items-center font-mono text-xs uppercase tracking-wide text-ink-3 underline-offset-4 hover:text-terracotta hover:underline ${FOCUS_RING}`}
+        >
+          ← Categorize
+        </Link>
+      ) : null}
+      <h1 className="font-display text-[var(--text-3xl)] leading-none tracking-[-0.015em]">
+        Transactions
+      </h1>
+      <FilterChips values={values} categoryName={categoryName} accountName={accountName} />
+      {merchant !== undefined ? (
+        <MerchantSummary totalCount={totalCount} breakdown={categoryBreakdown ?? []} />
+      ) : (
+        <p className="text-sm text-ink-2">
+          <strong className="text-foreground">{totalCount}</strong> row
+          {totalCount === 1 ? "" : "s"}
+        </p>
+      )}
+    </header>
+  );
+}
+
+/**
+ * The active filters as a chip row (D18), replacing the joined sentence.
+ *
+ * Only the merchant chip is removable. That is a real consistency wrinkle —
+ * eight other filters can still only be cleared by wiping all of them — and
+ * it is deliberate rather than an oversight: the merchant filter is the only
+ * one with no visible control anywhere on the page, so it is the only one you
+ * could otherwise get stuck inside. The rest are tracked in TODOS.md.
+ */
+function FilterChips({
+  values,
+  categoryName,
+  accountName,
+}: {
+  values: TransactionsFilterValues;
+  categoryName: string | null;
+  accountName: string | null;
+}) {
+  const facts: string[] = [];
+  if (values.search !== undefined) facts.push(`"${values.search}"`);
+  if (categoryName !== null) facts.push(categoryName);
+  else if (values.categoryId !== undefined) facts.push(`Category ${values.categoryId}`);
+  if (accountName !== null) facts.push(accountName);
+  else if (values.accountId !== undefined) facts.push(`Account ${values.accountId}`);
+  if (values.dateFrom !== undefined || values.dateTo !== undefined) {
+    facts.push(`${values.dateFrom ?? "…"} – ${values.dateTo ?? "…"}`);
+  }
+  if (values.amountMin !== undefined || values.amountMax !== undefined) {
+    const min = values.amountMin !== undefined ? `$${centsToDollarString(values.amountMin)}` : "$0";
+    const max = values.amountMax !== undefined ? `$${centsToDollarString(values.amountMax)}` : "…";
+    facts.push(`${min} – ${max}`);
+  }
+  if (values.pending === "posted") facts.push("Posted only");
+  else if (values.pending === "pending") facts.push("Pending only");
+
+  if (values.merchant === undefined && facts.length === 0) {
+    return <p className="text-sm text-ink-3">All transactions</p>;
+  }
+
+  return (
+    <ul aria-label="Active filters" className="flex flex-wrap items-center gap-2">
+      {values.merchant !== undefined ? (
+        <li className="flex min-h-11 items-center gap-1 rounded-[999px] bg-terracotta pl-3 pr-1 text-sm text-paper-0">
+          <span className="max-w-[28ch] truncate font-mono" title={values.merchant}>
+            {values.merchant}
+          </span>
+          <Link
+            /* The glyph is silent to a screen reader (the DS66 parens rule),
+               so the label carries the meaning. No `page` in the rebuilt
+               href: removing a filter widens the result set, which has to
+               reset to page 1 or you land past the end of the new one.
+
+               Deliberately NOT `FOCUS_RING`: this is the one control sitting
+               ON the terracotta fill, where a terracotta ring is invisible.
+               Same 2px/2px geometry, paper ink. */
+            href={buildHref({ ...values, merchant: undefined })}
+            aria-label="Remove merchant filter"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-[999px] text-base leading-none hover:bg-[color-mix(in_oklch,var(--paper-0)_25%,transparent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--paper-0)]"
+          >
+            <span aria-hidden>×</span>
+          </Link>
+        </li>
+      ) : null}
+      {facts.map((fact, i) => (
+        <li
+          /* Index-keyed: two different filters can render the same label —
+             an account and a category both named "Checking", say — and this
+             list is rebuilt from scratch on every render anyway. */
+          key={`${i}-${fact}`}
+          className="rounded-[999px] border border-border px-3 py-1 text-sm text-ink-2"
+        >
+          {fact}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * `AMAZON — 59 rows, 53 uncategorized · 49 filed as Gas`.
+ *
+ * The filed counts are the whole point of D3=A: `COSTCO GAS` shows 1
+ * uncategorized row on `/categorize` but 50 in total, 49 of them already
+ * filed as Gas — which answers the question you clicked to ask before you
+ * read a single row.
+ */
+function MerchantSummary({
+  totalCount,
+  breakdown,
+}: {
+  totalCount: number;
+  breakdown: CategoryBreakdownRow[];
+}) {
+  const uncategorized = breakdown.find((r) => r.categoryId === null)?.count ?? 0;
+  const filed = breakdown.filter((r) => r.categoryId !== null).slice(0, 2);
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm text-ink-2">
+      <p>
+        <strong className="text-foreground">{totalCount}</strong> row
+        {totalCount === 1 ? "" : "s"}
+        {uncategorized > 0 ? `, ${uncategorized} uncategorized` : null}
+        {filed.map((row) => (
+          <span key={row.categoryId}>
+            {" · "}
+            {row.count} filed as {row.categoryName}
+          </span>
+        ))}
+      </p>
+      {uncategorized > 0 ? (
+        <Link
+          href="/categorize"
+          className={`inline-flex min-h-11 items-center font-medium text-terracotta underline-offset-4 hover:underline ${FOCUS_RING}`}
+        >
+          Categorize all {uncategorized} →
+        </Link>
+      ) : null}
+    </div>
   );
 }

@@ -8,8 +8,14 @@ import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import type { UncategorizedBacklog } from "@/lib/budget/loadMonthView";
 import { formatCents } from "@/lib/money";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
+import { StateCard } from "@/components/ledger/state-card";
+import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { buildHref, filterValuesToSearchParams, type TransactionsFilterValues } from "./_filter-bar";
-import { TransactionRowForm, TransferRowItem } from "./_transaction-row";
+import {
+  TransactionColumnHeaders,
+  TransactionRowForm,
+  TransferRowItem,
+} from "./_transaction-row";
 
 type Props = {
   rows: TransactionRow[];
@@ -56,38 +62,47 @@ export function TransactionsUi({
         searchParams={searchParams}
       />
       {rows.length === 0 ? (
-        <EmptyState totalCount={totalCount} includeTransfers={searchParams.includeTransfers} />
+        <EmptyState
+          totalCount={totalCount}
+          searchParams={searchParams}
+        />
       ) : (
-      <ul className="space-y-2">
-        {rows.map((row) => (
-          <li key={row.id}>
-            {row.transferPairId !== null ? (
-              <TransferRowItem
-                row={row}
-                cardAccounts={cardAccounts}
-                onPairingChanged={onPairingChanged}
-              />
-            ) : (
-              <TransactionRowForm
-                row={row}
-                leafCategories={leafCategories}
-                cardAccounts={cardAccounts}
-                onPairingChanged={onPairingChanged}
-                onCategorized={(priorCategoryId, updatedCount) => {
-                  if (priorCategoryId === null) {
-                    setBacklogCount((c) => Math.max(0, c - updatedCount));
-                  }
-                }}
-                onUndone={(priorCategoryId, revertedCount) => {
-                  if (priorCategoryId === null) {
-                    setBacklogCount((c) => c + revertedCount);
-                  }
-                }}
-              />
-            )}
-          </li>
-        ))}
-      </ul>
+        /* D17 [HARD REJECTION] — one ruled list, not N stacked card shells. */
+        <div className="overflow-hidden rounded-lg border border-border bg-card shadow-soft">
+          <TransactionColumnHeaders merchantFiltered={searchParams.merchant !== undefined} />
+          <ul className="divide-y divide-[var(--rule-faint)]">
+            {rows.map((row) => (
+              <li key={row.id}>
+                {row.transferPairId !== null ? (
+                  <TransferRowItem
+                    row={row}
+                    cardAccounts={cardAccounts}
+                    onPairingChanged={onPairingChanged}
+                    filterValues={searchParams}
+                  />
+                ) : (
+                  <TransactionRowForm
+                    row={row}
+                    leafCategories={leafCategories}
+                    cardAccounts={cardAccounts}
+                    onPairingChanged={onPairingChanged}
+                    filterValues={searchParams}
+                    onCategorized={(priorCategoryId, updatedCount) => {
+                      if (priorCategoryId === null) {
+                        setBacklogCount((c) => Math.max(0, c - updatedCount));
+                      }
+                    }}
+                    onUndone={(priorCategoryId, revertedCount) => {
+                      if (priorCategoryId === null) {
+                        setBacklogCount((c) => c + revertedCount);
+                      }
+                    }}
+                  />
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       <Pagination
         page={page}
@@ -100,6 +115,15 @@ export function TransactionsUi({
   );
 }
 
+/**
+ * T14/D21 — the shared `color-mix(… var(--accent-amber) …)` formula, the same
+ * one `BacklogBanner`, the dashboard tile and the Spine chip use, rather than
+ * Tailwind's raw `amber-*` palette. DESIGN.md's audit table named this strip
+ * specifically.
+ *
+ * `-mx-5` must stay equal to the page's `p-5` gutter or the bleed stops
+ * reaching the viewport edges.
+ */
 function BacklogStrip({
   count,
   totalCents,
@@ -111,17 +135,22 @@ function BacklogStrip({
   return (
     <div
       aria-live="polite"
-      className="sticky top-0 z-10 -mx-5 flex items-center justify-between gap-3 border-b border-amber-400/50 bg-amber-100/90 px-5 py-2 text-sm text-amber-900 backdrop-blur dark:bg-amber-950/80 dark:text-amber-100"
+      className="sticky top-0 z-10 -mx-5 flex items-center justify-between gap-3 border-b px-5 py-2 text-sm backdrop-blur"
+      style={{
+        background: "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
+        borderBottomColor: "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
+        color: "color-mix(in oklch, var(--accent-amber) 50%, var(--foreground))",
+      }}
     >
       <span>
-        Backlog: <strong>{count}</strong> uncategorized —{" "}
+        Backlog: <strong className="text-foreground">{count}</strong> uncategorized —{" "}
         <span className="[font-variant-numeric:tabular-nums]">
           {formatCents(totalCents)}
         </span>
       </span>
       <Link
         href="/categorize"
-        className="font-medium underline-offset-4 hover:underline"
+        className={`font-medium underline-offset-4 hover:underline ${FOCUS_RING}`}
       >
         Bulk →
       </Link>
@@ -149,7 +178,7 @@ function ResultSummary({
 }) {
   const on = searchParams.includeTransfers === true;
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-ink-2">
       <span>
         {totalCount} transaction{totalCount === 1 ? "" : "s"}
       </span>
@@ -163,7 +192,7 @@ function ResultSummary({
            flipping between "Show transfers" and "Hide transfers".
            `min-h-11` brings the target to the 44px floor the rest of this
            branch's controls use; a bare text-xs link was ~16px tall. */
-        className="inline-flex min-h-11 items-center px-1 font-medium underline-offset-4 hover:underline"
+        className={`inline-flex min-h-11 items-center px-1 font-medium underline-offset-4 hover:underline ${FOCUS_RING}`}
       >
         {on ? "Hide transfers" : "Show transfers"}
       </Link>
@@ -171,21 +200,91 @@ function ResultSummary({
   );
 }
 
+/**
+ * T10/D18 — the zero-result state, on the shared `StateCard` shell rather
+ * than the flat bordered sentence that predated it.
+ *
+ * The merchant case is why this needed designing rather than inheriting. It
+ * is reachable and it is not the user's fault: `db:backfill-merchants`
+ * rewrites `normalized_merchant` when the normalizer changes (rule 10), so a
+ * bookmarked drilldown can stop matching anything at all — and a hand-typed
+ * `?merchant=amazon` never matches, because the filter is exact against an
+ * upper-cased key. Both land here. Naming the key verbatim and offering the
+ * `?search=` fallback turns rule 10's unfixable coupling into one click:
+ * `search` is `LIKE %x%` and case-insensitive, so it finds the rows the exact
+ * key no longer does.
+ */
 function EmptyState({
   totalCount,
-  includeTransfers,
+  searchParams,
 }: {
   totalCount: number;
-  includeTransfers?: boolean;
+  searchParams: TransactionsFilterValues;
 }) {
+  const actionClass = `inline-flex min-h-11 items-center rounded-md border border-border px-3 text-sm font-medium hover:bg-muted ${FOCUS_RING}`;
+
+  if (totalCount !== 0) {
+    return (
+      <StateCard
+        variant="empty"
+        title="This page is empty."
+        description="There are rows in this filter, just not this far in."
+        primaryAction={
+          <Link href={buildHref(searchParams)} className={actionClass}>
+            Back to page 1
+          </Link>
+        }
+      />
+    );
+  }
+
+  const { merchant } = searchParams;
+  if (merchant !== undefined) {
+    return (
+      <StateCard
+        variant="empty"
+        title={`No transactions for “${merchant}”.`}
+        description="That exact merchant key matches nothing. A merchant backfill can rewrite these keys, so a saved link can go stale."
+        primaryAction={
+          <Link
+            href={buildHref({ ...searchParams, merchant: undefined })}
+            className={actionClass}
+          >
+            Remove the merchant filter
+          </Link>
+        }
+        secondaryAction={
+          <Link
+            href={buildHref({ ...searchParams, merchant: undefined, search: merchant })}
+            className={`inline-flex min-h-11 items-center text-sm font-medium text-terracotta underline underline-offset-4 hover:no-underline ${FOCUS_RING}`}
+          >
+            Search for “{merchant}” instead →
+          </Link>
+        }
+      />
+    );
+  }
+
+  if (searchParams.includeTransfers) {
+    return (
+      <StateCard
+        variant="empty"
+        title="No transfers in this range."
+        description="Transfer-paired rows only appear where both legs fall inside the filter."
+      />
+    );
+  }
+
   return (
-    <div className="rounded-md border border-border bg-card px-5 py-10 text-center text-sm text-muted-foreground">
-      {totalCount !== 0
-        ? "This page is empty — try a lower page number."
-        : includeTransfers
-          ? "No transfers in this range."
-          : "No transactions match this filter."}
-    </div>
+    <StateCard
+      variant="empty"
+      title="No transactions match this filter."
+      primaryAction={
+        <Link href="/transactions" className={actionClass}>
+          Clear filters
+        </Link>
+      }
+    />
   );
 }
 
@@ -217,7 +316,7 @@ function Pagination({
   const lastRow = Math.min(totalCount, page * pageSize);
 
   return (
-    <nav className="flex items-center justify-between text-sm text-muted-foreground">
+    <nav className="flex items-center justify-between text-sm text-ink-2">
       <span>
         {firstRow}–{lastRow} of {totalCount}
       </span>
@@ -225,12 +324,12 @@ function Pagination({
         {page > 1 ? (
           <Link
             href={hrefFor(page - 1)}
-            className="rounded-md border border-border px-3 py-1 hover:bg-muted"
+            className={`inline-flex min-h-11 items-center rounded-md border border-border px-3 hover:bg-muted ${FOCUS_RING}`}
           >
             ← Prev
           </Link>
         ) : (
-          <span className="rounded-md border border-border px-3 py-1 opacity-50">
+          <span className="inline-flex min-h-11 items-center rounded-md border border-border px-3 opacity-50">
             ← Prev
           </span>
         )}
@@ -240,12 +339,12 @@ function Pagination({
         {page < totalPages ? (
           <Link
             href={hrefFor(page + 1)}
-            className="rounded-md border border-border px-3 py-1 hover:bg-muted"
+            className={`inline-flex min-h-11 items-center rounded-md border border-border px-3 hover:bg-muted ${FOCUS_RING}`}
           >
             Next →
           </Link>
         ) : (
-          <span className="rounded-md border border-border px-3 py-1 opacity-50">
+          <span className="inline-flex min-h-11 items-center rounded-md border border-border px-3 opacity-50">
             Next →
           </span>
         )}

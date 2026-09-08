@@ -4,9 +4,7 @@ import type { LeafCategory } from "@/lib/categories";
 import { currentMonth } from "@/lib/now";
 import { lastDayOfMonth, monthBoundary } from "@/lib/budget/monthOfIso";
 import { centsToDollarString } from "@/lib/money";
-
-/** Mirrors page.tsx's Zod `.max()` — imported there so the client-side limit and validation can't drift. */
-export const MAX_SEARCH_LENGTH = 200;
+import { MAX_SEARCH_LENGTH } from "@/lib/transactions/searchParams";
 
 export type TransactionsFilterValues = {
   search: string | undefined;
@@ -23,6 +21,15 @@ export type TransactionsFilterValues = {
    * place the URL is built; without that, page 2 silently drops the toggle.
    */
   includeTransfers: boolean | undefined;
+  /**
+   * D2 — exact `normalized_merchant`, set only by the `/categorize` drilldown
+   * and by a row's own merchant link. It has no visible input in the form
+   * below (D10: a text field would silently zero-row anyone who typed
+   * `amazon` at a key stored as `AMAZON`), so like `pageSize` and
+   * `includeTransfers` before it, it survives an "Apply filters" submit ONLY
+   * via the hidden field, and page 2 ONLY via the serializer.
+   */
+  merchant: string | undefined;
 };
 
 /**
@@ -87,6 +94,13 @@ export function FilterBar({
           silently turn transfers back off. */}
       {values.includeTransfers ? (
         <input type="hidden" name="includeTransfers" value="true" />
+      ) : null}
+      {/* D10/D18 — same reason as the two above. The merchant filter's only
+          visible control is the removable chip in the page header; without
+          this field, submitting any filter change would silently widen the
+          list from one merchant back to all 1,540 rows. */}
+      {values.merchant !== undefined ? (
+        <input type="hidden" name="merchant" value={values.merchant} />
       ) : null}
       <label className="col-span-2 flex flex-col gap-1 sm:col-span-4">
         <span className="text-xs text-muted-foreground">Search</span>
@@ -225,6 +239,7 @@ export function filterValuesToSearchParams(values: TransactionsFilterValues): UR
   if (values.amountMax !== undefined) params.set("amountMax", centsToDollarString(values.amountMax));
   if (values.pending !== undefined && values.pending !== "all") params.set("pending", values.pending);
   if (values.includeTransfers) params.set("includeTransfers", "true");
+  if (values.merchant !== undefined) params.set("merchant", values.merchant);
   return params;
 }
 
