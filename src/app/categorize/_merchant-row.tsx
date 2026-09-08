@@ -11,6 +11,7 @@ import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
 import { classifyKeyTrainability } from "@/lib/categorize/keyTrainability";
+import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
   clearPendingPick,
@@ -97,32 +98,56 @@ export function MerchantRow({
   const categoryId =
     storedPick ?? (group.existingRule ? String(group.existingRule.categoryId) : "");
 
-  const handlePick = (next: string) => writePendingPick(merchant, next);
+  const handlePick = (next: string) => {
+    writePendingPick(merchant, next);
+    /* CLEAR the tick rather than only masking it. `checked={remember &&
+       trainable}` un-ticks the box on screen, but `remember` stays true, so
+       picking a trainable category again resurrected a tick the user had not
+       re-made — and on that submit a rule really would be written. The mask
+       stays as well, because the verdict can also change from underneath a
+       stale page. */
+    if (
+      !classifyKeyTrainability(
+        merchant,
+        group.filedCategoryIds,
+        next === "" ? null : Number(next),
+      ).trainable
+    ) {
+      setRemember(false);
+    }
+  };
 
   /**
    * Whether "Remember" may write a rule for this key, evaluated against the
    * category currently picked — not against the key alone.
    *
-   * The union is what makes this agree with the server: `bulkCategorize` runs
-   * the same pure predicate over the same filed ids plus the same pending
-   * category, so the checkbox is disabled exactly when the write would be
-   * refused. Computing it from `group.filedCategoryIds` alone would leave the
-   * box enabled for a merchant filed to one category until the user picks a
-   * second one — which is the case that most needs the warning.
-   *
-   * A blank pick contributes nothing: `Number("")` is 0, which is not a real
-   * category id and would read as a second category on every unfiled row.
+   * Passing the pick SEPARATELY from the filed ids is what makes this agree
+   * with the server: `bulkCategorize` calls the same pure predicate with the
+   * same two arguments, so the checkbox is disabled exactly when the write
+   * would be refused, and the sentence shown here is the sentence the server
+   * would have returned. Folding them into one array at each call site — which
+   * this used to do — is what let the client hand over `Number("")` as a
+   * phantom second category; `classifyKeyTrainability` now decides what counts
+   * as a real id, once, for both sides.
    */
   const trainability = classifyKeyTrainability(
     merchant,
-    categoryId === ""
-      ? group.filedCategoryIds
-      : [...group.filedCategoryIds, Number(categoryId)],
+    group.filedCategoryIds,
+    categoryId === "" ? null : Number(categoryId),
   );
 
-  /* `useId`, not `` `reason-${merchant}` ``: 17 of the 363 real keys carry
-     `# * ? /` (see `merchantDrilldownHref`), and a raw key is not a safe id. */
-  const reasonId = useId();
+  /* ONE `useId` base, and both ids on this row derive from it.
+     `id={`cat-${merchant}`}` was the previous spelling for the combobox, and
+     while it works (`htmlFor` is a DOM association, not a CSS selector) it is
+     not something to reach for: 17 of the 363 real keys carry `# * ? /` (see
+     `merchantDrilldownHref`), so the resulting id needs `CSS.escape` before it
+     can appear in any selector, and two keys differing only in stripped
+     punctuation would collide outright. Deriving both from `useId` also stops
+     this file contradicting itself, which it did while the reason element used
+     `useId` and the control eight lines below used the raw key. */
+  const rowId = useId();
+  const categoryFieldId = `${rowId}-cat`;
+  const reasonId = `${rowId}-reason`;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -135,8 +160,22 @@ export function MerchantRow({
         const result = await bulkCategorizeMerchantAction(formData);
         clearPendingPick(merchant);
         onDismissedChange(merchant, true);
-        toast.success(
-          `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`,
+        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
+           default collapsed stack (`expand` unset — `layout.tsx`), where
+           `[data-front="false"] > *` is `opacity: 0`: whichever toast is not
+           newest has its contents, INCLUDING its action button, drawn
+           invisible until the stack is hovered. Two toasts therefore forced a
+           choice between the warning being readable and the Undo being
+           reachable, and the Undo is the only thing that puts a removed rule
+           back inside its 10s window. Merging them makes the notice and its
+           remedy the same front toast. */
+        const filed = `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
+        const notify =
+          result.ruleRefusal === null ? toast.success : toast.warning;
+        notify(
+          result.ruleRefusal === null
+            ? filed
+            : `${filed} ${result.ruleRefusal.message}`,
           {
             duration: 10_000,
             action: {
@@ -146,7 +185,9 @@ export function MerchantRow({
                   const undo = await undoBulkCategorizeAction(result.snapshot);
                   onUndo(undo.revertedCount);
                   onDismissedChange(merchant, false);
-                  toast(`Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.`);
+                  toast(
+                    `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
+                  );
                 } catch (err) {
                   toast.error(
                     err instanceof Error ? err.message : "Undo failed.",
@@ -156,23 +197,6 @@ export function MerchantRow({
             },
           },
         );
-        /* Fired AFTER the success toast, not before. `<Toaster>` runs
-           Sonner's default collapsed stack, which renders only the newest
-           toast in full and tucks the rest behind it — so the warning has to
-           be the newest or it is the one notice the user cannot read. Only
-           reachable from a stale form (the checkbox above is disabled
-           whenever this would fire), but a silent no-op on a box the user
-           ticked is exactly the failure this whole guard exists to stop. */
-        if (result.ruleRefusal !== null) {
-          toast.warning(
-            `${
-              result.refusalDeletedRule
-                ? "Existing rule removed."
-                : "Rule not saved."
-            } ${result.ruleRefusal.message}`,
-            { duration: 10_000 },
-          );
-        }
       } catch (err) {
         // Revert optimistic counter on error.
         onUndo(group.count);
@@ -203,11 +227,11 @@ export function MerchantRow({
         {formatCents(group.totalCents)}
       </span>
       <div className="flex flex-wrap items-center gap-3 sm:col-span-3 sm:col-start-1 sm:row-start-2 sm:justify-end">
-        <label className="sr-only" htmlFor={`cat-${merchant}`}>
+        <label className="sr-only" htmlFor={categoryFieldId}>
           Category for {merchantLabel(merchant)}
         </label>
         <CategoryCombobox
-          id={`cat-${merchant}`}
+          id={categoryFieldId}
           name="categoryId"
           value={categoryId}
           onValueChange={handlePick}

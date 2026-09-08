@@ -1,5 +1,6 @@
-import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { filedCategoryEvidenceWhere } from "./resolveKeyTrainability";
 
 type Db = typeof defaultDb;
 
@@ -156,10 +157,16 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
 /**
  * Distinct categories each merchant's ALREADY-FILED rows carry.
  *
- * Note the inverted category predicate: every other follow-up query here reads
- * the uncategorized backlog, and this one deliberately reads its complement —
- * the decisions already made are what say whether one rule can cover the key.
- * Transfer-paired rows stay excluded, matching `loadFiledCategoryIds`.
+ * The WHERE comes from `filedCategoryEvidenceWhere`, shared with
+ * `loadFiledCategoryIds` — the two used to be independent spellings of the same
+ * predicate, and a divergence lets the checkbox render enabled and then be
+ * refused on submit. Only the merchant condition differs (`inArray` for a page
+ * of groups here, `eq` for one key there), which is exactly why that is the
+ * parameter. `resolveKeyTrainability.test.ts` still pins them against each other.
+ *
+ * Note it is the only query in this file that requires `category_id IS NOT NULL`:
+ * the main group query and `loadSampleMemos` read the uncategorized backlog, and
+ * `loadTotalRowCounts` drops the category predicate entirely.
  */
 function loadFiledCategories(db: Db, merchants: string[]): Map<string, number[]> {
   const rows = db
@@ -168,10 +175,12 @@ function loadFiledCategories(db: Db, merchants: string[]): Map<string, number[]>
       categoryId: schema.transactions.categoryId,
     })
     .from(schema.transactions)
+    .innerJoin(
+      schema.categories,
+      eq(schema.transactions.categoryId, schema.categories.id),
+    )
     .where(
-      and(
-        isNotNull(schema.transactions.categoryId),
-        isNull(schema.transactions.transferPairId),
+      filedCategoryEvidenceWhere(
         inArray(schema.transactions.normalizedMerchant, merchants),
       ),
     )

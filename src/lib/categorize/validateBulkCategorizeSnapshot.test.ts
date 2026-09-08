@@ -94,12 +94,16 @@ describe("validateBulkCategorizeSnapshot — rejections", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects empty normalizedMerchant", () => {
+  it("ACCEPTS the empty normalizedMerchant so its undo is reachable", () => {
+    /* Reversed deliberately, and it is the undo half that matters: a refusal on
+       the `""` key can REMOVE that key's rule, and rejecting the snapshot here
+       made the one action with no other repair path un-undoable. See the note on
+       `priorRuleSchema.matchValue`. */
     const result = validateBulkCategorizeSnapshot({
       ...validWithoutPrior,
       normalizedMerchant: "",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("rejects categoryId = 0", () => {

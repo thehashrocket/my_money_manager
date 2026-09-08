@@ -2,12 +2,11 @@ import { connection } from "next/server";
 import { loadSubscriptions } from "@/lib/subscriptions/loadSubscriptions";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
+import { dismissSubscriptionAction, restoreSubscriptionAction } from "./actions";
 import {
-  dismissSubscriptionAction,
-  restoreSubscriptionAction,
-  categorizeSubscriptionAction,
-  categorizeAllSubscriptionsAction,
-} from "./actions";
+  CategorizeAllSubscriptionsButton,
+  CategorizeSubscriptionButton,
+} from "./_categorize-buttons";
 import type { DetectedSubscription } from "@/lib/subscriptions/detectSubscriptions";
 
 export default async function SubscriptionsPage() {
@@ -33,21 +32,14 @@ export default async function SubscriptionsPage() {
                 <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
                   Detected · {active.length}
                 </h2>
-                <form action={categorizeAllSubscriptionsAction}>
-                  <button
-                    type="submit"
-                    className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-                  >
-                    Categorize all
-                  </button>
-                </form>
+                <CategorizeAllSubscriptionsButton />
               </div>
               <div className="divide-y divide-border rounded-lg border border-border bg-card">
                 {active.map((sub) => (
                   <SubscriptionRow
                     key={sub.normalizedMerchant}
                     sub={sub}
-                    categorizeAction={categorizeSubscriptionAction}
+                    showCategorize
                     dismissAction={dismissSubscriptionAction}
                   />
                 ))}
@@ -80,12 +72,12 @@ export default async function SubscriptionsPage() {
 
 function SubscriptionRow({
   sub,
-  categorizeAction,
+  showCategorize = false,
   dismissAction,
   dismissLabel = "Not a subscription",
 }: {
   sub: DetectedSubscription;
-  categorizeAction?: (formData: FormData) => Promise<void>;
+  showCategorize?: boolean;
   dismissAction: (formData: FormData) => Promise<void>;
   dismissLabel?: string;
 }) {
@@ -126,16 +118,10 @@ function SubscriptionRow({
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
-        {categorizeAction && (
-          <form action={categorizeAction}>
-            <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />
-            <button
-              type="submit"
-              className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            >
-              Categorize
-            </button>
-          </form>
+        {showCategorize && (
+          <CategorizeSubscriptionButton
+            normalizedMerchant={sub.normalizedMerchant}
+          />
         )}
         <form action={dismissAction}>
           <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />

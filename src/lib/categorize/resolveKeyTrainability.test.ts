@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { classifyKeyTrainability } from "./keyTrainability";
@@ -91,6 +92,74 @@ function seedTxn(opts: {
     .all();
   return row;
 }
+
+describe("loadFiledCategoryIds — archived categories", () => {
+  it("does NOT count a filing under an archived category as evidence", () => {
+    /* An archived category's rules never fire — `buildRuleMatcher` skips them
+       (rule 8) — so a filing under one cannot contradict a live rule. Counting it
+       refused Remember on a key whose only category that still matters is
+       unanimous, with a message about two categories the user can no longer even
+       pick from. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const retired = seedCategory("Retired");
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: new Date("2026-06-01T00:00:00.000Z") })
+      .where(eq(schema.categories.id, retired.id))
+      .run();
+
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -1000,
+      categoryId: groceries.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -2000,
+      categoryId: retired.id,
+    });
+
+    expect(loadFiledCategoryIds(handle.db, "SAFEWAY")).toEqual([groceries.id]);
+    expect(
+      resolveKeyTrainability(handle.db, "SAFEWAY", groceries.id).trainable,
+    ).toBe(true);
+  });
+
+  it("still counts a filing under a LIVE category", () => {
+    // The control: same shape, nothing archived, so the refusal must stand.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -1000,
+      categoryId: groceries.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -2000,
+      categoryId: dining.id,
+    });
+
+    expect(loadFiledCategoryIds(handle.db, "SAFEWAY").sort()).toEqual(
+      [groceries.id, dining.id].sort(),
+    );
+    expect(
+      resolveKeyTrainability(handle.db, "SAFEWAY", groceries.id).trainable,
+    ).toBe(false);
+  });
+});
 
 describe("loadFiledCategoryIds", () => {
   it("returns nothing for a key the ledger has never seen", () => {
@@ -362,10 +431,11 @@ describe("resolveKeyTrainability — agrees with what /categorize renders", () =
 
     for (const group of groups) {
       for (const pick of [groceries.id, dining.id, other.id]) {
-        const client = classifyKeyTrainability(group.normalizedMerchant, [
-          ...group.filedCategoryIds,
+        const client = classifyKeyTrainability(
+          group.normalizedMerchant,
+          group.filedCategoryIds,
           pick,
-        ]);
+        );
         const server = resolveKeyTrainability(
           handle.db,
           group.normalizedMerchant,

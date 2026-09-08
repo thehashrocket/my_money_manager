@@ -680,15 +680,11 @@ describe("categorizeTransaction — Remember guard", () => {
     ).toHaveLength(0);
   });
 
-  it("judges the key BEFORE its own UPDATE lands", () => {
-    // This function files the target row first and reaches the rule block
-    // last. Read at the rule site, the target's brand-new category would count
-    // as prior evidence: a key with one prior filing under Amazon plus this
-    // row now under Amazon would look like one category (fine), but a FIRST
-    // ever row would look like one category too — hiding the real question.
-    // Here history says Amazon and the pick says HomeGoods, so the union is
-    // two and the rule must be refused. If the check ran after the UPDATE it
-    // would still see two, so the sharper assertion is the next test.
+  it("refuses when OTHER filed rows for the key disagree with the pick", () => {
+    // Not an ordering test, despite what this used to be called: a read after
+    // the UPDATE would refuse here too. What it pins is that rows the caller is
+    // NOT writing still count — the second AMAZON row is the evidence, and
+    // `excludeTxnIds` must not swallow it along with the target.
     const a = seedAccount();
     const b = seedBatch();
     const amazon = seedCategory("Amazon");
@@ -748,10 +744,15 @@ describe("categorizeTransaction — Remember guard", () => {
   it("MOVING a row off its only category does not refuse on the category it left", () => {
     // The target is the key's ONLY filed row, under Groceries, and the user
     // moves it to Dining with Remember ticked. After the move the key is
-    // unanimously Dining, so one rule IS right and the box must work. Reading
-    // filings before the UPDATE means Groceries is still in the set, which is
-    // the one case where the pre-check is more conservative than the truth —
-    // pinned here so a future change that "fixes" it is a deliberate choice.
+    // unanimously Dining, so one rule IS right and the box must work.
+    //
+    // This is what `excludeTxnIds` buys. The verdict used to be computed over
+    // every filed row including the one being moved, so it refused on the
+    // category the row was LEAVING — a category that no longer exists for this
+    // key once the action commits. The refusal then also deleted the rule, and
+    // with the key still looking split there was no second attempt that would
+    // have worked. The title said this behaviour; the assertions said the
+    // opposite, which is how it survived review.
     const a = seedAccount();
     const b = seedBatch();
     const groceries = seedCategory("Groceries");
@@ -771,8 +772,14 @@ describe("categorizeTransaction — Remember guard", () => {
       applyToPast: false,
     });
 
-    expect(result.ruleRefusal?.reason).toBe("multi-category");
-    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+    const rule = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "JACK IN THE BOX"))
+      .get();
+    expect(rule?.categoryId).toBe(dining.id);
   });
 
   it("still writes the rule for an ordinary key", () => {
@@ -911,15 +918,19 @@ describe("categorizeTransaction — Remember guard, boundary cases", () => {
       amountCents: -1500,
     });
 
-    const result = categorizeTransaction(handle.db, {
-      transactionId: t.id,
-      categoryId: homeGoods.id,
-      rememberMerchant: true,
-      applyToPast: false,
-    });
+    const result = categorizeTransaction(
+      handle.db,
+      {
+        transactionId: t.id,
+        categoryId: homeGoods.id,
+        rememberMerchant: true,
+        applyToPast: false,
+      },
+      { allowRuleRemoval: true },
+    );
 
     expect(result.ruleRefusal).not.toBeNull();
-    expect(result.refusalDeletedRule).toBe(true);
+    expect(result.ruleRefusal?.removedRule?.categoryId).toBe(amazon.id);
     expect(result.ruleTouched).toBe(true);
     expect(result.priorRule?.categoryId).toBe(amazon.id);
     expect(
@@ -942,6 +953,7 @@ describe("categorizeTransaction — Remember guard, boundary cases", () => {
       earliestApplyToPastDate: result.earliestApplyToPastDate,
       ruleTouched: result.ruleTouched,
       priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
     });
     expect(undone.ruleAction).toBe("restored");
     const restored = handle.db
@@ -993,7 +1005,7 @@ describe("categorizeTransaction — Remember guard, boundary cases", () => {
     });
 
     expect(result.ruleRefusal).toBeNull();
-    expect(result.refusalDeletedRule).toBe(false);
+
     const rule = handle.db
       .select()
       .from(schema.categoryRules)

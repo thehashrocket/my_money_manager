@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
+import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
@@ -100,8 +101,26 @@ export function TransactionRowForm({
         setApplyToPast(false);
         onCategorized(priorCategoryId, result.updatedCount);
 
-        toast.success(
-          `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`,
+        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
+           default collapsed stack (`expand` unset — `layout.tsx`), and
+           `[data-front="false"] > *` is `opacity: 0` there: whichever toast is
+           not the newest has its contents, INCLUDING its action button, drawn
+           invisible until the stack is hovered. So two toasts forced a choice
+           between the warning being readable and the Undo being reachable —
+           and on this surface that Undo is the only way back, both for the rows
+           and for a rule the refusal removed, inside 10 seconds. Merging them
+           puts the notice and its remedy on the same front toast.
+
+           This row cannot disable its checkbox up front the way `/categorize`
+           does, because the list carries no per-key filing history to check
+           against, so the toast is the only channel there is. */
+        const filed = `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
+        const notify =
+          result.ruleRefusal === null ? toast.success : toast.warning;
+        notify(
+          result.ruleRefusal === null
+            ? filed
+            : `${filed} ${result.ruleRefusal.message}`,
           {
             duration: 10_000,
             action: {
@@ -126,7 +145,7 @@ export function TransactionRowForm({
                   );
                   onUndone(priorCategoryId, reverted);
                   toast(
-                    `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.`,
+                    `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
                   );
                 } catch (err) {
                   toast.error(
@@ -137,31 +156,6 @@ export function TransactionRowForm({
             },
           },
         );
-
-        /* The rows were filed; only the rule was withheld. A second toast
-           rather than a suffix on the success one, because they are different
-           facts with different urgency — and `toast.warning` keeps the success
-           message from reading as if the whole action was downgraded.
-           `/categorize` disables its checkbox up front instead; this row
-           cannot, because the list has no per-key filing history to check
-           against (see the note on `ruleRefusal` in categorizeTransaction).
-
-           Fired AFTER the success toast, and that order is load-bearing:
-           `<Toaster>` runs Sonner's default collapsed stack, which renders
-           only the NEWEST toast in full and tucks the rest behind it. Warned
-           first, the one notice that the user's Remember did nothing is the
-           one they cannot read — and on this surface the toast is the only
-           channel for it, since the checkbox cannot be disabled up front. */
-        if (result.ruleRefusal !== null) {
-          toast.warning(
-            `${
-              result.refusalDeletedRule
-                ? "Existing rule removed."
-                : "Rule not saved."
-            } ${result.ruleRefusal.message}`,
-            { duration: 10_000 },
-          );
-        }
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Categorize failed.");
       }

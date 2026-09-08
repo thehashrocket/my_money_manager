@@ -6,12 +6,23 @@ import { restorePriorRule } from "./restorePriorRule";
 
 type Db = typeof defaultDb;
 
+/**
+ * What an undo did to `category_rules`.
+ *
+ * `"already-gone"` is the honest answer for "we went to delete the rule this
+ * call inserted and it was not there any more" — someone else removed or
+ * retargeted it inside the 10s window. It used to report `"deleted"`
+ * unconditionally, which made a no-op indistinguishable from a success at the
+ * one moment the user is checking whether their rule came back.
+ */
+export type RuleUndoAction = "none" | "deleted" | "already-gone" | "restored";
+
 export type UndoResult = {
   /** Rows actually reset to NULL (may be < snapshot.txnIds.length if the user
    *  re-categorized some rows in the meantime). */
   revertedCount: number;
-  /** What happened to the rule: inserted → deleted, updated → restored, none → nothing. */
-  ruleAction: "none" | "deleted" | "restored";
+  /** What happened to the rule: inserted → deleted, updated/removed → restored. */
+  ruleAction: RuleUndoAction;
 };
 
 /**
@@ -22,7 +33,8 @@ export type UndoResult = {
  * the fact are left alone — we don't overwrite work done post-snapshot.
  *
  * Rules (C3):
- * - `priorRule = null` + `ruleTouched = true` → the bulk inserted a rule; delete it.
+ * - `priorRule = null` + `ruleTouched = true` → the bulk inserted a rule; delete
+ *   it by primary key, and report `"already-gone"` if it was not there.
  * - `priorRule != null` + `ruleTouched = true` → restore the full prior row
  *   verbatim (see {@link restorePriorRule}). Covers BOTH ways a prior rule can
  *   be gone: overwritten by the upsert, or deleted by a trainability refusal.
@@ -55,15 +67,17 @@ export function undoBulkCategorize(
       revertedCount = result.length;
     }
 
-    let ruleAction: UndoResult["ruleAction"] = "none";
+    let ruleAction: RuleUndoAction = "none";
 
     if (snapshot.ruleTouched) {
       if (snapshot.priorRule === null) {
         if (snapshot.insertedRuleId !== null) {
-          tx.delete(schema.categoryRules)
+          const removed = tx
+            .delete(schema.categoryRules)
             .where(eq(schema.categoryRules.id, snapshot.insertedRuleId))
-            .run();
-          ruleAction = "deleted";
+            .returning({ id: schema.categoryRules.id })
+            .all();
+          ruleAction = removed.length > 0 ? "deleted" : "already-gone";
         }
       } else {
         restorePriorRule(tx, snapshot.priorRule);

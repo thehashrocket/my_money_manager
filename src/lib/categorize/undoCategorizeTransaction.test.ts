@@ -264,6 +264,75 @@ describe("undoCategorizeTransaction — rule", () => {
     expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
   });
 
+  it("deletes by PRIMARY KEY, so a retargeted row is not silently missed", () => {
+    /* This used to delete by (match_type, match_value, category_id) and assert
+       `"deleted"` without checking — a lookup whose own sibling's doc comment
+       calls it unsafe once a second writer can retarget the row inside the 10s
+       window, which `/subscriptions` can. Retargeting the rule between the
+       action and the undo made the WHERE match nothing, so the rule survived and
+       the undo still claimed it had gone.
+
+       Now the undo owns `insertedRuleId`, and the honest answer when the row is
+       no longer where the snapshot says is `"already-gone"`. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    const target = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY" });
+
+    const snapshot = categorizeTransaction(handle.db, {
+      transactionId: target.id,
+      categoryId: groceries.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+    expect(snapshot.insertedRuleId).not.toBeNull();
+
+    // Someone else retargets the very row this undo is about to remove.
+    handle.db
+      .update(schema.categoryRules)
+      .set({ categoryId: dining.id })
+      .where(eq(schema.categoryRules.id, snapshot.insertedRuleId ?? 0))
+      .run();
+
+    const undo = undoCategorizeTransaction(handle.db, snapshot);
+    // Deleted by id, so the retarget does not hide it.
+    expect(undo.ruleAction).toBe("deleted");
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchType, "exact"))
+        .all(),
+    ).toHaveLength(0);
+  });
+
+  it("reports `already-gone` rather than a false `deleted`", () => {
+    // A no-op undo and a successful one used to be byte-identical, at the one
+    // moment the user is checking whether their rule came back.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const target = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY" });
+
+    const snapshot = categorizeTransaction(handle.db, {
+      transactionId: target.id,
+      categoryId: groceries.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    // Another tab removes it first.
+    handle.db
+      .delete(schema.categoryRules)
+      .where(eq(schema.categoryRules.id, snapshot.insertedRuleId ?? 0))
+      .run();
+
+    expect(undoCategorizeTransaction(handle.db, snapshot).ruleAction).toBe(
+      "already-gone",
+    );
+  });
+
   it("restores the full prior rule verbatim when replace was undone", () => {
     const a = seedAccount();
     const b = seedBatch();

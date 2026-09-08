@@ -36,20 +36,33 @@ describe("validateBulkCategorizeInput", () => {
     expect(result.data.rememberMerchant).toBe(false);
   });
 
-  it("rejects empty normalizedMerchant", () => {
+  it("ACCEPTS the empty normalizedMerchant, which is a real stored key", () => {
+    /* Reversed deliberately. `""` is what a blank bank memo normalizes to —
+       `merchantLabel` exists to render it, and `loadMerchantGroups` groups it
+       like any other key, so `/categorize` lists that group with a working
+       Submit button. `.min(1)` here made that button throw "Invalid bulk
+       categorize input" on the one group with no other way to file it. The
+       Remember checkbox is still refused for the key (`keyTrainability`); the
+       ROWS are not. */
     const result = validateBulkCategorizeInput({
       normalizedMerchant: "",
       categoryId: "1",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.normalizedMerchant).toBe("");
   });
 
-  it("rejects whitespace-only normalizedMerchant", () => {
+  it("normalizes whitespace-only to the empty key rather than rejecting it", () => {
+    // Trimming still happens; it just no longer gates. A padded blank memo and
+    // a truly blank one are the same key, which is what the normalizer says too.
     const result = validateBulkCategorizeInput({
       normalizedMerchant: "   ",
       categoryId: "1",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.normalizedMerchant).toBe("");
   });
 
   it("trims leading/trailing whitespace", () => {

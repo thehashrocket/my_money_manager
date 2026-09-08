@@ -602,14 +602,18 @@ describe("bulkCategorize — Remember guard", () => {
     });
     seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500 });
 
-    const result = bulkCategorize(handle.db, {
-      normalizedMerchant: "AMAZON",
-      categoryId: homeGoods.id,
-      rememberMerchant: true,
-    });
+    const result = bulkCategorize(
+      handle.db,
+      {
+        normalizedMerchant: "AMAZON",
+        categoryId: homeGoods.id,
+        rememberMerchant: true,
+      },
+      { allowRuleRemoval: true },
+    );
 
     expect(result.ruleRefusal).not.toBeNull();
-    expect(result.refusalDeletedRule).toBe(true);
+    expect(result.ruleRefusal?.removedRule?.categoryId).toBe(amazon.id);
     // Snapshotted verbatim, so the undo can put the exact row back.
     expect(result.priorRule?.categoryId).toBe(amazon.id);
     expect(result.priorRule?.matchValue).toBe("AMAZON");
@@ -663,12 +667,16 @@ describe("bulkCategorize — Remember guard", () => {
       amountCents: -1500,
     });
 
-    const result = bulkCategorize(handle.db, {
-      normalizedMerchant: "AMAZON",
-      categoryId: homeGoods.id,
-      rememberMerchant: true,
-    });
-    expect(result.refusalDeletedRule).toBe(true);
+    const result = bulkCategorize(
+      handle.db,
+      {
+        normalizedMerchant: "AMAZON",
+        categoryId: homeGoods.id,
+        rememberMerchant: true,
+      },
+      { allowRuleRemoval: true },
+    );
+    expect(result.ruleRefusal?.removedRule).not.toBeNull();
 
     const undone = undoBulkCategorize(handle.db, {
       normalizedMerchant: result.normalizedMerchant,
@@ -705,7 +713,7 @@ describe("bulkCategorize — Remember guard", () => {
   });
 
   it("reports no deletion when the refused key had no rule to begin with", () => {
-    // `refusalDeletedRule` drives user-facing copy ("Existing rule removed."
+    // `ruleRefusal.removedRule` drives user-facing copy ("Removed the rule…"
     // vs "Rule not saved."), so it must not fire on the ordinary case where
     // there was never a rule — which is most refusals.
     const a = seedAccount();
@@ -713,14 +721,18 @@ describe("bulkCategorize — Remember guard", () => {
     const misc = seedCategory("Misc");
     seedTxn({ accountId: a.id, batchId: b.id, merchant: "ONLINE", amountCents: -1500 });
 
-    const result = bulkCategorize(handle.db, {
-      normalizedMerchant: "ONLINE",
-      categoryId: misc.id,
-      rememberMerchant: true,
-    });
+    const result = bulkCategorize(
+      handle.db,
+      {
+        normalizedMerchant: "ONLINE",
+        categoryId: misc.id,
+        rememberMerchant: true,
+      },
+      { allowRuleRemoval: true },
+    );
 
     expect(result.ruleRefusal?.reason).toBe("lossy-key");
-    expect(result.refusalDeletedRule).toBe(false);
+    expect(result.ruleRefusal?.removedRule).toBeNull();
     expect(result.ruleTouched).toBe(false);
     expect(result.priorRule).toBeNull();
   });
@@ -760,7 +772,6 @@ describe("bulkCategorize — Remember guard", () => {
     });
 
     expect(result.ruleRefusal).toBeNull();
-    expect(result.refusalDeletedRule).toBe(false);
     const rule = handle.db
       .select()
       .from(schema.categoryRules)

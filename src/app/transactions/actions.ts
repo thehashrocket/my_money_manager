@@ -6,6 +6,7 @@ import {
   categorizeTransaction,
   type CategorizeTransactionSnapshot,
 } from "@/lib/categorize/categorizeTransaction";
+import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
 import { validateCategorizeTransactionSnapshot } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
@@ -29,7 +30,12 @@ export async function categorizeTransactionAction(formData: FormData) {
     throw new Error(`Invalid categorize transaction input — ${issues}`);
   }
 
-  const result = categorizeTransaction(db, parsed.data);
+  /* See the note in `/categorize`'s action: ticking Remember on a row is a
+     deliberate per-merchant retrain, so this surface opts in to a refusal
+     removing the rule it contradicts. Never a form field. */
+  const result = categorizeTransaction(db, parsed.data, {
+    allowRuleRemoval: true,
+  });
 
   const snapshot: CategorizeTransactionSnapshot = {
     normalizedMerchant: result.normalizedMerchant,
@@ -41,6 +47,7 @@ export async function categorizeTransactionAction(formData: FormData) {
     earliestApplyToPastDate: result.earliestApplyToPastDate,
     ruleTouched: result.ruleTouched,
     priorRule: result.priorRule,
+    insertedRuleId: result.insertedRuleId,
   };
 
   revalidatePath("/transactions");
@@ -52,12 +59,15 @@ export async function categorizeTransactionAction(formData: FormData) {
     updatedCount: result.updatedCount,
     categoryName: result.categoryName,
     // Deliberately outside `snapshot`: the refusal is a REASON, not state to
-    // reverse. When it also deleted a rule, `snapshot.priorRule` +
-    // `ruleTouched` already carry that for the undo. These two ride the result
-    // only so the row can say why the box it ticked did nothing, and what
-    // happened to the rule that was there.
-    ruleRefusal: result.ruleRefusal,
-    refusalDeletedRule: result.refusalDeletedRule,
+    // reverse. When it also removed a rule, `snapshot.priorRule` +
+    // `ruleTouched` already carry that for the undo. This rides the result only
+    // so the row can say why the box it ticked did nothing, and what happened
+    // to the rule that was there — resolved to a finished sentence server-side,
+    // because naming the removed rule's category needs a lookup.
+    ruleRefusal:
+      result.ruleRefusal === null
+        ? null
+        : describeRuleRefusal(db, result.ruleRefusal),
   };
 }
 

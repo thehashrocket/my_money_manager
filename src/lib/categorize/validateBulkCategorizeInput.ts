@@ -8,15 +8,18 @@ import { z } from "zod";
  * Coerces strings → numbers / booleans so this composes directly with
  * `Object.fromEntries(formData)`.
  *
- * `normalizedMerchant` must be non-empty after trim. The merchant normalizer
- * is pure and already canonicalizes case/punctuation; we just refuse the
- * whitespace-only form here so the GROUP BY can't collapse onto an empty key.
+ * `normalizedMerchant` is trimmed but MAY be empty, and that is the third and
+ * last place this decision had to be applied consistently (the other two are
+ * the snapshot validators). `""` is a real stored key — a blank bank memo
+ * normalizes to it, `merchantLabel` exists to render it, and `loadMerchantGroups`
+ * groups it like any other — so `/categorize` lists that group with a Submit
+ * button, and `.min(1)` here made the button throw "Invalid bulk categorize
+ * input" on the one group the user cannot fix any other way. It never protected
+ * the GROUP BY it claimed to: the empty key comes OUT of that grouping rather
+ * than being created by this input.
  */
 export const bulkCategorizeInputSchema = z.object({
-  normalizedMerchant: z
-    .string()
-    .transform((s) => s.trim())
-    .pipe(z.string().min(1)),
+  normalizedMerchant: z.string().transform((s) => s.trim()),
   categoryId: z.coerce.number().int().positive(),
   rememberMerchant: z
     .union([z.literal("true"), z.literal("false"), z.boolean()])

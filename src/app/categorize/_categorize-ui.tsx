@@ -27,8 +27,11 @@ type Props = {
  *   on a Next revalidation round-trip.
  * - TWO sets of merchant keys, not one, because "hide this row" and "count this
  *   as done" have different lifetimes and one set could not honour both.
- *   `done` is the progress denominator's numerator and survives the whole
- *   sitting. `hidden` only bridges the gap between a submit and the
+ *   `done` is what the progress counter is BUILT from and survives the whole
+ *   sitting — not the numerator itself, which is `done` minus anything the
+ *   server still lists (see the note at `doneMerchants` below; a merchant that
+ *   comes back is in both sets at once). `hidden` only bridges the gap between
+ *   a submit and the
  *   revalidation that drops the row server-side, so it is CLEARED on every new
  *   server payload — the list the server just sent is authoritative about what
  *   is left. Sharing one set meant a merchant that came back (an import mid

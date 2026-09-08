@@ -176,6 +176,7 @@ describe("categorizeTransactionAction — end-to-end pipeline", () => {
       earliestApplyToPastDate: result.earliestApplyToPastDate,
       ruleTouched: result.ruleTouched,
       priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
     };
 
     undoCategorizeTransaction(handle.db, snapshot);
@@ -214,6 +215,7 @@ describe("categorizeTransactionAction — end-to-end pipeline", () => {
         earliestApplyToPastDate: result.earliestApplyToPastDate,
         ruleTouched: result.ruleTouched,
         priorRule: result.priorRule,
+        insertedRuleId: result.insertedRuleId,
       }),
     );
     expect(json.targetTxnId).toBe(target.id);
@@ -253,6 +255,7 @@ describe("categorizeTransactionAction — ruleRefusal pass-through", () => {
       earliestApplyToPastDate: result.earliestApplyToPastDate,
       ruleTouched: result.ruleTouched,
       priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
     };
     /* `expect(snapshot).not.toHaveProperty("ruleRefusal")` was the obvious
        assertion and it was vacuous: `snapshot` is a literal built right here
@@ -328,6 +331,7 @@ describe("categorizeTransactionAction — ruleRefusal pass-through", () => {
       earliestApplyToPastDate: result.earliestApplyToPastDate,
       ruleTouched: result.ruleTouched,
       priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
     });
 
     const after = handle.db

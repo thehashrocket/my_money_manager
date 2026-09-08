@@ -4,6 +4,7 @@ import { invalidateForwardRollover } from "@/lib/budget";
 import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import type { CategorizeTransactionSnapshot } from "./categorizeTransaction";
 import { restorePriorRule } from "./restorePriorRule";
+import type { RuleUndoAction } from "./undoBulkCategorize";
 
 type Db = typeof defaultDb;
 
@@ -12,8 +13,8 @@ export type UndoCategorizeTransactionResult = {
   targetReverted: boolean;
   /** Rows actually reset to NULL from the applyToPast set. */
   revertedApplyToPastCount: number;
-  /** Rule action taken: "deleted" (insert undone), "restored" (prior row restored), "none". */
-  ruleAction: "none" | "deleted" | "restored";
+  /** Rule action taken — see {@link RuleUndoAction}. */
+  ruleAction: RuleUndoAction;
 };
 
 /**
@@ -26,8 +27,16 @@ export type UndoCategorizeTransactionResult = {
  * Apply-to-past rows: reset to NULL, but only rows still pointing at
  * `newCategoryId` (same guard — user re-touch wins).
  *
- * Rule: deleted if inserted; restored verbatim if replaced (full column
- * snapshot). `ruleTouched=false` → no-op.
+ * Rule: deleted if this call inserted it; restored verbatim if it was
+ * overwritten OR deleted by a trainability refusal (full column snapshot, see
+ * {@link restorePriorRule}). `ruleTouched=false` → no-op.
+ *
+ * The delete is by primary key via `snapshot.insertedRuleId`. It used to match
+ * on (match_type, match_value, category_id) and assert `"deleted"` without
+ * checking, which is unsafe the moment a second writer can retarget that row
+ * inside the 10s window — `/subscriptions` upserts arbitrary keys to
+ * `Subscriptions` with no UI in front of it. The old lookup then matched
+ * nothing, the rule survived, and the undo still said it had gone.
  *
  * Invalidation: both categories get invalidated at their respective earliest
  * months. New category at earliest(target.date, earliestApplyToPastDate);
@@ -67,20 +76,18 @@ export function undoCategorizeTransaction(
       revertedApplyToPastCount = result.length;
     }
 
-    let ruleAction: UndoCategorizeTransactionResult["ruleAction"] = "none";
+    let ruleAction: RuleUndoAction = "none";
 
     if (snapshot.ruleTouched) {
       if (snapshot.priorRule === null) {
-        tx.delete(schema.categoryRules)
-          .where(
-            and(
-              eq(schema.categoryRules.matchType, "exact"),
-              eq(schema.categoryRules.matchValue, snapshot.normalizedMerchant),
-              eq(schema.categoryRules.categoryId, snapshot.newCategoryId),
-            ),
-          )
-          .run();
-        ruleAction = "deleted";
+        if (snapshot.insertedRuleId !== null) {
+          const removed = tx
+            .delete(schema.categoryRules)
+            .where(eq(schema.categoryRules.id, snapshot.insertedRuleId))
+            .returning({ id: schema.categoryRules.id })
+            .all();
+          ruleAction = removed.length > 0 ? "deleted" : "already-gone";
+        }
       } else {
         restorePriorRule(tx, snapshot.priorRule);
         ruleAction = "restored";
