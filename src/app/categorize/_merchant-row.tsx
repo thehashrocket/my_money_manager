@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useSyncExternalStore, useTransition } from "react";
+import { useId, useState, useSyncExternalStore, useTransition } from "react";
 import { toast } from "sonner";
 import { formatCents } from "@/lib/money";
 import { merchantDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
@@ -10,6 +10,7 @@ import type { LeafCategory } from "@/lib/categories";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
+import { classifyKeyTrainability } from "@/lib/categorize/keyTrainability";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
   clearPendingPick,
@@ -98,6 +99,31 @@ export function MerchantRow({
 
   const handlePick = (next: string) => writePendingPick(merchant, next);
 
+  /**
+   * Whether "Remember" may write a rule for this key, evaluated against the
+   * category currently picked — not against the key alone.
+   *
+   * The union is what makes this agree with the server: `bulkCategorize` runs
+   * the same pure predicate over the same filed ids plus the same pending
+   * category, so the checkbox is disabled exactly when the write would be
+   * refused. Computing it from `group.filedCategoryIds` alone would leave the
+   * box enabled for a merchant filed to one category until the user picks a
+   * second one — which is the case that most needs the warning.
+   *
+   * A blank pick contributes nothing: `Number("")` is 0, which is not a real
+   * category id and would read as a second category on every unfiled row.
+   */
+  const trainability = classifyKeyTrainability(
+    merchant,
+    categoryId === ""
+      ? group.filedCategoryIds
+      : [...group.filedCategoryIds, Number(categoryId)],
+  );
+
+  /* `useId`, not `` `reason-${merchant}` ``: 17 of the 363 real keys carry
+     `# * ? /` (see `merchantDrilldownHref`), and a raw key is not a safe id. */
+  const reasonId = useId();
+
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!categoryId) return;
@@ -130,6 +156,23 @@ export function MerchantRow({
             },
           },
         );
+        /* Fired AFTER the success toast, not before. `<Toaster>` runs
+           Sonner's default collapsed stack, which renders only the newest
+           toast in full and tucks the rest behind it — so the warning has to
+           be the newest or it is the one notice the user cannot read. Only
+           reachable from a stale form (the checkbox above is disabled
+           whenever this would fire), but a silent no-op on a box the user
+           ticked is exactly the failure this whole guard exists to stop. */
+        if (result.ruleRefusal !== null) {
+          toast.warning(
+            `${
+              result.refusalDeletedRule
+                ? "Existing rule removed."
+                : "Rule not saved."
+            } ${result.ruleRefusal.message}`,
+            { duration: 10_000 },
+          );
+        }
       } catch (err) {
         // Revert optimistic counter on error.
         onUndo(group.count);
@@ -172,14 +215,33 @@ export function MerchantRow({
           required
           className="min-w-[10rem]"
         />
-        <label className="flex min-h-11 items-center gap-1.5 text-xs text-ink-2">
+        <label
+          className={`flex min-h-11 items-center gap-1.5 text-xs ${
+            trainability.trainable ? "text-ink-2" : "cursor-not-allowed text-ink-3"
+          }`}
+          title={trainability.trainable ? undefined : trainability.message}
+        >
           <input
             type="checkbox"
             name="rememberMerchant"
             value="true"
-            checked={remember}
+            /* Never `checked={remember}` alone: the verdict moves with the
+               category picked above, so a box ticked while the key still
+               looked trainable has to un-tick itself when the pick makes it
+               untrainable — otherwise the form posts a Remember the server
+               will refuse, and the user is told after the fact instead of
+               before. */
+            checked={remember && trainability.trainable}
+            disabled={!trainability.trainable}
+            /* The reason is the checkbox's accessible description, not just
+               text that happens to sit nearby: `basis-full` puts it on its
+               own line below the Submit button, so proximity alone does not
+               connect the two. */
+            aria-describedby={
+              trainability.trainable ? undefined : reasonId
+            }
             onChange={(e) => setRemember(e.target.checked)}
-            className="h-4 w-4"
+            className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
           />
           Remember
         </label>
@@ -190,6 +252,26 @@ export function MerchantRow({
         >
           {isPending ? "Saving…" : "Submit"}
         </button>
+        {/* Not a `title=` alone. A disabled control with no visible reason is
+            the thing the user files a bug about; and `title` is unreachable by
+            keyboard and unreliable to screen readers. `basis-full` puts it on
+            its own line inside the same flex row rather than adding a grid
+            cell the `ColumnHeaders` template would then have to know about. */}
+        {trainability.trainable ? null : (
+          /* `sm:text-right`, not `text-right`: the row it belongs to only
+             right-aligns above `sm` (`sm:justify-end` on the wrapper), so a
+             hard right-align left a stray right-edge sentence under a
+             left-aligned control stack on narrow screens. `text-xs` matches
+             the Remember label two elements up — the 11px `--text-xs` token
+             put the one sentence that has to be read at the smallest size on
+             the row. */
+          <p
+            id={reasonId}
+            className="basis-full text-xs text-ink-3 sm:text-right"
+          >
+            {trainability.message}
+          </p>
+        )}
       </div>
     </form>
   );

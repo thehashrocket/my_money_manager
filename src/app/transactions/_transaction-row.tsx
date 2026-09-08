@@ -137,6 +137,31 @@ export function TransactionRowForm({
             },
           },
         );
+
+        /* The rows were filed; only the rule was withheld. A second toast
+           rather than a suffix on the success one, because they are different
+           facts with different urgency — and `toast.warning` keeps the success
+           message from reading as if the whole action was downgraded.
+           `/categorize` disables its checkbox up front instead; this row
+           cannot, because the list has no per-key filing history to check
+           against (see the note on `ruleRefusal` in categorizeTransaction).
+
+           Fired AFTER the success toast, and that order is load-bearing:
+           `<Toaster>` runs Sonner's default collapsed stack, which renders
+           only the NEWEST toast in full and tucks the rest behind it. Warned
+           first, the one notice that the user's Remember did nothing is the
+           one they cannot read — and on this surface the toast is the only
+           channel for it, since the checkbox cannot be disabled up front. */
+        if (result.ruleRefusal !== null) {
+          toast.warning(
+            `${
+              result.refusalDeletedRule
+                ? "Existing rule removed."
+                : "Rule not saved."
+            } ${result.ruleRefusal.message}`,
+            { duration: 10_000 },
+          );
+        }
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Categorize failed.");
       }
