@@ -397,6 +397,18 @@ just a red page.
 
 `src/app/_components/BacklogBanner.tsx`. Two variants: `"budget"` (shows CTA link) and `"categorize"` (omits CTA, caller handles the counter). Uses `--accent-amber` via `color-mix`.
 
+`_categorize-ui.tsx`'s `BacklogHeader` and `_transactions-ui.tsx`'s `BacklogStrip` are near-duplicates that reimplement the shell rather than reuse it, each for something the component does not expose (a live client-side count and a progress counter; a `Bulk →` link). D21 put all three on the same amber formula so the colour can no longer drift three ways — the shell still can. Collapsing them onto a `trailing` slot is tracked in `TODOS.md`.
+
+---
+
+## Focus ring
+
+`src/components/ledger/focus-ring.ts` exports `FOCUS_RING`, the one focus treatment for interactive elements **outside** `components/ui` — links, `<summary>` disclosures, and buttons written inline. The shadcn primitives carry their own `focus-visible:ring-*` and are not in scope for it.
+
+`outline`, not `ring`: an outline honours `outline-offset` and is drawn outside the border box without following `rounded-*` seams, so it stays a clean rectangle around a control sitting flush inside a ruled row. It is not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a `ring`'s box-shadow — so the choice buys geometry, not clipping.
+
+Known divergence: `FOCUS_RING` uses `--accent-terracotta` at full strength while `globals.css` defines `--ring` as the same accent at 55%, which is what every shadcn control uses. Two treatments, not one. Tracked in `TODOS.md`; changing it makes the hand-rolled ring visibly softer, so it wants both seen side by side first.
+
 ---
 
 ## State components (empty / loading / error / success)

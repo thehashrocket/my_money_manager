@@ -46,7 +46,24 @@ src/
                    category CRUD, archive/unarchive, and expense→income reclassification
                    copyMonth, monthOfIso, transactionsDrilldownHref — /budget → /transactions
                    per-category-per-month link builder (dateFrom/dateTo, not year/month)
-  lib/categorize/  Bulk-categorize logic and validators
+                   merchantDrilldownHref — /categorize → /transactions exact-merchant link,
+                   URLSearchParams-built (17 of 363 real keys carry `# * ? /`) and `null`
+                   for an empty key. Parked here beside its sibling; TODOS.md tracks moving
+                   it to lib/transactions/, which now owns the param it emits
+  lib/categorize/  Bulk-categorize logic and validators, plus the two read models:
+                   loadMerchantGroups — /categorize rows; sampleMemos (≤3 distinct memos,
+                   excluding ones equal to the key — 9.8% of rows) and totalRowCount
+                   (ALL rows for the key, filed included) are deliberately not `count`
+                   loadTransactions + summarizeByCategory — both build their WHERE through
+                   one shared buildPredicates, so the /transactions header can never
+                   describe a row set the list is not showing
+  lib/transactions/ /transactions' URL contract, extracted from page.tsx so it is testable:
+                   searchParams — the `.strict()` zod schema + flatten(); a filter key must
+                   be accepted HERE and emitted by filterValuesToSearchParams or it drops
+                   silently on page 2 (has shipped broken twice)
+                   limits — MAX_SEARCH_LENGTH / MAX_PAGE_SIZE in a zod-free module, because
+                   _filter-bar.tsx is client-side and importing them from the schema pulled
+                   zod into the route bundle (+376 KB, measured)
   lib/import/      Import orchestration and validators
   lib/simplefin/   Automated sync: client (zod-validated), mapping, bucket transfer
                    matcher, link/unlink, undo, input validation
