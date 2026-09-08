@@ -124,7 +124,6 @@ export function setAccountLink(
   const linkChanged = account.simplefinAccountId !== simplefinAccountId;
 
   return db.transaction((tx) => {
-
     let warning: string | null = null;
 
     if (linkChanged) {
@@ -151,13 +150,18 @@ export function setAccountLink(
         // Still deliberately NOT "future syncs will dedup these automatically".
         // Rows written from here on carry their feed, so sync recognizes them
         // wherever they live — but these rows carry neither an external_id nor
-        // a provenance tag, so no id-based pass can ever match them. Content
-        // dedup gives them a partial safety net (they now qualify, being
-        // external_id NULL) bounded by the 45-day window; older than that,
-        // they are on their own. Reconciling or deleting them is still the
-        // only complete answer.
+        // a provenance tag, so no id-based pass can ever match them.
+        //
+        // Content dedup is the only net they have, and it is narrower than it
+        // looks in the case this warning is actually about: `existingByContent`
+        // is scoped `eq(accountId, account.id)`, so it only helps when THIS
+        // account resyncs. A DIFFERENT account claiming this feed cannot see
+        // these rows at all — not bounded by the 45-day window, invisible. Even
+        // for a same-account resync the window applies, and older than that they
+        // are on their own. Reconciling or deleting them is the only complete
+        // answer, which is why the warning says so.
         const n = atRisk.length;
-        warning = `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync may not recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} — reconcile or delete ${n === 1 ? "it" : "them"} here to be sure. Relinking no longer creates this.`;
+        warning = `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} and will import ${n === 1 ? "it" : "them"} again — reconcile or delete ${n === 1 ? "it" : "them"} here. Relinking no longer creates this.`;
       }
     }
 

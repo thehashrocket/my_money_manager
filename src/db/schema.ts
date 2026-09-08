@@ -290,7 +290,14 @@ export const transactions = sqliteTable(
     uniqueIndex("transactions_feed_external_id_unique")
       .on(t.simplefinSourceAccountId, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL`),
-    // Backs the per-feed dedup lookup in `syncSimpleFin`.
+    // Forward-looking, NOT load-bearing today: the unique index above already
+    // covers `syncSimpleFin`'s id pass (`simplefin_source_account_id = ? AND
+    // external_id IS NOT NULL` plans as a covering search on it, verified with
+    // EXPLAIN QUERY PLAN), and the content pass's `ne()` sits inside an OR and
+    // is not sargable. Kept because a per-feed lookup that is not also
+    // external_id-scoped is the obvious next reader, and one extra index on a
+    // table taking a few hundred inserts a year costs nothing measurable.
+    // Do not cite it as backing the dedup lookup — removing it regresses nothing.
     index("transactions_feed_source_idx").on(t.simplefinSourceAccountId),
   ],
 );

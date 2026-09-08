@@ -1169,14 +1169,22 @@ describe("syncSimpleFin — feed-scoped dedup, both directions", () => {
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
   });
 
-  it("is BLIND to a row carrying an external_id but no feed tag (the state 0020 leaves unhandled)", async () => {
-    // `NULL <> 'ACT-1'` is NULL, not true, so such a row matches neither
-    // `simplefin_source_account_id = feed` (the id pass) nor the content pass's
-    // different-feed clause — it is invisible to both and re-imports.
+  it("content-vouches for a row carrying an external_id but NO feed tag, rather than re-importing it", async () => {
+    // The worst state available, and the reason candidacy needs an explicit
+    // `IS NULL` arm. `ne()` compiles to SQL `<>`, and `NULL <> 'ACT-1'` is NULL
+    // rather than true — so before the third `or()` arm this row matched
+    // NEITHER `simplefin_source_account_id = feed` (the id pass) nor the
+    // different-feed clause. It was invisible to both passes, and the partial
+    // unique index could not stop the insert either, because SQLite treats
+    // index NULLs as DISTINCT. It re-imported on every single sync.
     //
-    // Unreachable from the app: every sync write records the feed, and nothing
-    // clears external_id any more. This pins the consequence so the day some
-    // path DOES produce one, the cost is written down rather than discovered.
+    // Migration 0020's backfill produces exactly this row for a sync row whose
+    // account is currently UNLINKED, so it is not hypothetical: the header's
+    // "a row still carrying an external_id has never been through a relink"
+    // argument does not cover a relink done between v0.8.0 and v0.8.3, when
+    // `setAccountLink` did not yet clear anything. Zero such rows existed on
+    // the live ledger when 0020 was applied — but an unlink is one click, so
+    // the class is closed in code instead of argued away.
     const a = seedAccount({ simplefinAccountId: "ACT-1" });
     const batch = seedBatch("simplefin");
     seedTxn({
@@ -1192,10 +1200,37 @@ describe("syncSimpleFin — feed-scoped dedup, both directions", () => {
     respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
+    expect(outcome.status).toBe("up-to-date");
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].simplefinSourceAccountId).toBeNull();
+  });
+
+  it("still imports a GENUINELY new row when an untagged row is present (the IS NULL arm widens candidacy, not suppression)", async () => {
+    // The mirror of the test above. Admitting untagged rows as content-dedup
+    // candidates must not turn into "suppress whatever the feed sends" — the
+    // multiset budget is what keeps it a per-signature match rather than a
+    // blanket skip.
+    const a = seedAccount({ simplefinAccountId: "ACT-1" });
+    const batch = seedBatch("simplefin");
+    seedTxn({
+      accountId: a.id,
+      batchId: batch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      source: "simplefin",
+      externalId: "TRN-a",
+      simplefinSourceAccountId: null,
+    });
+
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87"), feedTxn("TRN-b", "-99.99")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
     expect(outcome.status).toBe("synced");
     const rows = handle.db.select().from(schema.transactions).all();
     expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.simplefinSourceAccountId)).toEqual([null, "ACT-1"]);
+    // The untagged row survived untouched; only the genuinely new one landed.
+    expect(rows.map((r) => r.amountCents).sort((x, y) => x - y)).toEqual([-9999, -487]);
   });
 
   it("STILL double-counts a re-minted feed claimed by a DIFFERENT local account", async () => {
@@ -1223,6 +1258,30 @@ describe("syncSimpleFin — feed-scoped dedup, both directions", () => {
     const rows = handle.db.select().from(schema.transactions).all();
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.amountCents)).toEqual([-487, -487]);
+  });
+
+  it("lets ONE account hold the same external_id twice under two feeds, and content dedup is the only thing that stops it", async () => {
+    // `account_id` left the uniqueness key, so `(same account, same
+    // external_id, different feed tag)` is no longer refused by the index. That
+    // is correct — a SimpleFIN id is unique within its own feed, not globally —
+    // but it means the SAME account re-pointed to a re-minted feed has only
+    // content dedup between it and a duplicate, where before the index caught
+    // it. This asserts content dedup actually holds that line, since a memo
+    // drift is all it would take to lose it.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    // Same real account, fresh `simplefin:claim` — new feed id, same txn id.
+    setAccountLink(a.id, "ACT-2", handle.db);
+    respondWith("ACT-2", [feedTxn("TRN-a", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    // Still tagged with the feed that actually produced it, not the new one.
+    expect(rows[0].simplefinSourceAccountId).toBe("ACT-1");
   });
 
   it("tags a row with the feed of the account SYNCING it, not the one that held it before", async () => {

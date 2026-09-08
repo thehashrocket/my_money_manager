@@ -543,14 +543,22 @@ export async function syncSimpleFin(
   for (const a of response.accounts ?? []) byExternalId.set(a.id, a);
 
   // ---- dedup, per account ----
-  type Staged = { account: (typeof linked)[number]; rows: MappedRow[] };
+  // `feedId` rides along rather than being re-derived in the write loop:
+  // it is the SAME non-null binding the dedup predicates keyed off, so the
+  // value that decided a row was new is the value stored as its provenance.
+  type Staged = {
+    account: (typeof linked)[number];
+    feedId: string;
+    rows: MappedRow[];
+  };
   const staged: Staged[] = [];
   const counts: AccountSyncCounts[] = [];
 
   for (const account of importAccounts) {
     // Non-null by construction: `importAccounts` comes from the linked-account
-    // query. Named once because three separate predicates below key off it, and
-    // `accounts.$inferSelect` types the column as nullable.
+    // query. Named once because the id pass, the content pass and the insert
+    // below all key off it, and `accounts.$inferSelect` types the column as
+    // nullable.
     const feedId = account.simplefinAccountId!;
     const remote = byExternalId.get(feedId);
     if (!remote) {
@@ -603,8 +611,8 @@ export async function syncSimpleFin(
         and(
           eq(schema.transactions.accountId, account.id),
           // A row is a content-dedup candidate when THIS feed cannot already
-          // have claimed it by id. Two cases qualify, and the second is why this
-          // is not simply `external_id IS NULL`:
+          // have claimed it by id. Three cases qualify, and only the first is
+          // what `external_id IS NULL` alone would have caught:
           //
           //  1. CSV rows (external_id NULL) — the original case: the feed
           //     re-sends days already imported from a file.
@@ -614,8 +622,27 @@ export async function syncSimpleFin(
           //     will not recognize it. Before provenance existed, relink cleared
           //     external_id and these rows fell into case 1 by accident; keeping
           //     the tag is what makes the case have to be named.
+          //  3. Rows with an external_id but NO provenance tag. Case 2 does not
+          //     cover these and cannot: `ne()` is SQL `<>`, and `NULL <> 'ACT-1'`
+          //     evaluates to NULL rather than true, so an untagged row falls out
+          //     of the OR entirely. That is the worst state available — the id
+          //     pass can't match it (`= feedId` skips NULL), and the partial
+          //     unique index can't stop the insert either, because SQLite treats
+          //     index NULLs as DISTINCT. The row would re-import on every sync,
+          //     silently double-counting real money.
+          //
+          //     Migration 0020's backfill leaves exactly this state behind for a
+          //     sync row whose account is currently UNLINKED, and its "never
+          //     been through a relink" argument does not cover it: `setAccountLink`
+          //     only began clearing external_id in v0.8.3 (ca53e68), five hours
+          //     after sync shipped in v0.8.0 (28aa181), so a relink in that window
+          //     left the tag intact. Measured 0 such rows on the live ledger
+          //     before applying 0020, but an unlink on /sync is one click and the
+          //     migration had not run yet — so this is defended in code rather
+          //     than argued away.
           or(
             isNull(schema.transactions.externalId),
+            isNull(schema.transactions.simplefinSourceAccountId),
             ne(schema.transactions.simplefinSourceAccountId, feedId),
           ),
           gte(schema.transactions.date, contentFloorIso),
@@ -677,7 +704,7 @@ export async function syncSimpleFin(
       );
     }
 
-    staged.push({ account, rows: toInsert });
+    staged.push({ account, feedId, rows: toInsert });
 
     const reported = remote?.balance ? parseAmountToCents(remote.balance) : null;
     const available = remote?.["available-balance"]
@@ -744,7 +771,7 @@ export async function syncSimpleFin(
       .returning({ id: schema.importBatches.id })
       .all();
 
-    for (const { account, rows } of staged) {
+    for (const { account, feedId, rows } of staged) {
       for (const row of rows) {
         const match = matchRule(row.normalizedMerchant, row.amountCents);
 
@@ -767,7 +794,13 @@ export async function syncSimpleFin(
             // Provenance: WHICH feed produced this row. Deliberately captured
             // at write time rather than joined through `accounts` on read —
             // the account's link can move, the row's origin cannot.
-            simplefinSourceAccountId: account.simplefinAccountId,
+            //
+            // `feedId`, not `account.simplefinAccountId`: same value, but the
+            // column is typed nullable and this is the one write path that
+            // could ever mint the untagged-with-an-external_id row case 3 above
+            // exists to survive. Using the non-null binding makes tsc reject any
+            // future refactor that lets a null reach here.
+            simplefinSourceAccountId: feedId,
             // Always false: pending rows are skipped above, so anything that
             // reaches here has posted.
             isPending: false,
