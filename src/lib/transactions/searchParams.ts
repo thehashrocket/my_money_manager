@@ -73,7 +73,9 @@ export const searchParamsSchema = z.object({
    *
    * NOT trimmed the way `search` is — this is compared byte-for-byte against
    * a stored key, and a key is allowed to carry whatever the normalizer
-   * produced. `""` is normalized to `undefined` by `flatten` below.
+   * produced. `""` never reaches this schema — `flatten` below DROPS the key
+   * rather than passing it on as `undefined`, which is a different fact and a
+   * load-bearing one (see its docstring).
    */
   merchant: z.string().optional(),
   page: z.coerce.number().int().min(1).optional(),

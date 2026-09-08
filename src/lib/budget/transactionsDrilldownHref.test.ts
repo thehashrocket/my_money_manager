@@ -162,7 +162,7 @@ describe("transactionsDrilldownHref (D9 regression guard)", () => {
 
 /**
  * T5 — 17 of the 363 real `normalized_merchant` keys on this ledger carry
- * characters with meaning in a URL (`# * ? / ;`). `#` is the dangerous one:
+ * characters with meaning in a URL (`# * ? /`). `#` is the dangerous one:
  * a template literal would not error, it would truncate the query string, so
  * `?merchant=GASCO#00000ANYTWN` becomes a filter on `GASCO` and shows a
  * different, entirely plausible-looking row set.

@@ -43,8 +43,8 @@ own memos, and links straight to those exact rows._
 - **`/transactions` filters on an exact merchant.** Arriving from a drilldown,
   the page leads with the merchant as a removable chip and a line that answers
   the question you clicked to ask: `50 rows, 1 uncategorized · 49 filed as
-  Gas`. The counts come from the same query as the list, so the header can
-  never describe rows the list is not showing.
+  Gas`. The counts share one predicate builder with the list, so the header
+  cannot describe a different row set than the one under it.
 - **A "Categorize all N" shortcut** from that header back to bulk filing, and a
   progress counter on `/categorize` (`12 of 181 merchants done`).
 - **Your half-finished pick survives the trip.** Choose a category, drill down
@@ -120,7 +120,7 @@ own memos, and links straight to those exact rows._
 - **The session-storage test suite passed only because of the order it ran in.**
   The module keeps its cache at module scope, and the Safari-private-mode block
   read from whatever an earlier test had left there; shuffled, it failed 2 runs
-  in 5. It now takes a fresh module per test.
+  in 5. That block now takes a fresh module per test.
 - **`191` appeared where the number is `181`** — the count of uncategorized
   merchant groups, in the README, the plan, `CLAUDE.md`'s rule 10 and two code
   comments. Re-measured against the live ledger: the page's own predicate
@@ -150,6 +150,37 @@ own memos, and links straight to those exact rows._
   `/transactions` labelled that row, `/categorize` rendered a nameless row with
   a screen-reader label reading "Category for " and no way to drill into it.
   Both sides now name it the same way.
+- **"Categorize all N →" could name a number the destination would not
+  honour.** The header counts under every active filter; `/categorize` filters
+  on nothing but "uncategorized and not transfer-paired". Select a month and
+  the link read "Categorize all 4 →" while filing all 53 rows of that
+  merchant, $2,647.30 across eight months — reproducible in all eight. It now
+  drops the count and reads "Categorize this merchant →" whenever another
+  filter is narrowing the list.
+- **The zero-result state named a recovery it offered no button for.** With
+  another filter also active it says the merchant key may be fine and that
+  clearing the rest is the quickest way to tell — while the primary action did
+  the opposite, dropping the merchant and keeping the rest, which landed on a
+  second empty page whenever a date range was what emptied the first. That is
+  the bug already fixed on the other link, on the one beside it.
+- **A blocked browser lost every parked category pick without saying so.** The
+  wrapper around the `sessionStorage` property access swallowed the error
+  entirely, and it is the failure that short-circuits all five inner handlers
+  — so in Chrome or Firefox with site data blocked, a dozen picks vanished on
+  reload with both consoles clean. It is exactly the case the module's warning
+  exists for.
+- **The rejected-parameter log could not name the parameter.** A `.strict()`
+  violation carries its offending key names on a field the log discarded,
+  so an unknown param logged as `{path: [], code: "unrecognized_keys"}` —
+  naming nothing, in precisely the in-app-link-builder case the log was added
+  for. Both range guards now log too; a mistyped amount pair was a 404 with no
+  record at all.
+- **A filter could clear every contract gate and still never reach the WHERE
+  clause.** The object handed to the query builder had no type annotation and
+  every field on it is optional, so a filter that was accepted, serialized,
+  typed and carried by the form could simply be missing there — rendering its
+  chip, reporting it in the header, carrying it to page 2, and filtering
+  nothing. It is now annotated, and dropping a field fails `tsc`.
 - **Two docstrings promised more than the code delivers.** The merchant header
   was documented as unable to describe a row set the list is not showing; it
   shares the list's predicates, not its read instant, so it can lag by one

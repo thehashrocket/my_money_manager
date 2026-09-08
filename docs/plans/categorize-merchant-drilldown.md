@@ -90,7 +90,9 @@ _merchant-row.tsx
 Missing [4] fails silently — the filter works on page 1 and vanishes on page 2, leaving
 you looking at all 1,540 rows in a page that still reads as filtered. That class has
 already happened twice (`pageSize`, `includeTransfers`); see the comments at
-`_filter-bar.tsx:79`, `:85`, `:246`. D5's keys-driven test exists to end it, and D11
+the `merchant` and `pageSize` field comments on `TransactionsFilterValues`,
+and the hidden-input block, all in `_filter-bar.tsx` (named rather than
+numbered — the same PR rewrote that file and the line numbers moved). D5's keys-driven test exists to end it, and D11
 lets that test close both halves — a key must be both serialized *and* accepted.
 
 `merchant` carries no length bound (D12): the column is unbounded `text`, the value goes
@@ -318,7 +320,7 @@ triggered the same hard rejection.
 
 ## Implementation Tasks
 
-Synthesized from the eng review (T1-T10) and this design review (T11-T20). Each task
+Synthesized from the eng review (T1-T10) and this design review (T11-T16). Each task
 derives from a specific finding. T1-T5 are unchanged; T6-T10 are revised where a design
 decision moved them.
 
@@ -348,7 +350,7 @@ decision moved them.
   - Verify: no `rounded-md border p-3` row shells remain; column headers render; compare against DS49's dashboard lists
 - [x] **T7 (P1, human: ~3h / CC: ~25min)** — `<details>` sample-memo disclosure on `/categorize` rows
   - Surfaced by: Pass 3 / D16 + D22 — the round trip was the failure point; the merchant name is now the control
-  - Files: `src/lib/categorize/loadMerchantGroups.ts` (+`GROUP_CONCAT`), `_merchant-row.tsx`
+  - Files: `src/lib/categorize/loadMerchantGroups.ts` (+`loadSampleMemos`, `selectDistinct` with the cap applied in JS), `_merchant-row.tsx`
   - Verify: `AUDIBLE` (memo == key) renders NO disclosure control; `AMAZON` shows 3 distinct memos + `See all 59 transactions →`
 - [x] **T8 (P1, human: ~1h / CC: ~10min)** — `rawMemo` line, conditional; delete the dead `rawDescription` tooltip
   - Surfaced by: Outside voice #1 (D9), refined by Pass 1 — merchant name is dropped and memo promoted when `merchant` is active

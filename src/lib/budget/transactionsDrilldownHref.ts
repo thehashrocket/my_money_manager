@@ -23,7 +23,7 @@ export function transactionsDrilldownHref(categoryId: number, year: number, mont
  * here, beside its sibling, rather than opening a third URL-builder module).
  *
  * `URLSearchParams`, never a template literal. 17 of the 363 real
- * `normalized_merchant` keys on this ledger carry `# * ? / ;` — and a bare
+ * `normalized_merchant` keys on this ledger carry `# * ? /` — and a bare
  * `#` does not error, it truncates the query string, so
  * `?merchant=GASCO#00000ANYTWN` silently filters on `GASCO` and shows a
  * different, plausible-looking row set.

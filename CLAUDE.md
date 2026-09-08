@@ -70,7 +70,9 @@ src/
                    that keeps failing: a key can exist in the schema and never be added to
                    TransactionsFilterValues, which is exactly how `pageSize` escaped a guard
                    written to catch it — the guard enumerates the type, so it is structurally
-                   blind to a key the type lacks. All three are now compile-time checks in
+                   blind to a key the type lacks. That third edge is now a compile-time
+                   assertion; the first two are exhaustive runtime checks driven off the
+                   type's own keys, in
                    _filter-bar.test.ts. A FOURTH gate is separate machinery: "Apply filters"
                    is a GET form, so a field also needs a visible control or a hidden input,
                    now derived from the serializer (VISIBLE_FIELDS is the complement) rather

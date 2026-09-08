@@ -36,7 +36,7 @@ describe("searchParamsSchema — merchant (D2/D12)", () => {
     if (parsed.success) expect(parsed.data.merchant).toBe("  SPACED  ");
   });
 
-  it("normalizes an empty merchant to undefined via flatten, not to an empty filter", () => {
+  it("drops an empty merchant key in flatten, so it never reaches the schema", () => {
     const parsed = searchParamsSchema.safeParse(flatten({ merchant: "" }));
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.merchant).toBe(undefined);

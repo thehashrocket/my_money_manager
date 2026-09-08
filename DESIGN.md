@@ -363,9 +363,9 @@ the feature exists to add.
 cut from every generated mockup (variant C invented *"Your debt is 20.7% of
 your assets. A good rule of thumb is to keep this under 30%. Learn more →"*:
 invented advice with an external link, in an app whose premise is that nothing
-leaves the machine). `--accent-amber` also already carries eight distinct
+leaves the machine). `--accent-amber` also already carries nine distinct
 meanings per the amber inventory below; 43% utilized is not a warning and must
-not add a ninth.
+not add a tenth.
 
 `hasLimit: false` means render no bar at all — absence of a limit is absence of
 something to show, and is NOT what decides the muted long-term treatment (E7).
