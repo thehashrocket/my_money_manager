@@ -65,21 +65,33 @@ export async function listRemoteAccounts(
 
 export type SetAccountLinkResult = {
   /**
-   * Set only when this account still holds LEGACY orphans: simplefin-sourced
-   * rows with no external_id, left behind by a relink from before
-   * `transactions.simplefin_source_account_id` existed.
+   * Set on a link CHANGE when either of two independent things is true. They
+   * are joined into one string; a relink can raise both at once.
    *
-   * Re-pointing a link no longer creates these. The clearing that did — and
-   * the double-count it caused, because it erased the only record of which
-   * feed a row came from — is gone; provenance is recorded at write time and
-   * survives any number of relinks. So this set can only ever SHRINK, and on
-   * a ledger that never relinked before the fix it is empty forever.
+   * (a) This account holds rows no id-based pass can ever match — keyed on
+   *     `simplefin_source_account_id IS NULL`, deliberately NOT on
+   *     `external_id IS NULL`. That is a strict superset covering two
+   *     populations: LEGACY orphans (both columns NULL, stripped by a relink
+   *     from before the provenance column existed) and rows that still CARRY
+   *     an external_id but got no tag, which migration 0020 leaves behind for
+   *     a sync row whose account was unlinked when it ran, since its backfill
+   *     is `WHERE external_id IS NOT NULL`. Both are equally unmatchable, so
+   *     keying on the column that decides matchability is what keeps the
+   *     second population from being invisible here.
    *
-   * It is still worth reporting: those rows carry no tag any sync can match,
-   * so they remain exposed to exactly the old double-count if another account
-   * claims this feed. Nothing can repair them automatically — the feed they
-   * came from is unknowable after the fact, which is the whole reason the
-   * column exists.
+   *     Re-pointing a link no longer creates the first population. The
+   *     clearing that did — and the double-count it caused, because it erased
+   *     the only record of which feed a row came from — is gone; provenance is
+   *     recorded at write time and survives any number of relinks. Nothing can
+   *     repair these automatically: the feed they came from is unknowable
+   *     after the fact, which is the whole reason the column exists.
+   *
+   * (b) The feed being claimed already has rows filed under a DIFFERENT local
+   *     account. Sync will correctly refuse to re-import them (that is the
+   *     de-dup working), but they stay where they are, so this account's
+   *     balance ends up short by the whole overlap. That under-count is the
+   *     accepted cost of recording provenance instead of moving rows, and the
+   *     relink is the one moment a person can act on it.
    */
   warning: string | null;
 };
@@ -158,8 +170,10 @@ export function setAccountLink(
       if (atRisk.length > 0) {
         // Still deliberately NOT "future syncs will dedup these automatically".
         // Rows written from here on carry their feed, so sync recognizes them
-        // wherever they live — but these rows carry neither an external_id nor
-        // a provenance tag, so no id-based pass can ever match them.
+        // wherever they live — but these rows carry no provenance tag, so no
+        // id-based pass can ever match them. (Some also lack an external_id;
+        // that is incidental. The missing TAG is what makes them unmatchable,
+        // which is why the query keys on it.)
         //
         // Content dedup is the only net they have, and it is narrower than it
         // looks in the case this warning is actually about: `existingByContent`
@@ -171,7 +185,7 @@ export function setAccountLink(
         // answer, which is why the warning says so.
         const n = atRisk.length;
         warnings.push(
-          `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported before de-dup tags were recorded, by an earlier relink. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} and will import ${n === 1 ? "it" : "them"} again — reconcile or delete ${n === 1 ? "it" : "them"} here. Relinking no longer creates this.`,
+          `${n} transaction${n === 1 ? "" : "s"} on this account ${n === 1 ? "was" : "were"} imported without the de-dup tag sync matches on. If a different account links this same feed later, its sync will NOT recognize ${n === 1 ? "it" : "them"} as ${n === 1 ? "a duplicate" : "duplicates"} and will import ${n === 1 ? "it" : "them"} again — reconcile or delete ${n === 1 ? "it" : "them"} here. Relinking no longer creates this.`,
         );
       }
 

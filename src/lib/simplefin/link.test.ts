@@ -216,7 +216,7 @@ describe("setAccountLink", () => {
     const result = setAccountLink(a.id, "ACT-different", handle.db);
 
     expect(result.warning).toMatch(/1 transaction/i);
-    expect(result.warning).toMatch(/before de-dup tags were recorded/i);
+    expect(result.warning).toMatch(/without the de-dup tag sync matches on/i);
     expect(result.warning).toMatch(/no longer creates this/i);
   });
 
