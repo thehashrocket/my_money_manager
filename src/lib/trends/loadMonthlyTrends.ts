@@ -7,28 +7,50 @@ type Db = typeof defaultDb;
 
 /**
  * SIGN CONVENTION (decided 2026-09-08) — spend is a SIGNED sum, so a refund
- * reduces the category's spend for that month. This chart and
- * `computeMtdSpent` (`src/lib/budget.ts`) now agree; before this they did
- * not, and the disagreement was live: September 2026 read $10.00 of Misc on
- * `/budget` and $295.00 here, because this query summed only the outbound
- * legs of five transfer reversals that cancel under a signed sum.
+ * reduces the category's spend for that month. This chart and the `/budget`
+ * page now agree; before this they did not, and the disagreement was live:
+ * September 2026 read $10.00 of Misc on `/budget` and $295.00 here, because
+ * this query summed only the outbound legs of five transfer reversals that
+ * cancel under a signed sum.
  *
- * Envelope budgeting is the argument: returning $20 of groceries restores
- * $20 of grocery-buying capacity, and `leftToBudgetCents` is computed from
- * `computeMtdSpent`, so matching THAT side is the only version of this fix
- * that leaves the zero-based math untouched.
+ * Envelope budgeting is the argument: returning $20 of groceries restores $20
+ * of grocery-buying capacity, and `/budget` already read spend that way, so
+ * aligning to it introduces no second convention.
  *
- *   transactions (transfer_pair_id IS NULL, category kind = 'expense')
+ *   transactions (transfer_pair_id IS NULL)
  *           │
+ *           ├─ loadSpendForMonth()  = 0 − SUM(amount_cents)   per category-month
+ *           │     ▲ what /budget RENDERS (loadMonthView.ts). Expense-ness is
+ *           │       decided by iterating `expenseLeaves`, not in SQL.
  *           ├─ computeMtdSpent()    = 0 − SUM(amount_cents)   per category-month
+ *           │     ▲ same expression; feeds the ROLLOVER chain
+ *           │       (`getEffectiveAllocation`), not the rendered figure. No
+ *           │       kind filter at all — it sums whatever category it is given.
  *           └─ loadMonthlyTrends()  = 0 − SUM(amount_cents)   per group-month
- *                                     ▲ same expression, deliberately
+ *                 ▲ here. Restricts to kind = 'expense' in SQL, because it
+ *                   aggregates across categories rather than being handed one.
+ *
+ * The three share an EXPRESSION over comparable predicates, not one predicate
+ * — an earlier version of this note claimed a single shared `kind = 'expense'`
+ * root, which only this branch has.
+ *
+ * `leftToBudgetCents` is untouched by any of it, and NOT for the reason this
+ * note used to give. It is `plannedIncomeCents − allocatedCents −
+ * plannedFundCents` (`loadMonthView.ts`) and carries no spend term at all, so
+ * no spend convention can move it. Do not "protect" it when changing spend.
  *
  * A month where refunds exceed spend yields a NEGATIVE `spentCents`. That is
  * reported rather than clamped — clamping would reintroduce the same class of
  * lie this change removes. Zero such cells exist on the live ledger across the
  * 6-month window (measured 2026-09-08), so the stacked bars are unaffected in
  * practice; a future one renders below the axis, which is the honest picture.
+ *
+ * `kind = 'fund'` is deliberately absent from all of this: fund categories are
+ * already excluded upstream (`ne(kind, 'fund')` on the name map, plus the skip
+ * in the bucketing loop), and `/budget` renders a fund as planned-only with no
+ * spend figure. The subquery below narrows to 'expense' rather than merely
+ * excluding income, so that stays true rather than depending on the two
+ * filters agreeing.
  */
 
 export type CategorySpend = {
@@ -41,11 +63,14 @@ export type MonthTrend = {
   month: number;
   label: string;
   /**
-   * The month's net spend across drawn groups. NOTE: no production code reads
-   * this any more — `isEmpty` moved to `byCategory.length` when a net-zero
-   * month stopped implying an empty one. Kept because it is the month total a
-   * consumer would reach for, and asserted in tests; do not treat its value as
-   * load-bearing for rendering without re-checking that.
+   * The month's net spend across drawn groups — i.e. `sum(byCategory)`.
+   *
+   * Derived, not independent. It is kept because it is genuinely the figure a
+   * consumer reaches for, but note what it must NOT be used for: deciding
+   * whether there is anything to draw. Under the signed convention a month
+   * whose refunds cancel its spend totals exactly zero while still drawing two
+   * real bars, so `totalSpentCents === 0` stopped implying an empty month.
+   * That question has one answer and it lives in {@link hasDrawableData}.
    */
   totalSpentCents: number;
   byCategory: CategorySpend[];
@@ -215,3 +240,8 @@ export function loadMonthlyTrends(db: Db, monthCount = 6): TrendData {
 
   return { months, categoryNames };
 }
+
+// `hasDrawableData` is re-exported, not defined here: `trend-chart.tsx` is a
+// client component and this module imports `@/db`, so it cannot be the one the
+// chart imports from. See `./hasDrawableData`.
+export { hasDrawableData } from "./hasDrawableData";

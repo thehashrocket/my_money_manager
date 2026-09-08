@@ -3,7 +3,7 @@ import { eq, ne } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { computeMtdSpent } from "@/lib/budget";
-import { loadMonthlyTrends } from "./loadMonthlyTrends";
+import { hasDrawableData, loadMonthlyTrends } from "./loadMonthlyTrends";
 
 /**
  * TC34b (mandatory regression, TS3): `loadMonthlyTrends` had NO test file at
@@ -527,5 +527,24 @@ describe("loadMonthlyTrends — a linked transfer is not spend", () => {
     expect(view.months[0].totalSpentCents).toBe(3000);
     expect(view.months[0].byCategory).toEqual([{ name: spent.name, spentCents: 3000 }]);
     expect(view.categoryNames).toEqual([spent.name]);
+  });
+});
+
+/**
+ * `TrendChart` used to decide emptiness itself, as
+ * `months.every((m) => m.totalSpentCents === 0)`. Under the signed convention
+ * that is no longer the same question, and the read model is what knows the
+ * difference — so the definition moved here and this pins it.
+ */
+describe("hasDrawableData — 'nothing to draw', not 'sums to zero'", () => {
+  it("is false when there is genuinely nothing", () => {
+    expect(hasDrawableData({ categoryNames: [] })).toBe(false);
+  });
+
+  it("is true for a window whose net spend is exactly zero but which draws bars", () => {
+    // A charge in one month, refunded in the next: every month totals zero and
+    // the six-month total is zero, yet two real bars exist. The old predicate
+    // rendered "import some transactions" over two months of activity.
+    expect(hasDrawableData({ categoryNames: ["Shopping"] })).toBe(true);
   });
 });

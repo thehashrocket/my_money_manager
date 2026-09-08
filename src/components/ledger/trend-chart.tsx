@@ -11,6 +11,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { formatCents } from "@/lib/money";
+import { hasDrawableData } from "@/lib/trends/hasDrawableData";
 import type { MonthTrend } from "@/lib/trends/loadMonthlyTrends";
 
 type TooltipPayloadItem = {
@@ -109,12 +110,10 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
 }
 
 export function TrendChart({ months, categoryNames }: TrendChartProps) {
-  // "Nothing to draw", not "sums to zero". Under the signed spend convention
-  // `totalSpentCents === 0` no longer implies an empty month — a month whose
-  // refunds exactly cancelled its spend also totals zero, and telling that user
-  // to import more transactions would be false. `byCategory` is already
-  // zero-filtered upstream, so an empty one is the precise render condition.
-  const isEmpty = months.every((m) => m.byCategory.length === 0);
+  // "Nothing to draw", not "sums to zero" — and the definition lives with the
+  // read model that establishes it, so a second consumer can't re-derive a
+  // different one. See `hasDrawableData`.
+  const isEmpty = !hasDrawableData({ categoryNames });
 
   if (isEmpty) {
     return (
