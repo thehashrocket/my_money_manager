@@ -95,7 +95,7 @@ describe("findSameAccountReversals — never auto-links, because the shape lies"
     // subscription charge from every spending surface.
     const out = findSameAccountReversals([
       row({ id: 982, accountId: 1, date: "2026-03-02", amountCents: 399, rawMemo: "ATM Surcharge fees refund" }),
-      row({ id: 985, accountId: 1, date: "2026-03-02", amountCents: -399, rawMemo: "APPLE.COM/BILL 866-712-7753 CA" }),
+      row({ id: 985, accountId: 1, date: "2026-03-02", amountCents: -399, rawMemo: "APPLE.COM/BILL CA" }),
     ]);
 
     // Returned for REVIEW — the function's whole contract is that it decides
