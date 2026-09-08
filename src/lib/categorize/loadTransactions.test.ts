@@ -566,9 +566,9 @@ describe("loadTransactions — includeTransfers (D14=B)", () => {
  * anyone from "simplifying" it back into the existing `search` predicate.
  *
  * `search` is `LIKE %x%` across three columns. On the real ledger that turns
- * 11 of 191 merchant groups into supersets — clicking `AMAZON` (53 rows)
- * would land on 71, silently including `AMAZON PRIME`, which is a different
- * merchant filed to a different category.
+ * 11 of 181 merchant groups into supersets — clicking `AMAZON` (59 rows for
+ * the exact key) would land on 71, silently including `AMAZON PRIME`, which
+ * is a different merchant filed to a different category.
  */
 describe("loadTransactions — merchant filter (D2)", () => {
   it("matches the key exactly and does NOT match a longer key sharing its prefix", () => {
@@ -768,5 +768,83 @@ describe("summarizeByCategory — tie-breaking", () => {
 
     const breakdown = summarizeByCategory(handle.db, { merchant: "TIE" });
     expect(breakdown.map((r) => r.categoryId)).toEqual([gas.id, null]);
+  });
+});
+
+/**
+ * `summarizeByCategory` shares `buildPredicates` with the list, and these pin
+ * the two consequences of that sharing that nothing else reached.
+ *
+ * The transfer case is the one with teeth. The merchant header renders
+ * "Categorize all N →" straight off this breakdown's NULL bucket, and
+ * `/categorize` refuses to show transfer-paired rows at all — so a
+ * summarizer that stopped excluding them would offer to categorize rows the
+ * pair machinery owns, from a link whose destination cannot list them.
+ */
+describe("summarizeByCategory — transfer-paired rows (shared predicates)", () => {
+  function seedPair(accountId: number, batchId: number, merchant: string) {
+    const anchor = seedTxn({ accountId, batchId, merchant, amountCents: -2500 });
+    const partner = seedTxn({ accountId, batchId, merchant, amountCents: 2500 });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+  }
+
+  it("excludes paired rows by default, exactly as the list beneath it does", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedPair(a.id, b.id, "ZELLE");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", categoryId: null });
+
+    const filter = { merchant: "ZELLE" };
+    const breakdown = summarizeByCategory(handle.db, filter);
+    const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
+
+    expect(breakdown.reduce((n, r) => n + r.count, 0)).toBe(totalCount);
+    expect(breakdown).toEqual([{ categoryId: null, categoryName: null, count: 1 }]);
+  });
+
+  it("reveals them when includeTransfers is set, still agreeing with the list", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedPair(a.id, b.id, "ZELLE");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", categoryId: null });
+
+    const filter = { merchant: "ZELLE", includeTransfers: true };
+    const breakdown = summarizeByCategory(handle.db, filter);
+    const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
+
+    expect(breakdown.reduce((n, r) => n + r.count, 0)).toBe(totalCount);
+    expect(totalCount).toBe(3);
+  });
+});
+
+/**
+ * The `totalCount !== 0` branch of `/transactions`' zero-result state, which
+ * renders "This page is empty — there are rows in this filter, just not this
+ * far in" and a Back-to-page-1 link. It is reachable from an ordinary
+ * bookmark: page 3 of a filter that has since shrunk. If `totalCount` were
+ * ever computed over the paged window rather than the whole predicate, that
+ * card would flip to "No transactions match this filter" and tell the user
+ * their filter is empty when it is not.
+ */
+describe("loadTransactions — a page past the end", () => {
+  it("returns no rows while still reporting the filter's real totalCount", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (let i = 0; i < 5; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, date: `2026-04-0${i + 1}` });
+    }
+
+    const past = loadTransactions(handle.db, { page: 4, pageSize: 2 });
+    expect(past.rows).toEqual([]);
+    expect(past.totalCount).toBe(5);
   });
 });

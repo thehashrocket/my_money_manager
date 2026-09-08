@@ -3,6 +3,7 @@ import {
   flatten,
   MAX_PAGE_SIZE,
   MAX_SEARCH_LENGTH,
+  resolveIsPending,
   searchParamsSchema,
 } from "./searchParams";
 
@@ -124,7 +125,7 @@ describe("searchParamsSchema — bounds and rejections", () => {
   });
 
   it("treats a whitespace-only amount as no filter rather than an invalid one", () => {
-    // `flatten` only maps "" to undefined; "   " reaches the transform intact.
+    // `flatten` only drops a "" field; "   " reaches the transform intact.
     const parsed = searchParamsSchema.safeParse(flatten({ amountMin: "   " }));
     expect(parsed.success && parsed.data.amountMin).toBe(undefined);
   });
@@ -138,17 +139,30 @@ describe("searchParamsSchema — bounds and rejections", () => {
   });
 
   it("the zero-result state's `?search=<key>` recovery link parses for a realistic key", () => {
-    // `EmptyState` offers `buildHref({ ...values, merchant: undefined,
-    // search: merchant })` when an exact merchant key matches nothing
-    // (rule 10). `merchant` is unbounded by design (D12) but `search` is
-    // capped, so the recovery only round-trips while keys stay under the cap —
-    // the longest real key today is 69 chars. Pinned so a future normalizer
-    // that produces longer keys fails here rather than 404ing the escape
-    // hatch.
+    // `EmptyState` offers a `?search=<merchant key>` recovery when an exact
+    // merchant key matches nothing (rule 10). `merchant` is unbounded by
+    // design (D12) but `search` is capped, so the recovery can only carry the
+    // whole key while keys stay under the cap. This documents the SHAPE of a
+    // long real key (a 64-char personal Zelle string) rather than pinning the
+    // normalizer — nothing here fails if the normalizer starts producing
+    // longer ones. That case is handled instead of asserted: `EmptyState`
+    // truncates to `MAX_SEARCH_LENGTH`, covered by the next test.
     const key = "INSTANT PAY ID: 000000000000000000 (TRANSFER TO SAVINGS) JANE DOE";
     expect(key.length).toBeLessThanOrEqual(MAX_SEARCH_LENGTH);
     const parsed = searchParamsSchema.safeParse(flatten({ search: key }));
     expect(parsed.success && parsed.data.search).toBe(key);
+  });
+
+  it("a key at the cap still parses, so the truncated recovery link cannot 404", () => {
+    // The recovery link builds `search: merchant.slice(0, MAX_SEARCH_LENGTH)`.
+    // This is the boundary that makes that slice sufficient rather than
+    // merely shorter: an over-long merchant key used to produce a recovery
+    // link the schema rejected, so the one action offered on the empty state
+    // 404'd — for exactly the stale-key case the state exists to rescue.
+    const overLong = "A".repeat(MAX_SEARCH_LENGTH * 2);
+    const truncated = overLong.slice(0, MAX_SEARCH_LENGTH);
+    const parsed = searchParamsSchema.safeParse(flatten({ search: truncated }));
+    expect(parsed.success && parsed.data.search).toBe(truncated);
   });
 });
 
@@ -157,10 +171,69 @@ describe("flatten", () => {
     expect(flatten({ merchant: ["A", "B"] }).merchant).toBe("A");
   });
 
-  it('maps "" to undefined so a blank GET-form field is "no filter"', () => {
-    expect(flatten({ search: "", dateFrom: "" })).toEqual({
-      search: undefined,
-      dateFrom: undefined,
-    });
+  it('drops a "" field so a blank GET-form input is "no filter"', () => {
+    expect(flatten({ search: "", dateFrom: "" })).toEqual({});
+  });
+
+  it("drops a blank key entirely rather than passing it on as undefined", () => {
+    // Load-bearing, and not the same thing as mapping it to `undefined`:
+    // `.strict()` raises `unrecognized_keys` for a key it does not know EVEN
+    // WHEN that key's value is `undefined`. While `flatten` retained the key,
+    // one empty foreign param 404'd a request in which every real filter had
+    // parsed fine.
+    expect(Object.hasOwn(flatten({ search: "" }), "search")).toBe(false);
+  });
+
+  it("drops a key whose value is undefined, not just one that is blank", () => {
+    // The guard is `value === "" || value === undefined`, and only the `""`
+    // half was pinned. Next's `searchParams` hands back `undefined` for a
+    // param it saw but could not resolve, and `Array.isArray(v) ? v[0] : v`
+    // yields `undefined` for a repeated-then-emptied param (`[]`). Both plant
+    // an own property whose value is `undefined` if the second half regresses
+    // — which `.strict()` rejects exactly as loudly as a real foreign value.
+    expect(Object.hasOwn(flatten({ ref: undefined }), "ref")).toBe(false);
+    expect(Object.hasOwn(flatten({ ref: [] }), "ref")).toBe(false);
+  });
+
+  it("an undefined foreign param does not 404 a page whose real filters are fine", () => {
+    const parsed = searchParamsSchema.safeParse(flatten({ merchant: "AMAZON", ref: undefined }));
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.merchant).toBe("AMAZON");
+  });
+
+  it("an empty foreign param does not 404 a page whose real filters are fine", () => {
+    // `?merchant=AMAZON&ref=` — a mail client, a link shortener or a browser
+    // extension will produce this; the user did nothing wrong.
+    const parsed = searchParamsSchema.safeParse(flatten({ merchant: "AMAZON", ref: "" }));
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.merchant).toBe("AMAZON");
+  });
+
+  it("a foreign param carrying a real value still 404s (.strict() stays strict)", () => {
+    expect(
+      searchParamsSchema.safeParse(flatten({ merchant: "AMAZON", ref: "x" })).success,
+    ).toBe(false);
+  });
+});
+
+describe("resolveIsPending", () => {
+  // Three-way, and the two boolean branches read backwards from the labels
+  // ("posted" → false). Inverting them shows pending rows under "Posted only"
+  // — a wrong result on a filter — and while this lived as a nested ternary
+  // inside `page.tsx` no test could reach it.
+  it('"posted" filters to NOT pending', () => {
+    expect(resolveIsPending("posted")).toBe(false);
+  });
+
+  it('"pending" filters to pending', () => {
+    expect(resolveIsPending("pending")).toBe(true);
+  });
+
+  it('"all" does not filter on pending at all', () => {
+    expect(resolveIsPending("all")).toBeUndefined();
+  });
+
+  it("an absent param does not filter on pending at all", () => {
+    expect(resolveIsPending(undefined)).toBeUndefined();
   });
 });

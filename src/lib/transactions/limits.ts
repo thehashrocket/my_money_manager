@@ -18,3 +18,16 @@
 /** Mirrors the filter form's own `maxLength` — imported there so the client-side limit and validation can't drift. */
 export const MAX_SEARCH_LENGTH = 200;
 export const MAX_PAGE_SIZE = 500;
+
+/**
+ * The page size when the URL doesn't name one.
+ *
+ * It lives here rather than in `page.tsx` because it is not the page's private
+ * business: `filterValuesToSearchParams` has to know it to decide whether a
+ * `pageSize` is worth emitting, and `_filter-bar.tsx` is on the client side of
+ * the zod boundary this module exists to straddle. It was previously a bare
+ * `50` re-derived at three call sites against an unexported const in a fourth;
+ * changing the default would have made all three wrong in both directions at
+ * once — silently emitting a redundant old default and dropping the new one.
+ */
+export const DEFAULT_PAGE_SIZE = 50;

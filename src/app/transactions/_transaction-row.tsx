@@ -8,6 +8,7 @@ import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionRowMenu } from "./_row-menu";
@@ -148,7 +149,7 @@ export function TransactionRowForm({
       /* D17 [HARD REJECTION] — was `rounded-md border p-3` inside a
          `ul.space-y-2`, i.e. a stack of card slabs rather than a list.
          DS49 already made this exact move on the dashboard.
-         The `opacity-50` dimming of already-filed rows is now conditional:
+         The `opacity-60` dimming of already-filed rows is now conditional:
          under a merchant filter the filed rows are the whole point (D3 shows
          all of a merchant's history because "49 already filed as Gas" is the
          answer), so dimming them would leave the one row you already knew
@@ -307,9 +308,34 @@ function PrimaryLabel({
     return (
       <span
         className="min-w-0 line-clamp-2 font-mono text-xs text-ink-1 sm:col-start-1 sm:row-start-1 sm:truncate"
-        title={memo || row.normalizedMerchant}
+        title={memo || row.normalizedMerchant || undefined}
       >
-        {memo || row.normalizedMerchant}
+        {/* A row can have BOTH a blank memo and an empty key — see below —
+            which rendered an empty span, i.e. a row with no label at all. */}
+        {memo || row.normalizedMerchant || <span className="text-ink-3">No merchant name</span>}
+      </span>
+    );
+  }
+  /**
+   * An empty key gets plain text, not a link.
+   *
+   * `filterValuesToSearchParams` refuses to emit `?merchant=`, which stops a
+   * bad URL but not a bad LINK: the `<Link>` still rendered, styled live and
+   * terracotta-underlined, and clicking it navigated to the current filters
+   * unchanged — a control promising "narrow to this merchant" that visibly
+   * does nothing. `merchantDrilldownHref` returns `null` on `/categorize` for
+   * exactly this case; the guard has to be re-made here because this path
+   * builds its href through `buildHref` instead.
+   *
+   * Reachable, not hypothetical: `parseCsv` passes the Memo column through
+   * unchecked, `normalizeMerchant("")` returns `""` (pinned in
+   * `normalize.test.ts`), and no write path rejects it — so one blank Memo
+   * cell produces a stored key of `""`.
+   */
+  if (!hasMerchantName(row.normalizedMerchant)) {
+    return (
+      <span className="min-w-0 truncate font-medium text-ink-3 sm:col-start-1 sm:row-start-1">
+        {NO_MERCHANT_NAME}
       </span>
     );
   }

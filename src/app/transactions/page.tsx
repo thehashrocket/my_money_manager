@@ -13,14 +13,14 @@ import {
 import { centsToDollarString } from "@/lib/money";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import {
+  DEFAULT_PAGE_SIZE,
   flatten,
+  resolveIsPending,
   searchParamsSchema,
   type RawSearchParams,
 } from "@/lib/transactions/searchParams";
 import { buildHref, FilterBar, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionsUi } from "./_transactions-ui";
-
-const DEFAULT_PAGE_SIZE = 50;
 
 /**
  * `/transactions` — filtered, paginated transaction list with inline
@@ -52,7 +52,21 @@ export default async function TransactionsPage({
   await connection();
   const raw = await searchParams;
   const parsed = searchParamsSchema.safeParse(flatten(raw));
-  if (!parsed.success) notFound();
+  if (!parsed.success) {
+    // Logged before the 404 because the amount fields are free text on a GET
+    // form, so this is reachable by typing `12.5o` — not only by tampering.
+    // The user gets Next's generic 404 either way; without this line the
+    // server keeps no record of WHICH param was rejected or why, which is
+    // exactly what you need to tell a typo apart from an in-app link builder
+    // emitting a param the schema refuses. That second case has shipped
+    // twice. Paths only, never values: a `search`/`merchant` value is ledger
+    // content and does not belong in a log.
+    console.error("[/transactions] rejected searchParams", {
+      keys: Object.keys(raw),
+      issues: parsed.error.issues.map((i) => ({ path: i.path, code: i.code })),
+    });
+    notFound();
+  }
 
   const {
     categoryId,
@@ -69,7 +83,7 @@ export default async function TransactionsPage({
   if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) notFound();
   if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) notFound();
 
-  const isPending = pending === "posted" ? false : pending === "pending" ? true : undefined;
+  const isPending = resolveIsPending(pending);
 
   const page = parsed.data.page ?? 1;
   const pageSize = parsed.data.pageSize ?? DEFAULT_PAGE_SIZE;
@@ -95,8 +109,9 @@ export default async function TransactionsPage({
 
   // D18 — only the merchant header renders a filing breakdown, so only the
   // merchant case pays for the extra aggregate. It shares `loadTransactions`'
-  // own predicates, so it can never describe a different row set than the
-  // list beneath it.
+  // own predicates, so the two can never disagree about which rows match.
+  // (Which rows match, not which instant they were read at — see
+  // `summarizeByCategory`'s docstring.)
   const categoryBreakdown =
     merchant !== undefined ? summarizeByCategory(db, predicateInput) : null;
 
@@ -129,6 +144,10 @@ export default async function TransactionsPage({
     pending,
     includeTransfers,
     merchant,
+    // The raw parsed value, not the `?? DEFAULT_PAGE_SIZE` one above: an
+    // absent `?pageSize=` must serialize back to absent, or every link this
+    // page builds would carry a redundant `pageSize=50`.
+    pageSize: parsed.data.pageSize,
   };
 
   return (
@@ -141,7 +160,7 @@ export default async function TransactionsPage({
         categoryBreakdown={categoryBreakdown}
       />
 
-      <FilterBar values={filterValues} leafCategories={leafCategories} accounts={accounts} pageSize={pageSize} />
+      <FilterBar values={filterValues} leafCategories={leafCategories} accounts={accounts} />
 
       <TransactionsUi
         rows={rows}
@@ -215,8 +234,14 @@ function FilterHeader({
         Transactions
       </h1>
       <FilterChips values={values} categoryName={categoryName} accountName={accountName} />
-      {merchant !== undefined ? (
-        <MerchantSummary totalCount={totalCount} breakdown={categoryBreakdown ?? []} />
+      {/* `categoryBreakdown !== null`, not `merchant !== undefined`: the two
+          conditions are equivalent today (both gate on the merchant filter in
+          `TransactionsPage`), but they were two separate expressions, and a
+          `?? []` here would have let a widened gate render the summary from
+          an invented empty breakdown — reporting 0 uncategorized and hiding
+          the "Categorize all N" action for a merchant that has plenty. */}
+      {categoryBreakdown !== null ? (
+        <MerchantSummary totalCount={totalCount} breakdown={categoryBreakdown} />
       ) : (
         <p className="text-sm text-ink-2">
           <strong className="text-foreground">{totalCount}</strong> row
@@ -230,11 +255,12 @@ function FilterHeader({
 /**
  * The active filters as a chip row (D18), replacing the joined sentence.
  *
- * Only the merchant chip is removable. That is a real consistency wrinkle —
- * eight other filters can still only be cleared by wiping all of them — and
- * it is deliberate rather than an oversight: the merchant filter is the only
- * one with no visible control anywhere on the page, so it is the only one you
- * could otherwise get stuck inside. The rest are tracked in TODOS.md.
+ * Only the merchant chip is removable, and that is deliberate rather than an
+ * oversight: the merchant filter is the only one with no visible control
+ * anywhere on the page, so it is the only one you could otherwise get stuck
+ * inside. The other eight each have their own field in `FilterBar` below —
+ * blank it and hit "Apply filters". Giving all nine a chip `×` is tracked in
+ * TODOS.md as a consistency improvement, not a fix for anything unreachable.
  */
 function FilterChips({
   values,
@@ -306,15 +332,18 @@ function FilterChips({
 }
 
 /**
- * `59 rows, 53 uncategorized · 49 filed as Gas`.
+ * `50 rows, 1 uncategorized · 49 filed as Gas`.
  *
  * The merchant name is not repeated here — `FilterChips` above renders it as
  * the removable chip, once.
  *
- * The filed counts are the whole point of D3=A: `COSTCO GAS` shows 1
- * uncategorized row on `/categorize` but 50 in total, 49 of them already
- * filed as Gas — which answers the question you clicked to ask before you
- * read a single row.
+ * The filed counts are the whole point of D3=A: that example is `COSTCO GAS`,
+ * which shows 1 uncategorized row on `/categorize` but 50 in total, 49 of
+ * them already filed as Gas — which answers the question you clicked to ask
+ * before you read a single row. (The example previously read `59 rows, 53
+ * uncategorized · 49 filed as Gas`, which is impossible: it spliced AMAZON's
+ * row and backlog counts onto COSTCO GAS's filing history, and 53 + 49
+ * overruns the 59 it claimed to break down.)
  */
 function MerchantSummary({
   totalCount,

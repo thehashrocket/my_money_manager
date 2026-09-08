@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { AmountParseError, parseAmountToCents } from "@/lib/money";
-import { MAX_PAGE_SIZE, MAX_SEARCH_LENGTH } from "./limits";
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH } from "./limits";
 
 /**
  * `/transactions`' URL contract, extracted out of `page.tsx` (D11).
@@ -22,7 +22,7 @@ import { MAX_PAGE_SIZE, MAX_SEARCH_LENGTH } from "./limits";
  * while the numbers themselves live in a zod-free module the client bundle can
  * reach without dragging the schema in — see `./limits`.
  */
-export { MAX_PAGE_SIZE, MAX_SEARCH_LENGTH };
+export { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH };
 
 const amountSchema = z
   .string()
@@ -89,12 +89,45 @@ export type RawSearchParams = Record<string, string | string[] | undefined>;
  * key being absent. Blank means "no filter" everywhere in this schema, so
  * `""` is normalized to `undefined` here rather than let a coerced field
  * (`z.coerce.number()`, `z.iso.date()`) reject it as invalid input.
+ *
+ * A blank key is DROPPED, not carried through as `undefined`. `.strict()`
+ * raises `unrecognized_keys` on a key it does not know even when that key's
+ * value is `undefined`, so retaining it meant one empty foreign param —
+ * `?merchant=AMAZON&ref=`, as a mail client, a link shortener or a browser
+ * extension will happily produce — hard-404'd a request in which every real
+ * filter had parsed fine. Dropping it here keeps `.strict()` aimed at what it
+ * is for: a param carrying a real value that this page does not understand.
  */
 export function flatten(raw: RawSearchParams): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
   for (const [k, v] of Object.entries(raw)) {
     const value = Array.isArray(v) ? v[0] : v;
-    out[k] = value === "" ? undefined : value;
+    if (value === "" || value === undefined) continue;
+    out[k] = value;
   }
   return out;
+}
+
+/**
+ * The `pending` filter's URL spelling → `loadTransactions`' `is_pending`
+ * predicate. `undefined` means "don't filter on it at all", which is what
+ * both `"all"` and an absent param mean.
+ *
+ * Lives here rather than inline in `page.tsx` because it is the last piece of
+ * the URL contract that was still stranded in the component file (D11): a
+ * three-way mapping written as a nested ternary, where inverting the two
+ * branches shows pending rows under "Posted only" — a wrong result, on a
+ * filter, with no test able to reach it.
+ */
+export function resolveIsPending(
+  pending: "posted" | "pending" | "all" | undefined,
+): boolean | undefined {
+  switch (pending) {
+    case "posted":
+      return false;
+    case "pending":
+      return true;
+    default:
+      return undefined;
+  }
 }

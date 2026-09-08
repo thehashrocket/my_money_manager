@@ -50,9 +50,13 @@ export type MerchantGroup = {
  * Returns groups sorted by count DESC, then merchant name ASC — biggest wins
  * surface first per the upstream plan.
  *
- * A second lightweight query fetches exact-match rules for the set of
- * merchants in play; at 30–60 groups this is negligible and keeps the grouping
- * query simple. See test plan — pre-fetch optimization is W5 scope.
+ * Three lightweight follow-up queries fetch, for the set of merchants in
+ * play: exact-match rules, up to three distinct sample memos each, and each
+ * key's total row count including already-filed rows. All three are
+ * `inArray()` over the group list rather than per-group round trips, so the
+ * cost is four queries total regardless of how many groups there are — which
+ * matters more than it did when this said "a second query at 30–60 groups",
+ * since the real ledger currently carries several times that many.
  */
 export function loadMerchantGroups(db: Db): MerchantGroup[] {
   const rows = db
@@ -110,6 +114,14 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
     totalCents: Number(r.total),
     existingRule: ruleByMerchant.get(r.normalizedMerchant) ?? null,
     sampleMemos: sampleMemosByMerchant.get(r.normalizedMerchant) ?? [],
+    // The `??` is unreachable, not a meaningful default: every merchant in
+    // `rows` has at least one uncategorized non-transfer row, and
+    // `loadTotalRowCounts` counts over the strictly weaker predicate (it
+    // drops the `categoryId IS NULL` clause), so the map always has an entry.
+    // Kept as a total-function guard rather than a `!`, but if it ever did
+    // fire it would understate the number the drilldown link promises — "See
+    // all 3 transactions" for a key with 50 — so it must not be read as a
+    // sensible fallback.
     totalRowCount:
       totalRowCountByMerchant.get(r.normalizedMerchant) ?? Number(r.count),
   }));

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { loadMerchantGroups } from "./loadMerchantGroups";
+import { loadTransactions, summarizeByCategory } from "./loadTransactions";
 
 let handle: TestDbHandle;
 
@@ -368,5 +370,179 @@ describe("loadMerchantGroups — sample memo edges", () => {
 
     const [group] = loadMerchantGroups(handle.db);
     expect(group.sampleMemos).toEqual(["SWEEP OUT 001"]);
+  });
+});
+
+/**
+ * `totalRowCount` and the destination's own count are two INDEPENDENT
+ * queries — `loadTotalRowCounts` here, `buildPredicates` in
+ * `loadTransactions` — and the `/categorize` row promises they agree:
+ * "See all N transactions →" is a claim about what the drilldown will show.
+ * Nothing but this test holds them together, so a predicate added to one and
+ * not the other would make the link lie rather than fail.
+ */
+describe("loadMerchantGroups — totalRowCount agrees with the drilldown it links to", () => {
+  it("matches loadTransactions' totalCount for the same key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    for (let i = 0; i < 4; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+    // A different key, to prove the counts are keyed and not just totals.
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000 });
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "COSTCO GAS",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    const { totalCount } = loadTransactions(handle.db, {
+      merchant: "COSTCO GAS",
+      page: 1,
+      pageSize: 50,
+    });
+    expect(group.totalRowCount).toBe(totalCount);
+    expect(totalCount).toBe(5);
+  });
+
+  it("still agrees when a transfer-paired row is present, which both must exclude", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: -2500,
+    });
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -100 });
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "ZELLE",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    const { totalCount } = loadTransactions(handle.db, {
+      merchant: "ZELLE",
+      page: 1,
+      pageSize: 50,
+    });
+    expect(group.totalRowCount).toBe(totalCount);
+    expect(totalCount).toBe(1);
+  });
+});
+
+/**
+ * The OTHER half of the same cross-surface promise, and the half nothing held.
+ *
+ * A `/categorize` row states two numbers about one key: `count`, its
+ * uncategorized backlog ("AMAZON, 53 rows"), and `totalRowCount`, what the
+ * drilldown opens ("See all 59 transactions →"). The describe above pins the
+ * second against `loadTransactions`. The first has a destination too: the
+ * merchant header on `/transactions` reads its "N uncategorized" and its
+ * "Categorize all N →" action straight off `summarizeByCategory`'s NULL
+ * bucket — a third, independently built WHERE clause.
+ *
+ * So the same defect class applies: a predicate added to `loadMerchantGroups`
+ * and not to `buildPredicates` (or the reverse) makes one surface promise a
+ * backlog the other does not show, with both numbers looking entirely
+ * plausible. That is precisely what D3=A traded away the simpler design for,
+ * so it is worth a test rather than a comment.
+ */
+describe("loadMerchantGroups — count agrees with the drilldown header's backlog", () => {
+  function backlogFromHeader(merchant: string): number {
+    return (
+      summarizeByCategory(handle.db, { merchant }).find((r) => r.categoryId === null)?.count ?? 0
+    );
+  }
+
+  it("the row's uncategorized count is the header's uncategorized count", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    for (let i = 0; i < 3; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    }
+    for (let i = 0; i < 4; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "COSTCO GAS",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    expect(group.count).toBe(backlogFromHeader("COSTCO GAS"));
+    expect(group.count).toBe(3);
+    // And the two numbers the row shows are genuinely different facts (D3) —
+    // asserting only their agreement would pass if both collapsed to one.
+    expect(group.totalRowCount).toBe(7);
+  });
+
+  it("still agrees when a transfer-paired row carries the same key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: -2500,
+    });
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -100 });
+
+    const group = loadMerchantGroups(handle.db).find((g) => g.normalizedMerchant === "ZELLE");
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    expect(group.count).toBe(backlogFromHeader("ZELLE"));
+    expect(group.count).toBe(1);
   });
 });

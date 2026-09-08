@@ -10,7 +10,13 @@ import { formatCents } from "@/lib/money";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
-import { buildHref, filterValuesToSearchParams, type TransactionsFilterValues } from "./_filter-bar";
+import {
+  buildHref,
+  filterValuesToSearchParams,
+  hasNonMerchantFilters,
+  merchantSearchRecoveryHref,
+  type TransactionsFilterValues,
+} from "./_filter-bar";
 import {
   TransactionColumnHeaders,
   TransactionRowForm,
@@ -240,11 +246,35 @@ function EmptyState({
 
   const { merchant } = searchParams;
   if (merchant !== undefined) {
+    /**
+     * The diagnosis below ("that exact key matches nothing") is only true when
+     * merchant is the ONLY thing narrowing the list. `buildPredicates` ANDs it
+     * with eight other filters, so `totalCount === 0` on its own says nothing
+     * about whether the key matches: arrive from `/categorize` on
+     * `?merchant=AMAZON`, then set a date range with no AMAZON rows in it —
+     * two clicks — and this card would assert a false fact about the ledger
+     * and blame a rule-10 backfill for it.
+     *
+     * The recovery links have the same problem in a worse place. Both are
+     * built by dropping `merchant` and keeping everything else, so when
+     * another filter is what emptied the list, the `?search=` escape hatch —
+     * which CLAUDE.md rule 10 names as THE mitigation for the one-way
+     * `?merchant=` coupling — lands on another empty page. The user is told
+     * the link is stale, clicks the fix, and nothing changes.
+     *
+     * So: clear every other filter as part of the recovery, and only claim
+     * the key is at fault when there is nothing else it could be.
+     */
+    const otherFiltersActive = hasNonMerchantFilters(searchParams);
     return (
       <StateCard
         variant="empty"
         title={`No transactions for “${merchant}”.`}
-        description="That exact merchant key matches nothing. A merchant backfill can rewrite these keys, so a saved link can go stale."
+        description={
+          otherFiltersActive
+            ? "No rows match this merchant AND the other active filters. The merchant key itself may still be fine — clearing the rest is the quickest way to tell."
+            : "That exact merchant key matches nothing. A merchant backfill can rewrite these keys, so a saved link can go stale."
+        }
         primaryAction={
           <Link
             href={buildHref({ ...searchParams, merchant: undefined })}
@@ -255,7 +285,9 @@ function EmptyState({
         }
         secondaryAction={
           <Link
-            href={buildHref({ ...searchParams, merchant: undefined, search: merchant })}
+            /* Every other filter dropped and the key truncated to the cap —
+               the rationale for both, and the tests, live on the builder. */
+            href={merchantSearchRecoveryHref(merchant, searchParams.pageSize)}
             className={`inline-flex min-h-11 items-center text-sm font-medium text-terracotta underline underline-offset-4 hover:no-underline ${FOCUS_RING}`}
           >
             Search for “{merchant}” instead →
@@ -303,8 +335,10 @@ function Pagination({
 }) {
   if (totalPages <= 1) return null;
 
+  // `pageSize` rides along inside `filterValuesToSearchParams` now, so this
+  // no longer re-derives the `!== 50` rule against a bare literal that had to
+  // stay in step with three other copies of it.
   const baseParams = filterValuesToSearchParams(searchParams);
-  if (pageSize !== 50) baseParams.set("pageSize", String(pageSize));
 
   const hrefFor = (p: number) => {
     const params = new URLSearchParams(baseParams);

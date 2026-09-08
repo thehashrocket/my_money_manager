@@ -38,8 +38,12 @@ export type FilterPredicateInput = {
    * D2 — EXACT `normalized_merchant`, the `/categorize` drilldown's filter.
    *
    * Deliberately not `search`: that one is `LIKE %x%` across three columns,
-   * and on 11 of 191 real merchant groups it returns a superset (`AMAZON`
-   * 53 rows → 71, by also matching `AMAZON PRIME`). A drilldown that quietly
+   * and on 11 of 181 real merchant groups it returns a superset (`AMAZON`
+   * 59 rows → 71, by also matching `AMAZON PRIME`). The 59 is what this exact
+   * filter returns for the key — ALL of its rows, filed included, which is
+   * what D3 opens; 53 is the group's uncategorized subset shown on
+   * `/categorize`, and comparing the superset against that instead overstated
+   * the gap. A drilldown that quietly
    * shows you more rows than the group you clicked is the silent-wrong-result
    * class this codebase's rules exist to prevent — so this is `eq()`, which
    * is also index-backed (`transactions_merchant_idx`).
@@ -244,9 +248,18 @@ export type CategoryBreakdownRow = {
  * ("49 of these are already filed as Gas"). Without this aggregate the header
  * can only report a total, which is the number the user could already see.
  *
- * Shares `buildPredicates` with the list itself, so the breakdown can never
- * describe a different row set than the one rendered beneath it. Ignores
- * paging on purpose — it summarises the whole filtered set, not page 1.
+ * Shares `buildPredicates` with the list itself, so the two can never disagree
+ * about WHICH ROWS MATCH — the failure this was extracted to make impossible
+ * was a header describing one filter set while the list applied another.
+ *
+ * It is not a snapshot guarantee, and the difference is worth being precise
+ * about: `loadTransactions` wraps its count and its rows in one
+ * `db.transaction`, while this is a separate call from the page. A categorize
+ * action committing between the two (a second tab, an in-flight Undo) can
+ * still leave the header a beat behind the list. The predicates cannot
+ * diverge; the read instants can.
+ *
+ * Ignores paging on purpose — it summarises the whole filtered set, not page 1.
  */
 export function summarizeByCategory(
   db: Db,
