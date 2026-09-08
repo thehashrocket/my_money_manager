@@ -16,6 +16,7 @@ import {
 import { formatCents } from "./money";
 import { todayIso } from "./now";
 import { findTransferPairs, type PairCandidate } from "./transferPair";
+import { loadRejectedPairs, pairKey } from "./transferRejections";
 import { createSnapshot, pruneSnapshots, type SnapshotResult } from "./snapshot";
 import { dbPath, snapshotDir } from "./paths";
 
@@ -674,7 +675,6 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
       amountCents: schema.transactions.amountCents,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
       rawMemo: schema.transactions.rawMemo,
-      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -686,17 +686,22 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
     )
     .all();
 
-  const candidates: (PairCandidate & { rowId: number; transferRejectedPartnerId: number | null })[] =
-    sameDayUnpaired.map((r) => ({
-      id: r.id,
-      rowId: r.id,
-      accountId: r.accountId,
-      date: r.date,
-      amountCents: r.amountCents,
-      bankTransactionNumber: r.bankTransactionNumber ?? "",
-      rawMemo: r.rawMemo,
-      transferRejectedPartnerId: r.transferRejectedPartnerId,
-    }));
+  const candidates: (PairCandidate & { rowId: number })[] = sameDayUnpaired.map((r) => ({
+    id: r.id,
+    rowId: r.id,
+    accountId: r.accountId,
+    date: r.date,
+    amountCents: r.amountCents,
+    bankTransactionNumber: r.bankTransactionNumber ?? "",
+    rawMemo: r.rawMemo,
+  }));
+
+  // One query for the whole same-day scan rather than one per candidate pair —
+  // see `loadRejectedPairs`' docstring.
+  const rejected = loadRejectedPairs(
+    db,
+    candidates.map((c) => c.rowId),
+  );
 
   // A row manually unlinked via "Not a transfer" must never be silently
   // re-linked to the SAME partner it was rejected against — see
@@ -707,12 +712,10 @@ export function linkTransferPairs(seedRowIds: number[], db: Db = defaultDb): num
   // candidacy either — the row itself stays eligible to match something
   // else, only this exact combination is blocked. A transaction-scoped
   // candidacy filter was tried first and reverted — see the schema comment
-  // on `transferRejectedPartnerId`. Found by Red Team, then corrected per
+  // on `transferPairRejections`. Found by Red Team, then corrected per
   // Codex structured review, both during `/ship` 2026-09-04.
-  const pairs = findTransferPairs(
-    candidates,
-    undefined,
-    (a, b) => a.transferRejectedPartnerId === b.rowId || b.transferRejectedPartnerId === a.rowId,
+  const pairs = findTransferPairs(candidates, undefined, (a, b) =>
+    rejected.has(pairKey(a.rowId, b.rowId)),
   );
 
   // One transaction, not two auto-commits per pair: each bare .run() is a

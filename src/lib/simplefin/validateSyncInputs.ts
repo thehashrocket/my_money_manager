@@ -28,6 +28,22 @@ export const resolveTransferInputSchema = z
     message: "a transfer pair needs two different transactions",
   });
 
+/**
+ * The same-account reversal queue's form: the two ids, plus which button was
+ * pressed.
+ *
+ * `intent` lives in the schema rather than being read raw off `FormData`
+ * because it is the discriminant that chooses between "link these two" (an
+ * undoable write) and "record a durable never-ask-again" — the one field with
+ * an opposite effect on money, and so the last one that should skip
+ * validation. `.default("link")` encodes the deliberate fail-safe direction:
+ * a missing or tampered value takes the path with the stricter guards, which
+ * is also the reversible one.
+ */
+export const resolveReversalInputSchema = resolveTransferInputSchema.and(
+  z.object({ intent: z.enum(["link", "reject"]).default("link") }),
+);
+
 /** Unlink takes either leg — the pair is cleared from whichever id is given. */
 export const unlinkTransferInputSchema = z.object({
   id: z.coerce.number().int().positive(),
@@ -36,6 +52,7 @@ export const unlinkTransferInputSchema = z.object({
 export type LinkAccountInput = z.infer<typeof linkAccountInputSchema>;
 export type UndoSyncInput = z.infer<typeof undoSyncInputSchema>;
 export type ResolveTransferInput = z.infer<typeof resolveTransferInputSchema>;
+export type ResolveReversalInput = z.infer<typeof resolveReversalInputSchema>;
 export type UnlinkTransferInput = z.infer<typeof unlinkTransferInputSchema>;
 
 type Validation<T> = { success: true; data: T } | { success: false; error: z.ZodError };
@@ -50,6 +67,11 @@ export function validateResolveTransferInput(
   i: unknown,
 ): Validation<ResolveTransferInput> {
   return resolveTransferInputSchema.safeParse(i);
+}
+export function validateResolveReversalInput(
+  i: unknown,
+): Validation<ResolveReversalInput> {
+  return resolveReversalInputSchema.safeParse(i);
 }
 export function validateUnlinkTransferInput(
   i: unknown,

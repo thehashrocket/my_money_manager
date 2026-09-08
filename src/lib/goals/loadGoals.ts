@@ -67,6 +67,31 @@ export function loadGoals(db: Db): GoalsView {
 
   const goalIds = goalCategories.map((g) => g.id);
 
+  // DELIBERATELY still `amount_cents < 0`, and NOT the signed sum the sign
+  // convention (2026-09-08) gave `computeMtdSpent` and `loadMonthlyTrends`.
+  // Converting this one was tried during that change and reverted, because it
+  // is not the same kind of quantity and the conversion silently changes the
+  // arithmetic above it:
+  //
+  //   progressCents = contributed − withdrawn
+  //
+  // `contributed` is PLANNED allocations (`budget_periods.allocated_cents`).
+  // Make `withdrawn` a net figure and a deposit into a fund category turns it
+  // negative, so the deposit is ADDED to progress — on top of the allocation
+  // that already counted the same intention. A fund allocated $500 that then
+  // receives the $500 would read ~$1,000 saved.
+  //
+  // Whether that is reachable depends on how money enters a fund, which is
+  // itself the unresolved half of TODOS.md's PR3 item ("progress is money
+  // planned, not money moved"). In today's model it arrives as a transfer, and
+  // transfers are paired out by the `transfer_pair_id IS NULL` filter, so the
+  // sum would be negatives-only anyway and the change would be a no-op — but
+  // that is an assumption about a code path with ZERO live exercise (there are
+  // no `kind='fund'` categories and no `target_cents` on the ledger), and a
+  // dead path is the worst place to introduce arithmetic nobody can observe.
+  //
+  // Settle the meaning of progress first; the sign convention here follows
+  // from that answer rather than the other way round.
   const withdrawalRows = db
     .select({
       categoryId: schema.transactions.categoryId,

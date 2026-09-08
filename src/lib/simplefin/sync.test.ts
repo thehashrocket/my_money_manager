@@ -6,14 +6,31 @@ import type { SimpleFinResponse, SimpleFinTransaction } from "./types";
 import {
   syncSimpleFin,
   linkTransferPairManually,
+  rejectTransferPairManually,
   unlinkTransferPair,
   findLinkedTransferPairs,
   linkTransfersByBucket,
   findAmbiguousTransfers,
+  findSameAccountReversalCandidates,
   refreshLiabilityBalancesOnly,
 } from "./sync";
 import { setAccountLink } from "./link";
+import {
+  loadRejectedPairs,
+  pairKey,
+  recordPairRejection,
+} from "@/lib/transferRejections";
 import { mapTransaction } from "./mapTransaction";
+
+/**
+ * Reads the rejection store the way production does, rather than poking at a
+ * column. Rejections used to live on `transactions` as a single
+ * self-referencing id per row; asserting through `loadRejectedPairs` means
+ * these tests exercise the real reader and cannot drift from it.
+ */
+function isRejected(handle: TestDbHandle, aId: number, bId: number): boolean {
+  return loadRejectedPairs(handle.db, [aId, bId]).has(pairKey(aId, bId));
+}
 
 /**
  * Exercises the dedup and manual-pairing logic against a real :memory: schema.
@@ -537,37 +554,23 @@ describe("unlinkTransferPair / findLinkedTransferPairs", () => {
   // "never evaluated" from "user explicitly rejected this match" apart, so
   // every automatic matcher would silently re-link a "Not a transfer"
   // correction the moment an unrelated future row landed on the same date.
-  // Pair-scoped (transferRejectedPartnerId), not transaction-scoped — a
-  // transaction-scoped version was tried first and reverted per Codex
-  // structured review (see the schema comment).
-  it("stamps transferRejectedPartnerId on both legs, pointed at each other", () => {
+  // Pair-scoped, not transaction-scoped — a transaction-scoped version was
+  // tried first and reverted per Codex structured review (see the
+  // `transferPairRejections` schema comment).
+  it("records the unlinked pair in transfer_pair_rejections", () => {
     const { a, b } = seedLinkedPair();
     unlinkTransferPair(a.id, handle.db);
-    const rows = handle.db
-      .select()
-      .from(schema.transactions)
-      .where(eq(schema.transactions.accountId, a.accountId))
-      .all();
-    const rowA = rows.find((r) => r.id === a.id)!;
-    expect(rowA.transferRejectedPartnerId).toBe(b.id);
-    const rowB = handle.db
-      .select()
-      .from(schema.transactions)
-      .where(eq(schema.transactions.id, b.id))
-      .get()!;
-    expect(rowB.transferRejectedPartnerId).toBe(a.id);
+    expect(isRejected(handle, a.id, b.id)).toBe(true);
+    // Stored unordered: one row answers the question from either direction,
+    // which is what removed the old `a->b OR b->a` disjunction.
+    expect(isRejected(handle, b.id, a.id)).toBe(true);
   });
 
-  it("manual re-link clears transferRejectedPartnerId on both legs — explicit human consent overrides an earlier rejection", () => {
+  it("manual re-link forgets that rejection — explicit human consent overrides an earlier one", () => {
     const { a, b } = seedLinkedPair();
     unlinkTransferPair(a.id, handle.db);
     linkTransferPairManually(a.id, b.id, handle.db);
-    const rows = handle.db
-      .select()
-      .from(schema.transactions)
-      .where(inArray(schema.transactions.id, [a.id, b.id]))
-      .all();
-    expect(rows.every((r) => r.transferRejectedPartnerId === null)).toBe(true);
+    expect(isRejected(handle, a.id, b.id)).toBe(false);
   });
 
   // Codex structured review (`/ship` 2026-09-04): an unconditional clear on
@@ -595,17 +598,17 @@ describe("unlinkTransferPair / findLinkedTransferPairs", () => {
       .get()!;
     // A is paired with C now, but still remembers it rejected B specifically.
     expect(rowA.transferPairId).toBe(c.id);
-    expect(rowA.transferRejectedPartnerId).toBe(b.id);
+    expect(isRejected(handle, a.id, b.id)).toBe(true);
   });
 });
 
 /**
- * Guards the fix for the gap `unlinkTransferPair`'s docstring names: without
- * `transferRejectedPartnerId`, every automatic matcher treats a rejected
- * pair exactly like a never-evaluated one, so the SAME rejected combination
- * can silently resurface once an unrelated row shares its date.
+ * Guards the fix for the gap `unlinkTransferPair`'s docstring names: without a
+ * rejection store, every automatic matcher treats a rejected pair exactly like
+ * a never-evaluated one, so the SAME rejected combination can silently
+ * resurface once an unrelated row shares its date.
  */
-describe("transferRejectedPartnerId — automatic matchers never resurface a rejected pair", () => {
+describe("transfer_pair_rejections — automatic matchers never resurface a rejected pair", () => {
   it("linkTransfersByBucket does not re-link a rejected pair when a later unrelated row shares its date", () => {
     const checking = seedAccount({ name: "Checking" });
     const savings = seedAccount({ name: "Savings" });
@@ -689,16 +692,22 @@ describe("transferRejectedPartnerId — automatic matchers never resurface a rej
     expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
   });
 
-  // isRejectedPair is `a.transferRejectedPartnerId === b.id || b.
-  // transferRejectedPartnerId === a.id`. unlinkTransferPair always writes
-  // both legs symmetrically, so every other test here has both halves of
-  // that OR true at once and can't tell it apart from either half alone.
-  // Inside matchTransfers' backtracking, `a` is always the POSITIVE-signed
-  // candidate and `b` the NEGATIVE-signed one (see assignAvoidingRejections),
-  // so these two tests seed the marker on only one sign's leg directly
-  // (bypassing unlinkTransferPair) to prove each half of the OR is
-  // independently load-bearing.
-  it("does not re-link when only the POSITIVE leg's rejection marker points at its partner", () => {
+  // The rejection used to be a self-referencing id on EACH leg, checked as
+  // `a.marker === b.id || b.marker === a.id`. That disjunction existed because
+  // the relation was stored twice and the two copies could disagree, so two
+  // tests were needed here — one seeding only the positive leg's marker, one
+  // only the negative leg's — to prove each half of the OR was load-bearing.
+  //
+  // A rejection is now ONE row keyed on the unordered pair, so the two copies
+  // cannot disagree and there is no OR left to be asymmetric. What still needs
+  // pinning is the property that replaced it: recording a rejection must be
+  // insensitive to the order the two ids arrive in, because `matchTransfers`'
+  // backtracking always presents the positive-signed candidate first while the
+  // review queue's form can submit either way round.
+  it.each([
+    ["positive leg first", true],
+    ["negative leg first", false],
+  ])("does not re-link a rejected pair, recorded %s", (_label, positiveFirst) => {
     const checking = seedAccount({ name: "Checking" });
     const savings = seedAccount({ name: "Savings" });
     const batch = seedBatch("simplefin");
@@ -716,45 +725,11 @@ describe("transferRejectedPartnerId — automatic matchers never resurface a rej
       rawMemo: "TRANSFER FROM CHECKING",
       date: "2026-09-07",
     });
-    handle.db
-      .update(schema.transactions)
-      .set({ transferRejectedPartnerId: negativeLeg.id })
-      .where(eq(schema.transactions.id, positiveLeg.id))
-      .run();
-
-    const { pairsLinked } = linkTransfersByBucket("2026-01-01", handle.db);
-    expect(pairsLinked).toBe(0);
-    const rows = handle.db
-      .select()
-      .from(schema.transactions)
-      .where(inArray(schema.transactions.id, [negativeLeg.id, positiveLeg.id]))
-      .all();
-    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
-  });
-
-  it("does not re-link when only the NEGATIVE leg's rejection marker points at its partner", () => {
-    const checking = seedAccount({ name: "Checking" });
-    const savings = seedAccount({ name: "Savings" });
-    const batch = seedBatch("simplefin");
-    const negativeLeg = seedTxn({
-      accountId: checking.id,
-      batchId: batch.id,
-      amountCents: -3000,
-      rawMemo: "TRANSFER TO SAVINGS",
-      date: "2026-09-07",
-    });
-    const positiveLeg = seedTxn({
-      accountId: savings.id,
-      batchId: batch.id,
-      amountCents: 3000,
-      rawMemo: "TRANSFER FROM CHECKING",
-      date: "2026-09-07",
-    });
-    handle.db
-      .update(schema.transactions)
-      .set({ transferRejectedPartnerId: positiveLeg.id })
-      .where(eq(schema.transactions.id, negativeLeg.id))
-      .run();
+    if (positiveFirst) {
+      recordPairRejection(handle.db, positiveLeg.id, negativeLeg.id);
+    } else {
+      recordPairRejection(handle.db, negativeLeg.id, positiveLeg.id);
+    }
 
     const { pairsLinked } = linkTransfersByBucket("2026-01-01", handle.db);
     expect(pairsLinked).toBe(0);
@@ -1992,5 +1967,501 @@ describe("refreshLiabilityBalancesOnly — scoping and warning placement", () =>
       expect(second.updates).toHaveLength(0);
       expect(second.warnings).toEqual([]);
     }
+  });
+});
+
+describe("linkTransferPairManually — same-account reversals (opt-in only)", () => {
+  it("still refuses a same-account pair by default, so every existing caller keeps the old guard", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 7F254",
+    });
+    const back = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 64590 reverse",
+    });
+
+    expect(() => linkTransferPairManually(out.id, back.id, handle.db)).toThrow(
+      /two different accounts/,
+    );
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  it("links a same-day same-account reversal when the review queue opts in", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 7F254",
+    });
+    const back = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 64590 reverse",
+    });
+
+    linkTransferPairManually(out.id, back.id, handle.db, {
+      allowSameAccountReversal: true,
+    });
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    const a = rows.find((r) => r.id === out.id)!;
+    const b = rows.find((r) => r.id === back.id)!;
+    expect(a.transferPairId).toBe(back.id);
+    expect(b.transferPairId).toBe(out.id);
+  });
+
+  it("refuses a same-account pair on different dates even with the opt-in", () => {
+    // The opt-in authorizes the CLASS, not any two rows. Without this, the flag
+    // would accept two opposite-sign rows of equal size anywhere in one
+    // account's history — a shape no reviewer is ever shown.
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "CHARGE",
+      date: "2026-09-01",
+    });
+    const back = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 25000,
+      rawMemo: "UNRELATED CREDIT",
+      date: "2026-09-02",
+    });
+
+    expect(() =>
+      linkTransferPairManually(out.id, back.id, handle.db, {
+        allowSameAccountReversal: true,
+      }),
+    ).toThrow(/same-day/);
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  it("still enforces opposite signs and equal amounts under the opt-in", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "CHARGE",
+    });
+    const sameSign = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "ANOTHER CHARGE",
+    });
+    const wrongAmount = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 24000,
+      rawMemo: "CLOSE BUT NOT EQUAL",
+    });
+
+    expect(() =>
+      linkTransferPairManually(out.id, sameSign.id, handle.db, {
+        allowSameAccountReversal: true,
+      }),
+    ).toThrow(/opposite signs/);
+    expect(() =>
+      linkTransferPairManually(out.id, wrongAmount.id, handle.db, {
+        allowSameAccountReversal: true,
+      }),
+    ).toThrow(/equal absolute amounts/);
+  });
+
+  it("rejectTransferPairManually records a rejection WITHOUT linking first", () => {
+    // The gap this closes: `unlinkTransferPair` returns early on an unpaired
+    // row, so the only route to a durable rejection used to be create-then-undo
+    // — which hides both rows from every spending surface in between.
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const charge = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: -399, rawMemo: "APPLE.COM/BILL" });
+    const refund = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 399, rawMemo: "ATM Surcharge fees refund" });
+
+    rejectTransferPairManually(refund.id, charge.id, handle.db);
+
+    const after = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [charge.id, refund.id]))
+      .all();
+    // Rejection recorded...
+    expect(isRejected(handle, charge.id, refund.id)).toBe(true);
+    // ...and NOTHING was ever linked, so neither row left spending.
+    expect(after.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  it("a rejection recorded this way actually removes the bucket from the queue", () => {
+    // End-to-end: the module docstring promises a one-vs-one bucket "disappears
+    // for good the first time the user says not a transfer". Until the reject
+    // path existed, that promise was unreachable from the UI.
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const charge = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: -1175, rawMemo: "AMAZON MKTPL" });
+    const refund = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 1175, rawMemo: "AMAZON MKTPLACE PMT" });
+
+    expect(findSameAccountReversalCandidates("2026-01-01", handle.db)).toHaveLength(1);
+    rejectTransferPairManually(refund.id, charge.id, handle.db);
+    expect(findSameAccountReversalCandidates("2026-01-01", handle.db)).toEqual([]);
+  });
+
+  it("refuses to reject a pair that is already linked — that is unlink's job", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const a = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: -1000, rawMemo: "OUT" });
+    const b = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 1000, rawMemo: "BACK" });
+    linkTransferPairManually(b.id, a.id, handle.db, { allowSameAccountReversal: true });
+
+    expect(() => rejectTransferPairManually(b.id, a.id, handle.db)).toThrow(/already paired/);
+  });
+
+  it("refuses to pair a HAND-ENTERED row as a reversal, even with the opt-in", () => {
+    // The queue never offers a manual row (findSameAccountReversalCandidates
+    // filters NOT_MANUAL), but the opt-in is carried by WHICH ACTION RAN, not by
+    // proof the ids came from the queue — so the linker re-asserts it. Flagged
+    // by Codex adversarial review during /ship 2026-09-08: pairing a manual row
+    // hides it from every spend surface, and `unmarkCardPayment` refuses a pair
+    // it did not create, so there would be no ordinary way to undo it.
+    const card = seedAccount({ name: "Visa" });
+    const batch = seedBatch("csv");
+    const manual = seedTxn({
+      accountId: card.id,
+      batchId: batch.id,
+      amountCents: -5000,
+      rawMemo: "HAND ENTERED CHARGE",
+      source: "manual",
+    });
+    const credit = seedTxn({
+      accountId: card.id,
+      batchId: batch.id,
+      amountCents: 5000,
+      rawMemo: "PROVISIONAL CREDIT",
+    });
+
+    expect(() =>
+      linkTransferPairManually(credit.id, manual.id, handle.db, {
+        allowSameAccountReversal: true,
+      }),
+    ).toThrow(/hand-entered/i);
+
+    // Neither leg moved.
+    const after = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [manual.id, credit.id]))
+      .all();
+    expect(after.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
+  it("records a rejection that survives, so a dismissed reversal stops resurfacing", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const charge = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -1175,
+      rawMemo: "AMAZON MKTPL*5Q7K15",
+    });
+    const refund = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 1175,
+      rawMemo: "AMAZON MKTPLACE PMT",
+    });
+
+    linkTransferPairManually(charge.id, refund.id, handle.db, {
+      allowSameAccountReversal: true,
+    });
+    unlinkTransferPair(charge.id, handle.db);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    const a = rows.find((r) => r.id === charge.id)!;
+    const b = rows.find((r) => r.id === refund.id)!;
+    expect(a.transferPairId).toBeNull();
+    expect(b.transferPairId).toBeNull();
+    // Pair-scoped rejection — this is what makes findSameAccountReversals drop
+    // the bucket on the next render.
+    expect(isRejected(handle, charge.id, refund.id)).toBe(true);
+  });
+});
+
+/**
+ * The DB half of the same-account reversal queue. `sameAccountReversals.test.ts`
+ * covers the bucketing argument against synthetic rows; this covers the four
+ * things the QUERY decides — the date window, the already-paired filter,
+ * NOT_MANUAL, and the rejection-predicate wiring — none of which that file can see.
+ */
+/**
+ * The two defects that made rejections a TABLE instead of a column.
+ *
+ * Both were live on the real ledger and both fail silently — a wrong number,
+ * not an error — so each one is pinned end-to-end through the real store
+ * rather than against the pure bucketing function, which cannot see either.
+ */
+describe("rejection storage — the two failures a single column could not avoid", () => {
+  /** N positives and M negatives, one account, one date, one magnitude. */
+  function seedReversalBucket(positives: number, negatives: number) {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const pos = Array.from({ length: positives }, (_, i) =>
+      seedTxn({
+        accountId: savings.id,
+        batchId: batch.id,
+        amountCents: 1000,
+        rawMemo: `CREDIT ${i}`,
+        date: "2026-09-04",
+      }),
+    );
+    const neg = Array.from({ length: negatives }, (_, i) =>
+      seedTxn({
+        accountId: savings.id,
+        batchId: batch.id,
+        amountCents: -1000,
+        rawMemo: `CHARGE ${i}`,
+        date: "2026-09-04",
+      }),
+    );
+    return { pos, neg };
+  }
+
+  // NON-CONVERGENCE. `findSameAccountReversals` drops a bucket only once EVERY
+  // positive/negative combination is rejected. While a rejection was one id per
+  // row, P*N combinations competed for P+N slots and each click destroyed the
+  // two markers already on those rows — so for P>=2 AND N>=2 the all-rejected
+  // state was UNREACHABLE (proved by exhaustive search over the reachable
+  // states; a 2x2 bucket peaks at 3 of 4 covered). The queue could not be
+  // dismissed and claimed otherwise every time. Live on the real ledger as a
+  // 2x4 bucket, which is the very cluster this feature was built for.
+  it.each([
+    [2, 2],
+    [2, 4],
+  ])(
+    "a %ix%i bucket disappears once every combination is rejected",
+    (positives, negatives) => {
+      const { pos, neg } = seedReversalBucket(positives, negatives);
+      expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toHaveLength(1);
+
+      for (const p of pos) {
+        for (const n of neg) rejectTransferPairManually(p.id, n.id, handle.db);
+      }
+
+      expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+    },
+  );
+
+  it("keeps surfacing a bucket while any one combination is still unanswered", () => {
+    const { pos, neg } = seedReversalBucket(2, 2);
+    // Every combination but one — rejecting is not a bulk dismissal.
+    rejectTransferPairManually(pos[0].id, neg[0].id, handle.db);
+    rejectTransferPairManually(pos[0].id, neg[1].id, handle.db);
+    rejectTransferPairManually(pos[1].id, neg[0].id, handle.db);
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toHaveLength(1);
+  });
+
+  // ERASURE. Rejecting (A,C) used to overwrite A's existing rejection of B,
+  // because one row held one partner. Two clicks in the reversal queue could
+  // clear both legs of an unrelated "Not a transfer", after which the automatic
+  // matcher re-linked the exact pair the user had rejected — silently dropping
+  // both rows out of every spending total.
+  it("a new rejection never erases an existing one against a third row", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -1000,
+      rawMemo: "CHARGE",
+      date: "2026-09-04",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 1000,
+      rawMemo: "CROSS-ACCOUNT CREDIT",
+      date: "2026-09-04",
+    });
+    // The user's cross-account correction: A and B are NOT a transfer.
+    rejectTransferPairManually(a.id, b.id, handle.db);
+
+    // Same date, same magnitude, on each of their own accounts — so each forms
+    // a same-account reversal candidate with its neighbour.
+    const aPartner = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: 1000,
+      rawMemo: "SAME-ACCOUNT CREDIT",
+      date: "2026-09-04",
+    });
+    const bPartner = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -1000,
+      rawMemo: "SAME-ACCOUNT CHARGE",
+      date: "2026-09-04",
+    });
+    rejectTransferPairManually(aPartner.id, a.id, handle.db);
+    rejectTransferPairManually(b.id, bPartner.id, handle.db);
+
+    // The original correction is intact...
+    expect(isRejected(handle, a.id, b.id)).toBe(true);
+
+    // ...so the matcher still refuses to put A and B together. It is free to
+    // link the OTHER cross-account pair in this bucket (aPartner/bPartner),
+    // which nobody rejected — asserting `pairsLinked === 0` here would be
+    // asserting that a rejection suppresses unrelated rows, which is exactly
+    // the transaction-scoped behaviour rule 4 rejected.
+    linkTransfersByBucket("2026-08-01", handle.db);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [a.id, b.id]))
+      .all();
+    const rowA = rows.find((r) => r.id === a.id)!;
+    const rowB = rows.find((r) => r.id === b.id)!;
+    expect(rowA.transferPairId).not.toBe(b.id);
+    expect(rowB.transferPairId).not.toBe(a.id);
+  });
+
+  it("re-rejecting an already-rejected pair is a no-op, not a duplicate or a throw", () => {
+    const { pos, neg } = seedReversalBucket(1, 1);
+    rejectTransferPairManually(pos[0].id, neg[0].id, handle.db);
+    expect(() =>
+      // Reversed argument order too: the pair is stored unordered.
+      rejectTransferPairManually(neg[0].id, pos[0].id, handle.db),
+    ).not.toThrow();
+    expect(handle.db.select().from(schema.transferPairRejections).all()).toHaveLength(1);
+  });
+});
+
+describe("findSameAccountReversalCandidates — the query around the bucketing", () => {
+  it("surfaces a same-account, same-day, equal-magnitude, opposite-sign pair", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: -25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 7F254",
+      date: "2026-09-01",
+    });
+    const back = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 25000,
+      rawMemo: "A2AXFER 000000000-1 Ref# 64590 reverse",
+      date: "2026-09-01",
+    });
+
+    const buckets = findSameAccountReversalCandidates("2026-08-01", handle.db);
+
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0].reason).toBe("same-account");
+    expect(buckets[0].absAmountCents).toBe(25000);
+    expect(buckets[0].positives.map((r) => r.id)).toEqual([back.id]);
+    expect(buckets[0].negatives.map((r) => r.id)).toEqual([out.id]);
+  });
+
+  it("leaves a CROSS-account pair to findAmbiguousTransfers and returns nothing", () => {
+    // The two queues must not double-report the same rows: one bucket appearing
+    // under both headings gives the user two contradictory buttons for it.
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: -25000, rawMemo: "OUT", date: "2026-09-01" });
+    seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 25000, rawMemo: "IN", date: "2026-09-01" });
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+    // And the rows are a genuine transfer the OTHER path owns, not an inert
+    // fixture that nothing would have matched anyway.
+    expect(linkTransfersByBucket("2026-08-01", handle.db).pairsLinked).toBe(1);
+  });
+
+  it("excludes rows older than the review window", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: -25000, rawMemo: "OLD OUT", date: "2026-07-01" });
+    seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 25000, rawMemo: "OLD BACK", date: "2026-07-01" });
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+    // Same rows, wider window — proves the emptiness above is the date filter
+    // and not the bucketing quietly rejecting the fixture.
+    expect(findSameAccountReversalCandidates("2026-06-01", handle.db)).toHaveLength(1);
+  });
+
+  it("excludes rows that are already paired", () => {
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("csv");
+    const out = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: -25000, rawMemo: "OUT", date: "2026-09-01" });
+    const back = seedTxn({ accountId: savings.id, batchId: batch.id, amountCents: 25000, rawMemo: "REVERSE", date: "2026-09-01" });
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toHaveLength(1);
+    linkTransferPairManually(out.id, back.id, handle.db, { allowSameAccountReversal: true });
+    // Resolving it is what makes it leave the queue — otherwise the user is
+    // asked the same question forever and cannot tell which ones they answered.
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+  });
+
+  it("excludes hand-entered rows (NOT_MANUAL) — a manual card charge has no bank reversal", () => {
+    const card = seedAccount({ name: "Visa", type: "credit" });
+    const manual = seedBatch("manual");
+    seedTxn({ accountId: card.id, batchId: manual.id, amountCents: -25000, rawMemo: "HAND ENTERED", date: "2026-09-01", source: "manual" });
+    seedTxn({ accountId: card.id, batchId: manual.id, amountCents: 25000, rawMemo: "HAND ENTERED CREDIT", date: "2026-09-01", source: "manual" });
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+  });
+
+  it("stops resurfacing a bucket the user rejected, end to end through the stored marker", () => {
+    // The promise the queue makes is that "no" is durable. sameAccountReversals
+    // proves the predicate honours a rejection; this proves the rejection
+    // unlinkTransferPair actually WRITES is the one the query reads back.
+    const checking = seedAccount({ name: "Checking" });
+    const batch = seedBatch("csv");
+    const charge = seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: -1175, rawMemo: "AMAZON MKTPL*5Q7K15", date: "2026-09-03" });
+    const refund = seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: 1175, rawMemo: "AMAZON MKTPLACE PMT", date: "2026-09-03" });
+
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toHaveLength(1);
+
+    linkTransferPairManually(charge.id, refund.id, handle.db, { allowSameAccountReversal: true });
+    unlinkTransferPair(charge.id, handle.db);
+
+    // Unpaired again, but rejected — so it must NOT come back asking.
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+    expect(findSameAccountReversalCandidates("2026-08-01", handle.db)).toEqual([]);
+  });
+
+  it("keeps a bucket alive when a THIRD candidate is still unrejected", () => {
+    // Rejecting one pairing is not a statement about the others: the live
+    // 2026-09-04 cluster has one positive against several negatives.
+    const checking = seedAccount({ name: "Checking" });
+    const batch = seedBatch("csv");
+    const credit = seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: 1000, rawMemo: "A2AXFER Ref# BFA33 reverse", date: "2026-09-04" });
+    const debitA = seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: -1000, rawMemo: "A2AXFER Ref# 0AA08", date: "2026-09-04" });
+    const debitB = seedTxn({ accountId: checking.id, batchId: batch.id, amountCents: -1000, rawMemo: "Zelle Transfer Payment ID", date: "2026-09-04" });
+
+    linkTransferPairManually(credit.id, debitB.id, handle.db, { allowSameAccountReversal: true });
+    unlinkTransferPair(credit.id, handle.db);
+
+    const buckets = findSameAccountReversalCandidates("2026-08-01", handle.db);
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0].negatives.map((r) => r.id).sort()).toEqual([debitA.id, debitB.id].sort());
   });
 });

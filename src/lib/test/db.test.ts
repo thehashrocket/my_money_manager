@@ -31,6 +31,7 @@ describe("migration parse (integration)", () => {
         "import_batches",
         "subscription_dismissals",
         "transactions",
+        "transfer_pair_rejections",
       ].sort(),
     );
   });

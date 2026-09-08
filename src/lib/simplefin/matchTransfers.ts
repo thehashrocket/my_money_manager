@@ -57,29 +57,61 @@ export type MatchedPair<T extends TransferCandidate> = {
   b: T;
 };
 
-export type AmbiguousBucket<T extends TransferCandidate> = {
+type BucketBase<T extends TransferCandidate> = {
   date: string;
   absAmountCents: number;
   positives: T[];
   negatives: T[];
-  /**
-   * Why this bucket couldn't auto-link, for accurate review-queue copy:
-   * "contested" — 3+ accounts, more than one plausible counterpart account.
-   * "unbalanced" — the counts genuinely don't match (N positives vs M negatives).
-   * "rejected" — counts DO balance, but every valid bijection hits a pairing
-   * the user already rejected via "Not a transfer"; nothing here is actually
-   * undecidable in the counting-argument sense, it's just blocked.
-   * "cross-source" — counts balance and nothing here was rejected, but a leg
-   * carries a bank transaction number the stronger CSV ±1 matcher already
-   * examined and declined to pair, so the weaker counting argument alone
-   * isn't corroboration enough to auto-link it.
-   */
+};
+
+/**
+ * A bucket whose rows span TWO OR MORE accounts — the only kind this file
+ * produces. `reason` says why the counting argument couldn't settle it:
+ *
+ * "contested" — 3+ accounts, more than one plausible counterpart account.
+ * "unbalanced" — the counts genuinely don't match (N positives vs M negatives).
+ * "rejected" — counts DO balance, but every valid bijection hits a pairing the
+ * user already rejected via "Not a transfer"; nothing here is actually
+ * undecidable in the counting-argument sense, it's just blocked.
+ * "cross-source" — counts balance and nothing here was rejected, but a leg
+ * carries a bank transaction number the stronger CSV ±1 matcher already
+ * examined and declined to pair, so the weaker counting argument alone isn't
+ * corroboration enough to auto-link it.
+ */
+export type CrossAccountBucket<T extends TransferCandidate> = BucketBase<T> & {
   reason: "contested" | "unbalanced" | "rejected" | "cross-source";
 };
 
+/**
+ * A transaction and its reversal, both on ONE account — produced only by
+ * `findSameAccountReversals` (`./sameAccountReversals.ts`), never here.
+ *
+ * A SEPARATE type rather than a fifth `reason`, because the two say opposite
+ * things about the account column: across a cross-account bucket `accountId`
+ * varies and is the thing being compared, while across a same-account bucket
+ * it is constant and is part of the bucket key. Flattening both into one union
+ * member let a caller wire same-account buckets to the cross-account review
+ * action — which typechecked and produced a queue where every button threw
+ * "A transfer pair must span two different accounts."
+ *
+ * It has no auto-link path at all: the shape is ~13% coincidence on real data,
+ * so every one of these is a human decision. See that file.
+ */
+export type SameAccountBucket<T extends TransferCandidate> = BucketBase<T> & {
+  reason: "same-account";
+  /** Constant across the bucket, so it is a property OF the bucket. */
+  accountId: T["accountId"];
+};
+
+/** Either kind, for the few things that genuinely handle both (`overlappingRowIds`). */
+export type AmbiguousBucket<T extends TransferCandidate> =
+  | CrossAccountBucket<T>
+  | SameAccountBucket<T>;
+
 export type MatchResult<T extends TransferCandidate> = {
   pairs: MatchedPair<T>[];
-  ambiguous: AmbiguousBucket<T>[];
+  /** Cross-account only — see `SameAccountBucket` for why that is a type, not a convention. */
+  ambiguous: CrossAccountBucket<T>[];
 };
 
 /** Star One labels the SENDING leg of an overdraft sweep reliably. */
@@ -104,18 +136,32 @@ export function isAtmWithdrawal(row: TransferCandidate): boolean {
  * Finds a bijection between `positives` and `negativesPreferred` (already
  * ordered by display preference) with zero rejected edges, preferring the
  * given order and falling back to alternate assignments only where a
- * preferred slot is rejected. Naive backtracking over an arbitrary rejection
- * set is worst-case O(n!) — the "3+ accounts" guard above bounds distinct
- * ACCOUNTS per bucket, not rows per direction, so it doesn't cap n. What
- * actually keeps this fast is that the rejection marker is a single column
- * (`transferRejectedPartnerId`): every row has out-degree <= 1 in the
- * rejected-edge relation, so the search is really over a near-linear partial
- * matching, not a dense one. Re-check this comment if that column ever
- * becomes multi-valued. Returns `null` when NO
- * valid full assignment exists (every arrangement hits at least one
- * rejection) — the caller treats that the same as an unbalanced bucket:
- * ambiguous, not guessed.
+ * preferred slot is rejected.
+ *
+ * Naive backtracking over an arbitrary rejection set is worst-case O(n!) — the
+ * "3+ accounts" guard above bounds distinct ACCOUNTS per bucket, not rows per
+ * direction, so it doesn't cap n. This used to be safe for a reason that no
+ * longer holds: while a rejection was a single self-referencing column, every
+ * row had out-degree <= 1 in the rejected-edge relation, so the search ran over
+ * a near-linear partial matching rather than a dense one. That comment carried
+ * an explicit "re-check this if the column ever becomes multi-valued", and
+ * v0.19.0 made it multi-valued (`transfer_pair_rejections`) — a row can now be
+ * rejected against every candidate in its bucket, which is precisely the dense
+ * case, and precisely what the same-account review queue encourages a user to
+ * produce.
+ *
+ * So the search is explicitly budgeted. Exceeding {@link SEARCH_BUDGET} returns
+ * `null`, which the caller already treats as "no valid assignment": the bucket
+ * goes to review instead of auto-linking. That failure direction is the safe
+ * one — it costs a human decision on a bucket nobody will ever actually build,
+ * where the alternative is a synchronous driver blocking the event loop.
+ *
+ * Returns `null` when no valid full assignment exists (every arrangement hits
+ * at least one rejection) — the caller treats that the same as an unbalanced
+ * bucket: ambiguous, not guessed.
  */
+const SEARCH_BUDGET = 20_000;
+
 function assignAvoidingRejections<T extends TransferCandidate>(
   positives: T[],
   negativesPreferred: T[],
@@ -123,11 +169,15 @@ function assignAvoidingRejections<T extends TransferCandidate>(
 ): { a: T; b: T }[] | null {
   const remaining = [...negativesPreferred];
   const assignment: { a: T; b: T }[] = [];
+  let steps = 0;
 
   function backtrack(i: number): boolean {
     if (i === positives.length) return true;
     const a = positives[i];
     for (let k = 0; k < remaining.length; k++) {
+      // Counted per EDGE considered, not per call: the blow-up is in the
+      // branching, and a per-call budget would let one level fan out unbounded.
+      if (++steps > SEARCH_BUDGET) return false;
       const b = remaining[k];
       if (isRejected(a, b)) continue;
       remaining.splice(k, 1);
@@ -139,7 +189,11 @@ function assignAvoidingRejections<T extends TransferCandidate>(
     return false;
   }
 
-  return backtrack(0) ? assignment : null;
+  const found = backtrack(0);
+  // Distinguishing "exhausted the budget" from "genuinely no assignment" would
+  // need a third return state, and both mean the same thing to the caller:
+  // don't auto-link, ask. Left as one value deliberately.
+  return found ? assignment : null;
 }
 
 export function matchTransfers<T extends TransferCandidate>(
@@ -161,7 +215,7 @@ export function matchTransfers<T extends TransferCandidate>(
   }
 
   const pairs: MatchedPair<T>[] = [];
-  const ambiguous: AmbiguousBucket<T>[] = [];
+  const ambiguous: CrossAccountBucket<T>[] = [];
 
   for (const [key, bucket] of buckets) {
     const [date, absStr] = key.split("|");
@@ -169,7 +223,9 @@ export function matchTransfers<T extends TransferCandidate>(
 
     const accountIds = [...new Set(bucket.map((r) => r.accountId))];
     // A positive and a negative of the same size inside ONE account is a
-    // refund, not a transfer.
+    // refund OR a reversal — never a transfer. This function pairs neither;
+    // `findSameAccountReversals` routes the shape to human review instead
+    // (v0.19.0), because ~13% of it is coincidence on real data.
     if (accountIds.length < 2) continue;
 
     // With three or more accounts a row can have more than one plausible partner

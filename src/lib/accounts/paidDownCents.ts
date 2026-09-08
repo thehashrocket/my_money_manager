@@ -54,7 +54,29 @@ export function paidDownCents(
         gt(schema.transactions.amountCents, 0),
         // E13: paired only. An unpaired positive on a card is a refund, not a
         // payment — the money came back from a merchant, not out of checking.
+        //
+        // Strictly redundant now: the EXISTS below cannot be satisfied when
+        // `transfer_pair_id` is NULL, so deleting this line changes nothing and
+        // fails no test. Kept as the readable statement of E13's rule — the
+        // EXISTS reads as a clause about the PARTNER, and "must be paired at
+        // all" is a separate fact that deserves to be visible next to it.
         isNotNull(schema.transactions.transferPairId),
+        // ...and paired ACROSS accounts. "Paired" alone stopped being a proxy
+        // for "payment" the moment same-account reversals became linkable: a
+        // disputed charge and its provisional credit on one card now satisfy
+        // `transfer_pair_id IS NOT NULL` on the positive leg, and counting that
+        // reports money that never left checking as debt paid down. Measured
+        // during /ship 2026-09-08: a $200 same-account reversal on a card took
+        // this figure from $0.00 to $200.00 on /accounts and the dashboard.
+        //
+        // A real payment is cross-account by construction (the mirror row is
+        // the withdrawal from checking), so this restores E13's actual intent
+        // rather than narrowing it.
+        sql`EXISTS (
+          SELECT 1 FROM ${schema.transactions} AS partner
+          WHERE partner.id = ${schema.transactions.transferPairId}
+            AND partner.account_id <> ${schema.transactions.accountId}
+        )`,
       ),
     )
     .get();

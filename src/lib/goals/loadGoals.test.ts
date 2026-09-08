@@ -144,6 +144,42 @@ describe("loadGoals (TC34a)", () => {
     ]);
   });
 
+  /**
+   * Pins the `amount_cents < 0` filter that the sign-convention pass
+   * deliberately did NOT convert (see the analysis at `loadGoals.ts:70-95`).
+   *
+   * Without this test the whole suite passes with that filter deleted — there
+   * was no fixture anywhere seeding a POSITIVE row on a fund category, so the
+   * one input that distinguishes "outflows only" from "signed sum" was absent.
+   * That matters because every sibling reader DID move to a signed sum, so the
+   * next person reading `loadMonthlyTrends`' docblock has an obvious-looking
+   * one-line change to make here and green CI telling them it was fine.
+   *
+   * It is not fine: `progress = contributed − withdrawn` where `contributed` is
+   * already the PLANNED allocation, so a net `withdrawn` lets a deposit add to
+   * progress on top of the allocation that counted the same intention — the
+   * goal reads roughly double.
+   */
+  it("counts a DEPOSIT into a fund as neither progress nor a negative withdrawal", () => {
+    const cat = seedFundCategory("Vacation", { targetCents: 100000 });
+    seedAllocation(cat.id, 2026, 4, 50000);
+
+    const account = seedAccount();
+    const batch = seedBatch();
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-05",
+      amountCents: 50000, // a deposit landing in the fund category, unpaired
+    });
+
+    const goal = loadGoals(handle.db).goals[0];
+    // Under a signed sum, withdrawn would be -50000 and progress 100000.
+    expect(goal.totalWithdrawnCents).toBe(0);
+    expect(goal.progressCents).toBe(50000);
+  });
+
   it("excludes transfer-paired rows from withdrawals", () => {
     const cat = seedFundCategory("Vacation");
     const account = seedAccount();

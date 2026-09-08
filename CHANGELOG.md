@@ -4,9 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.0] - 2026-09-08
+
+### Added
+- **`/sync` can now pair a charge with its own cancellation.** A reversed transfer, a disputed charge with a provisional credit, a returned payment — these put both halves on *one* account, and every matcher in the app required a pair to span two accounts, so nothing could see them and there was no way to fix one by hand. They sat in whatever spending category they were filed under, quietly. A new "Reversals needing review" queue on `/sync` lists them beside the existing transfer review, showing the two descriptions side by side. It **never links anything on its own**, and that is the point: on your ledger the same shape also turns up as pure coincidence — a $3.99 ATM fee refund sitting opposite a real $3.99 Apple charge on the same day, and a Zelle receipt opposite a genuine $200.00 ATM withdrawal. Auto-linking either would have deleted real spending with no error. Fourteen to review today; expect about two a month. Where a date and amount has several candidates, both dropdowns start on "Choose…" rather than an arbitrary row, so a wrong pairing is never one click away. Each item also has a **Not a reversal** button, so dismissing a coincidence no longer means linking it first and undoing it — that round trip briefly hid both rows from every spending screen. A dismissal sticks, so a plain merchandise refund only has to be answered once.
+
+### Changed
+- **"Spent" now means the same thing on every page.** A refund reduces that category's spend everywhere, which is what an envelope budget implies: return $20 of groceries and you have $20 of groceries to buy again. `/budget` already worked this way; the dashboard's 6-month trend chart counted only money going out, so the two disagreed. This was live, not theoretical — September 2026 showed **$10.00** of Misc on `/budget` and **$295.00** on the dashboard, the same category in the same month. The chart now uses the same signed sum `/budget` does, so the number that feeds Left to Budget is untouched. A month where refunds exceed spend reports as negative rather than being clamped to zero: clamping would be the same kind of lie this fixes.
+
+
+_From the second review pass over the v0.16.0 liability work, below._
+
+- **"Is this a credit card" had five different spellings in the codebase**, one of them not equivalent to the others. They agree only while there are exactly two liability types; a third would have split them silently, with nothing failing to compile. There is now one `isCreditCard`, exhaustive like its two siblings.
+- **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
+- **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
 
 ### Fixed
+_From the sign-convention change above._
+
+_From a full review pass over this release, before it merges. The first two are
+the same root cause and were both live on the real ledger._
+
+- **The "Not a reversal" button could silently erase a "Not a transfer" you had already recorded** — and once erased, the automatic matcher re-linked the exact pair you had rejected, dropping both rows out of every spending total with no error. A rejection was stored as a single partner id on each row, so recording a new one overwrote the old. It is now a row per pair (`transfer_pair_rejections`), and existing rejections are carried across by the migration rather than lost.
+- **A reversal bucket with two or more candidates on both sides could never be dismissed.** The queue only drops a bucket once every combination has been answered, but with one slot per row those answers overwrote each other — for a 2×2 or larger bucket the all-answered state was mathematically unreachable, so the bucket came back forever while the app said "this pairing won't be suggested again" every single time. Your ledger has exactly one such bucket, and it is the 2×4 cluster this whole feature was built for.
+- **Nothing confirmed which button you pressed.** Resolving a review item removes it from the list, which unmounted the message explaining what had just happened — so on a one-candidate bucket "Link as reversal" and "Not a reversal" looked identical: the card simply vanished. Outcomes now surface in a status region that outlives the item.
+- **"Not a transfer" reported success when it had done nothing.** Unlinking an already-unpaired pair (reachable from a stale tab after an undone sync) returned the ordinary confirmation while recording no rejection at all — claiming a durable correction that did not exist.
+- **Recording a rejection skipped the validation that linking gets.** The durable, un-undoable half of the pair of operations was the *less* checked one: it verified only that both rows existed and neither was already paired. It now applies the same shape gate — opposite signs, equal magnitude, and same-day for a same-account pair.
+- **The "also listed under" note promised something one of its two buttons doesn't do.** Linking a row that both queues claim does clear it from both; saying it is *not* a pair only answers one reading, and the other queue keeps showing it.
+- **The transfer matcher's backtracking search is now bounded.** Its complexity argument rested on a rejection being a single column, and carried an explicit note to re-check if that ever changed — which this release changed. A dense set of rejections on one date could have taken the search factorial (measured at 3.5 seconds for eleven candidates, on a synchronous driver that blocks the page). It now falls back to "send this bucket to review" instead.
+
+- **The trend chart was about to start counting your paychecks as spending.** The filter that dropped refunds was quietly doing a second job — excluding income, which is positive. Removing it alone would have pulled 43 paycheck and interest rows worth **+$52,131.17** into the last six months and drawn them as roughly $52k of negative spend. Spending is now decided by the category's kind, which is what the word actually means, rather than by which way the amount points.
+- **Savings goals were deliberately left alone, and the reason is now written down.** Aligning the goals page to the same signed sum was tried during this change and reverted: goal progress is `allocated − withdrawn`, and a *net* withdrawn figure makes a deposit into a fund **increase** progress on top of the allocation that already counted the same intention. No fund category exists on any ledger yet, so nothing here has ever produced a number — which makes it the worst possible place to leave arithmetic nobody can observe. The query stays on outflows-only with the analysis recorded beside it.
+
+- **A disputed charge on a credit card would have been reported as debt you paid off.** "Paid down this month" counts positive card rows that are paired, on the reasoning that the only way a card's positive row could be paired was a payment from checking. Letting reversals be paired broke that: a $200 provisional credit on the card, paired with the charge it cancels, satisfied the same test. Measured going from $0.00 to $200.00 on `/accounts` and the dashboard for money that never left checking. A payment now has to be paired **across** accounts, which is what a payment always was.
+- **A refund-heavy month would have drawn in the wrong place on the chart.** The trend chart stacks its bars, and the stacking mode it was using does not separate positive from negative — a category below zero would have been painted back over its neighbour, above the axis, in the wrong colour, while the tooltip total stayed correct. Now negatives render below the axis, which is what the rest of this release promises.
+- **The tooltip hid the very refunds this release surfaces.** It filtered to positive values only, so a category whose refunds outran its spend vanished from the hover panel *and* from its Total, leaving the number disagreeing with the bar above it.
+- **A hand-entered transaction can no longer be paired as a reversal.** The review queue never offered one, but the check lived only in the query that built the list. Pairing a hand-entered row would have hidden it from every spending view with no ordinary way to undo it.
+
 _A second review pass over the v0.16.0 liability work, before it merges. Nine
 findings, all in code this release introduced._
 
@@ -19,11 +53,6 @@ findings, all in code this release introduced._
 - **Un-marking a card payment failed when done from the card's own row**, refusing with a message that was untrue and that pointed at an operation which would have left the card balance wrong. Hand-marked payments also no longer appear on `/sync` beside a "Not a transfer" button that would corrupt them.
 - **The test that guards the balance sign convention contained the very bug it was guarding**, so it would have passed if the fix were reverted. There is now a direct test of the one function that owns the sign.
 - **The docs described a mortgage as having no Reconcile**, which would have reintroduced a fixed bug where an unlinked car loan had no way to correct its balance at all.
-
-### Changed
-- **"Is this a credit card" had five different spellings in the codebase**, one of them not equivalent to the others. They agree only while there are exactly two liability types; a third would have split them silently, with nothing failing to compile. There is now one `isCreditCard`, exhaustive like its two siblings.
-- **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
-- **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
 
 ## [0.18.0] - 2026-09-07
 

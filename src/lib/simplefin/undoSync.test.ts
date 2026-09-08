@@ -341,7 +341,10 @@ describe("undo completeness — links a sync creates must not outlive it", () =>
     const survivor = handle.db
       .select().from(schema.transactions)
       .where(eq(schema.transactions.id, csvLeg.id)).get();
-    expect(survivor?.transferRejectedPartnerId).toBeNull();
+    expect(survivor).toBeDefined();
+    // Deleting a batch's rows must not leave a rejection pointing at a row that
+    // no longer exists — `transfer_pair_rejections` cascades on both legs.
+    expect(handle.db.select().from(schema.transferPairRejections).all()).toEqual([]);
   });
 });
 

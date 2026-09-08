@@ -134,6 +134,13 @@
       "when": 1788754724406,
       "tag": "0018_liability_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1788891544055,
+      "tag": "0019_overjoyed_the_enforcers",
+      "breakpoints": true
     }
   ]
 }
