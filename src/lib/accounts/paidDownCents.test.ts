@@ -94,6 +94,36 @@ describe("paidDownCents", () => {
     expect(paidDownCents(visa.id, 2026, 9, handle.db)).toBe(50_000);
   });
 
+  it("EXCLUDES a positive paired to a row on the SAME account — a reversal, not a payment", () => {
+    // The regression this closes, found by adversarial review during /ship
+    // 2026-09-08 and measured going $0.00 -> $200.00.
+    //
+    // E13 narrowed the predicate to "paired positives" on the reasoning that
+    // the cross-account payment mirror was the only positive a card could ever
+    // have paired. Same-account reversal linking broke that premise: a disputed
+    // charge and its provisional credit sit on ONE card, and pairing them makes
+    // the credit a paired positive. Nothing left checking, so nothing was paid
+    // down — but the figure would read like a $200 payment.
+    const visa = seedAccount("Visa");
+    const credit = seedTxn({ accountId: visa.id, date: "2026-09-12", amountCents: 20_000 });
+    const charge = seedTxn({ accountId: visa.id, date: "2026-09-12", amountCents: -20_000 });
+    link(credit.id, charge.id);
+
+    expect(paidDownCents(visa.id, 2026, 9, handle.db)).toBe(0);
+  });
+
+  it("still counts a real payment when the card ALSO has a same-account reversal that month", () => {
+    // The exclusion must be per-row, not a whole-account disqualifier.
+    const visa = seedAccount("Visa");
+    const checking = seedAccount("Checking", "checking");
+    seedPayment(visa.id, checking.id, "2026-09-10", 50_000);
+    const credit = seedTxn({ accountId: visa.id, date: "2026-09-12", amountCents: 20_000 });
+    const charge = seedTxn({ accountId: visa.id, date: "2026-09-12", amountCents: -20_000 });
+    link(credit.id, charge.id);
+
+    expect(paidDownCents(visa.id, 2026, 9, handle.db)).toBe(50_000);
+  });
+
   it("EXCLUDES an unpaired positive row — that is a refund, not a payment (E13)", () => {
     // The bug this closes: `SUM(amount_cents > 0)` was correct only because
     // the payment mirror used to be the sole positive row a card could own.
