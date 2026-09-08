@@ -25,6 +25,71 @@ findings, all in code this release introduced._
 - **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
 - **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
 
+## [0.18.0] - 2026-09-07
+
+_The merchant name on `/categorize` finally goes somewhere. `AMAZON` is a
+deliberately lossy key — 59 charges can hide behind it — and the only way to
+see what you were actually filing was to remember the merchant, walk to
+`/transactions`, and search. Now the name opens, shows you three of the bank's
+own memos, and links straight to those exact rows._
+
+### Added
+- **Every merchant on `/categorize` opens.** Click the name and it shows up to
+  three of the bank's real memo lines for that group — the text that actually
+  tells `AMZN MKTP US*2X4RT9KL3` apart from `AMAZON.COM*RT4YU8QQ3` — plus a
+  link to every transaction behind the key, filed ones included. A group whose
+  memos are all identical to the key shows no panel to open, because there
+  would be nothing in it.
+- **`/transactions` filters on an exact merchant.** Arriving from a drilldown,
+  the page leads with the merchant as a removable chip and a line that answers
+  the question you clicked to ask: `59 rows, 53 uncategorized · 49 filed as
+  Gas`. The counts come from the same query as the list, so the header can
+  never describe rows the list is not showing.
+- **A "Categorize all N" shortcut** from that header back to bulk filing, and a
+  progress counter on `/categorize` (`12 of 181 merchants done`).
+- **Your half-finished pick survives the trip.** Choose a category, drill down
+  to check what those charges were, come back — the pick is still there. It
+  survives a hard reload too, and is discarded when the tab closes.
+
+### Changed
+- **Both transaction lists are ruled rows, not stacked cards**, with column
+  headers that line up with the values under them. At 181 rows the card shells
+  were most of the ink on the page.
+- **Rows show the bank's own memo text**, wrapped to two lines on a phone where
+  there is no tooltip to fall back on. Under a merchant filter the memo takes
+  the headline slot, since repeating the same key 59 times says nothing.
+- **A merchant link narrows what you are already looking at** rather than
+  replacing it — a date range you set deliberately is not silently discarded.
+  A row already matching the active merchant is plain text, not a link to the
+  page you are standing on.
+- **Filtering to a merchant no longer dims the rows already filed.** You asked
+  to see them.
+- The three remaining hand-rolled amber warning surfaces moved onto the shared
+  accent token, leaving `import/preview` as the last one.
+
+### Fixed
+- **A merchant key containing `#`, `?`, `/` or `*` now survives the link.**
+  17 of 363 real keys do. A bare `#` truncates a query string, so the old shape
+  would have filtered on `GASCO` and shown the wrong merchant's rows with no
+  sign anything went wrong.
+- **A stale bookmark explains itself.** A merchant backfill can rewrite the
+  keys these links are built from; a `?merchant=` matching nothing now names
+  the key and offers a substring search as the way back, instead of an empty
+  list.
+- **The transactions rows had a tooltip showing the word `WITHDRAWAL`** on
+  every row since it shipped — `raw_description` holds only that and `DEPOSIT`.
+  Removed; the memo is on the row now.
+- **A merchant with nothing to disclose lost its drilldown link too**, which
+  was exactly backwards: those rows are the ones showing a bare key they cannot
+  elaborate on.
+- **`/transactions` was shipping 376 KB of validation library to the browser**
+  for one number. It ships none.
+- **A picked category could not be re-selected in Safari private mode**, where
+  session storage throws rather than failing quietly — the field stayed empty
+  and Submit stayed disabled.
+- A row with an empty merchant key could produce a link that promised one
+  merchant and landed on all 1,540 rows.
+
 ## [0.17.0] - 2026-09-07
 
 _Merchant names finally group. The ledger had 516 different merchant names for
