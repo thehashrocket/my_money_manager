@@ -116,10 +116,10 @@ describe("_pending-pick — round trip", () => {
   });
 
   it("keeps URL-hostile merchant keys distinct rather than colliding", () => {
-    writePendingPick("ARCO#05450AMERI", "3");
-    writePendingPick("ARCO", "9");
-    expect(readPendingPick("ARCO#05450AMERI")).toBe("3");
-    expect(readPendingPick("ARCO")).toBe("9");
+    writePendingPick("GASCO#00000ANYTWN", "3");
+    writePendingPick("GASCO", "9");
+    expect(readPendingPick("GASCO#00000ANYTWN")).toBe("3");
+    expect(readPendingPick("GASCO")).toBe("9");
   });
 });
 
@@ -170,13 +170,19 @@ describe("_pending-pick — prune", () => {
   it("notifies only when it actually removed something", () => {
     writePendingPick("AMAZON", "7");
     const onChange = vi.fn();
-    subscribePendingPicks(onChange);
+    // The listener set is module scope; leaving a subscriber behind makes
+    // every later test in this file emit into a stale mock.
+    const unsubscribe = subscribePendingPicks(onChange);
 
-    prunePendingPicks(["AMAZON"]);
-    expect(onChange).not.toHaveBeenCalled();
+    try {
+      prunePendingPicks(["AMAZON"]);
+      expect(onChange).not.toHaveBeenCalled();
 
-    prunePendingPicks([]);
-    expect(onChange).toHaveBeenCalledTimes(1);
+      prunePendingPicks([]);
+      expect(onChange).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("removes every stale key, not every other one — mutation during iteration", () => {
@@ -204,8 +210,55 @@ describe("_pending-pick — a storage that throws (Safari private mode)", () => 
 
   it("still notifies subscribers so the UI stays consistent with itself", () => {
     const onChange = vi.fn();
-    subscribePendingPicks(onChange);
+    const unsubscribe = subscribePendingPicks(onChange);
+    try {
+      writePendingPick("AMAZON", "7");
+      expect(onChange).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  /**
+   * The guarantee the docstring above actually makes.
+   *
+   * "Degrades to no persistence" is a much weaker claim than "does not throw",
+   * and only the weak one used to be pinned. With `sessionStorage` as the
+   * field's ONLY state, a throwing store meant the controlled combobox never
+   * reflected the selection and `disabled={... || !categoryId}` kept Submit
+   * greyed out — the picker was inoperable, not merely forgetful. The
+   * in-memory cache is what makes the docstring true.
+   */
+  it("a pick still reads back within the sitting, storage or no storage", () => {
     writePendingPick("AMAZON", "7");
-    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(readPendingPick("AMAZON")).toBe("7");
+
+    writePendingPick("AMAZON", "");
+    expect(readPendingPick("AMAZON")).toBe("");
+
+    clearPendingPick("AMAZON");
+    expect(readPendingPick("AMAZON")).toBeNull();
+  });
+});
+
+describe("_pending-pick — the cache mirrors one store, not all of them", () => {
+  it("does not carry picks across a change of sessionStorage instance", () => {
+    stubBrowser();
+    writePendingPick("AMAZON", "7");
+    expect(readPendingPick("AMAZON")).toBe("7");
+
+    // A second, empty store: the cache has to be rebuilt from it rather than
+    // answering from the previous one.
+    stubBrowser();
+    expect(readPendingPick("AMAZON")).toBeNull();
+  });
+
+  it("hydrates picks written to storage before this module ever read it", () => {
+    stubBrowser();
+    store.setItem("mm.categorize.pick.AMAZON", "12");
+    store.setItem("unrelated.app.key", "keep me");
+
+    expect(readPendingPick("AMAZON")).toBe("12");
+    expect(readPendingPick("unrelated.app.key")).toBeNull();
   });
 });

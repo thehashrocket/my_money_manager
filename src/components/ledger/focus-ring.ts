@@ -9,8 +9,12 @@
  * files is six chances for one of them to drift, and a focus ring that is
  * subtly different on one control out of six is worse than no system at all.
  *
- * `outline`, not `ring`: it must not be clipped by the `overflow-hidden` on
- * the ruled row lists these controls sit inside.
+ * `outline`, not `ring`: an outline follows `outline-offset` and is drawn
+ * outside the border box without participating in `rounded-*` seams, so it
+ * stays a clean rectangle around a control sitting flush inside a ruled row.
+ * It is NOT immune to an ancestor's `overflow-hidden` — that clips an outline
+ * exactly as it clips a `ring`'s box-shadow — so the choice buys geometry,
+ * not clipping.
  */
 export const FOCUS_RING =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent-terracotta)]";

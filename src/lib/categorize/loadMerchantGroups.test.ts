@@ -262,18 +262,18 @@ describe("loadMerchantGroups — sample memos", () => {
     const a = seedAccount();
     const b = seedBatch();
     const cat = seedCategory("Gas");
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", amountCents: -1000, rawMemo: "SHELL OIL 5522" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", amountCents: -1000, rawMemo: "FUELCO OIL 0000" });
     seedTxn({
       accountId: a.id,
       batchId: b.id,
-      merchant: "SHELL",
+      merchant: "FUELCO",
       amountCents: -1000,
       categoryId: cat.id,
-      rawMemo: "SHELL SERVICE STN 9",
+      rawMemo: "FUELCO SERVICE STN 0",
     });
 
     const [group] = loadMerchantGroups(handle.db);
-    expect(group.sampleMemos).toEqual(["SHELL OIL 5522"]);
+    expect(group.sampleMemos).toEqual(["FUELCO OIL 0000"]);
   });
 });
 

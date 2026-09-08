@@ -101,6 +101,17 @@ function searchPredicate(term: string): SQL {
  * per-category breakdown in the header. Three call sites re-deriving these
  * predicates by hand is how a header ends up describing a different row set
  * than the one under it.
+ *
+ * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
+ * both, or neither may be set. Replaces the old `year`+`month` window (whole
+ * months are now expressed as `dateFrom=monthBoundary(...)`,
+ * `dateTo=lastDayOfMonth(...)` by the caller).
+ *
+ * Amount window is magnitude-based (`ABS(amount_cents)`), not signed — see
+ * `TransactionFilter.amountMinCents`. `ABS()` on the column means the
+ * predicate can't use an index, same as `searchPredicate`'s `LIKE` above;
+ * both are negligible at this app's realistic row counts (single household,
+ * low thousands of rows even after years).
  */
 function buildPredicates(filter: FilterPredicateInput): SQL[] {
   const predicates: SQL[] = [];
@@ -152,16 +163,9 @@ function buildPredicates(filter: FilterPredicateInput): SQL[] {
  * default so categorize actions never touch rows owned by the pair machinery
  * (matches `/budget` MTD semantics); `includeTransfers` reveals them.
  *
- * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
- * both, or neither may be set. Replaces the old `year`+`month` window (whole
- * months are now expressed as `dateFrom=monthBoundary(...)`,
- * `dateTo=lastDayOfMonth(...)` by the caller).
- *
- * Amount window is magnitude-based (`ABS(amount_cents)`), not signed — see
- * `TransactionFilter.amountMinCents`. `ABS()` on the column means this
- * predicate can't use an index, same as the `LIKE` search below; both are
- * negligible at this app's realistic row counts (single household, low
- * thousands of rows even after years).
+ * The WHERE clause itself is `buildPredicates` above — shared with
+ * `summarizeByCategory`, which is the only reason the header and the list
+ * under it cannot describe different row sets.
  *
  * Sort: `date DESC, id DESC` — newest first, stable tiebreaker.
  */

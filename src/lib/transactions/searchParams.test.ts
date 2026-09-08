@@ -23,7 +23,7 @@ describe("searchParamsSchema — merchant (D2/D12)", () => {
   });
 
   it("preserves URL-hostile characters verbatim — the key is compared byte-for-byte", () => {
-    const key = "ARCO#05450AMERI";
+    const key = "GASCO#00000ANYTWN";
     const parsed = searchParamsSchema.safeParse(flatten({ merchant: key }));
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.merchant).toBe(key);

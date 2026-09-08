@@ -129,8 +129,28 @@ const ALL_FILTERS_ACTIVE: TransactionsFilterValues = {
   // fixture has to use a value that is actually carried.
   pending: "posted",
   includeTransfers: true,
-  merchant: "ARCO#05450AMERI",
+  merchant: "GASCO#00000ANYTWN",
 };
+
+describe("buildHref refuses to emit a merchant filter it cannot honour", () => {
+  /**
+   * A bare `?merchant=` is worse than no link: `flatten()` reads `""` as
+   * `undefined`, so the destination drops the filter and shows every row —
+   * from a control that promised to narrow to one merchant.
+   * `merchantDrilldownHref` returns `null` for this; the per-row link on
+   * `/transactions` builds its href through `buildHref` instead, so the guard
+   * belongs in the serializer both paths share.
+   */
+  it("skips an empty merchant key rather than emitting `?merchant=`", () => {
+    const href = buildHref({ ...emptyValues, merchant: "" });
+    expect(href).not.toContain("merchant");
+  });
+
+  it("still emits a non-empty key", () => {
+    const href = buildHref({ ...emptyValues, merchant: "AMAZON" });
+    expect(new URL(href, "http://x").searchParams.get("merchant")).toBe("AMAZON");
+  });
+});
 
 describe("every TransactionsFilterValues key survives the URL round trip", () => {
   const keys = Object.keys(ALL_FILTERS_ACTIVE) as (keyof TransactionsFilterValues)[];
@@ -154,10 +174,17 @@ describe("every TransactionsFilterValues key survives the URL round trip", () =>
       expect(params.has(key)).toBe(true);
     });
 
-    it(`${key} is parsed back out by searchParamsSchema`, () => {
+    /**
+     * Value equality, not mere presence. `includeTransfers` parses to `false`
+     * when the key is absent entirely (`z.literal("true").optional().transform`),
+     * so `.not.toBe(undefined)` passed for a field that was never serialized —
+     * the exact silent-drop class this guard exists to catch, on the exact
+     * field it has already shipped broken once.
+     */
+    it(`${key} survives the round trip with its value intact`, () => {
       expect(parsed.success).toBe(true);
       if (!parsed.success) return;
-      expect(parsed.data[key]).not.toBe(undefined);
+      expect(parsed.data[key]).toEqual(ALL_FILTERS_ACTIVE[key]);
     });
   }
 });

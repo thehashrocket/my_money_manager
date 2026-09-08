@@ -590,11 +590,11 @@ describe("loadTransactions — merchant filter (D2)", () => {
   it("matches URL-hostile keys literally — no wildcard, no escaping surface", () => {
     const a = seedAccount();
     const b = seedBatch();
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ARCO#05450AMERI" });
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "CA DMV 658 *SVC" });
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "PG E/EZ-PAY" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "GASCO#00000ANYTWN" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ST DMV 000 *SVC" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "UTIL CO/EZ-PAY" });
 
-    for (const key of ["ARCO#05450AMERI", "CA DMV 658 *SVC", "PG E/EZ-PAY"]) {
+    for (const key of ["GASCO#00000ANYTWN", "ST DMV 000 *SVC", "UTIL CO/EZ-PAY"]) {
       const r = loadTransactions(handle.db, { merchant: key, page: 1, pageSize: 50 });
       expect(r.totalCount).toBe(1);
       expect(r.rows[0].normalizedMerchant).toBe(key);
@@ -730,11 +730,11 @@ describe("summarizeByCategory", () => {
     const a = seedAccount();
     const b = seedBatch();
     const gas = seedCategory("Gas");
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", categoryId: gas.id, date: "2026-04-02" });
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", categoryId: null, date: "2026-04-03" });
-    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", categoryId: null, date: "2026-05-03" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: gas.id, date: "2026-04-02" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: null, date: "2026-04-03" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: null, date: "2026-05-03" });
 
-    const filter = { merchant: "SHELL", dateFrom: "2026-04-01", dateTo: "2026-04-30" };
+    const filter = { merchant: "FUELCO", dateFrom: "2026-04-01", dateTo: "2026-04-30" };
     const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
     const summed = summarizeByCategory(handle.db, filter).reduce((n, r) => n + r.count, 0);
     expect(summed).toBe(totalCount);

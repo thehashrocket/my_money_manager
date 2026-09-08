@@ -306,7 +306,10 @@ function FilterChips({
 }
 
 /**
- * `AMAZON — 59 rows, 53 uncategorized · 49 filed as Gas`.
+ * `59 rows, 53 uncategorized · 49 filed as Gas`.
+ *
+ * The merchant name is not repeated here — `FilterChips` above renders it as
+ * the removable chip, once.
  *
  * The filed counts are the whole point of D3=A: `COSTCO GAS` shows 1
  * uncategorized row on `/categorize` but 50 in total, 49 of them already

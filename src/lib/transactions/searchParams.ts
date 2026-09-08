@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AmountParseError, parseAmountToCents } from "@/lib/money";
+import { MAX_PAGE_SIZE, MAX_SEARCH_LENGTH } from "./limits";
 
 /**
  * `/transactions`' URL contract, extracted out of `page.tsx` (D11).
@@ -16,9 +17,12 @@ import { AmountParseError, parseAmountToCents } from "@/lib/money";
  * of React/Next imports.
  */
 
-/** Mirrors the filter form's own `maxLength` — imported there so the client-side limit and validation can't drift. */
-export const MAX_SEARCH_LENGTH = 200;
-export const MAX_PAGE_SIZE = 500;
+/**
+ * Re-exported so this module stays the single import site for the URL contract,
+ * while the numbers themselves live in a zod-free module the client bundle can
+ * reach without dragging the schema in — see `./limits`.
+ */
+export { MAX_PAGE_SIZE, MAX_SEARCH_LENGTH };
 
 const amountSchema = z
   .string()
@@ -76,7 +80,6 @@ export const searchParamsSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).optional(),
 }).strict();
 
-export type TransactionsSearchParams = z.infer<typeof searchParamsSchema>;
 
 export type RawSearchParams = Record<string, string | string[] | undefined>;
 

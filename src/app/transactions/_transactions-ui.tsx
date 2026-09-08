@@ -150,7 +150,7 @@ function BacklogStrip({
       </span>
       <Link
         href="/categorize"
-        className={`font-medium underline-offset-4 hover:underline ${FOCUS_RING}`}
+        className={`inline-flex min-h-11 items-center px-1 font-medium underline-offset-4 hover:underline ${FOCUS_RING}`}
       >
         Bulk →
       </Link>

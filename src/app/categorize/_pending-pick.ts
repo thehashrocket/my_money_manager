@@ -31,6 +31,54 @@ const PREFIX = "mm.categorize.pick.";
 
 const listeners = new Set<() => void>();
 
+/**
+ * The picks, in memory. `sessionStorage` is the DURABILITY layer; this is the
+ * source of truth for reads.
+ *
+ * Two things go wrong when storage is read directly on every render. First,
+ * a browser that throws on `sessionStorage` (Safari private mode, Chrome with
+ * "block all site data") stops being a lost-persistence problem and becomes a
+ * broken picker: with nothing else holding the value, `readPendingPick` keeps
+ * returning `null`, the controlled combobox never shows what you chose, and
+ * Submit — `disabled={... || !categoryId}` — stays greyed out forever. The
+ * comment above promises this degrades to "won't survive a trip"; without a
+ * cache it degrades to "cannot pick a category at all".
+ *
+ * Second, `emit()` is a broadcast and every row subscribes, so on the real
+ * ledger one pick used to cost ~181 synchronous `getItem` calls on the main
+ * thread. Now it costs one `Map` lookup per row.
+ */
+const cache = new Map<string, string>();
+
+/**
+ * `sessionStorage` is read once, lazily, into `cache` — not per read. Runs on
+ * the client only; `storage()` returns null during SSR.
+ *
+ * Keyed on the Storage INSTANCE rather than a boolean: the cache mirrors one
+ * store, so a different store means a different set of picks and the cache
+ * has to be rebuilt rather than carried over. In the browser that never
+ * happens; in the test environment each case installs its own fake, and a
+ * bare `hydrated` flag would have leaked one test's picks into the next.
+ */
+let hydratedFrom: Storage | null = null;
+function hydrate(): void {
+  const store = storage();
+  if (store === null || store === hydratedFrom) return;
+  hydratedFrom = store;
+  cache.clear();
+  try {
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i);
+      if (key === null || !key.startsWith(PREFIX)) continue;
+      const value = store.getItem(key);
+      if (value !== null) cache.set(key.slice(PREFIX.length), value);
+    }
+  } catch {
+    // See writePendingPick — a locked-down browser leaves the cache empty,
+    // which is the correct "nothing parked yet" answer.
+  }
+}
+
 /** Stable identity — `useSyncExternalStore` resubscribes when this changes. */
 export function subscribePendingPicks(onChange: () => void): () => void {
   listeners.add(onChange);
@@ -57,11 +105,9 @@ function storage(): Storage | null {
 }
 
 export function readPendingPick(normalizedMerchant: string): string | null {
-  try {
-    return storage()?.getItem(PREFIX + normalizedMerchant) ?? null;
-  } catch {
-    return null;
-  }
+  if (typeof window === "undefined") return null;
+  hydrate();
+  return cache.get(normalizedMerchant) ?? null;
 }
 
 /**
@@ -71,15 +117,25 @@ export function readPendingPick(normalizedMerchant: string): string | null {
  * clear.
  */
 export function writePendingPick(normalizedMerchant: string, categoryId: string): void {
+  // Never on the server: module scope is shared across requests there, so a
+  // cached pick would be one user's half-finished thought leaking into the
+  // next render. There is also nothing to park — the page is about to unmount.
+  if (typeof window === "undefined") return;
+  hydrate();
+  cache.set(normalizedMerchant, categoryId);
   try {
     storage()?.setItem(PREFIX + normalizedMerchant, categoryId);
   } catch {
     // Quota or a locked-down browser — the pick simply won't survive a trip.
+    // It still shows in the field, because `cache` already has it.
   }
   emit();
 }
 
 export function clearPendingPick(normalizedMerchant: string): void {
+  if (typeof window === "undefined") return;
+  hydrate();
+  cache.delete(normalizedMerchant);
   try {
     storage()?.removeItem(PREFIX + normalizedMerchant);
   } catch {
@@ -98,19 +154,21 @@ export function clearPendingPick(normalizedMerchant: string): void {
  * the authority; anything not in it is finished business.
  */
 export function prunePendingPicks(liveMerchants: readonly string[]): void {
-  const store = storage();
-  if (store === null) return;
+  if (typeof window === "undefined") return;
+  hydrate();
   const live = new Set(liveMerchants);
-  try {
-    const stale: string[] = [];
-    for (let i = 0; i < store.length; i += 1) {
-      const key = store.key(i);
-      if (key === null || !key.startsWith(PREFIX)) continue;
-      if (!live.has(key.slice(PREFIX.length))) stale.push(key);
+  // Collected first, then removed: mutating `cache` while iterating its own
+  // keys is the same hazard the storage-index walk had.
+  const stale = [...cache.keys()].filter((merchant) => !live.has(merchant));
+  if (stale.length === 0) return;
+  const store = storage();
+  for (const merchant of stale) {
+    cache.delete(merchant);
+    try {
+      store?.removeItem(PREFIX + merchant);
+    } catch {
+      // See writePendingPick.
     }
-    for (const key of stale) store.removeItem(key);
-    if (stale.length > 0) emit();
-  } catch {
-    // See writePendingPick.
   }
+  emit();
 }

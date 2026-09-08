@@ -197,6 +197,11 @@ export function MerchantRow({
  * opens onto an empty panel. That case is real and common: on the live ledger
  * `TRIM(raw_memo)` equals the key itself on 151 of 1,540 rows, and
  * `loadMerchantGroups` drops those samples rather than repeat the line above.
+ *
+ * The drilldown link is rendered in BOTH branches, not just inside the panel.
+ * "Nothing to disclose" and "nothing to link to" are different facts, and
+ * conflating them took the escape hatch away from precisely the rows that
+ * cannot explain themselves any other way.
  */
 function MerchantDisclosure({ group }: { group: MerchantGroup }) {
   const merchant = group.normalizedMerchant;
@@ -207,16 +212,42 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
     </span>
   ) : null;
 
+  const drilldown =
+    href === null ? null : (
+      <Link
+        href={href}
+        /* D8 — 181 of these on one page; the destination is dynamic and
+           already has its own `loading.tsx`, so eager prefetching buys a
+           shell the route provides anyway. `visited:` distinguishes the
+           merchants already looked at on a page worked through in passes. */
+        prefetch={false}
+        className={`inline-flex min-h-11 items-center text-[var(--text-xs)] text-terracotta underline underline-offset-4 visited:text-ink-3 hover:no-underline ${FOCUS_RING}`}
+      >
+        See all {group.totalRowCount} transaction
+        {group.totalRowCount === 1 ? "" : "s"} →
+      </Link>
+    );
+
   if (group.sampleMemos.length === 0) {
     return (
-      <div className="flex min-w-0 items-baseline gap-2 sm:col-start-1 sm:row-start-1">
-        {/* Holds the chevron's column so a row with nothing to disclose still
-            starts its name on the same x as the rows around it. */}
-        <span aria-hidden className={CHEVRON_SLOT} />
-        <span className="truncate font-medium" title={merchant}>
-          {merchant}
-        </span>
-        {badge}
+      <div className="min-w-0 sm:col-start-1 sm:row-start-1">
+        <div className="flex min-w-0 items-baseline gap-2">
+          {/* Holds the chevron's column so a row with nothing to disclose still
+              starts its name on the same x as the rows around it. */}
+          <span aria-hidden className={CHEVRON_SLOT} />
+          <span className="truncate font-medium" title={merchant}>
+            {merchant}
+          </span>
+          {badge}
+        </div>
+        {/* The drilldown is NOT part of what the disclosure hides. Nesting it
+            there made it unreachable for exactly the groups that need it most:
+            "nothing to disclose" means every memo is byte-identical to the key
+            (151 of 1,540 rows), so the row shows a bare key it cannot
+            elaborate on and the only way to see the underlying transactions
+            was gone. Measured live on a four-group fixture: the one group with
+            no distinct memos rendered no link at all. */}
+        {drilldown === null ? null : <div className="mt-1 pl-4">{drilldown}</div>}
       </div>
     );
   }
@@ -251,20 +282,7 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
             </li>
           ))}
         </ul>
-        {href !== null ? (
-          <Link
-            href={href}
-            /* D8 — 181 of these on one page; the destination is dynamic and
-               already has its own `loading.tsx`, so eager prefetching buys a
-               shell the route provides anyway. `visited:` distinguishes the
-               merchants already looked at on a page worked through in passes. */
-            prefetch={false}
-            className={`inline-flex min-h-11 items-center text-[var(--text-xs)] text-terracotta underline underline-offset-4 visited:text-ink-3 hover:no-underline ${FOCUS_RING}`}
-          >
-            See all {group.totalRowCount} transaction
-            {group.totalRowCount === 1 ? "" : "s"} →
-          </Link>
-        ) : null}
+        {drilldown}
       </div>
     </details>
   );

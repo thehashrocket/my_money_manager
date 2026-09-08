@@ -4,7 +4,9 @@ import type { LeafCategory } from "@/lib/categories";
 import { currentMonth } from "@/lib/now";
 import { lastDayOfMonth, monthBoundary } from "@/lib/budget/monthOfIso";
 import { centsToDollarString } from "@/lib/money";
-import { MAX_SEARCH_LENGTH } from "@/lib/transactions/searchParams";
+// From `limits`, not `searchParams`: this file is in the client graph, and the
+// schema module carries zod, which is not tree-shakeable at module scope.
+import { MAX_SEARCH_LENGTH } from "@/lib/transactions/limits";
 
 export type TransactionsFilterValues = {
   search: string | undefined;
@@ -239,7 +241,15 @@ export function filterValuesToSearchParams(values: TransactionsFilterValues): UR
   if (values.amountMax !== undefined) params.set("amountMax", centsToDollarString(values.amountMax));
   if (values.pending !== undefined && values.pending !== "all") params.set("pending", values.pending);
   if (values.includeTransfers) params.set("includeTransfers", "true");
-  if (values.merchant !== undefined) params.set("merchant", values.merchant);
+  // `""` is skipped, not emitted. `flatten()` turns a bare `?merchant=` back
+  // into `undefined` at the destination, so a row whose `normalized_merchant`
+  // is empty would produce a link that promises one merchant and silently
+  // lands on all 1,540 rows. `merchantDrilldownHref` guards this by returning
+  // `null`; the row-level link builder goes through here instead, so the guard
+  // has to live at the one place both paths share.
+  if (values.merchant !== undefined && values.merchant !== "") {
+    params.set("merchant", values.merchant);
+  }
   return params;
 }
 

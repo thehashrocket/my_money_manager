@@ -11,6 +11,7 @@ import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
 import { TransactionRowMenu } from "./_row-menu";
+import { cn } from "@/lib/utils";
 import {
   categorizeTransactionAction,
   undoCategorizeTransactionAction,
@@ -250,7 +251,16 @@ export function TransactionColumnHeaders({
   return (
     <div
       aria-hidden
-      className={`${TXN_ROW_GRID} hidden border-b border-[var(--rule-strong)] bg-[var(--bg-inset)] py-2 font-mono text-[10px] uppercase tracking-wide text-ink-3 sm:grid`}
+      /* `cn()`, not a template string: the grid constant already carries
+         `py-3`, and Tailwind resolves a `py-3`/`py-2` collision by
+         stylesheet order rather than by class-string order — so the
+         header's own `py-2` was dead and it rendered at full row height.
+         tailwind-merge makes the later class win, which is what the
+         shared-template pattern assumed all along. */
+      className={cn(
+        TXN_ROW_GRID,
+        "hidden border-b border-[var(--rule-strong)] bg-[var(--bg-inset)] py-2 font-mono text-[10px] uppercase tracking-wide text-ink-3 sm:grid",
+      )}
     >
       <span>{merchantFiltered ? "Memo" : "Merchant / memo"}</span>
       <span>Category</span>
@@ -275,6 +285,15 @@ export function TransactionColumnHeaders({
  * `pageSize`), producing a much larger result set from what reads as a
  * narrowing action. And a row already matching the active merchant links to
  * the page it is standing on, so it renders as plain text instead.
+ *
+ * The promoted memo wraps to two lines below `sm`, exactly like `MemoLine` —
+ * this branch IS the D9 case, not an exception to it. Measured at 390px on a
+ * five-row `?merchant=AMAZON` list: four of the five memos overflowed the
+ * 316px available (363-396px needed) and a single `truncate` line cut every
+ * one of them at the same `AMAZON MKTPLACE PMTS AMZN.COM/BILL…` prefix, with
+ * only the `title` tooltip — which touch does not have — to reveal the tail
+ * that told them apart. `MemoLine`'s `line-clamp-2` fix landed on the branch
+ * that this case never renders.
  */
 function PrimaryLabel({
   row,
@@ -287,7 +306,7 @@ function PrimaryLabel({
   if (filterValues.merchant !== undefined) {
     return (
       <span
-        className="min-w-0 truncate font-mono text-xs text-ink-1 sm:col-start-1 sm:row-start-1"
+        className="min-w-0 line-clamp-2 font-mono text-xs text-ink-1 sm:col-start-1 sm:row-start-1 sm:truncate"
         title={memo || row.normalizedMerchant}
       >
         {memo || row.normalizedMerchant}

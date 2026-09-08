@@ -164,7 +164,7 @@ describe("transactionsDrilldownHref (D9 regression guard)", () => {
  * T5 — 17 of the 363 real `normalized_merchant` keys on this ledger carry
  * characters with meaning in a URL (`# * ? / ;`). `#` is the dangerous one:
  * a template literal would not error, it would truncate the query string, so
- * `?merchant=ARCO#05450AMERI` becomes a filter on `ARCO` and shows a
+ * `?merchant=GASCO#00000ANYTWN` becomes a filter on `GASCO` and shows a
  * different, entirely plausible-looking row set.
  */
 describe("merchantDrilldownHref", () => {
@@ -175,19 +175,19 @@ describe("merchantDrilldownHref", () => {
   });
 
   it("percent-encodes '#' rather than truncating the query at it", () => {
-    const href = merchantDrilldownHref("ARCO#05450AMERI")!;
-    expect(href).toBe("/transactions?merchant=ARCO%2305450AMERI");
+    const href = merchantDrilldownHref("GASCO#00000ANYTWN")!;
+    expect(href).toBe("/transactions?merchant=GASCO%2300000ANYTWN");
     const url = new URL(href, "http://localhost");
     expect(url.hash).toBe("");
-    expect(url.searchParams.get("merchant")).toBe("ARCO#05450AMERI");
+    expect(url.searchParams.get("merchant")).toBe("GASCO#00000ANYTWN");
   });
 
   it.each([
-    "ROTTEN ROBBIE #",
-    "CA DMV 658 *SVC",
-    "PG E/EZ-PAY",
-    "APPLE.COM/BILL",
-    "FASTY?S BBQ JOI JAMESTOWN",
+    "CORNER STORE #",
+    "ST DMV 000 *SVC",
+    "UTIL CO/EZ-PAY",
+    "VENDOR.COM/BILL",
+    "NORA?S BBQ JOI ANYTWN",
     // Shape-preserving stand-in for the ledger's longest real keys (63-69
     // chars): a colon, parens, a long digit run and spaces. Those keys are
     // personal Zelle strings carrying a real name, and this repo is public —

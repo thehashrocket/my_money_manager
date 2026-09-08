@@ -56,15 +56,15 @@ groups, 363 distinct merchants.**
 
 ```
 _merchant-row.tsx
-  group.normalizedMerchant                     e.g. "ARCO#05450AMERI"
+  group.normalizedMerchant                     e.g. "GASCO#00000ANYTWN"
         │
         ▼
   merchantDrilldownHref(merchant)              ← new; beside transactionsDrilldownHref (D6)
         │  new URLSearchParams({merchant})
         │  NEVER a template literal — 17 of 363 real keys carry # * ? / ;
-        │  a bare `#` truncates the query and silently filters on "ARCO"
+        │  a bare `#` truncates the query and silently filters on "GASCO"
         ▼
-  /transactions?merchant=ARCO%2305450AMERI
+  /transactions?merchant=GASCO%2300000ANYTWN
         │
         ▼
   lib/transactions/searchParams.ts  .strict()  ← [1] add `merchant` or every link 404s
@@ -155,9 +155,9 @@ Two implementation notes worth carrying forward, neither of which changes a deci
 CODE PATHS                                                USER FLOWS
 [+] merchantDrilldownHref()                               [+] Categorize → inspect
   ├── plain key "AMAZON"                                    ├── Click AMAZON → 59 rows
-  ├── URL-hostile keys ★★★  (17 real: ARCO#05450AMERI,      ├── [MANUAL] Click → page 2 →
-  │   ROTTEN ROBBIE #, CA DMV 658 *SVC, PG E/EZ-PAY,        │      filter SURVIVES ⚠ D5 class
-  │   APPLE.COM/BILL, FASTY?S BBQ JOI JAMESTOWN)            ├── [MANUAL] Apply filters →
+  ├── URL-hostile keys ★★★  (17 real: GASCO#00000ANYTWN,      ├── [MANUAL] Click → page 2 →
+  │   CORNER STORE #, ST DMV 000 *SVC, UTIL CO/EZ-PAY,        │      filter SURVIVES ⚠ D5 class
+  │   VENDOR.COM/BILL, NORA?S BBQ JOI ANYTWN)            ├── [MANUAL] Apply filters →
   └── empty-string key → refuse, never emit "?merchant="    │      merchant survives
                                                             ├── [MANUAL] chip ⊗ → merchant
 [+] loadTransactions({merchant})                            │      drops, date range stays
@@ -341,7 +341,7 @@ decision moved them.
 - [x] **T5 (P1, human: ~45min / CC: ~10min)** — `merchantDrilldownHref` + URL-encoding tests
   - Surfaced by: Test review — 17 of 363 real keys carry `# * ? /`
   - Files: `src/lib/budget/transactionsDrilldownHref.ts`, `.test.ts`
-  - Verify: pin `ARCO#05450AMERI` → `merchant=ARCO%2305450AMERI`
+  - Verify: pin `GASCO#00000ANYTWN` → `merchant=GASCO%2300000ANYTWN`
 - [x] **T6 (P1, human: ~4h / CC: ~35min)** — **[HARD REJECTION]** convert both row lists from cards to ruled rows
   - Surfaced by: Pass 1 / D17 — Codex + subagent both triggered hard rejection #7; litmus 5 NO on both
   - Files: `src/app/categorize/_merchant-row.tsx`, `_categorize-ui.tsx`, `src/app/transactions/_transaction-row.tsx`, `_transactions-ui.tsx`

@@ -10,6 +10,7 @@ import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { MerchantRow, ROW_GRID } from "./_merchant-row";
 import { prunePendingPicks } from "./_pending-pick";
+import { cn } from "@/lib/utils";
 
 type Props = {
   initialGroups: MerchantGroup[];
@@ -121,7 +122,16 @@ function ColumnHeaders() {
   return (
     <div
       aria-hidden
-      className={`${ROW_GRID} hidden border-b border-[var(--rule-strong)] bg-[var(--bg-inset)] py-2 font-mono text-[10px] uppercase tracking-wide text-ink-3 sm:grid`}
+      /* `cn()`, not a template string: the grid constant already carries
+         `py-3`, and Tailwind resolves a `py-3`/`py-2` collision by
+         stylesheet order rather than by class-string order — so the
+         header's own `py-2` was dead and it rendered at full row height.
+         tailwind-merge makes the later class win, which is what the
+         shared-template pattern assumed all along. */
+      className={cn(
+        ROW_GRID,
+        "hidden border-b border-[var(--rule-strong)] bg-[var(--bg-inset)] py-2 font-mono text-[10px] uppercase tracking-wide text-ink-3 sm:grid",
+      )}
     >
       <span>Merchant</span>
       <span className="text-right">Rows</span>
