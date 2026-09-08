@@ -75,6 +75,7 @@ export function planBackfill({ txns, rules, dismissals, normalize = normalizeMer
   const exactRules = rules.filter((r) => r.match_type === "exact");
   const rewritten = [];
   const ambiguous = [];
+  const unevidenced = [];
   for (const rule of exactRules) {
     const counts = oldToNew.get(rule.match_value);
     let next;
@@ -82,7 +83,18 @@ export function planBackfill({ txns, rules, dismissals, normalize = normalizeMer
       // No row currently carries this key — the merchant hasn't been seen since
       // the rule was trained. Renormalizing the rule's own value is the only
       // evidence available, and it is exact whenever the key is a fixed point.
+      //
+      // This is the LOWEST-confidence branch in the planner, lower than
+      // `ambiguous` below, which at least has rows on both sides. It is the one
+      // place the backfill stops being a join through the data and becomes a
+      // guess, so it gets reported rather than folded into the rewrite count.
+      //
+      // `drifts` marks the sub-case that is not merely unevidenced but wrong: a
+      // key that is not a fixed point relocates the rule to a value no write
+      // path will ever produce, because those normalize from raw_memo and land
+      // one step earlier. Such a rule is dead on arrival.
       next = normalize(rule.match_value);
+      unevidenced.push({ rule, next, drifts: normalize(next) !== next });
     } else if (counts.size === 1) {
       next = [...counts.keys()][0];
     } else {
@@ -236,6 +248,7 @@ export function planBackfill({ txns, rules, dismissals, normalize = normalizeMer
     reachChanges,
     changedRules,
     ambiguous,
+    unevidenced,
     collisions,
     losingRuleIds,
     dismissalPlan,
@@ -293,8 +306,10 @@ function runCli(argv) {
         ? ` (drifting: ${plan.drifting.map((k) => JSON.stringify(k)).join(", ")})`
         : ""),
   );
+  const unevidencedChanged = plan.unevidenced.filter((u) => u.next !== u.rule.match_value);
   say(
-    `exact rules:     ${plan.exactRuleCount} total, ${plan.changedRules.length} rewritten, ${plan.ambiguous.length} ambiguous`,
+    `exact rules:     ${plan.exactRuleCount} total, ${plan.changedRules.length} rewritten, ` +
+      `${plan.ambiguous.length} ambiguous, ${unevidencedChanged.length} unevidenced`,
   );
   say(
     `other rules:     ${plan.nonExactRuleCount} contains/regex (never rewritten), ` +
@@ -327,6 +342,25 @@ function runCli(argv) {
       say(
         `  id=${rule.id} ${JSON.stringify(rule.match_value)} -> ` +
           ranked.map(([k, n]) => `${JSON.stringify(k)} x${n}`).join(", "),
+      );
+    }
+  }
+
+  if (unevidencedChanged.length > 0) {
+    say("");
+    say("UNEVIDENCED REWRITES (no surviving row carries the old key — derived from");
+    say("the rule's own value, so exact only if that value is a fixed point):");
+    for (const { rule, next, drifts } of unevidencedChanged) {
+      say(
+        `  id=${rule.id} ${JSON.stringify(rule.match_value)} -> ${JSON.stringify(next)}` +
+          `  category=${categories.get(rule.category_id)?.name}` +
+          (drifts ? "   <-- DRIFTS: no write path produces this key; rule lands dead" : ""),
+      );
+    }
+    if (unevidencedChanged.some((u) => u.drifts)) {
+      say(
+        "  A drifting target means the rule will match nothing. Retrain it from a row\n" +
+          "  in /categorize after this run rather than trusting the rewrite.",
       );
     }
   }
