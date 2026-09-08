@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
@@ -39,6 +39,20 @@ export type MerchantGroup = {
    * Naming the same number in both places would misstate what the link opens.
    */
   totalRowCount: number;
+  /**
+   * Distinct categories this key's already-filed, non-transfer rows carry.
+   *
+   * Feeds the Remember guard (`keyTrainability.ts`) on the client, where it is
+   * unioned with the category the user has currently picked. Shipped as the
+   * ids rather than as a finished verdict for exactly that reason: the verdict
+   * depends on the pick, which only the row component knows, and computing it
+   * here would disagree with the server the moment the user chooses a category
+   * this key has never been filed to.
+   *
+   * Same predicate as `loadFiledCategoryIds` — a divergence between the two
+   * would let the checkbox render enabled and then be refused on submit.
+   */
+  filedCategoryIds: number[];
 };
 
 /**
@@ -50,13 +64,14 @@ export type MerchantGroup = {
  * Returns groups sorted by count DESC, then merchant name ASC — biggest wins
  * surface first per the upstream plan.
  *
- * Three lightweight follow-up queries fetch, for the set of merchants in
- * play: exact-match rules, up to three distinct sample memos each, and each
- * key's total row count including already-filed rows. All three are
- * `inArray()` over the group list rather than per-group round trips, so the
- * cost is four queries total regardless of how many groups there are — which
- * matters more than it did when this said "a second query at 30–60 groups",
- * since the real ledger currently carries several times that many.
+ * Four lightweight follow-up queries fetch, for the set of merchants in
+ * play: exact-match rules, up to three distinct sample memos each, each key's
+ * total row count including already-filed rows, and the distinct categories
+ * those filed rows carry. All four are `inArray()` over the group list rather
+ * than per-group round trips, so the cost is five queries total regardless of
+ * how many groups there are — which matters more than it did when this said "a
+ * second query at 30–60 groups", since the real ledger currently carries
+ * several times that many.
  */
 export function loadMerchantGroups(db: Db): MerchantGroup[] {
   const rows = db
@@ -99,6 +114,7 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
 
   const sampleMemosByMerchant = loadSampleMemos(db, merchants);
   const totalRowCountByMerchant = loadTotalRowCounts(db, merchants);
+  const filedCategoriesByMerchant = loadFiledCategories(db, merchants);
 
   const ruleByMerchant = new Map<string, ExistingRule>();
   for (const rule of rules) {
@@ -124,6 +140,9 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
     // sensible fallback.
     totalRowCount:
       totalRowCountByMerchant.get(r.normalizedMerchant) ?? Number(r.count),
+    // Empty is the correct and common answer: a key nothing has been filed
+    // under yet is trainable, so the absent-entry case is not a fallback.
+    filedCategoryIds: filedCategoriesByMerchant.get(r.normalizedMerchant) ?? [],
   }));
 
   groups.sort((a, b) => {
@@ -132,6 +151,40 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
   });
 
   return groups;
+}
+
+/**
+ * Distinct categories each merchant's ALREADY-FILED rows carry.
+ *
+ * Note the inverted category predicate: every other follow-up query here reads
+ * the uncategorized backlog, and this one deliberately reads its complement —
+ * the decisions already made are what say whether one rule can cover the key.
+ * Transfer-paired rows stay excluded, matching `loadFiledCategoryIds`.
+ */
+function loadFiledCategories(db: Db, merchants: string[]): Map<string, number[]> {
+  const rows = db
+    .selectDistinct({
+      normalizedMerchant: schema.transactions.normalizedMerchant,
+      categoryId: schema.transactions.categoryId,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        isNotNull(schema.transactions.categoryId),
+        isNull(schema.transactions.transferPairId),
+        inArray(schema.transactions.normalizedMerchant, merchants),
+      ),
+    )
+    .all();
+
+  const byMerchant = new Map<string, number[]>();
+  for (const row of rows) {
+    if (row.categoryId === null) continue;
+    const existing = byMerchant.get(row.normalizedMerchant);
+    if (existing === undefined) byMerchant.set(row.normalizedMerchant, [row.categoryId]);
+    else existing.push(row.categoryId);
+  }
+  return byMerchant;
 }
 
 /**

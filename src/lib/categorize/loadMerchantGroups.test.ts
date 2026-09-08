@@ -584,3 +584,112 @@ describe("loadMerchantGroups — count agrees with the drilldown header's backlo
     expect(group.count).toBe(1);
   });
 });
+
+describe("loadMerchantGroups — filedCategoryIds", () => {
+  it("is empty for a key nothing has been filed under", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWSHOP", amountCents: -1000 });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.normalizedMerchant).toBe("NEWSHOP");
+    // Empty is the answer, not a missing entry — a brand-new key is trainable.
+    expect(group.filedCategoryIds).toEqual([]);
+  });
+
+  it("carries the distinct categories the key's filed rows already use", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -2000,
+      categoryId: homeGoods.id,
+    });
+    // Two more filings under a category already seen must not add entries.
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -900,
+      categoryId: amazon.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500 });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect([...group.filedCategoryIds].sort()).toEqual(
+      [amazon.id, homeGoods.id].sort(),
+    );
+  });
+
+  it("excludes transfer-paired rows, matching loadFiledCategoryIds", () => {
+    // The two predicates have to agree or the checkbox renders enabled and is
+    // then refused on submit.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const other = seedCategory("Other");
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "PARTNER",
+      amountCents: 4000,
+      categoryId: groceries.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+      categoryId: other.id,
+      transferPairId: partner.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1500 });
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "SAFEWAY",
+    );
+    expect(group?.filedCategoryIds).toEqual([]);
+  });
+
+  it("scopes filings to their own key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+      categoryId: groceries.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "CHIPOTLE",
+      amountCents: -1200,
+      categoryId: dining.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1500 });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "CHIPOTLE", amountCents: -800 });
+
+    const groups = loadMerchantGroups(handle.db);
+    expect(
+      groups.find((g) => g.normalizedMerchant === "SAFEWAY")?.filedCategoryIds,
+    ).toEqual([groceries.id]);
+    expect(
+      groups.find((g) => g.normalizedMerchant === "CHIPOTLE")?.filedCategoryIds,
+    ).toEqual([dining.id]);
+  });
+});
