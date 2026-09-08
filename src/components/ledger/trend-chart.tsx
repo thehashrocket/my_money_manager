@@ -55,11 +55,31 @@ function buildChartData(months: MonthTrend[], categoryNames: string[]) {
 // tooltip floats independently of the Legend's layout.
 const TOOLTIP_MAX_ROWS = 5;
 
+// Spend is positive here, so the ordinary case is the "money out" tone. A
+// negative value means refunds outran spend for that group — real money coming
+// back — and it gets the credit tone rather than being painted as an outflow.
+// Exactly zero is neither: a month whose refunds cancelled its spend to the
+// cent is not an outflow, and painting $0.00 red reads as one.
+function moneyTone(value: number) {
+  if (value === 0) return "text-muted-foreground";
+  return value < 0 ? "text-money-pos" : "text-money-neg";
+}
+
 function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
 
-  const present = payload.filter((p) => (p.value ?? 0) > 0);
-  const sorted = [...present].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  // `!== 0`, not `> 0`. Under the signed convention a category whose refunds
+  // exceed its spend reports a NEGATIVE `spentCents` and draws below the axis
+  // (see `loadMonthlyTrends`' docblock — reported, never clamped). A `> 0`
+  // filter dropped that row from the tooltip AND from the Total below it, so
+  // the tooltip disagreed with the bar it was describing. Exactly zero is still
+  // excluded, matching the read model, which never emits a zero group.
+  const present = payload.filter((p) => (p.value ?? 0) !== 0);
+  // Sort by magnitude so a large refund ranks with the large spends rather
+  // than falling to the bottom of the list under a signed comparison.
+  const sorted = [...present].sort(
+    (a, b) => Math.abs(b.value ?? 0) - Math.abs(a.value ?? 0),
+  );
   const total = sorted.reduce((s, p) => s + (p.value ?? 0), 0);
   const shown = sorted.slice(0, TOOLTIP_MAX_ROWS);
   const rest = sorted.slice(TOOLTIP_MAX_ROWS);
@@ -71,7 +91,7 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
       {shown.map((p) => (
         <div key={p.name} className="flex justify-between gap-4">
           <span style={{ color: p.fill }}>{p.name}</span>
-          <span className="text-money-neg">{formatCents(Math.round((p.value ?? 0) * 100))}</span>
+          <span className={moneyTone(p.value ?? 0)}>{formatCents(Math.round((p.value ?? 0) * 100))}</span>
         </div>
       ))}
       {rest.length > 0 && (
@@ -82,14 +102,19 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
       )}
       <div className="flex justify-between gap-4 border-t border-border pt-1 font-semibold">
         <span className="text-muted-foreground">Total</span>
-        <span className="text-money-neg">{formatCents(Math.round(total * 100))}</span>
+        <span className={moneyTone(total)}>{formatCents(Math.round(total * 100))}</span>
       </div>
     </div>
   );
 }
 
 export function TrendChart({ months, categoryNames }: TrendChartProps) {
-  const isEmpty = months.every((m) => m.totalSpentCents === 0);
+  // "Nothing to draw", not "sums to zero". Under the signed spend convention
+  // `totalSpentCents === 0` no longer implies an empty month — a month whose
+  // refunds exactly cancelled its spend also totals zero, and telling that user
+  // to import more transactions would be false. `byCategory` is already
+  // zero-filtered upstream, so an empty one is the precise render condition.
+  const isEmpty = months.every((m) => m.byCategory.length === 0);
 
   if (isEmpty) {
     return (
@@ -103,7 +128,23 @@ export function TrendChart({ months, categoryNames }: TrendChartProps) {
 
   return (
     <ResponsiveContainer width="100%" height={240}>
-      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 8 }}>
+      {/*
+        `stackOffset="sign"` is load-bearing now that a group's month can be
+        negative (a category whose refunds outran its spend — see
+        `loadMonthlyTrends`' docblock, which reports rather than clamps).
+        Recharts defaults to `stackOffset: "none"`, which is d3's
+        `stackOffsetNone`: it accumulates sequentially and does NOT separate
+        signs, so a negative segment is drawn as [prevTop − v, prevTop] —
+        painted back OVER its neighbour, above the axis, in the refund
+        category's colour. The tooltip total stayed right while the picture was
+        wrong. "sign" splits positives above the axis and negatives below,
+        which is what the docblock claims happens.
+      */}
+      <BarChart
+        data={data}
+        stackOffset="sign"
+        margin={{ top: 8, right: 8, bottom: 0, left: 8 }}
+      >
         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
         <XAxis
           dataKey="label"
