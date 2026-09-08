@@ -272,7 +272,7 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
            the summary out of `list-item`, so `list-none` alone leaves a second
            stray triangle beside ours. */
         className={`flex cursor-pointer list-none items-baseline gap-2 py-2.5 -my-2.5 text-terracotta underline-offset-4 hover:underline [&::-webkit-details-marker]:hidden ${FOCUS_RING}`}
-        title={merchant}
+        title={merchantLabel(merchant)}
       >
         <span
           aria-hidden

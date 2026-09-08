@@ -14,8 +14,10 @@ import {
  * This module is a plain `.ts` store, not a component, so it is inside the
  * testable surface (same precedent as `_filter-bar.test.ts`). It is also the
  * only place in the feature where a browser API can *throw* rather than
- * return a falsy value — Safari's private mode throws on `sessionStorage`
- * access — and the whole point of the wrapping is that a persistence
+ * return a falsy value — Safari's private mode threw `QuotaExceededError`
+ * from `setItem`, and Chrome/Firefox with site data blocked throw a
+ * `SecurityError` from the property access itself — and the point of the
+ * wrapping is that a persistence
  * convenience must never take down the page it is helping on. That guarantee
  * is only real if something exercises the throwing path.
  *
@@ -209,9 +211,49 @@ describe("_pending-pick — prune", () => {
     }
   });
 
+  /**
+   * The reload path, which is the only one that matters here and the only one
+   * nothing covered.
+   *
+   * Every other prune test writes its picks through `writePendingPick` in the
+   * same module instance, so `cache` is already populated and `hydrate()`
+   * inside `prunePendingPicks` is dead weight — deleting that call left all
+   * 1,439 tests green. But the scenario the function exists for is precisely
+   * the one where the cache starts EMPTY and the picks are only in storage:
+   * after a reload, `sessionStorage` outlives the module. Without hydration
+   * the GC walks an empty map, prunes nothing, and a pick outlives the
+   * merchant it was about — exactly what the docstring says it prevents.
+   */
+  it("prunes picks that exist only in storage, as after a reload", () => {
+    // Written directly, NOT via writePendingPick: this is a fresh module
+    // looking at a store that predates it.
+    store.setItem("mm.categorize.pick.SAFEWAY", "3");
+    store.setItem("mm.categorize.pick.AMAZON", "7");
+
+    prunePendingPicks(["AMAZON"]);
+
+    expect(store.getItem("mm.categorize.pick.SAFEWAY")).toBeNull();
+    expect(store.getItem("mm.categorize.pick.AMAZON")).toBe("7");
+  });
+
+  it("a deliberate clear survives a reload as \"\", not as never-picked", () => {
+    // The module's headline invariant, on the durability path rather than
+    // within one sitting. `hydrate()` keeping `""` is what stops
+    // `storedPick ?? existingRule` reinstating the rule's category and
+    // silently undoing the clear; a `if (value)` truthiness check here would
+    // drop it, and every in-memory test would still pass.
+    store.setItem("mm.categorize.pick.AMAZON", "");
+
+    expect(readPendingPick("AMAZON")).toBe("");
+    expect(readPendingPick("AMAZON")).not.toBeNull();
+  });
+
   it("removes every stale key, not every other one — mutation during iteration", () => {
-    // The two-pass shape (collect, then remove) matters: removing inside the
-    // `store.key(i)` loop shifts the indices and silently leaves half behind.
+    // Collect-then-remove, over `cache.keys()` rather than a `store.key(i)`
+    // index walk — which is what makes this safe. The index walk (the shape
+    // `hydrate()` still uses, and which prune used before it became
+    // cache-driven) shifts indices under its own `removeItem` and silently
+    // leaves half the stale keys behind.
     for (const merchant of ["A", "B", "C", "D", "E", "F"]) {
       writePendingPick(merchant, "1");
     }

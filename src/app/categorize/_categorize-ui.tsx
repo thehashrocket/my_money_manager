@@ -78,7 +78,8 @@ export function CategorizeUi({
            `initialGroups.length`. Both actions call `revalidatePath`, so the
            server list drops a merchant the moment it is categorized — reading
            the denominator off it made the counter read "1 of 5" one submit
-           after it read "0 of 6", as though the work had grown. This form
+           after it read "0 of 6", overstating progress: the denominator shrank with the numerator, so one
+ * submit moved it two steps instead of one. This form
            holds steady across the revalidation and still grows if an import
            adds merchants mid-sitting. */
         totalMerchants={groups.length + dismissed.size}

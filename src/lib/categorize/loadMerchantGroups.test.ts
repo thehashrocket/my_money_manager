@@ -349,6 +349,44 @@ describe("loadMerchantGroups — sample memo edges", () => {
     expect(group.sampleMemos).toEqual(["ALPHA 1", "BETA 2", "MID 3"]);
   });
 
+  /**
+   * The cap is PER MERCHANT, and nothing proved it.
+   *
+   * Every other sample-memo test seeds exactly one merchant, so the grouping
+   * and the cap are exercised only in the shape they never run in on the real
+   * page — a 181-group list. Replacing the per-merchant
+   * `existing.length < MAX_SAMPLE_MEMOS` with a single global counter left all
+   * 1,439 tests green, and the resulting bug is invisible rather than loud:
+   * every group after the first renders NO disclosure control, which looks
+   * exactly like the legitimate "this merchant has nothing to disclose" state
+   * the other tests do cover.
+   */
+  it("caps each merchant at three independently, not three across the whole list", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (const merchant of ["ALPHA CO", "BRAVO CO", "CHARLIE CO"]) {
+      for (const n of [1, 2, 3, 4]) {
+        seedTxn({
+          accountId: a.id,
+          batchId: b.id,
+          merchant,
+          amountCents: -100 * n,
+          rawMemo: `${merchant} MEMO ${n}`,
+        });
+      }
+    }
+
+    const groups = loadMerchantGroups(handle.db);
+    expect(groups).toHaveLength(3);
+    for (const group of groups) {
+      expect(group.sampleMemos).toHaveLength(3);
+      // ...and each group's samples are its OWN memos, not a neighbour's.
+      for (const memo of group.sampleMemos) {
+        expect(memo.startsWith(group.normalizedMerchant)).toBe(true);
+      }
+    }
+  });
+
   it("does not sample a transfer-paired row's memo", () => {
     const a = seedAccount();
     const b = seedBatch();

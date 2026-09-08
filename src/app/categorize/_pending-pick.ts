@@ -15,8 +15,11 @@
  * `sessionStorage`, not `localStorage`: a pick is a half-finished thought
  * inside one sitting, not a preference. Closing the tab should discard it.
  *
- * Every access is wrapped — Safari's private mode throws on `sessionStorage`
- * access rather than returning null, and a persistence convenience must never
+ * Every access is wrapped — a locked-down browser throws rather than
+ * returning null, in two different places: Safari's private mode threw
+ * `QuotaExceededError` from `setItem`, while Chrome and Firefox with site
+ * data blocked throw a `SecurityError` from the `sessionStorage` property
+ * access itself, and a persistence convenience must never
  * be able to take down the page it is helping on.
  *
  * Exposed as a `useSyncExternalStore` source rather than read into `useState`
@@ -117,10 +120,30 @@ export function noPendingPick(): null {
   return null;
 }
 
+/**
+ * The `window.sessionStorage` PROPERTY ACCESS, wrapped — and the only place
+ * that failure can be reported.
+ *
+ * This is the sixth catch in the module and the one that used to be silent.
+ * When the getter itself throws (Chrome or Firefox with site data blocked for
+ * the origin, an enterprise `DefaultCookiesSetting=2`, a sandboxed iframe),
+ * this returns `null` — and then every `storage()?.setItem(…)` below
+ * short-circuits and `hydrate()` returns before its `try`. So none of the five
+ * inner catches ever runs, and without a warn here the module produced NO
+ * diagnostic at all in exactly the configuration its docstring promises to
+ * make legible: the user parks a dozen picks, reloads, loses all of them, and
+ * both consoles are clean.
+ *
+ * The `typeof window` check stays OUTSIDE the `try` deliberately — inside, a
+ * server render would take the catch and warn once per process about a browser
+ * API that was never supposed to exist there.
+ */
 function storage(): Storage | null {
+  if (typeof window === "undefined") return null;
   try {
-    return typeof window === "undefined" ? null : window.sessionStorage;
-  } catch {
+    return window.sessionStorage;
+  } catch (err) {
+    warnStorageUnavailable(err);
     return null;
   }
 }
