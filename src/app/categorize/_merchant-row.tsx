@@ -9,6 +9,7 @@ import type { MerchantGroup } from "@/lib/categorize/loadMerchantGroups";
 import type { LeafCategory } from "@/lib/categories";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
   clearPendingPick,
@@ -46,14 +47,18 @@ export const ROW_GRID =
  * whether that was groceries or a laptop, and the only way to find out was to
  * leave the page you are working through. Opening the name shows up to three
  * of the group's real bank memos in place; the drilldown to `/transactions`
- * moves INSIDE that disclosure as the escape hatch for when three isn't
- * enough.
+ * is the escape hatch for when three isn't enough. That drilldown sits
+ * OUTSIDE the disclosure, not inside it — see the comment at the render site
+ * for why nesting it there made it unreachable for the groups that need it
+ * most.
  *
  * Making the name a disclosure rather than a link closes four things at once
- * that a bare link opened: it halves the added tab stops (181, not 362), a
- * truncated 69-char key is no longer also an ambiguous link target, the
- * control is no longer inside a 50%-opacity row (see `existingRule` below),
- * and the common case no longer navigates away from unsaved state at all.
+ * that a bare link opened: it halves the added tab stops, a truncated 69-char
+ * key is no longer also an ambiguous link target, the control is no longer
+ * inside a dimmed row (this PR drops that dimming entirely — rule-backed rows
+ * now render at full-strength ink, with the `→ CATEGORY (RULE)` badge
+ * carrying the settled signal), and the common case no longer navigates away
+ * from unsaved state at all.
  *
  * On submit:
  * - calls `bulkCategorizeMerchantAction` via a transition,
@@ -156,7 +161,7 @@ export function MerchantRow({
       </span>
       <div className="flex flex-wrap items-center gap-3 sm:col-span-3 sm:col-start-1 sm:row-start-2 sm:justify-end">
         <label className="sr-only" htmlFor={`cat-${merchant}`}>
-          Category for {merchant}
+          Category for {merchantLabel(merchant)}
         </label>
         <CategoryCombobox
           id={`cat-${merchant}`}
@@ -235,15 +240,20 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
           {/* Holds the chevron's column so a row with nothing to disclose still
               starts its name on the same x as the rows around it. */}
           <span aria-hidden className={CHEVRON_SLOT} />
-          <span className="truncate font-medium" title={merchant}>
-            {merchant}
+          <span
+            className={`truncate font-medium${hasMerchantName(merchant) ? "" : " text-ink-3"}`}
+            title={merchantLabel(merchant)}
+          >
+            {merchantLabel(merchant)}
           </span>
           {badge}
         </div>
         {/* The drilldown is NOT part of what the disclosure hides. Nesting it
             there made it unreachable for exactly the groups that need it most:
-            "nothing to disclose" means every memo is byte-identical to the key
-            (151 of 1,540 rows), so the row shows a bare key it cannot
+            "nothing to disclose" means the group has no memo that adds
+            anything to its key — every memo equalling the key once trimmed
+            (`loadSampleMemos` compares `TRIM(raw_memo)`, and blank memos are
+            dropped by the same query) — so the row shows a bare key it cannot
             elaborate on and the only way to see the underlying transactions
             was gone. Measured live on a four-group fixture: the one group with
             no distinct memos rendered no link at all. */}
@@ -271,7 +281,9 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
         >
           ▶
         </span>
-        <span className="truncate font-medium">{merchant}</span>
+        <span className={`truncate font-medium${hasMerchantName(merchant) ? "" : " text-ink-3"}`}>
+          {merchantLabel(merchant)}
+        </span>
         {badge}
       </summary>
       <div className="mt-2 space-y-1.5 border-l border-[var(--rule-faint)] pl-3">

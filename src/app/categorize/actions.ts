@@ -47,7 +47,14 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     .where(eq(schema.categories.id, result.categoryId))
     .get();
 
+  // `/transactions` too, and not only for symmetry with its own actions
+  // (which already revalidate `/categorize`): the drilldown makes these two
+  // pages a round trip. `/transactions?merchant=X` → "Categorize all N →" →
+  // file them here → back. Without this, the page you return to still lists
+  // those rows as Uncategorized, under a header breakdown that no longer
+  // matches the ledger.
   revalidatePath("/categorize");
+  revalidatePath("/transactions");
   revalidatePath("/budget", "layout");
 
   return {
@@ -74,6 +81,7 @@ export async function undoBulkCategorizeAction(
 
   const result = undoBulkCategorize(db, parsed.data);
   revalidatePath("/categorize");
+  revalidatePath("/transactions");
   revalidatePath("/budget", "layout");
   return result;
 }

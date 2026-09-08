@@ -51,6 +51,25 @@ const listeners = new Set<() => void>();
 const cache = new Map<string, string>();
 
 /**
+ * Storage failures are survivable by design — `cache` is the read source of
+ * truth, so the picker keeps working — but they are not nothing: on a full
+ * reload every parked pick is gone, which is the exact defect D19 exists to
+ * close. Warning once (not per call: `prunePendingPicks` can attempt ~181
+ * `removeItem`s in a single pass, and `hydrate()` walks the whole store) leaves
+ * a trace that makes "my picks keep vanishing" answerable instead of a
+ * mystery, without turning a locked-down browser into a wall of console noise.
+ */
+let warnedAboutStorage = false;
+function warnStorageUnavailable(err: unknown): void {
+  if (warnedAboutStorage) return;
+  warnedAboutStorage = true;
+  console.warn(
+    "[pending-pick] sessionStorage unavailable — category picks will not survive a reload",
+    err,
+  );
+}
+
+/**
  * `sessionStorage` is read once, lazily, into `cache` — not per read. Runs on
  * the client only; `storage()` returns null during SSR.
  *
@@ -73,9 +92,11 @@ function hydrate(): void {
       const value = store.getItem(key);
       if (value !== null) cache.set(key.slice(PREFIX.length), value);
     }
-  } catch {
-    // See writePendingPick — a locked-down browser leaves the cache empty,
-    // which is the correct "nothing parked yet" answer.
+  } catch (err) {
+    // A locked-down browser leaves the cache empty, which is the correct
+    // "nothing parked yet" answer — but it is also indistinguishable from a
+    // genuinely empty store, so say so once.
+    warnStorageUnavailable(err);
   }
 }
 
@@ -125,9 +146,13 @@ export function writePendingPick(normalizedMerchant: string, categoryId: string)
   cache.set(normalizedMerchant, categoryId);
   try {
     storage()?.setItem(PREFIX + normalizedMerchant, categoryId);
-  } catch {
+  } catch (err) {
     // Quota or a locked-down browser — the pick simply won't survive a trip.
-    // It still shows in the field, because `cache` already has it.
+    // It still shows in the field, because `cache` was already set above.
+    // The ordering is load-bearing: writing the cache AFTER storage would
+    // make a throwing `setItem` skip it and leave the picker inoperable, the
+    // very bug this module was written to fix.
+    warnStorageUnavailable(err);
   }
   emit();
 }
@@ -138,8 +163,9 @@ export function clearPendingPick(normalizedMerchant: string): void {
   cache.delete(normalizedMerchant);
   try {
     storage()?.removeItem(PREFIX + normalizedMerchant);
-  } catch {
+  } catch (err) {
     // See writePendingPick.
+    warnStorageUnavailable(err);
   }
   emit();
 }
@@ -147,11 +173,18 @@ export function clearPendingPick(normalizedMerchant: string): void {
 /**
  * Drop parked picks for merchants this page no longer lists.
  *
- * Without it a pick outlives the thing it was about: categorize AMAZON from
- * `/transactions` in another tab, come back, and a stale "Gifts" would be
- * restored onto whatever row reused that key — or linger invisibly forever
- * for a merchant that no longer has a backlog at all. The live group list is
- * the authority; anything not in it is finished business.
+ * Without it a pick outlives the thing it was about: park "Gifts" on AMAZON,
+ * drill into `/transactions`, file the whole group from there, and the
+ * `revalidatePath("/categorize")` that follows drops AMAZON from the server's
+ * group list — but the stale "Gifts" would be restored onto whatever row
+ * reused that key, or linger invisibly forever for a merchant with no backlog
+ * left. The live group list is the authority; anything not in it is finished
+ * business.
+ *
+ * The trigger is a fresh `initialGroups` (`_categorize-ui.tsx`'s effect), so
+ * this covers navigation and revalidation, NOT a second browser tab: picks
+ * live in `sessionStorage`, which is per-tab, and switching tabs is not a
+ * navigation — nothing refetches, so nothing prunes.
  */
 export function prunePendingPicks(liveMerchants: readonly string[]): void {
   if (typeof window === "undefined") return;
@@ -166,8 +199,9 @@ export function prunePendingPicks(liveMerchants: readonly string[]): void {
     cache.delete(merchant);
     try {
       store?.removeItem(PREFIX + merchant);
-    } catch {
+    } catch (err) {
       // See writePendingPick.
+      warnStorageUnavailable(err);
     }
   }
   emit();

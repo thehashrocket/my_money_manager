@@ -19,7 +19,7 @@ type Props = {
 };
 
 /**
- * Client island wrapper for `/categorize`. Owns three pieces of local state:
+ * Client island wrapper for `/categorize`. Owns two pieces of local state:
  *
  * - A live backlog counter that decrements optimistically on submit and
  *   increments back on Undo. Matches the server-rendered count on first paint;
