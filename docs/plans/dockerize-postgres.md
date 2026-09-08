@@ -903,7 +903,7 @@ Nothing here is rebuilt in parallel.
 | **`/budget` set-based query rewrite** | Deliberately gated on measurement (D6.1B). Restructuring the most subtly-tested logic in the repo during a dialect migration would give a wrong envelope two candidate causes. |
 | **Branded `Cents` type** (TODOS P4) | PR2 touches all 292 call sites, so it is tempting. It is also a second reason for every line to change. Separate pass. |
 | **Shared batch-writer refactor** (TODOS P4) | Same reasoning. |
-| **SimpleFIN relink `external_id` orphaning** (TODOS P2, open) | Pre-existing bug, unrelated to transport. Fixing it mid-migration muddies the reconciliation. |
+| **SimpleFIN relink `external_id` orphaning** (TODOS P2 — **closed in v0.21.0**, before PR2 started) | Was deferred as a pre-existing bug, unrelated to transport: fixing it mid-migration would have muddied the reconciliation. It shipped separately instead — `transactions.simplefin_source_account_id` + migration `0020` — so PR2 inherits a partial unique index over `(simplefin_source_account_id, external_id)`, not `(account_id, external_id)`. |
 | **Dev containers / devcontainer.json** | `pnpm dev` on the host stays the primary loop. |
 
 ## Failure modes

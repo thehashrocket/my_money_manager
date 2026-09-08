@@ -1498,7 +1498,11 @@ column).
       correct as spend. This is the same shape as the fund and rollover stories:
       the largest release in the repo (39 tasks) renders an anchor balance and
       nothing else. Do not read the liability surfaces as verified until the card
-      carries rows. Blocked by: getting the Citi feed to import transactions, which
-      is also the action most likely to trigger the relink P1 above — sequence
-      accordingly. (`src/lib/accounts/paidDownCents.ts`,
+      carries rows. Blocked by: getting the Citi feed to import transactions. That
+      used to be the action most likely to trigger the relink P1 above, so it had to
+      be sequenced after it; the P1 closed in v0.21.0 (feed provenance, migration
+      `0020`), so linking the card is now just a link. Watch for the new relink
+      warning instead: if the Citi feed's rows are already filed under another
+      account, sync will refuse to re-import them and this account's balance will
+      run short until they are moved. (`src/lib/accounts/paidDownCents.ts`,
       `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`)

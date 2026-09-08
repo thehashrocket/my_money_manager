@@ -1,5 +1,7 @@
 # Plan — Load the ledger and start budgeting
 
+**Status update 2026-09-08:** the one gap this plan carried forward unfixed — failure mode #4, the cross-account relink double-count — is **closed** in v0.21.0 by `transactions.simplefin_source_account_id` (migration `0020`). The rest of the document is left as written on the date it was locked.
+
 Locked via `/plan-eng-review` 2026-09-02. Supersedes nothing; this is the work that
 `PLAN.md`'s "integration checkpoint" has been waiting on since Weekend 2.
 
@@ -162,7 +164,7 @@ sequence, not before it. Steps 5-10 have not run.
 | Deferred | Why |
 |---|---|
 | PR2 Postgres, PR3 NAS/phone | Decided at D1. Neither is evaluable until the app is proven on real data. |
-| P1 SimpleFIN cross-account relink double-count | Cannot fire until step 7 links the accounts. Do it immediately after, not before. |
+| P1 SimpleFIN cross-account relink double-count | Cannot fire until step 7 links the accounts. Do it immediately after, not before. **Done: closed in v0.21.0** (feed provenance, migration `0020`). |
 | Raising `MAX_LOOKBACK_DAYS` 45→90 | Cut. Star One's CSV export covers the whole gap, so the smaller sync window is strictly better. |
 | Month-scoped `/categorize` filter + month-scoped backlog count | Real gap (Codex points 3-4) but a new feature, not a fix. TODO. |
 | `/categorize` pagination | Gated on T7's measurement. |
@@ -188,13 +190,16 @@ sequence, not before it. Steps 5-10 have not run.
 | 1 | `buildPreview` dedup | Wider re-export double-counts | T2 adds it | After T2 | Rows flagged duplicate in preview |
 | 2 | `commitImport` + rules | A bad `contains` rule mass-mislabels the backfill | T1 adds it | Partly | Wrong categories, correctable in bulk; **no undo on import-time categorization** — see risk below |
 | 3 | `pnpm db:migrate` | Rebuild fails on FK rows | `migration0010.test.ts` + today's dry run | Yes | Non-zero exit, pre-migrate snapshot intact |
-| 4 | Step 7 link | Mislink, then relink → silent cross-account double-count | `sync.test.ts:737` pins it | **No** | Nothing. Known open P1. |
+| 4 | Step 7 link | Mislink, then relink → silent cross-account double-count | was pinned in `sync.test.ts`; that test is now inverted to assert the fix | **Yes, since v0.21.0** (was: no) | Nothing to see — the rows keep their feed tag, so the resync recognises them. |
 | 5 | Transfer review | Backfilled April pairs unreachable | No | After T5 | Rows counted as spending, invisibly |
 
-**Critical gap: #4.** No test, no handling, silent. It is the open P1 in `TODOS.md`
-and step 7 is exactly when it becomes reachable. Mitigation for this plan: link
-each account once, carefully, and verify the mapping before syncing. Fix it
-immediately after this plan lands.
+**Critical gap: #4 — CLOSED in v0.21.0.** As written at plan time: no test, no handling, silent; the
+open P1 in `TODOS.md`, reachable from step 7. The mitigation this plan ran with was to link each
+account once, carefully, and verify the mapping before syncing. The fix landed after: a row now
+records the feed that produced it (`transactions.simplefin_source_account_id`), the partial unique
+index is scoped by that feed rather than by the local account, and `setAccountLink` no longer clears
+anything. One narrower path stays open and is pinned by a test rather than claimed fixed: a re-minted
+feed id (`pnpm simplefin:claim`) wired to a *different* local account than the one holding the old rows.
 
 **Risk on #2:** `bulkCategorize` has a full undo path; import-time categorization
 does not. A rule that matches too broadly labels the whole backfill with no
