@@ -405,7 +405,7 @@ just a red page.
 
 `src/components/ledger/focus-ring.ts` exports `FOCUS_RING`, the one focus treatment for interactive elements **outside** `components/ui` — links, `<summary>` disclosures, and buttons written inline. The shadcn primitives carry their own `focus-visible:ring-*` and are not in scope for it.
 
-`outline`, not `ring`: an outline honours `outline-offset` and is drawn outside the border box without following `rounded-*` seams, so it stays a clean rectangle around a control sitting flush inside a ruled row. It is not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a `ring`'s box-shadow — so the choice buys geometry, not clipping.
+`outline`, not `ring`: an outline is drawn outside the border box and takes no part in layout, so `outline-offset` can push it clear of a control without displacing its neighbours in a dense ruled row — a `ring`'s box-shadow spread has to be budgeted against the row's own padding instead. It **does** follow `border-radius` (CSS UI 4, honoured by every browser this app targets), so it is not a way to get a rectangle around a rounded control: every `FOCUS_RING` consumer is `rounded-md` or `rounded-[999px]` and the ring renders rounded on all of them. It is also not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a box-shadow. The choice buys layout independence, not shape and not clipping.
 
 Known divergence: `FOCUS_RING` uses `--accent-terracotta` at full strength while `globals.css` defines `--ring` as the same accent at 55%, which is what every shadcn control uses. Two treatments, not one. Tracked in `TODOS.md`; changing it makes the hand-rolled ring visibly softer, so it wants both seen side by side first.
 

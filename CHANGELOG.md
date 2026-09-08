@@ -42,7 +42,7 @@ own memos, and links straight to those exact rows._
   would be nothing in it.
 - **`/transactions` filters on an exact merchant.** Arriving from a drilldown,
   the page leads with the merchant as a removable chip and a line that answers
-  the question you clicked to ask: `59 rows, 53 uncategorized · 49 filed as
+  the question you clicked to ask: `50 rows, 1 uncategorized · 49 filed as
   Gas`. The counts come from the same query as the list, so the header can
   never describe rows the list is not showing.
 - **A "Categorize all N" shortcut** from that header back to bulk filing, and a
@@ -82,13 +82,57 @@ own memos, and links straight to those exact rows._
 - **A merchant with nothing to disclose lost its drilldown link too**, which
   was exactly backwards: those rows are the ones showing a bare key they cannot
   elaborate on.
-- **`/transactions` was shipping 376 KB of validation library to the browser**
-  for one number. It ships none.
+- **`/transactions` still ships no validation library to the browser.** Pulling
+  the URL schema into a testable module put zod one import away from the client
+  bundle — measured at +376 KB before the constants were split back out into a
+  dependency-free module. Caught in review, so nothing shipped; recorded because
+  the split looks like indirection until you know what it costs to undo.
 - **A picked category could not be re-selected in Safari private mode**, where
   session storage throws rather than failing quietly — the field stayed empty
   and Submit stayed disabled.
 - A row with an empty merchant key could produce a link that promised one
   merchant and landed on all 1,540 rows.
+- **A deliberate page size survived some links and not others.** `?pageSize=200`
+  was dropped by six of the page's own links — the merchant chip's `×`, the
+  transfers toggle, "Back to page 1", both empty-state recovery links, and a
+  row's merchant link — snapping the list back to 50 rows with nothing saying
+  so. `pageSize` is now a member of the filter set, so every link carries it and
+  the round-trip guard covers it like any other field.
+- **The zero-result state could misdiagnose a stale link and then offer two
+  recoveries that both failed.** With a date range also active, "no transactions
+  for X" blamed the merchant key for an empty list the date range had caused,
+  and both escape hatches kept the date range — so the suggested fix landed on
+  another empty page. It now says which case it is in and clears the rest.
+- **The stale-link recovery 404'd for a merchant key over 200 characters**,
+  because merchant keys are unbounded and `search` is capped. It truncates.
+- **An empty trailing URL parameter 404'd the page.** `?merchant=AMAZON&ref=`
+  — the shape a mail client or a link shortener leaves behind — was rejected
+  by the strict schema even though every real filter parsed fine.
+- **A row whose merchant key is empty rendered a link that did nothing**, styled
+  exactly like a working one. It renders as text now, and a rejected URL is
+  logged server-side rather than 404ing with no record of what was wrong.
+- **The tests guarding the stale-link recovery asserted against a copy of the
+  code rather than the code.** The suite documents two bugs that link has
+  already had — keeping the other filters, and not truncating an over-long key
+  — but the expression it checked lived inline in the empty state, and the test
+  file had reimplemented it. Either bug could have come back with all four
+  tests green. The builder is now a named function both sides use.
+- **The session-storage test suite passed only because of the order it ran in.**
+  The module keeps its cache at module scope, and the Safari-private-mode block
+  read from whatever an earlier test had left there; shuffled, it failed 2 runs
+  in 5. It now takes a fresh module per test.
+- **`191` appeared where the number is `181`** — the count of uncategorized
+  merchant groups, in the README, the plan, `CLAUDE.md`'s rule 10 and two code
+  comments. Re-measured against the live ledger: the page's own predicate
+  returns 181, and `191` matches nothing under any predicate. The `11 of 181`
+  substring-superset figure is exact.
+- **The focus-ring constant's docstring made two claims that were not true of
+  its own consumers** — a call-site count that was really a `grep` line count,
+  and "every consumer is rounded", when 8 of the 14 are bare links and
+  `<summary>` elements with no radius at all.
+- **Three controls in the filter bar had no focus ring**, including "Apply
+  filters" — the ones `DESIGN.md` names as the reason the shared constant
+  exists.
 
 ## [0.17.0] - 2026-09-07
 

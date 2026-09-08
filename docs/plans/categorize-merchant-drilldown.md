@@ -16,14 +16,14 @@ then asks you to pick a category. There is no way to see WHAT the rows are. `AMA
 53 rows and −$2,411 could be groceries, gifts, or a laptop. Today the only recourse is
 opening `/transactions` in another tab and retyping the merchant by hand.
 
-Measured on the live ledger (`my_money_manager-app-1`, 1,540 rows): **191 uncategorized
+Measured on the live ledger (`my_money_manager-app-1`, 1,540 rows): **181 uncategorized
 groups, 363 distinct merchants.**
 
 ## Decisions
 
 | # | Decision | Chosen | Why |
 |---|---|---|---|
-| D2 | Filter mechanism | **Exact `merchant=` param** | `search=` is `LIKE %x%`; on 11 of 191 groups it returns a superset (`AMAZON` 53 → 71 rows). Also index-backed. |
+| D2 | Filter mechanism | **Exact `merchant=` param** | `search=` is `LIKE %x%`; on 11 of 181 groups it returns a superset (`AMAZON` 59 → 71 rows — 59 being what the exact filter returns for the key, not its 53-row uncategorized subset). Also index-backed. |
 | D3 | Which rows | **All rows for the merchant** | Prior filing history is the decision support: `COSTCO GAS` shows 1 uncategorized but 50 total, 49 already filed as `Gas`. |
 | D4 | What is clickable | **Merchant name only** | On all 181 rows; the category badge renders on 6. |
 | D5 | Carry-forward guard | **Keys-driven round-trip test** | Silent-drop bug documented 3× in `_filter-bar.tsx`; existing test hand-enumerates fields so it can't catch field #10. |
@@ -286,12 +286,12 @@ triggered the same hard rejection.
 | `rawMemo` line (`/transactions`) | `font-mono`, one line desktop / two mobile, `truncate` + `title`. Suppressed when identical to the merchant key. **When `merchant` is active, the merchant name is dropped from the row and the memo takes the primary slot.** |
 | `title={row.rawDescription}` | **DELETE** (`:135` and `:243`). `raw_description` holds only `WITHDRAWAL` (1302) or `DEPOSIT` (238) — this tooltip has conveyed nothing on 1,540 of 1,540 rows. |
 | Filter chip row | Above the filter panel, replacing the `parts.join(" · ")` `<p>`. Removable merchant chip = filled terracotta + `×`; non-removable facts = outline chips. `rounded-[999px]` (DESIGN.md: pill radius is chips only). `×` wrapped in `min-h-11 min-w-11` with `aria-label="Remove merchant filter"` — the glyph is silent to a screen reader (same class as the DS66 parens rule). Not `⊗`: not in this app's vocabulary. |
-| Header block (`FilterSummary`) | `← Categorize` return link (mirrors `categorize/page.tsx:28-33`), chip row, `AMAZON — 59 rows, 53 uncategorized · 49 filed as Gas`, and `Categorize all 53 →`. Merchant is `parts[0]`, its own element, `max-w-[28ch] truncate` + `title` (longest real keys are 63-69 chars of personal Zelle strings). |
+| Header block (`FilterSummary`) | `← Categorize` return link (mirrors `categorize/page.tsx:28-33`), chip row, `COSTCO GAS — 50 rows, 1 uncategorized · 49 filed as Gas`, and `Categorize all 1 →` (the earlier spelling of this example spliced AMAZON's 59/53 onto COSTCO GAS's filing history, which cannot add up). Merchant is `parts[0]`, its own element, `max-w-[28ch] truncate` + `title` (longest real keys are 63-69 chars of personal Zelle strings). |
 | Row dimming (`/transactions`) | **Suppress when `merchant` is active.** Otherwise the 49 filed rows that ARE D3=A's rationale render at `opacity-50` while the 1 row you already knew about is the only thing at full contrast. |
 | Empty state | `StateCard variant="empty"`. `No transactions for "amazon".` + `[Remove the merchant filter]` + `[Search for "amazon" instead →]`. Names the key verbatim. |
 | Progress counter | `Backlog: 498 transactions — $8,420.11 · 12 of 181 merchants done`. `groups.length` already exists at `_categorize-ui.tsx:39` and was never rendered. |
 | Focus | `focus-visible:outline-2 focus-visible:outline-offset-2` in terracotta on every new interactive element. |
-| Visited | Distinct visited treatment on merchant links — 191 of them on a page worked in passes; "did I already look at this one?" is a real question. Terracotta must not override it. |
+| Visited | Distinct visited treatment on merchant links — 181 of them on a page worked in passes; "did I already look at this one?" is a real question. Terracotta must not override it. |
 | Amber (D21) | `color-mix(in oklch, var(--accent-amber) …)`, the shared formula. Watch the `-mx-5` gutter coupling on the sticky strips (DESIGN.md). |
 | Money | Parens on negatives, `[font-variant-numeric:tabular-nums]`, `formatCents()`. |
 | 375px | Rows stack; the merchant control takes its own full-width line as a real 44px target. Expanded disclosure layout at this width is **unresolved** — needs eyes at implementation. |
