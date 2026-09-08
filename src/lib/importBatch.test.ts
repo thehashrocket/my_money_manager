@@ -7,6 +7,11 @@ import { computeImportRowHash } from "./hash";
 import { loadAccountBalances } from "./accounts/loadAccountBalances";
 import type { ParsedRow } from "./parseCsv";
 import { unlinkTransferPair } from "./simplefin/sync";
+import {
+  loadRejectedPairs,
+  pairKey,
+  recordPairRejection,
+} from "./transferRejections";
 
 // `commitImport` calls `createSnapshot` against a real `data/money.db` path,
 // which does not exist in the test environment — stubbed the same way
@@ -1657,7 +1662,7 @@ describe("linkTransferPairs", () => {
       expect(legA.transferPairId).not.toBeNull();
 
       // ...then land back in an unpaired state WITHOUT going through
-      // unlinkTransferPair (which now also stamps transferRejectedPartnerId
+      // unlinkTransferPair (which now also records a rejection
       // — see the "never re-pairs a rejected pair" test below). This simulates a
       // historical gap instead: e.g. rows imported before this pairing logic
       // existed, or a `transferPairId` cleared by some other pre-existing
@@ -1704,8 +1709,8 @@ describe("linkTransferPairs", () => {
   // legitimate self-heal for a historical gap) also silently reverses an
   // EXPLICIT "Not a transfer" correction, because transferPairId IS NULL was
   // the only eligibility signal and unlinkTransferPair set nothing else.
-  // Fix: unlinkTransferPair now also stamps transferRejectedPartnerId on
-  // both legs (pointed at each other), and linkTransferPairs filters its
+  // Fix: unlinkTransferPair now also records the pair in
+  // transfer_pair_rejections, and linkTransferPairs filters its
   // PROPOSED pairs against it — pair-scoped, not transaction-scoped (a
   // transaction-scoped version was tried first and reverted per Codex
   // structured review; see the next test for exactly the scenario that
@@ -1757,7 +1762,9 @@ describe("linkTransferPairs", () => {
         .where(eq(schema.transactions.id, legA.id))
         .get()!;
       expect(rejected.transferPairId).toBeNull();
-      expect(rejected.transferRejectedPartnerId).toBe(legB.id);
+      expect(
+        loadRejectedPairs(handle.db, [legA.id, legB.id]).has(pairKey(legA.id, legB.id)),
+      ).toBe(true);
 
       // An unrelated PENDING row lands on the SAME date, in a THIRD account —
       // structurally identical to the repair scenario above, except this pair
@@ -1787,15 +1794,15 @@ describe("linkTransferPairs", () => {
     }
   });
 
-  // The rejection check is `a.transferRejectedPartnerId === b.rowId ||
-  // b.transferRejectedPartnerId === a.rowId`. unlinkTransferPair always
-  // writes both legs symmetrically, so every other test in this file has
-  // both halves of that OR true at once and can't tell it apart from either
-  // half alone. These two tests seed the marker on only ONE leg directly
+  // These two tests used to seed a per-leg marker on only ONE of the two rows,
+  // because the check was an `a->b OR b->a` over two separately-stored copies
+  // and each half needed pinning independently. A rejection is now one row on
+  // the unordered pair, so what they pin instead is that recording it is
+  // insensitive to argument order. They seed the rejection directly
   // (bypassing unlinkTransferPair) to prove each half is independently
   // load-bearing — dropping either clause would silently re-link a pair the
   // user rejected under a partial-write or future-refactor scenario.
-  it("refuses to link when only the FIRST-inserted leg's rejection marker points at its partner", () => {
+  it("refuses to link a rejected pair recorded with the FIRST-inserted leg named first", () => {
     const handle = createTestDb();
     createSnapshotMock.mockClear();
     createSnapshotMock.mockReturnValue({
@@ -1831,19 +1838,15 @@ describe("linkTransferPairs", () => {
       const [legA, legB] = handle.db.select().from(schema.transactions).all();
       expect(legA.transferPairId).toBe(legB.id);
 
-      // Clear the auto-link on BOTH legs, but set the marker on legA only —
-      // legB's own field is left null, so only the LEFT half of the OR can
-      // catch this.
+      // Clear the auto-link on both legs, then record the rejection with legA
+      // named FIRST. Order used to matter here (the check was an `a->b OR
+      // b->a` over two separately-stored copies); it must not now.
       handle.db
         .update(schema.transactions)
         .set({ transferPairId: null })
         .where(inArray(schema.transactions.id, [legA.id, legB.id]))
         .run();
-      handle.db
-        .update(schema.transactions)
-        .set({ transferRejectedPartnerId: legB.id })
-        .where(eq(schema.transactions.id, legA.id))
-        .run();
+      recordPairRejection(handle.db, legA.id, legB.id);
 
       const linked = linkTransferPairs([legA.id, legB.id], handle.db);
       expect(linked).toBe(0);
@@ -1855,7 +1858,7 @@ describe("linkTransferPairs", () => {
     }
   });
 
-  it("refuses to link when only the SECOND-inserted leg's rejection marker points at its partner", () => {
+  it("refuses to link a rejected pair recorded with the SECOND-inserted leg named first", () => {
     const handle = createTestDb();
     createSnapshotMock.mockClear();
     createSnapshotMock.mockReturnValue({
@@ -1891,19 +1894,13 @@ describe("linkTransferPairs", () => {
       const [legA, legB] = handle.db.select().from(schema.transactions).all();
       expect(legA.transferPairId).toBe(legB.id);
 
-      // Clear the auto-link on BOTH legs, but set the marker on legB only —
-      // legA's own field is left null, so only the RIGHT half of the OR can
-      // catch this.
+      // Same, with legB named first — the mirror of the test above.
       handle.db
         .update(schema.transactions)
         .set({ transferPairId: null })
         .where(inArray(schema.transactions.id, [legA.id, legB.id]))
         .run();
-      handle.db
-        .update(schema.transactions)
-        .set({ transferRejectedPartnerId: legA.id })
-        .where(eq(schema.transactions.id, legB.id))
-        .run();
+      recordPairRejection(handle.db, legB.id, legA.id);
 
       const linked = linkTransferPairs([legA.id, legB.id], handle.db);
       expect(linked).toBe(0);
@@ -1919,7 +1916,7 @@ describe("linkTransferPairs", () => {
   // transaction-scoped rejection marker: rejecting one false-positive pair
   // would permanently block that row from ever pairing with its ACTUAL
   // correct counterpart too — an ordinary correction became unrecoverable.
-  // The pair-scoped fix (transferRejectedPartnerId) must not have this
+  // The pair-scoped fix (transfer_pair_rejections) must not have this
   // problem: legA's real transfer leg should still auto-link normally after
   // legA was rejected against a DIFFERENT, coincidentally-matching row.
   it("a row rejected against one false-positive match can still auto-pair with its real counterpart", () => {

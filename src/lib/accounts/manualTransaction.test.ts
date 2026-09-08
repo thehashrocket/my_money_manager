@@ -405,7 +405,10 @@ describe("unmarkCardPayment (E12 / F15)", () => {
       .from(schema.transactions)
       .where(eq(schema.transactions.id, leg.id))
       .get();
-    expect(after?.transferRejectedPartnerId).toBeNull();
+    expect(after).toBeDefined();
+    // Unmarking is not a rejection: nothing should have been recorded against
+    // this row, or the automatic matchers would be blocked from re-pairing it.
+    expect(handle.db.select().from(schema.transferPairRejections).all()).toEqual([]);
 
     // Re-markable, including to a different card.
     const amex = seedAccount({ name: "Amex", type: "credit" });
@@ -825,7 +828,7 @@ describe("unmarkCardPayment — works from either leg", () => {
       .where(eq(schema.transactions.id, debit.id))
       .get()!;
     expect(source.transferPairId).toBeNull();
-    expect(source.transferRejectedPartnerId).toBeNull();
+    expect(handle.db.select().from(schema.transferPairRejections).all()).toEqual([]);
     // The surviving row's id comes back, not the deleted mirror's.
     if (result.status === "ok") expect(result.transactionId).toBe(debit.id);
   });

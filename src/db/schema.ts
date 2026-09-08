@@ -250,39 +250,10 @@ export const transactions = sqliteTable(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },
     ),
-    // Set by `unlinkTransferPair` alongside clearing `transferPairId`, pointed
-    // at the specific partner that was rejected (both legs point at each
-    // other) — deliberately PAIR-scoped, not transaction-scoped. A
-    // transaction-scoped "rejected" flag was tried first and reverted: it
-    // made an ordinary correction unrecoverable, since rejecting one
-    // false-positive match permanently blocked that row from ever pairing
-    // with its ACTUAL correct counterpart either — and `linkTransferPairManually`
-    // is only reachable from `findAmbiguousTransfers`'s review queue, so a
-    // transaction excluded there had no UI path back at all. Found by Codex
-    // structured review during `/ship` 2026-09-04. The automatic matchers
-    // (`linkTransferPairs`, `linkTransfersByBucket`) check this while
-    // proposing each candidate pair, before committing to it — not as
-    // select-time SQL candidacy and not as a `.filter()` over the finished
-    // result — so the row itself stays eligible to match something else,
-    // only this exact combination is blocked. `findAmbiguousTransfers`
-    // deliberately does NOT filter on this: a human reviewing that queue is
-    // not a silent re-link, so a rejected row is allowed to resurface there
-    // against a different candidate. `linkTransferPairManually` clears it
-    // only when it currently points at the specific partner being linked
-    // now — a rejection recorded against a different (third) row is left
-    // alone, since clearing unconditionally would silently erase evidence
-    // of an unrelated correction.
-    // KNOWN LIMITATION: this is a single column, so a row remembers only its
-    // MOST RECENT rejection. If a row is later paired-then-rejected against a
-    // DIFFERENT partner, the earlier rejection is silently overwritten — see
-    // TODOS.md. A multi-valued rejection store would close this but is
-    // likely overkill for a single-user app; documented here rather than
-    // fixed so a future reader doesn't mistake the single-slot behavior for
-    // a bug in `unlinkTransferPair` itself.
-    transferRejectedPartnerId: integer("transfer_rejected_partner_id").references(
-      (): AnySQLiteColumn => transactions.id,
-      { onDelete: "set null" },
-    ),
+    // A rejected pairing is NOT stored here. It used to be, as a single
+    // `transfer_rejected_partner_id` column, and a column can hold exactly one
+    // partner — see `transferPairRejections` below for why that turned out to
+    // be unworkable rather than merely lossy.
     isPending: integer("is_pending", { mode: "boolean" }).notNull().default(false),
     notes: text("notes"),
     createdAt,
@@ -301,6 +272,82 @@ export const transactions = sqliteTable(
     uniqueIndex("transactions_account_external_id_unique")
       .on(t.accountId, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL`),
+  ],
+);
+
+/**
+ * "These two transactions are NOT two halves of one movement."
+ *
+ * PAIR-scoped, never transaction-scoped. A transaction-scoped flag was tried
+ * first and reverted: rejecting one false-positive match permanently blocked
+ * that row from pairing with its ACTUAL counterpart too, and the only UI that
+ * could undo it was the review queue the same flag hid the row from.
+ *
+ * ┌───────────────────────────────────────────────────────────────────────┐
+ * │ WHY THIS IS A TABLE AND NOT A COLUMN                                  │
+ * │                                                                       │
+ * │ This started as `transactions.transfer_rejected_partner_id`, a single │
+ * │ self-referencing column on each leg. That was documented as merely    │
+ * │ LOSSY ("a row remembers only its most recent rejection"), on the      │
+ * │ estimate that losing one needed four rejections across two rows. The  │
+ * │ same-account reversal queue (v0.19.0) made writing a marker a ONE-    │
+ * │ CLICK act, and two independent failures fell out of it immediately:   │
+ * │                                                                       │
+ * │  1. ERASURE. Rejecting (A,C) overwrites A's existing rejection of B.  │
+ * │     Two clicks in the reversal queue can clear both legs of an        │
+ * │     unrelated "Not a transfer", after which the automatic matcher     │
+ * │     re-links the exact pair the user rejected — silently dropping     │
+ * │     both rows out of every spend total.                               │
+ * │                                                                       │
+ * │  2. NON-CONVERGENCE. `findSameAccountReversals` drops a bucket only   │
+ * │     once EVERY positive/negative combination is rejected. P·N         │
+ * │     combinations compete for P+N column slots, so for P>=2 AND N>=2   │
+ * │     the all-rejected state is UNREACHABLE — proved by exhaustive      │
+ * │     search over the reachable state space, and live on the real       │
+ * │     ledger (a 2x4 bucket, where 3 of 8 combinations stay live no      │
+ * │     matter the click order). The queue could not be dismissed, and    │
+ * │     said "this pairing won't be suggested again" every time.          │
+ * │                                                                       │
+ * │ Neither is fixable while one row holds one partner, so the store is   │
+ * │ multi-valued. See `src/lib/transferRejections.ts`.                    │
+ * └───────────────────────────────────────────────────────────────────────┘
+ *
+ * The pair is stored UNORDERED, normalised to `low < high`, so membership is
+ * one exact index probe rather than the `a->b OR b->a` disjunction the column
+ * needed. `onDelete: 'cascade'` mirrors the old column's `set null`: deleting
+ * a transaction (an undone sync batch) takes its rejections with it.
+ *
+ * The automatic matchers consult this while PROPOSING each candidate pair,
+ * never as select-time candidacy and never as a filter over a finished
+ * result — so a rejected row stays eligible to match something else and only
+ * this exact combination is blocked. `findAmbiguousTransfers` deliberately
+ * does not filter its own SELECT on it either: a human reviewing that queue
+ * is not a silent re-link.
+ */
+export const transferPairRejections = sqliteTable(
+  "transfer_pair_rejections",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** The smaller of the two transaction ids — see `normalizePairKey`. */
+    lowTransactionId: integer("low_transaction_id")
+      .notNull()
+      .references((): AnySQLiteColumn => transactions.id, { onDelete: "cascade" }),
+    /** The larger of the two. `low < high` is enforced by `normalizePairKey`. */
+    highTransactionId: integer("high_transaction_id")
+      .notNull()
+      .references((): AnySQLiteColumn => transactions.id, { onDelete: "cascade" }),
+    createdAt,
+  },
+  (t) => [
+    uniqueIndex("transfer_pair_rejections_unique").on(
+      t.lowTransactionId,
+      t.highTransactionId,
+    ),
+    // Both legs are looked up independently: a candidate pair arrives as
+    // (a, b) in arbitrary order and the loader collects every rejection
+    // touching a set of row ids.
+    index("transfer_pair_rejections_low_idx").on(t.lowTransactionId),
+    index("transfer_pair_rejections_high_idx").on(t.highTransactionId),
   ],
 );
 

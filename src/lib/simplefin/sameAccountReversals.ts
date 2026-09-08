@@ -1,4 +1,8 @@
-import type { AmbiguousBucket, TransferCandidate } from "./matchTransfers";
+import type {
+  AmbiguousBucket,
+  SameAccountBucket,
+  TransferCandidate,
+} from "./matchTransfers";
 
 /**
  * Same-account reversals: a transaction and its cancellation, both landing on
@@ -22,11 +26,12 @@ import type { AmbiguousBucket, TransferCandidate } from "./matchTransfers";
  * │                                                                     │
  * │ The shape alone — same account, same date, equal magnitude,         │
  * │ opposite signs — is NOT sufficient evidence. Measured across the    │
- * │ live ledger's 8 months: 15 candidate pairs, of which at least two   │
- * │ are coincidences that would DELETE real spending if auto-linked:    │
+ * │ live ledger's 8 months (2026-09-08): 14 candidate BUCKETS, of which │
+ * │ at least two are coincidences that would DELETE real spending if    │
+ * │ auto-linked:                                                        │
  * │                                                                     │
  * │   $3.99   "ATM Surcharge fees refund"  vs  "APPLE.COM/BILL"         │
- * │   $200.00 "Zelle Transfer Payment ID"  vs  "ATM 0605 EXAMPLE ST" │
+ * │   $200.00 "Zelle Transfer Payment ID"  vs  "ATM 0605 EXAMPLE ST"    │
  * │                                                                     │
  * │ A wrong link silently removes money from every spending surface     │
  * │ (see `unlinkTransferPair`'s docstring). At ~2 candidates a month a  │
@@ -34,7 +39,9 @@ import type { AmbiguousBucket, TransferCandidate } from "./matchTransfers";
  * │ because the distinguishing signal lives in heterogeneous memo text  │
  * │ (`reverse`, `Reversal ID:`, `Provisional Credit`, `TO`/`FRM`, and   │
  * │ identical memos), and CLAUDE.md rule 4 makes memo-independence a    │
- * │ deliberate property of the matchers.                                │
+ * │ deliberate property of the matchers. Counted as BUCKETS throughout: │
+ * │ 12 of the 14 hold one candidate each, one holds 1x2 and one 2x4,    │
+ * │ so the pair count (22) is a different and less useful number.       │
  * │                                                                     │
  * │ So: every bucket goes to review. There is no auto-link path here    │
  * │ and this function returns no `pairs` — only `AmbiguousBucket`s.     │
@@ -63,7 +70,7 @@ import type { AmbiguousBucket, TransferCandidate } from "./matchTransfers";
 export function findSameAccountReversals<T extends TransferCandidate>(
   rows: T[],
   isRejected: (a: T, b: T) => boolean = () => false,
-): AmbiguousBucket<T>[] {
+): SameAccountBucket<T>[] {
   const buckets = new Map<string, T[]>();
 
   for (const row of rows) {
@@ -83,7 +90,7 @@ export function findSameAccountReversals<T extends TransferCandidate>(
     else buckets.set(key, [row]);
   }
 
-  const ambiguous: AmbiguousBucket<T>[] = [];
+  const ambiguous: SameAccountBucket<T>[] = [];
 
   for (const bucket of buckets.values()) {
     const positives = bucket.filter((r) => r.amountCents > 0);
@@ -98,6 +105,10 @@ export function findSameAccountReversals<T extends TransferCandidate>(
     ambiguous.push({
       date: bucket[0].date,
       absAmountCents: Math.abs(bucket[0].amountCents),
+      // Constant across the bucket by construction — it is part of the key —
+      // so it is hoisted onto the bucket rather than left for a consumer to
+      // read off an arbitrary member.
+      accountId: bucket[0].accountId,
       positives,
       negatives,
       reason: "same-account",
@@ -111,7 +122,7 @@ export function findSameAccountReversals<T extends TransferCandidate>(
     (a, b) =>
       b.date.localeCompare(a.date) ||
       b.absAmountCents - a.absAmountCents ||
-      String(a.positives[0].accountId).localeCompare(String(b.positives[0].accountId)),
+      String(a.accountId).localeCompare(String(b.accountId)),
   );
 }
 
@@ -144,7 +155,7 @@ export function overlappingRowIds<T extends TransferCandidate>(
   a: AmbiguousBucket<T>[],
   b: AmbiguousBucket<T>[],
 ): Set<T["id"]> {
-  const idsIn = (buckets: AmbiguousBucket<T>[]) =>
+  const idsIn = (buckets: readonly AmbiguousBucket<T>[]) =>
     new Set(buckets.flatMap((x) => [...x.positives, ...x.negatives].map((r) => r.id)));
   const inA = idsIn(a);
   const shared = new Set<T["id"]>();

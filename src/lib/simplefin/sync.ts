@@ -11,8 +11,18 @@ import { fetchAccounts } from "./client";
 import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
-import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
+import {
+  matchTransfers,
+  type CrossAccountBucket,
+  type SameAccountBucket,
+} from "./matchTransfers";
 import { findSameAccountReversals } from "./sameAccountReversals";
+import {
+  clearPairRejection,
+  loadRejectedPairs,
+  recordPairRejection,
+  rejectionPredicate,
+} from "@/lib/transferRejections";
 import { formatCents, parseAmountToCents } from "@/lib/money";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
@@ -110,7 +120,7 @@ export type SyncOutcome =
       batchId: number;
       insertedCount: number;
       pairsLinked: number;
-      ambiguous: AmbiguousBucket<TransferRow>[];
+      ambiguous: CrossAccountBucket<TransferRow>[];
       snapshot: SnapshotResult;
       accounts: AccountSyncSummary[];
       balanceUpdates: LiabilityBalanceUpdate[];
@@ -125,13 +135,22 @@ type TransferRow = {
   rawMemo: string;
   /** Carries a bank transaction number, so the CSV ±1 matcher already saw it. */
   adjudicatedByTxnNumber: boolean;
-  /** See the `transferRejectedPartnerId` schema comment. */
-  transferRejectedPartnerId: number | null;
 };
 
-/** True when this specific proposed pair was previously rejected by either leg. */
-function isRejectedPair(a: TransferRow, b: TransferRow): boolean {
-  return a.transferRejectedPartnerId === b.id || b.transferRejectedPartnerId === a.id;
+/**
+ * The `(a, b) => rejected?` predicate for a set of candidate rows.
+ *
+ * ONE query for the whole run, not one per candidate: the matchers evaluate
+ * this inside their inner loops (`findTransferPairs`' bucket scan,
+ * `assignAvoidingRejections`' backtracking), and better-sqlite3 is
+ * synchronous, so a per-pair round trip would block the event loop
+ * quadratically. Scoped to the rows in hand — `transfer_pair_rejections`
+ * accumulates forever by design.
+ */
+function rejectionPredicateFor(rows: TransferRow[], db: Db) {
+  return rejectionPredicate<TransferRow>(
+    loadRejectedPairs(db, rows.map((r) => r.id)),
+  );
 }
 
 function isoDaysAgo(days: number, now: Date): string {
@@ -882,7 +901,7 @@ export function linkTransfersByBucket(
   sinceIso: string,
   db: Db = defaultDb,
   batchId?: number,
-): { pairsLinked: number; ambiguous: AmbiguousBucket<TransferRow>[] } {
+): { pairsLinked: number; ambiguous: CrossAccountBucket<TransferRow>[] } {
   const unlinked: TransferRow[] = db
     .select({
       id: schema.transactions.id,
@@ -891,7 +910,6 @@ export function linkTransfersByBucket(
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
-      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -913,7 +931,10 @@ export function linkTransfersByBucket(
   // post-filter): see assignAvoidingRejections for why a post-filter would
   // still lose an otherwise-valid pairing for the OTHER members of the same
   // balanced bucket.
-  const { pairs: allPairs, ambiguous } = matchTransfers(unlinked, isRejectedPair);
+  const { pairs: allPairs, ambiguous } = matchTransfers(
+    unlinked,
+    rejectionPredicateFor(unlinked, db),
+  );
 
   // Only persist a pair that involves at least one row from THIS batch.
   // matchTransfers sees every unlinked row in the window, so it can legitimately
@@ -963,84 +984,85 @@ export function linkTransferPairManually(
   db: Db = defaultDb,
   opts: { allowSameAccountReversal?: boolean } = {},
 ): void {
-  const rows = db
-    .select()
-    .from(schema.transactions)
-    .where(inArray(schema.transactions.id, [aId, bId]))
-    .all();
+  // The read, every guard and the write share ONE transaction. They used to be
+  // a bare SELECT followed by `db.transaction(...)`, which was correct only
+  // because better-sqlite3 is synchronous and nothing between them yielded —
+  // an unstated invariant one `await` away from a check-then-act race whose
+  // failure mode is a dangling one-way `transfer_pair_id` (one row silently
+  // out of spending while its partner still counts). `undoSyncBatch` already
+  // re-checks its own staleness condition inside its transaction for exactly
+  // this reason (CLAUDE.md rule 5); this now matches. Throwing rolls back, and
+  // nothing has been written at that point anyway.
+  db.transaction((tx) => {
+    const rows = tx
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [aId, bId]))
+      .all();
 
-  if (rows.length !== 2) throw new Error("Both transactions must exist.");
-  const [a, b] = rows;
-  // Same-account is refused by default, and the opt-in is a PARAMETER rather
-  // than something derivable from the two rows. That is deliberate: the shape
-  // "same account, same day, equal magnitude, opposite signs" is ~13% coincidence
-  // on real data (see `sameAccountReversals.ts`), so it cannot be the thing that
-  // authorizes the link — a genuine $3.99 subscription charge sitting opposite an
-  // unrelated $3.99 refund satisfies it perfectly. Only the same-account review
-  // queue passes the flag, and it is a server action argument, never a form
-  // field, so a crafted or stale request cannot set it.
-  //
-  // The same-day requirement is the second half of the narrowing: without it
-  // this would accept any two opposite-sign rows of equal size anywhere in one
-  // account's history, which is not a shape any reviewer is ever shown.
-  if (a.accountId === b.accountId) {
-    if (!opts.allowSameAccountReversal) {
-      throw new Error("A transfer pair must span two different accounts.");
+    if (rows.length !== 2) throw new Error("Both transactions must exist.");
+    const [a, b] = rows;
+    // Same-account is refused by default, and the opt-in is a PARAMETER rather
+    // than something derivable from the two rows. That is deliberate: the shape
+    // "same account, same day, equal magnitude, opposite signs" is ~13% coincidence
+    // on real data (see `sameAccountReversals.ts`), so it cannot be the thing that
+    // authorizes the link — a genuine $3.99 subscription charge sitting opposite an
+    // unrelated $3.99 refund satisfies it perfectly. Only the same-account review
+    // queue passes the flag, and it is a server action argument, never a form
+    // field, so a crafted or stale request cannot set it.
+    //
+    // The same-day requirement is the second half of the narrowing: without it
+    // this would accept any two opposite-sign rows of equal size anywhere in one
+    // account's history, which is not a shape any reviewer is ever shown.
+    if (a.accountId === b.accountId) {
+      if (!opts.allowSameAccountReversal) {
+        throw new Error("A transfer pair must span two different accounts.");
+      }
+      if (a.date !== b.date) {
+        throw new Error("A same-account reversal must be same-day.");
+      }
+      // The queue never offers a hand-entered row (`findSameAccountReversalCandidates`
+      // filters NOT_MANUAL), so re-asserting it here costs nothing and closes the
+      // gap between "what the UI shows" and "what the action accepts" — the opt-in
+      // is carried by which action ran, which is not by itself proof the ids came
+      // from the queue. It matters specifically for manual rows: pairing one hides
+      // it from every spend surface, and the row menu's undo (`unmarkCardPayment`)
+      // refuses a pair it did not create, so there would be no ordinary way back.
+      if (a.importSource === "manual" || b.importSource === "manual") {
+        throw new Error(
+          "A hand-entered transaction cannot be paired as a reversal — edit or delete the row instead.",
+        );
+      }
     }
-    if (a.date !== b.date) {
-      throw new Error("A same-account reversal must be same-day.");
+    if (Math.sign(a.amountCents) === Math.sign(b.amountCents)) {
+      throw new Error("A transfer pair must have opposite signs.");
     }
-    // The queue never offers a hand-entered row (`findSameAccountReversalCandidates`
-    // filters NOT_MANUAL), so re-asserting it here costs nothing and closes the
-    // gap between "what the UI shows" and "what the action accepts" — the opt-in
-    // is carried by which action ran, which is not by itself proof the ids came
-    // from the queue. It matters specifically for manual rows: pairing one hides
-    // it from every spend surface, and the row menu's undo (`unmarkCardPayment`)
-    // refuses a pair it did not create, so there would be no ordinary way back.
-    if (a.importSource === "manual" || b.importSource === "manual") {
+    if (Math.abs(a.amountCents) !== Math.abs(b.amountCents)) {
+      throw new Error("A transfer pair must have equal absolute amounts.");
+    }
+    // Re-pairing a row that already has a partner would overwrite this side of
+    // the link while the old partner keeps pointing back, leaving a dangling
+    // one-way reference. Reachable from a stale /sync tab resolving a bucket that
+    // another tab already resolved.
+    if (a.transferPairId !== null || b.transferPairId !== null) {
       throw new Error(
-        "A hand-entered transaction cannot be paired as a reversal — edit or delete the row instead.",
+        "One of these transactions is already paired — reload the page to see the current state.",
       );
     }
-  }
-  if (Math.sign(a.amountCents) === Math.sign(b.amountCents)) {
-    throw new Error("A transfer pair must have opposite signs.");
-  }
-  if (Math.abs(a.amountCents) !== Math.abs(b.amountCents)) {
-    throw new Error("A transfer pair must have equal absolute amounts.");
-  }
-  // Re-pairing a row that already has a partner would overwrite this side of
-  // the link while the old partner keeps pointing back, leaving a dangling
-  // one-way reference. Reachable from a stale /sync tab resolving a bucket that
-  // another tab already resolved.
-  if (a.transferPairId !== null || b.transferPairId !== null) {
-    throw new Error(
-      "One of these transactions is already paired — reload the page to see the current state.",
-    );
-  }
 
-  db.transaction((tx) => {
-    // Clears transferRejectedPartnerId ONLY when it currently points at the
-    // OTHER leg of THIS link — clearing it unconditionally would also erase
-    // a rejection recorded against a third row. Example: A was rejected
-    // against B; A is later manually linked to C. If A's marker were blindly
-    // nulled here, A would forget it ever rejected B — and if C's link is
-    // later undone, A and B (assuming B's own marker was independently
-    // cleared the same way by its own future manual link) could silently
-    // auto-re-link with no trace either side ever objected. Found by Codex
-    // structured review during `/ship` 2026-09-04.
+    // Deliberately linking a pair the user had previously rejected ("Link as
+    // transfer anyway") forgets THAT rejection and only that one. Under the old
+    // single-column store this needed a conditional — clearing blindly would
+    // also erase a rejection recorded against a THIRD row, so linking A to C
+    // could make A forget it had rejected B. With one row per pair the hazard is
+    // structural rather than guarded: there is nothing to clobber.
+    clearPairRejection(tx, a.id, b.id);
     tx.update(schema.transactions)
-      .set({
-        transferPairId: b.id,
-        transferRejectedPartnerId: a.transferRejectedPartnerId === b.id ? null : a.transferRejectedPartnerId,
-      })
+      .set({ transferPairId: b.id })
       .where(eq(schema.transactions.id, a.id))
       .run();
     tx.update(schema.transactions)
-      .set({
-        transferPairId: a.id,
-        transferRejectedPartnerId: b.transferRejectedPartnerId === a.id ? null : b.transferRejectedPartnerId,
-      })
+      .set({ transferPairId: a.id })
       .where(eq(schema.transactions.id, b.id))
       .run();
   });
@@ -1057,46 +1079,72 @@ export function linkTransferPairManually(
  * was worse still — the linked positive leg briefly counted as debt paid down.
  * Found by adversarial review during /ship 2026-09-08.
  *
- * Pair-scoped, exactly like the marker `unlinkTransferPair` writes: rejecting
- * one combination in a multi-candidate bucket says nothing about the others,
- * and `findSameAccountReversals` only drops a bucket once EVERY combination in
- * it is rejected. Same single-valued caveat as the column itself (CLAUDE.md
- * rule 4) — a row remembers only its most recent rejection.
+ * Pair-scoped, exactly like the rejection `unlinkTransferPair` writes:
+ * rejecting one combination in a multi-candidate bucket says nothing about the
+ * others, and `findSameAccountReversals` only drops a bucket once EVERY
+ * combination in it is rejected.
+ *
+ * That last sentence is only satisfiable because rejections live in their own
+ * table. While they were a single column per row, P*N combinations competed
+ * for P+N slots, so a bucket with two or more candidates on BOTH sides could
+ * never reach the all-rejected state at all — it re-surfaced forever while the
+ * UI insisted the pairing would not be suggested again. See the
+ * `transferPairRejections` schema comment.
+ *
+ * Idempotent: re-rejecting an already-rejected pair succeeds without writing,
+ * because a stale tab resubmitting is ordinary use here — but it says so in
+ * the return value rather than reporting the two outcomes identically.
  */
+export type RejectOutcome = "recorded" | "already-rejected";
+
 export function rejectTransferPairManually(
   aId: number,
   bId: number,
   db: Db = defaultDb,
-): void {
-  const rows = db
-    .select()
-    .from(schema.transactions)
-    .where(inArray(schema.transactions.id, [aId, bId]))
-    .all();
+): RejectOutcome {
+  // Read, guards and write in one transaction — see `linkTransferPairManually`.
+  return db.transaction((tx) => {
+    const rows = tx
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.id, [aId, bId]))
+      .all();
 
-  if (rows.length !== 2) throw new Error("Both transactions must exist.");
-  const [a, b] = rows;
+    if (aId === bId) throw new Error("A pair must be two different transactions.");
+    if (rows.length !== 2) throw new Error("Both transactions must exist.");
+    const [a, b] = rows;
 
-  // Rejecting an already-linked pair is `unlinkTransferPair`'s job — it has to
-  // clear the link as well, and doing half of that here would leave the rows
-  // paired while claiming they were rejected.
-  if (a.transferPairId !== null || b.transferPairId !== null) {
-    throw new Error(
-      "One of these transactions is already paired — use “Not a transfer” on the linked pair instead.",
-    );
-  }
+    // Rejecting an already-linked pair is `unlinkTransferPair`'s job — it has to
+    // clear the link as well, and doing half of that here would leave the rows
+    // paired while claiming they were rejected.
+    if (a.transferPairId !== null || b.transferPairId !== null) {
+      throw new Error(
+        "One of these transactions is already paired — use “Not a transfer” on the linked pair instead.",
+      );
+    }
 
-  db.transaction((tx) => {
-    tx.update(schema.transactions)
-      .set({ transferRejectedPartnerId: b.id })
-      .where(eq(schema.transactions.id, a.id))
-      .run();
-    tx.update(schema.transactions)
-      .set({ transferRejectedPartnerId: a.id })
-      .where(eq(schema.transactions.id, b.id))
-      .run();
+    // The SAME shape gate `linkTransferPairManually` applies, and for a stronger
+    // reason. A rejection is the DURABLE half of this pair of operations: a link
+    // can be undone from the "Linked pairs" list, while a rejection has no UI at
+    // all and suppresses the automatic matchers forever. It was originally the
+    // less-validated of the two, which is backwards. A pair that no queue could
+    // ever have offered is a stale or crafted post, not an answer to a question
+    // the app asked.
+    if (Math.sign(a.amountCents) === Math.sign(b.amountCents)) {
+      throw new Error("A rejected pair must have opposite signs.");
+    }
+    if (Math.abs(a.amountCents) !== Math.abs(b.amountCents)) {
+      throw new Error("A rejected pair must be the same amount.");
+    }
+    if (a.accountId === b.accountId && a.date !== b.date) {
+      throw new Error("A same-account reversal must be same-day.");
+    }
+
+    return recordPairRejection(tx, a.id, b.id) ? "recorded" : "already-rejected";
   });
 }
+
+export type UnlinkOutcome = "unlinked" | "already-unpaired";
 
 /**
  * Clears BOTH sides of a transfer pair.
@@ -1114,40 +1162,53 @@ export function rejectTransferPairManually(
  * that no longer points back is exactly the dangling state that
  * `linkTransferPairManually` refuses to create.
  *
- * Also stamps `transferRejectedPartnerId` on both legs, pointed at each
- * other. `transferPairId IS NULL` alone doesn't distinguish "never
+ * Returns which of the two things happened, so a no-op cannot be reported as a
+ * completed correction — see the `already-unpaired` branch.
+ *
+ * Also records the pair in `transfer_pair_rejections`.
+ * `transferPairId IS NULL` alone doesn't distinguish "never
  * evaluated" from "user explicitly rejected this specific match" —
  * without a separate marker, every automatic matcher (`linkTransferPairs`,
  * `linkTransfersByBucket`) would treat a just-unlinked row as an ordinary
  * unpaired candidate again, and an unrelated future import landing on the
  * same date could silently re-link the exact pair the user just rejected,
  * with no notification. Deliberately PAIR-scoped, not transaction-scoped —
- * see the schema comment on `transferRejectedPartnerId` for why a
+ * see the schema comment on `transferPairRejections` for why a
  * transaction-scoped flag was tried first and reverted. Found by Red Team,
  * then corrected per Codex structured review, both during `/ship`
  * 2026-09-04.
  */
-export function unlinkTransferPair(id: number, db: Db = defaultDb): void {
-  const row = db
-    .select()
-    .from(schema.transactions)
-    .where(eq(schema.transactions.id, id))
-    .get();
+export function unlinkTransferPair(id: number, db: Db = defaultDb): UnlinkOutcome {
+  // Read, guard and write in one transaction — see `linkTransferPairManually`.
+  return db.transaction((tx) => {
+    const row = tx
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, id))
+      .get();
 
-  if (!row) throw new Error(`No such transaction: ${id}`);
-  // Idempotent: a double-submit or a stale tab should be a no-op, not an error.
-  if (row.transferPairId === null) return;
+    if (!row) throw new Error(`No such transaction: ${id}`);
+    // Idempotent: a double-submit or a stale tab should be a no-op, not an error.
+    // It is NOT reported as an ordinary success, though: the rejection below is
+    // the entire point of this button, and the no-op path writes none of it. A
+    // caller that renders "Unpaired — both rows count towards spending again."
+    // here is asserting a durable correction that was never recorded. Reachable:
+    // `undoSyncBatch` deletes a batch's rows and ON DELETE SET NULL clears the
+    // survivor's `transferPairId` with no rejection, so a stale /sync tab still
+    // listing that pair lands exactly here.
+    if (row.transferPairId === null) return "already-unpaired";
 
-  const partnerId = row.transferPairId;
-  db.transaction((tx) => {
+    const partnerId = row.transferPairId;
+    recordPairRejection(tx, id, partnerId);
     tx.update(schema.transactions)
-      .set({ transferPairId: null, transferRejectedPartnerId: partnerId })
+      .set({ transferPairId: null })
       .where(eq(schema.transactions.id, id))
       .run();
     tx.update(schema.transactions)
-      .set({ transferPairId: null, transferRejectedPartnerId: id })
+      .set({ transferPairId: null })
       .where(eq(schema.transactions.id, partnerId))
       .run();
+    return "unlinked";
   });
 }
 
@@ -1172,7 +1233,6 @@ export function findLinkedTransferPairs(
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
       transferPairId: schema.transactions.transferPairId,
-      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -1227,15 +1287,15 @@ export function findLinkedTransferPairs(
 export function findAmbiguousTransfers(
   sinceIso: string,
   db: Db = defaultDb,
-): AmbiguousBucket<TransferRow>[] {
-  // The select itself does NOT filter on transferRejectedPartnerId: this is
+): CrossAccountBucket<TransferRow>[] {
+  // The select itself does NOT filter on rejections: this is
   // a human-review surface, not an auto-link path, so a previously-rejected
   // row is allowed to resurface here against a DIFFERENT candidate — the
   // human decides, they aren't silently re-linked. Excluding the ROW would
   // repeat the mistake `linkTransferPairManually` is the fix for (see the
-  // schema comment on `transferRejectedPartnerId`): it's the only UI entry
+  // schema comment on `transferPairRejections`): it's the only UI entry
   // point to `linkTransferPairManually`, so hiding a row here would leave no
-  // way to ever manually pair it again. isRejectedPair IS still passed to
+  // way to ever manually pair it again. The rejection predicate IS still passed to
   // matchTransfers below, purely so this page shows the same buckets
   // linkTransfersByBucket actually computed at sync time — a bucket that
   // fails rejection-avoidance during sync becomes ambiguous there, and
@@ -1249,7 +1309,6 @@ export function findAmbiguousTransfers(
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
-      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -1265,7 +1324,7 @@ export function findAmbiguousTransfers(
       adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
     }));
 
-  return matchTransfers(unlinked, isRejectedPair).ambiguous;
+  return matchTransfers(unlinked, rejectionPredicateFor(unlinked, db)).ambiguous;
 }
 
 /**
@@ -1284,7 +1343,7 @@ export function findAmbiguousTransfers(
 export function findSameAccountReversalCandidates(
   sinceIso: string,
   db: Db = defaultDb,
-): AmbiguousBucket<TransferRow>[] {
+): SameAccountBucket<TransferRow>[] {
   const unlinked: TransferRow[] = db
     .select({
       id: schema.transactions.id,
@@ -1293,7 +1352,6 @@ export function findSameAccountReversalCandidates(
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
       bankTransactionNumber: schema.transactions.bankTransactionNumber,
-      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
     })
     .from(schema.transactions)
     .where(
@@ -1314,7 +1372,7 @@ export function findSameAccountReversalCandidates(
       adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
     }));
 
-  return findSameAccountReversals(unlinked, isRejectedPair);
+  return findSameAccountReversals(unlinked, rejectionPredicateFor(unlinked, db));
 }
 
 export type { TransferRow };

@@ -373,3 +373,57 @@ describe("matchTransfers — isRejected", () => {
     expect([byP1.a.id, byP1.b.id]).not.toContain(n1.id);
   });
 });
+
+/**
+ * The rejection relation used to be a single self-referencing column, so every
+ * row had out-degree <= 1 and `assignAvoidingRejections`' backtracking could
+ * never fan out. `transfer_pair_rejections` (v0.19.0) removed that bound: a row
+ * can now be rejected against every candidate in its bucket, and the
+ * same-account review queue actively invites a user to do exactly that.
+ */
+describe("assignAvoidingRejections — dense rejection sets are budgeted, not explored", () => {
+  it("returns a review bucket instead of hanging when no assignment exists in a dense bucket", () => {
+    const N = 11;
+    const positives = Array.from({ length: N }, () => row(CHK, 5000, "IN"));
+    const negatives = Array.from({ length: N }, () => row(SAV, -5000, "OUT"));
+    const doomed = positives[N - 1];
+
+    // Every OTHER pairing is free, so the search assigns the first N-1
+    // positives happily and only discovers the dead end at the last one — then
+    // backtracks and retries, which is (N-1)! ≈ 3.6M permutations of a prefix
+    // that can never be completed. This is the shape that actually blows up;
+    // rejecting everything would fail on the first row and prove nothing.
+    const isRejected = (a: { id: number }, b: { id: number }) =>
+      a.id === doomed.id || b.id === doomed.id;
+
+    const started = Date.now();
+    const { pairs, ambiguous } = matchTransfers([...positives, ...negatives], isRejected);
+    const elapsed = Date.now() - started;
+
+    // Correctness: nothing is auto-linked, the bucket goes to a human.
+    expect(pairs).toHaveLength(0);
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0].reason).toBe("rejected");
+    // Liveness: better-sqlite3 is synchronous and this runs inside a request,
+    // so an unbounded search here is a hung page, not a slow one.
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it("still finds a valid assignment when one exists behind a rejected preferred slot", () => {
+    // The budget must not turn an ordinary fallback into a review bucket.
+    const p1 = row(CHK, 5000, "IN 1");
+    const p2 = row(CHK, 5000, "IN 2");
+    const n1 = row(SAV, -5000, "OUT 1");
+    const n2 = row(SAV, -5000, "OUT 2");
+    const isRejected = (a: { id: number }, b: { id: number }) =>
+      (a.id === p1.id && b.id === n1.id) || (a.id === n1.id && b.id === p1.id);
+
+    const { pairs, ambiguous } = matchTransfers([p1, p2, n1, n2], isRejected);
+
+    expect(ambiguous).toHaveLength(0);
+    expect(pairs).toHaveLength(2);
+    // p1 took the non-rejected slot rather than the bucket being abandoned.
+    const p1Pair = pairs.find((x) => x.a.id === p1.id || x.b.id === p1.id)!;
+    expect([p1Pair.a.id, p1Pair.b.id]).toContain(n2.id);
+  });
+});

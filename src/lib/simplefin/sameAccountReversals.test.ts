@@ -208,8 +208,13 @@ describe("findSameAccountReversals — bucketing and ordering", () => {
 describe("findSameAccountReversals — the remaining bucket shapes", () => {
   it("ignores a bucket that is all POSITIVE, not just all negative", () => {
     // Two credits of the same size on one day (a duplicated refund) is a real
-    // shape, and the `negatives.length === 0` half of the guard is the only
-    // thing stopping it being offered as a pairing with nothing to pair to.
+    // shape and must not be offered as a pairing with nothing to pair to.
+    //
+    // NOT pinned to the `negatives.length === 0` early return specifically:
+    // that line is subsumed dead code (flipping its `||` to `&&` passes the
+    // whole suite) because `hasLiveCombination` below already returns false
+    // when either side is empty — `[].some(...)` is false. The behaviour is
+    // what is guarded here; the early return is a readability affordance.
     const out = findSameAccountReversals([
       row({ accountId: 1, amountCents: 1000 }),
       row({ accountId: 1, amountCents: 1000 }),
