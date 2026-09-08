@@ -1198,6 +1198,33 @@ describe("syncSimpleFin — feed-scoped dedup, both directions", () => {
     expect(rows.map((r) => r.simplefinSourceAccountId)).toEqual([null, "ACT-1"]);
   });
 
+  it("STILL double-counts a re-minted feed claimed by a DIFFERENT local account", async () => {
+    // The one hole the provenance fix does not close, pinned rather than
+    // claimed fixed. Two things have to go wrong together: the feed id changes
+    // (a fresh `simplefin:claim`, so the id pass cannot match) AND the new feed
+    // is wired to a different local account (so the content fallback, which is
+    // still scoped to `account_id`, cannot see the old rows either).
+    //
+    // Re-pointing the SAME account instead is the covered case above. Widening
+    // content dedup across accounts is not obviously right — two accounts
+    // legitimately hold identical same-day rows — so this is a boundary, not a
+    // TODO with an obvious patch.
+    const a = seedAccount({ simplefinAccountId: "ACT-1", name: "Old Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    setAccountLink(a.id, null, handle.db);
+    const b = seedAccount({ name: "Re-claimed Checking" });
+    setAccountLink(b.id, "ACT-9", handle.db);
+    respondWith("ACT-9", [feedTxn("TRN-re-minted", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.amountCents)).toEqual([-487, -487]);
+  });
+
   it("tags a row with the feed of the account SYNCING it, not the one that held it before", async () => {
     // Provenance is captured at write time from `account.simplefinAccountId`.
     // A second local account claiming a feed writes its OWN rows under that
