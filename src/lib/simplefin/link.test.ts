@@ -269,9 +269,10 @@ describe("setAccountLink", () => {
 });
 
 /**
- * The legacy-orphan warning is the ONE thing `setAccountLink` still reports,
- * and every clause of its query is load-bearing: it names a count the user is
- * asked to act on. The pre-provenance tests covered the plural wording via the
+ * The unmatchable-rows warning is ONE of the two things `setAccountLink`
+ * reports (the other — rows tagged with the claimed feed but filed under a
+ * different local account — is the next block), and every clause of its query
+ * is load-bearing: it names a count the user is asked to act on. The pre-provenance tests covered the plural wording via the
  * clearing path that no longer exists, so the branch lost its only exercise
  * when the clearing went away.
  */
