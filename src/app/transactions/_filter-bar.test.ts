@@ -162,14 +162,45 @@ type SchemaKey = keyof z.output<typeof searchParamsSchema>;
 type UncarriedSchemaKey = Exclude<SchemaKey, keyof TransactionsFilterValues | "page">;
 const NO_UNCARRIED_SCHEMA_KEYS: UncarriedSchemaKey extends never ? true : never = true;
 
+/**
+ * The same edge, closed harder — and in the other direction too.
+ *
+ * `NO_UNCARRIED_SCHEMA_KEYS` above is one-directional and keys-only. It
+ * catches "a schema key that never became a filter field" (the `pageSize`
+ * bug), but not either of these:
+ *
+ * - a FILTER field that is not a schema key — which serializes into a URL the
+ *   `.strict()` schema then 404s, the `includeTransfers` failure shape;
+ * - a VALUE drift — widening `pending` to a fourth literal in the schema while
+ *   the filter type still knows three. Both keys sets still match; the two
+ *   types no longer describe the same thing.
+ *
+ * Mutual assignability catches all three. `-?` plus `| undefined` reproduces
+ * the deliberate "required, possibly-undefined" encoding of the hand-written
+ * type — the property is required so `tsc` forces every construction site to
+ * name it, and its value may still be `undefined` because an absent filter is
+ * a real state.
+ *
+ * The type stays hand-written rather than being replaced by `Derived`: a
+ * mapped type carries no per-property JSDoc, and the comments on `merchant`,
+ * `pageSize` and `includeTransfers` above are the postmortems of the bugs
+ * this contract exists to prevent. Deriving it would delete them from hover.
+ * zod is imported here as a TYPE only, and this is a test file besides, so
+ * neither costs the client bundle anything.
+ */
+type Derived = { [K in Exclude<SchemaKey, "page">]-?: z.output<typeof searchParamsSchema>[K] | undefined };
+type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const FILTER_TYPE_MATCHES_SCHEMA: MutuallyAssignable<TransactionsFilterValues, Derived> = true;
+
 describe("buildHref refuses to emit a merchant filter it cannot honour", () => {
   /**
-   * A bare `?merchant=` is worse than no link: `flatten()` reads `""` as
-   * `undefined`, so the destination drops the filter and shows every row —
+   * A bare `?merchant=` is worse than no link: `flatten()` DROPS a blank
+   * key, so the destination has no merchant filter and shows every row —
    * from a control that promised to narrow to one merchant.
    * `merchantDrilldownHref` returns `null` for this; the per-row link on
    * `/transactions` builds its href through `buildHref` instead, so the guard
-   * belongs in the serializer both paths share.
+   * is made again in the serializer, because the two link builders share no
+   * code — `merchantDrilldownHref` builds its own `URLSearchParams`.
    */
   it("skips an empty merchant key rather than emitting `?merchant=`", () => {
     const href = buildHref({ ...emptyValues, merchant: "" });
@@ -266,6 +297,12 @@ describe("every TransactionsFilterValues key survives the URL round trip", () =>
   it("no schema key is left outside the carry-forward contract", () => {
     // See NO_UNCARRIED_SCHEMA_KEYS above — the real enforcement is the type.
     expect(NO_UNCARRIED_SCHEMA_KEYS).toBe(true);
+  });
+
+  it("the filter type and the schema describe the same fields, both ways", () => {
+    // FILTER_TYPE_MATCHES_SCHEMA — again, the enforcement is `tsc`; this makes
+    // it a visible named test rather than a silent annotation.
+    expect(FILTER_TYPE_MATCHES_SCHEMA).toBe(true);
   });
 
   it("the fixture actually populates every field (guards the guard)", () => {

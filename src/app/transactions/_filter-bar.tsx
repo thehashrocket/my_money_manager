@@ -121,7 +121,14 @@ export function hasNonMerchantFilters(values: TransactionsFilterValues): boolean
  * by default. The old spelling hand-wrote one `<input type="hidden">` per
  * field, so the failure mode for forgetting was a silently dropped filter.
  */
-export const VISIBLE_FIELDS = new Set([
+// Typed on the ELEMENT, not the Set: `keyof TransactionsFilterValues` makes a
+// typo here a `tsc` error, while the `ReadonlySet<string>` annotation keeps
+// `.has(name)` callable with the plain strings that come back from
+// `URLSearchParams`. Without the element type, a renamed field left behind in
+// this list suppresses the hidden input for a field that has no visible
+// control either — a silently dropped filter, which is the whole bug class
+// this file exists to close.
+export const VISIBLE_FIELDS: ReadonlySet<string> = new Set<keyof TransactionsFilterValues>([
   "search",
   "accountId",
   "categoryId",
@@ -151,7 +158,9 @@ export function FilterBar({
   // `buildHref` carries `pageSize` itself now that it is a member of
   // `TransactionsFilterValues`, so these two quick links need no special
   // treatment — the `withPageSize` string-splicing helper that used to wrap
-  // them (and that three other call sites forgot to use) is gone.
+  // them is gone. (It was a closure inside `FilterBar`, so no other file
+  // could reach it; exactly one other href builder — the transfers toggle —
+  // had to re-derive `pageSize` itself, and forgot.)
   const thisMonthHref = buildHref({
     ...values,
     dateFrom: monthBoundary(year, month),
@@ -342,7 +351,10 @@ export function filterValuesToSearchParams(values: TransactionsFilterValues): UR
   // is empty would produce a link that promises one merchant and silently
   // lands on all 1,540 rows. `merchantDrilldownHref` guards this by returning
   // `null`; the row-level link builder goes through here instead, so the guard
-  // has to live at the one place both paths share.
+  // builds its href through here instead, so the same guard has to be made
+  // AGAIN here. The two paths share nothing — `merchantDrilldownHref` builds
+  // its own `URLSearchParams` and never calls this — so this is deliberate
+  // duplication, not a choke point.
   if (values.merchant !== undefined && values.merchant !== "") {
     params.set("merchant", values.merchant);
   }

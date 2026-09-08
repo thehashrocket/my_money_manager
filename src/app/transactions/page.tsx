@@ -9,6 +9,7 @@ import {
   loadTransactions,
   summarizeByCategory,
   type CategoryBreakdownRow,
+  type FilterPredicateInput,
 } from "@/lib/categorize/loadTransactions";
 import { centsToDollarString } from "@/lib/money";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
@@ -19,7 +20,12 @@ import {
   searchParamsSchema,
   type RawSearchParams,
 } from "@/lib/transactions/searchParams";
-import { buildHref, FilterBar, type TransactionsFilterValues } from "./_filter-bar";
+import {
+  buildHref,
+  FilterBar,
+  hasNonMerchantFilters,
+  type TransactionsFilterValues,
+} from "./_filter-bar";
 import { TransactionsUi } from "./_transactions-ui";
 
 /**
@@ -63,7 +69,17 @@ export default async function TransactionsPage({
     // content and does not belong in a log.
     console.error("[/transactions] rejected searchParams", {
       keys: Object.keys(raw),
-      issues: parsed.error.issues.map((i) => ({ path: i.path, code: i.code })),
+      issues: parsed.error.issues.map((i) =>
+        // A root-level `.strict()` violation carries `path: []` and puts the
+        // offending NAMES on `issue.keys` — so mapping to `path` alone logged
+        // `{path: [], code: "unrecognized_keys"}` and named nothing, in
+        // exactly the link-builder case above. Verified against this repo's
+        // zod 4.5.4. A key name is URL/schema space, not ledger content, so
+        // the no-values rule does not cover it.
+        i.code === "unrecognized_keys"
+          ? { code: i.code, unrecognized: i.keys }
+          : { code: i.code, path: i.path },
+      ),
     });
     notFound();
   }
@@ -80,15 +96,36 @@ export default async function TransactionsPage({
     includeTransfers,
     merchant,
   } = parsed.data;
-  if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) notFound();
-  if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) notFound();
+  // Logged for the same reason as the schema rejection above, and these are
+  // MORE reachable than that path: both fields are user-entered on a GET form,
+  // and `amountSchema` applies `Math.abs`, so typing `-100` into "Amount min"
+  // (a natural reading on a ledger where withdrawals are negative) silently
+  // becomes 10000 and trips this guard. The user gets Next's stock 404 with no
+  // field named. A date bound and a cents magnitude are schema-space, not
+  // ledger content, so unlike a `search`/`merchant` value they are safe to log.
+  if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) {
+    console.error("[/transactions] rejected searchParams", {
+      reason: "dateFrom is after dateTo",
+      dateFrom,
+      dateTo,
+    });
+    notFound();
+  }
+  if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) {
+    console.error("[/transactions] rejected searchParams", {
+      reason: "amountMin is above amountMax (both are magnitudes — the sign is dropped)",
+      amountMinCents: amountMin,
+      amountMaxCents: amountMax,
+    });
+    notFound();
+  }
 
   const isPending = resolveIsPending(pending);
 
   const page = parsed.data.page ?? 1;
   const pageSize = parsed.data.pageSize ?? DEFAULT_PAGE_SIZE;
 
-  const predicateInput = {
+  const predicateInput: { [K in keyof FilterPredicateInput & string]: FilterPredicateInput[K] } = {
     categoryId,
     accountId,
     dateFrom,
@@ -241,7 +278,11 @@ function FilterHeader({
           an invented empty breakdown — reporting 0 uncategorized and hiding
           the "Categorize all N" action for a merchant that has plenty. */}
       {categoryBreakdown !== null ? (
-        <MerchantSummary totalCount={totalCount} breakdown={categoryBreakdown} />
+        <MerchantSummary
+          totalCount={totalCount}
+          breakdown={categoryBreakdown}
+          scoped={hasNonMerchantFilters(values)}
+        />
       ) : (
         <p className="text-sm text-ink-2">
           <strong className="text-foreground">{totalCount}</strong> row
@@ -348,9 +389,30 @@ function FilterChips({
 function MerchantSummary({
   totalCount,
   breakdown,
+  scoped,
 }: {
   totalCount: number;
   breakdown: CategoryBreakdownRow[];
+  /**
+   * True when a filter other than `merchant` is also narrowing the list.
+   *
+   * The breakdown describes the LIST — it shares `buildPredicates` with it,
+   * which is the invariant that stops the header describing rows the list is
+   * not showing. `/categorize` shares none of that: `loadMerchantGroups`
+   * filters on `category_id IS NULL AND transfer_pair_id IS NULL` and nothing
+   * else, so it offers every uncategorized row for the key regardless of the
+   * date range, account or amount window in force here.
+   *
+   * So the count is right about this page and wrong about the destination,
+   * and the CTA is the one place that difference can cost money. Measured on
+   * the real ledger: with a month selected, `AMAZON` reads between 3 and 17
+   * depending on the month, while `/categorize` files all 53 rows ($2,647.30)
+   * across eight months. The user is told one number and moves another.
+   *
+   * Naming a count we cannot honour is the failure; omitting it is not. When
+   * scoped, the CTA drops the number rather than the link.
+   */
+  scoped: boolean;
 }) {
   const uncategorized = breakdown.find((r) => r.categoryId === null)?.count ?? 0;
   const filed = breakdown.filter((r) => r.categoryId !== null).slice(0, 2);
@@ -372,7 +434,7 @@ function MerchantSummary({
           href="/categorize"
           className={`inline-flex min-h-11 items-center font-medium text-terracotta underline-offset-4 hover:underline ${FOCUS_RING}`}
         >
-          Categorize all {uncategorized} →
+          {scoped ? "Categorize this merchant →" : `Categorize all ${uncategorized} →`}
         </Link>
       ) : null}
     </div>

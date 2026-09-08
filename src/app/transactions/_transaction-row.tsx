@@ -310,9 +310,15 @@ function PrimaryLabel({
         className="min-w-0 line-clamp-2 font-mono text-xs text-ink-1 sm:col-start-1 sm:row-start-1 sm:truncate"
         title={memo || row.normalizedMerchant || undefined}
       >
-        {/* A row can have BOTH a blank memo and an empty key — see below —
-            which rendered an empty span, i.e. a row with no label at all. */}
-        {memo || row.normalizedMerchant || <span className="text-ink-3">No merchant name</span>}
+        {/* The third alternative is a total-function guard, not a case that
+            fires here: this branch only runs when a merchant filter is
+            active, and every row was then selected by
+            `eq(normalized_merchant, merchant)` against a key `flatten` has
+            already refused to let be blank — so `row.normalizedMerchant` is
+            non-empty. It uses the shared constant rather than a fourth copy
+            of the string, which is the whole reason `merchantLabel.ts`
+            exists. */}
+        {memo || row.normalizedMerchant || NO_MERCHANT_NAME}
       </span>
     );
   }
@@ -366,7 +372,9 @@ function PrimaryLabel({
  * in ten does not render its first line twice. Also suppressed when the memo
  * has already been promoted into the primary slot above.
  *
- * Two lines below `sm`, one line above it. Real bank memos run 48-72 chars,
+ * Two lines below `sm`, one line above it. Measured on the ledger, memos run 8-72 chars (median 40); the merchant-
+ * filtered case this is arguing about is the long end — all 59 `AMAZON`
+ * memos are exactly 48 —
  * and the desktop escape hatch for the overflow is the `title` tooltip — which
  * does not exist on touch. Truncating to one line at 375px would throw away
  * most of the only text that distinguishes 59 rows all labelled `AMAZON`,
@@ -393,7 +401,7 @@ function MemoLine({
 }
 
 /**
- * D20 — monochrome, with one exception. 19 categories against 5 accents means
+ * D20 — monochrome, with one exception. 53 leaf categories against 5 accents
  * any cycling palette invents a relationship between whichever categories
  * happen to collide, so the badge carries the name and nothing else. Amber is
  * the exception because `Uncategorized` is not a category, it is a STATE —

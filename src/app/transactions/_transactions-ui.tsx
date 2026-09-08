@@ -12,6 +12,7 @@ import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import {
   buildHref,
+  CLEARED_FILTERS,
   filterValuesToSearchParams,
   hasNonMerchantFilters,
   merchantSearchRecoveryHref,
@@ -276,12 +277,32 @@ function EmptyState({
             : "That exact merchant key matches nothing. A merchant backfill can rewrite these keys, so a saved link can go stale."
         }
         primaryAction={
-          <Link
-            href={buildHref({ ...searchParams, merchant: undefined })}
-            className={actionClass}
-          >
-            Remove the merchant filter
-          </Link>
+          otherFiltersActive ? (
+            <Link
+              /* The description above says clearing the rest is the quickest
+                 way to tell whether the key is stale — so the primary action
+                 has to BE that. Dropping `merchant` and keeping the rest was
+                 the opposite move, and it reintroduced the second-empty-page
+                 bug on the primary that `merchantSearchRecoveryHref` fixed on
+                 the secondary: from `?merchant=X&dateFrom=2030-01-01` it just
+                 landed on `?dateFrom=2030-01-01`, empty again. */
+              href={buildHref({
+                ...CLEARED_FILTERS,
+                merchant,
+                pageSize: searchParams.pageSize,
+              })}
+              className={actionClass}
+            >
+              Clear the other filters
+            </Link>
+          ) : (
+            <Link
+              href={buildHref({ ...searchParams, merchant: undefined })}
+              className={actionClass}
+            >
+              Remove the merchant filter
+            </Link>
+          )
         }
         secondaryAction={
           <Link
