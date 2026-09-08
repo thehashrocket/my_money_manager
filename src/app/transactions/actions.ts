@@ -51,6 +51,13 @@ export async function categorizeTransactionAction(formData: FormData) {
     snapshot,
     updatedCount: result.updatedCount,
     categoryName: result.categoryName,
+    // Deliberately outside `snapshot`: the refusal is a REASON, not state to
+    // reverse. When it also deleted a rule, `snapshot.priorRule` +
+    // `ruleTouched` already carry that for the undo. These two ride the result
+    // only so the row can say why the box it ticked did nothing, and what
+    // happened to the rule that was there.
+    ruleRefusal: result.ruleRefusal,
+    refusalDeletedRule: result.refusalDeletedRule,
   };
 }
 

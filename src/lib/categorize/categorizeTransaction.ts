@@ -8,12 +8,14 @@ import {
   ParentAllocationError,
   SavingsGoalCategoryError,
 } from "@/lib/categoryErrors";
-import { createOrUpdateRule } from "@/lib/rules";
-import type { PriorRuleSnapshot } from "./bulkCategorize";
+import { createOrUpdateRule, deleteExactRule, readExactRule } from "@/lib/rules";
+import { toPriorRuleSnapshot, type PriorRuleSnapshot } from "./bulkCategorize";
 import {
   TransactionNotFoundError,
   TransferPairedTransactionError,
 } from "./categorizeTransactionErrors";
+import type { TrainabilityRefusal } from "./keyTrainability";
+import { resolveKeyTrainability } from "./resolveKeyTrainability";
 import type { CategorizeTransactionInput } from "./validateCategorizeTransactionInput";
 
 type Db = typeof defaultDb;
@@ -30,9 +32,17 @@ export type CategorizeTransactionSnapshot = {
   applyToPastTxnIds: number[];
   /** Earliest date seen in `applyToPastTxnIds`, or `null` if none. */
   earliestApplyToPastDate: string | null;
-  /** True when the caller ticked Remember and a rule was upserted. */
+  /**
+   * True when this call changed the rules table — either Remember was ticked
+   * and a rule was upserted, or the trainability guard refused and deleted the
+   * rule that was already there. Both leave the undo something to reverse.
+   */
   ruleTouched: boolean;
-  /** Rule row that existed BEFORE the upsert, or `null` if none. */
+  /**
+   * The rule row as it stood before this call: `null` when none existed,
+   * otherwise the row that was overwritten (upsert) or removed (refusal).
+   * The undo restores it either way and cannot tell the two apart.
+   */
   priorRule: PriorRuleSnapshot | null;
 };
 
@@ -41,6 +51,20 @@ export type CategorizeTransactionResult = CategorizeTransactionSnapshot & {
   updatedCount: number;
   /** Name of the newly assigned category — for the Sonner toast. */
   categoryName: string;
+  /**
+   * Set when Remember was ticked but the key is not safe to train a rule on
+   * (see `keyTrainability.ts`). Rows are still filed; only the rule is
+   * withheld. Not part of the snapshot: it is the reason for a decision, not
+   * state to reverse, and `ruleTouched` + `priorRule` already carry what the
+   * undo needs — including the case where the refusal DELETED a rule.
+   */
+  ruleRefusal: TrainabilityRefusal | null;
+  /**
+   * True when the refusal removed an exact rule that already pointed this key
+   * somewhere. Undoable, but the user ticked a box and a rule disappeared, so
+   * the row says so rather than reporting the bare "Rule not saved."
+   */
+  refusalDeletedRule: boolean;
 };
 
 /**
@@ -50,7 +74,17 @@ export type CategorizeTransactionResult = CategorizeTransactionSnapshot & {
  *
  * Server-trust: `normalizedMerchant` is NOT read from the form. We resolve it
  * server-side from the target row so a tampered applyToPast can't broadcast
- * across merchants.
+ * across merchants. The Remember guard below is enforced here for the same
+ * reason — `/transactions` renders this checkbox on every row without knowing
+ * the key's filing history, so the server is the only place that can answer it.
+ *
+ * Rule REFUSAL: the upsert is skipped when the key is not safe to train
+ * (`keyTrainability.ts`), and any exact rule already held for the key is
+ * DELETED — see `deleteExactRule`, and note that this row is the only surface
+ * that could ever have retargeted such a rule, so leaving it standing made it
+ * permanent. Rows are still filed and `ruleRefusal` carries the reason back
+ * for the toast — refusing the whole action would throw away a categorization
+ * the user was right about.
  *
  * Invalidation: the new category is invalidated starting at the earliest of
  * (target.date, earliest applyToPast date). If the target had a prior
@@ -111,6 +145,16 @@ export function categorizeTransaction(
     const targetPriorCategoryId = target.categoryId;
     const normalizedMerchant = target.normalizedMerchant;
 
+    // Resolved BEFORE the two UPDATEs below. This function files its target
+    // row first and upserts the rule last, so checking at the rule site would
+    // read a ledger that already contains this action's own writes and count
+    // them as prior evidence.
+    const verdict = rememberMerchant
+      ? resolveKeyTrainability(tx, normalizedMerchant, categoryId)
+      : null;
+    const ruleRefusal =
+      verdict !== null && !verdict.trainable ? verdict : null;
+
     tx.update(schema.transactions)
       .set({ categoryId, updatedAt: new Date() })
       .where(eq(schema.transactions.id, target.id))
@@ -152,29 +196,12 @@ export function categorizeTransaction(
 
     let priorRule: PriorRuleSnapshot | null = null;
     let ruleTouched = false;
+    let refusalDeletedRule = false;
 
-    if (rememberMerchant) {
-      const existing = tx
-        .select()
-        .from(schema.categoryRules)
-        .where(
-          and(
-            eq(schema.categoryRules.matchType, "exact"),
-            eq(schema.categoryRules.matchValue, normalizedMerchant),
-          ),
-        )
-        .get();
+    if (rememberMerchant && ruleRefusal === null) {
+      const existing = readExactRule(tx, normalizedMerchant);
       if (existing) {
-        priorRule = {
-          id: existing.id,
-          categoryId: existing.categoryId,
-          matchType: existing.matchType,
-          matchValue: existing.matchValue,
-          priority: existing.priority,
-          source: existing.source,
-          createdAt: existing.createdAt,
-          updatedAt: existing.updatedAt,
-        };
+        priorRule = toPriorRuleSnapshot(existing);
       }
       createOrUpdateRule(tx, {
         normalizedMerchant,
@@ -182,6 +209,19 @@ export function categorizeTransaction(
         source: "manual",
       });
       ruleTouched = true;
+    } else if (ruleRefusal !== null) {
+      /* The refusal removes the rule already held for this key, it does not
+         merely decline to write a new one. `deleteExactRule` carries the full
+         reasoning; the short version is that this row is the ONLY surface that
+         could ever have retargeted such a rule, and the refusal is what shuts
+         that door — leaving the rule standing made it permanent. Reported by
+         the /ship review; decision d0995fa9. */
+      const removed = deleteExactRule(tx, normalizedMerchant);
+      if (removed) {
+        priorRule = toPriorRuleSnapshot(removed);
+        ruleTouched = true;
+        refusalDeletedRule = true;
+      }
     }
 
     const newCatEarliest = earlierDate(target.date, earliestApplyToPastDate);
@@ -210,6 +250,8 @@ export function categorizeTransaction(
       priorRule,
       updatedCount: 1 + applyToPastTxnIds.length,
       categoryName: category.name,
+      ruleRefusal,
+      refusalDeletedRule,
     };
   });
 }

@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
 import type { BulkCategorizeSnapshot } from "./bulkCategorize";
+import { restorePriorRule } from "./restorePriorRule";
 
 type Db = typeof defaultDb;
 
@@ -23,8 +24,8 @@ export type UndoResult = {
  * Rules (C3):
  * - `priorRule = null` + `ruleTouched = true` → the bulk inserted a rule; delete it.
  * - `priorRule != null` + `ruleTouched = true` → restore the full prior row
- *   (categoryId, priority, source, matchType, matchValue, createdAt, updatedAt)
- *   verbatim via UPDATE on the prior row's primary key.
+ *   verbatim (see {@link restorePriorRule}). Covers BOTH ways a prior rule can
+ *   be gone: overwritten by the upsert, or deleted by a trainability refusal.
  * - `ruleTouched = false` → no-op on rules.
  *
  * Invalidation: the same earliest-month invalidation that `bulkCategorize`
@@ -65,19 +66,7 @@ export function undoBulkCategorize(
           ruleAction = "deleted";
         }
       } else {
-        const prior = snapshot.priorRule;
-        tx.update(schema.categoryRules)
-          .set({
-            categoryId: prior.categoryId,
-            matchType: prior.matchType,
-            matchValue: prior.matchValue,
-            priority: prior.priority,
-            source: prior.source,
-            createdAt: prior.createdAt,
-            updatedAt: prior.updatedAt,
-          })
-          .where(eq(schema.categoryRules.id, prior.id))
-          .run();
+        restorePriorRule(tx, snapshot.priorRule);
         ruleAction = "restored";
       }
     }

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
 
@@ -123,6 +123,64 @@ export function createOrUpdateRule(
     .returning()
     .all();
   return upserted;
+}
+
+/**
+ * The exact rule currently held for `normalizedMerchant`, or null.
+ *
+ * One spelling of the "which rule is this key's" lookup, shared by both write
+ * paths and by {@link deleteExactRule}. It was copy-pasted into
+ * `bulkCategorize` and `categorizeTransaction`, and a third copy landed the
+ * moment a refusal also needed it.
+ */
+export function readExactRule(
+  db: AnyDb,
+  normalizedMerchant: string,
+): CategoryRule | undefined {
+  return db
+    .select()
+    .from(schema.categoryRules)
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "exact"),
+        eq(schema.categoryRules.matchValue, normalizedMerchant),
+      ),
+    )
+    .get();
+}
+
+/**
+ * Remove the exact rule for `normalizedMerchant`, returning the row it
+ * deleted (or null if there was none) so an undo can put it back.
+ *
+ * Called ONLY when the trainability guard refuses a key the user just ticked
+ * "Remember" on. Refusing the upsert alone was not enough: a key with a rule
+ * already pointing somewhere wrong keeps auto-filing every future import
+ * (rule 6), and the guard itself closes the only repair path — `/categorize`
+ * never lists the merchant, because the rule leaves no NULL-category rows for
+ * it to group, and `/transactions` refuses the retrain, because the rows that
+ * same rule filed are what push the key over two distinct categories. There is
+ * no rules-management surface, so the rule would have been permanent.
+ *
+ * "No rule can be right for this key" means the key files by hand, which is
+ * this deletion, not a stale rule left standing. CLAUDE.md rule 10 assumes a
+ * rule can always be retrained from a row; that assumption needs this.
+ */
+export function deleteExactRule(
+  db: AnyDb,
+  normalizedMerchant: string,
+): CategoryRule | null {
+  const [deleted] = db
+    .delete(schema.categoryRules)
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "exact"),
+        eq(schema.categoryRules.matchValue, normalizedMerchant),
+      ),
+    )
+    .returning()
+    .all();
+  return deleted ?? null;
 }
 
 function compareRules(a: CategoryRule, b: CategoryRule): number {

@@ -10,6 +10,7 @@ import {
   SavingsGoalCategoryError,
 } from "@/lib/categoryErrors";
 import { bulkCategorize } from "./bulkCategorize";
+import { undoBulkCategorize } from "./undoBulkCategorize";
 
 let handle: TestDbHandle;
 
@@ -504,5 +505,445 @@ describe("bulkCategorize — rejections", () => {
       .all();
     expect(stillNull.every((r) => r.categoryId === null)).toBe(true);
     expect(handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all()).toHaveLength(0);
+  });
+});
+
+describe("bulkCategorize — Remember guard", () => {
+  it("files the rows but writes no rule for a lossy key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gifts = seedCategory("Gifts");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ONLINE", amountCents: -2500 });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ONLINE", amountCents: -1000 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "ONLINE",
+      categoryId: gifts.id,
+      rememberMerchant: true,
+    });
+
+    // The categorization the user asked for still happened. Refusing the whole
+    // action would throw away a decision that was fine for THESE rows.
+    expect(result.updatedCount).toBe(2);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+
+    const rules = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "ONLINE"))
+      .all();
+    expect(rules).toHaveLength(0);
+  });
+
+  it("writes no rule when the pick makes the key span two categories", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    // History is unanimous...
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500 });
+
+    // ...and this pick is what breaks it.
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: homeGoods.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+        .all(),
+    ).toHaveLength(0);
+  });
+
+  it("DELETES an existing rule when it refuses, and snapshots it for undo", () => {
+    /* Refusing only the upsert left the wrong rule auto-filing every future
+       import (rule 6) with no way to reach it: `/categorize` never lists the
+       merchant, because the rule leaves it no NULL-category rows to group, and
+       `/transactions` refuses the retrain, because the rows that same rule
+       filed are what push the key over two categories. There is no
+       rules-management surface. "No rule can be right for this key" means the
+       key files by hand, so the rule goes — snapshotted into `priorRule` with
+       `ruleTouched`, which is what makes the deletion undoable. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: amazon.id,
+        matchType: "exact",
+        matchValue: "AMAZON",
+        priority: 50,
+        source: "manual",
+      })
+      .run();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: homeGoods.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.ruleRefusal).not.toBeNull();
+    expect(result.refusalDeletedRule).toBe(true);
+    // Snapshotted verbatim, so the undo can put the exact row back.
+    expect(result.priorRule?.categoryId).toBe(amazon.id);
+    expect(result.priorRule?.matchValue).toBe("AMAZON");
+    expect(result.ruleTouched).toBe(true);
+    // `insertedRuleId` stays null: nothing was inserted, so the undo must take
+    // the restore branch, not the delete-what-we-inserted branch.
+    expect(result.insertedRuleId).toBeNull();
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+        .all(),
+    ).toHaveLength(0);
+
+    // The rows were still filed — the refusal withholds the rule, not the work.
+    expect(result.updatedCount).toBe(1);
+  });
+
+  it("restores a refusal-deleted rule on undo, row for row", () => {
+    /* The restore path was an UPDATE by primary key, which silently no-ops on
+       a row that no longer exists — so the deletion above would have been
+       one-way without `restorePriorRule`'s insert fallback. Undo has to return
+       the ledger to the state it was in, including the rule the user had. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    const [seeded] = handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: amazon.id,
+        matchType: "exact",
+        matchValue: "AMAZON",
+        priority: 70,
+        source: "auto",
+      })
+      .returning()
+      .all();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    const pending = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -1500,
+    });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: homeGoods.id,
+      rememberMerchant: true,
+    });
+    expect(result.refusalDeletedRule).toBe(true);
+
+    const undone = undoBulkCategorize(handle.db, {
+      normalizedMerchant: result.normalizedMerchant,
+      categoryId: result.categoryId,
+      txnIds: result.txnIds,
+      ruleTouched: result.ruleTouched,
+      priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
+      earliestDate: result.earliestDate,
+    });
+    expect(undone.ruleAction).toBe("restored");
+
+    const restored = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+      .get();
+    // Every user-owned column, not just the category — priority and source are
+    // what a rule trained by import heuristics differs from a manual one by.
+    expect(restored?.id).toBe(seeded.id);
+    expect(restored?.categoryId).toBe(amazon.id);
+    expect(restored?.priority).toBe(70);
+    expect(restored?.source).toBe("auto");
+    expect(restored?.matchType).toBe("exact");
+    expect(restored?.createdAt.getTime()).toBe(seeded.createdAt.getTime());
+
+    // And the rows went back to NULL, same as any other undo.
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get();
+    expect(row?.categoryId).toBeNull();
+  });
+
+  it("reports no deletion when the refused key had no rule to begin with", () => {
+    // `refusalDeletedRule` drives user-facing copy ("Existing rule removed."
+    // vs "Rule not saved."), so it must not fire on the ordinary case where
+    // there was never a rule — which is most refusals.
+    const a = seedAccount();
+    const b = seedBatch();
+    const misc = seedCategory("Misc");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ONLINE", amountCents: -1500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "ONLINE",
+      categoryId: misc.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+    expect(result.refusalDeletedRule).toBe(false);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.priorRule).toBeNull();
+  });
+
+  it("does NOT delete a rule when Remember was not ticked", () => {
+    /* The deletion is downstream of a refusal, and a refusal only exists when
+       the user ticked Remember. Ordinary filing on a key that happens to be
+       untrainable must leave the rules table alone — otherwise categorizing a
+       row would quietly retire a rule nobody asked about. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: amazon.id,
+        matchType: "exact",
+        matchValue: "AMAZON",
+        priority: 50,
+        source: "manual",
+      })
+      .run();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: homeGoods.id,
+      rememberMerchant: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.refusalDeletedRule).toBe(false);
+    const rule = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+      .get();
+    expect(rule?.categoryId).toBe(amazon.id);
+  });
+
+  it("still writes the rule for an ordinary key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+      categoryId: groceries.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+  });
+
+  it("ignores a transfer-paired row's category when judging the key", () => {
+    // Same predicate as loadMerchantGroups/loadFiledCategoryIds. A second
+    // category reachable only through a transfer-paired row is evidence
+    // `/categorize` never shows, so refusing on it would disable a checkbox
+    // for a reason the user cannot see.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const other = seedCategory("Other");
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "PARTNER",
+      amountCents: 4000,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+      categoryId: other.id,
+      transferPairId: partner.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+  });
+
+  it("does not refuse when Remember was never ticked", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gifts = seedCategory("Gifts");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ONLINE", amountCents: -2500 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "ONLINE",
+      categoryId: gifts.id,
+      rememberMerchant: false,
+    });
+
+    // No rule was requested, so there is nothing to report. A refusal here
+    // would surface a warning toast on an action that did exactly what it said.
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.updatedCount).toBe(1);
+  });
+});
+
+describe("bulkCategorize — Remember guard, boundary cases", () => {
+  it("refuses the EMPTY key and still files its rows", () => {
+    // A blank Memo cell normalizes to "" (see `merchantLabel`, which exists
+    // because that case is reachable). An exact rule on "" would claim every
+    // future memo-less row, so the refusal has to fire on a key that renders
+    // as nothing at all — the one lossy key with no visible text to warn on.
+    const a = seedAccount();
+    const b = seedBatch();
+    const misc = seedCategory("Misc");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "", amountCents: -1000 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "",
+      categoryId: misc.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+    // The blank-key wording, not the channel sentence with empty quotes.
+    expect(result.ruleRefusal?.message).toContain("no merchant name");
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, ""))
+        .all(),
+    ).toHaveLength(0);
+  });
+
+  it("refuses on the ledger's own history, not only on the pending pick", () => {
+    // The split already exists and the pick agrees with one half of it, so the
+    // union is two categories without this action introducing anything. A
+    // guard that only compared history against the pick would pass this.
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -2000,
+      categoryId: homeGoods.id,
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -900 });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: amazon.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    expect(result.ruleTouched).toBe(false);
+  });
+
+  it("reports the refusal even when there is nothing left to file", () => {
+    // A stale tab resubmitting after the backlog for this key is already
+    // cleared: zero rows move, and the only thing the action would have done
+    // is write the rule it must refuse. The result still has to say so, or the
+    // row reports a plain success for an action that did nothing.
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -2000,
+      categoryId: homeGoods.id,
+    });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: amazon.id,
+      rememberMerchant: true,
+    });
+
+    expect(result.updatedCount).toBe(0);
+    expect(result.earliestDate).toBeNull();
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    expect(result.ruleTouched).toBe(false);
   });
 });

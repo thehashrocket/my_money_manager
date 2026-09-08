@@ -3,6 +3,7 @@ import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
 import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import type { CategorizeTransactionSnapshot } from "./categorizeTransaction";
+import { restorePriorRule } from "./restorePriorRule";
 
 type Db = typeof defaultDb;
 
@@ -81,19 +82,7 @@ export function undoCategorizeTransaction(
           .run();
         ruleAction = "deleted";
       } else {
-        const prior = snapshot.priorRule;
-        tx.update(schema.categoryRules)
-          .set({
-            categoryId: prior.categoryId,
-            matchType: prior.matchType,
-            matchValue: prior.matchValue,
-            priority: prior.priority,
-            source: prior.source,
-            createdAt: prior.createdAt,
-            updatedAt: prior.updatedAt,
-          })
-          .where(eq(schema.categoryRules.id, prior.id))
-          .run();
+        restorePriorRule(tx, snapshot.priorRule);
         ruleAction = "restored";
       }
     }

@@ -61,6 +61,12 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     snapshot,
     updatedCount: result.updatedCount,
     categoryName: categoryRow?.name ?? `Category ${result.categoryId}`,
+    // `/categorize` disables the checkbox for an untrainable key, so this is
+    // normally null. It is still returned because "disabled in the UI" is not
+    // an enforcement boundary — a stale tab holding a form from before the
+    // key's filing history changed can still post `rememberMerchant=true`.
+    ruleRefusal: result.ruleRefusal,
+    refusalDeletedRule: result.refusalDeletedRule,
   };
 }
 
