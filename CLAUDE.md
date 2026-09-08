@@ -46,7 +46,51 @@ src/
                    category CRUD, archive/unarchive, and expense→income reclassification
                    copyMonth, monthOfIso, transactionsDrilldownHref — /budget → /transactions
                    per-category-per-month link builder (dateFrom/dateTo, not year/month)
-  lib/categorize/  Bulk-categorize logic and validators
+                   merchantDrilldownHref — /categorize → /transactions exact-merchant link,
+                   URLSearchParams-built (17 of 363 real keys carry `# * ? /`) and `null`
+                   for an empty key. Parked here beside its sibling; TODOS.md tracks moving
+                   it to lib/transactions/, which now owns the param it emits
+  lib/categorize/  Bulk-categorize logic and validators, plus the two read models:
+                   loadMerchantGroups — /categorize rows; sampleMemos (≤3 distinct memos,
+                   excluding ones equal to the key — 9.8% of rows) and totalRowCount
+                   (all NON-TRANSFER rows for the key, filed included — the transfer
+                   exclusion is what makes it agree with the drilldown it links to,
+                   pinned by a test) are deliberately not `count`
+                   loadTransactions + summarizeByCategory — both build their WHERE through
+                   one shared buildPredicates, so the /transactions header and the list
+                   under it can never disagree about WHICH ROWS MATCH. That is a predicate
+                   guarantee, not a snapshot one: they are two separate reads, so a
+                   categorize action committing between them (a second tab, an in-flight
+                   Undo) can still leave the header a beat behind
+  lib/transactions/ /transactions' URL contract, extracted from page.tsx so it is testable:
+                   searchParams — the `.strict()` zod schema + flatten() + resolveIsPending;
+                   a filter key must be accepted HERE and emitted by
+                   filterValuesToSearchParams or it drops silently on page 2 (shipped
+                   broken twice). The contract has THREE edges and the third is the one
+                   that keeps failing: a key can exist in the schema and never be added to
+                   TransactionsFilterValues, which is exactly how `pageSize` escaped a guard
+                   written to catch it — the guard enumerates the type, so it is structurally
+                   blind to a key the type lacks. That third edge is now a compile-time
+                   assertion; the first two are exhaustive runtime checks driven off the
+                   type's own keys, in
+                   _filter-bar.test.ts. A FOURTH gate is separate machinery: "Apply filters"
+                   is a GET form, so a field also needs a visible control or a hidden input,
+                   now derived from the serializer (VISIBLE_FIELDS is the complement) rather
+                   than hand-listed one <input> at a time
+                   flatten DROPS a blank key rather than passing it on as undefined —
+                   .strict() rejects an unknown key even when its value is undefined, so
+                   retaining it made one empty foreign param (`?merchant=X&ref=`) 404 a
+                   request whose real filters all parsed
+                   limits — MAX_SEARCH_LENGTH / MAX_PAGE_SIZE / DEFAULT_PAGE_SIZE in a
+                   zod-free module, because _filter-bar.tsx is client-side and importing them
+                   from the schema pulled zod into the route bundle (+376 KB, measured)
+                   merchantLabel — merchantLabel() / hasMerchantName() / NO_MERCHANT_NAME,
+                   the ONE answer to "how is an empty normalized_merchant shown to a
+                   person". The empty key is reachable (a blank Memo cell normalizes to ""),
+                   and before this the two ends of the drilldown disagreed: /transactions
+                   rendered a fallback while /categorize rendered the key verbatim — an
+                   unreadable row with an sr-only label ending in "Category for ". Zero
+                   imports on purpose, same client-graph constraint as limits
   lib/import/      Import orchestration and validators
   lib/simplefin/   Automated sync: client (zod-validated), mapping, bucket transfer
                    matcher, link/unlink, undo, input validation
@@ -137,6 +181,8 @@ These are load-bearing. Violating them corrupts the database.
     The backfill recomputes every row **from `raw_memo`**, never from the existing key, and rewrites rules by joining through the rows (old key → that row's `raw_memo` → new key) rather than by renormalizing the rule's own value. That is what makes it exact instead of dependent on idempotence — for every rule some surviving row still corroborates. There is one fallback: a rule whose key no current row carries has no rows to join through, so its own `match_value` is renormalized instead, which is exact only if that key is a fixed point. That is the one place the backfill stops being a join through the data and becomes a guess, so those rules are reported in their own `UNEVIDENCED REWRITES` section rather than folded into the rewrite count — with the genuinely broken sub-case marked `DRIFTS`, meaning the guess landed on a non-fixed-point key that no write path emits, so the rule is dead on arrival and needs retraining from a row. The `--apply` verification pass separately fails the run if any *row* is left unconverged.
     **Two tables key off this column, not one:** `category_rules.match_value` (for `match_type='exact'` only) and `subscription_dismissals.normalized_merchant`. Both carry unique indexes, so a rewrite that collapses two values collides, and in both tables the loser is **deleted**, not merely out-ranked. The two tables pick their survivor by deliberately opposite rules. For `category_rules` it is `compareRules`' own order (priority DESC, then **most recently updated**), because picking the oldest instead silently reverts the user's latest training. For `subscription_dismissals` it is the **oldest** `dismissed_at`, because there the earliest deliberate act is the one to preserve — a dismissal is a standing instruction, not a correction of an earlier one.
     The ranking models `buildRuleMatcher` as a whole — its skip filter as well as its sort. An archived category's rules never fire (rule 8 — inert, not deleted), so they sort **last** regardless of priority or recency; ranking one first would delete the live rule that was actually firing and keep one that never will, leaving the merchant with no effective rule at all. The printed collision lines mark them `(ARCHIVED — never fires)`.
+    **A third consumer is not a table at all: the `?merchant=` URL param.** `/categorize`'s drilldown link filters `/transactions` on an EXACT `normalized_merchant` (`merchantDrilldownHref` → `loadTransactions`'s `eq()`), so a backfill that rewrites a key silently invalidates every link already built from the old one — a bookmark, or a URL shared into a note. Nothing in the database records that a link existed, so unlike the two tables above there is nothing for the backfill to rewrite and no collision to adjudicate; the coupling is real but one-way and unfixable from this side. It is handled at the destination instead: a `?merchant=` that matches nothing renders a zero-result state naming the key verbatim and offering `?search=<key>` as the recovery, which works precisely because `search` is `LIKE %x%` and case-insensitive where the merchant filter is neither. That recovery drops every OTHER active filter too, and truncates the key to `MAX_SEARCH_LENGTH`: keeping the other filters meant the suggested fix landed on a second empty page whenever a date range was what emptied the first, and `merchant` is deliberately unbounded while `search` is capped, so an over-long key turned the one offered escape hatch into a 404. `pageSize` is the one thing it does carry across, because it is a display preference rather than a predicate — it can never be why the list came back empty. That distinction is the same one `hasNonMerchantFilters` draws when it decides whether to blame the key: it excludes `pageSize` for that reason, and `includeTransfers` because that toggle only ever WIDENS the row set, so counting it made one click of "Show transfers" flip the empty state to "the merchant key itself may still be fine" on a page that had just gotten emptier for no new reason. Do not "fix" that empty state by widening the filter itself — the exactness is D2, and a `LIKE` drilldown returns a superset on 11 of 181 real groups.
+
     **A `contains`/`regex` rule is never rewritten but IS reported.** Its `match_value` is a substring or a pattern, not a key, so there is nothing to join through. The plan counts each one's reach against the old keys and the new ones and prints any that change, flagging a drop to zero as dead. That is reported, never refused: the normalizer change is what kills such a rule, at the moment it lands, so refusing would only withhold the repair for the rows.
     **A `contains` rule cannot be repaired by any backfill.** Its `match_value` is a substring, not a key. If a normalizer change stops that token appearing in any key, the rule is dead permanently — `AMAZON PRIME` and `GOOGLE ONE` were both one edit away from exactly that, saved by keeping `PRIME` out of `BRAND_QUALIFIERS` and adding `GOOGLE` to `PROCESSOR_PREFIXES`, not by the backfill. `normalize.test.ts` pins both tokens as reachable; treat that test as a contract with `drizzle/0006_subscription_rules.sql`.
 

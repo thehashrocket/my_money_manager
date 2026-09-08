@@ -43,11 +43,11 @@ Tailwind utilities: `text-terracotta`, `text-ledger`, `text-redbrown`, `text-amb
 | Sync warnings (drift, stale balance, connection issue) | `sync/page.tsx`, `sync/ActionForm.tsx` | Yes (banners); `text-amber-700 dark:text-amber-400` at `sync/page.tsx:478` does not — raw Tailwind, not the mixed formula |
 | Expense envelope progress bar, warn/over fill (DS40) | `budget/[year]/[month]/_month-editor.tsx`'s `BAR_CLASS.amber` (`envelope-card.tsx`'s `FILL_COLORS` is gone — D8 deleted the component, which held a drifted redbrown-on-overspend copy of this rule) | N/A — a fill color, not text; the 3:1 contrast concern DS8′/DS13 raised is text-specific |
 | Import preview: calendar-invalid rows, pending badge | `import/preview/[id]/page.tsx` | **No** — raw `amber-300`/`amber-50`/`amber-800`/`amber-700`, not Ledger Paper tokens at all |
-| Categorize/transactions sticky backlog banners | `categorize/_categorize-ui.tsx`, `transactions/_transactions-ui.tsx` | **No** — raw `amber-400`/`amber-100`/`amber-900`/`amber-950`/`amber-100` |
-| Uncategorized row badge | `transactions/_transaction-row.tsx` | **No** — raw `amber-200`/`amber-900`/`amber-900`/`amber-100` |
+| Categorize/transactions sticky backlog banners | `categorize/_categorize-ui.tsx`, `transactions/_transactions-ui.tsx` | Yes — converted by D21 (merchant-drilldown PR); same 18%/45%/50% mix as `BacklogBanner` |
+| Uncategorized row badge | `transactions/_transaction-row.tsx`'s `CategoryBadge` | Yes — converted by D21. D20 made this one load-bearing: it is the only badge colour encoding a *state* rather than a label, which is why it stays amber while every other category badge is monochrome |
 | Trend chart's 4th category color | `globals.css`'s `--chart-4: var(--accent-amber)` | N/A — categorical chart color, not a warning at all; coincidence of hue, not shared meaning |
 
-**What DS48 anticipated vs. what's actually here:** DS48 named four meanings (backlog-exists, categorize-count, late-assigning, `stale`). The real count is higher — sync warnings, the F1 banner, the progress-bar fill, and the chart color all also use the token, and three whole surfaces (`import/preview`, `categorize`/`transactions`' sticky banners, the transaction row badge) use the *raw* Tailwind amber palette instead of the token at all, which is a second, separate kind of drift `mm-design-system-documented-not-adopted` already named. Distinguishable today by context; enforced by nothing. No consolidation in this pass — recorded so a future change to `--accent-amber` (or a future addition of a fifth meaning) has one place to check for blast radius, per DS48's own scope.
+**What DS48 anticipated vs. what's actually here:** DS48 named four meanings (backlog-exists, categorize-count, late-assigning, `stale`). The real count is higher — sync warnings, the F1 banner, the progress-bar fill, and the chart color all also use the token, and **one** surface still uses the *raw* Tailwind amber palette instead of the token at all — `import/preview` — which is a second, separate kind of drift `mm-design-system-documented-not-adopted` already named. It was three: D21 (the merchant-drilldown PR) converted the two sticky backlog strips and the transaction row badge, and deliberately left `import/preview` alone because it sits on the import path, the most correctness-critical code in the repo. That last one is tracked in `TODOS.md`. Distinguishable today by context; enforced by nothing. No consolidation in this pass — recorded so a future change to `--accent-amber` (or a future addition of a fifth meaning) has one place to check for blast radius, per DS48's own scope.
 
 ### Money display rules
 - **Positive**: no sign, `text-money-pos` in summaries. Neutral in transaction rows.
@@ -363,9 +363,9 @@ the feature exists to add.
 cut from every generated mockup (variant C invented *"Your debt is 20.7% of
 your assets. A good rule of thumb is to keep this under 30%. Learn more →"*:
 invented advice with an external link, in an app whose premise is that nothing
-leaves the machine). `--accent-amber` also already carries eight distinct
+leaves the machine). `--accent-amber` also already carries nine distinct
 meanings per the amber inventory below; 43% utilized is not a warning and must
-not add a ninth.
+not add a tenth.
 
 `hasLimit: false` means render no bar at all — absence of a limit is absence of
 something to show, and is NOT what decides the muted long-term treatment (E7).
@@ -396,6 +396,18 @@ just a red page.
 ## Backlog banner
 
 `src/app/_components/BacklogBanner.tsx`. Two variants: `"budget"` (shows CTA link) and `"categorize"` (omits CTA, caller handles the counter). Uses `--accent-amber` via `color-mix`.
+
+`_categorize-ui.tsx`'s `BacklogHeader` and `_transactions-ui.tsx`'s `BacklogStrip` are near-duplicates that reimplement the shell rather than reuse it, each for something the component does not expose (a live client-side count and a progress counter; a `Bulk →` link). D21 put all three on the same amber formula so the colour can no longer drift three ways — the shell still can. Collapsing them onto a `trailing` slot is tracked in `TODOS.md`.
+
+---
+
+## Focus ring
+
+`src/components/ledger/focus-ring.ts` exports `FOCUS_RING`, the one focus treatment for interactive elements **outside** `components/ui` — links, `<summary>` disclosures, and buttons written inline. The shadcn primitives carry their own `focus-visible:ring-*` and are not in scope for it.
+
+`outline`, not `ring`: an outline is drawn outside the border box and takes no part in layout, so `outline-offset` can push it clear of a control without displacing its neighbours in a dense ruled row — a `ring`'s box-shadow spread has to be budgeted against the row's own padding instead. It **does** follow `border-radius` (CSS UI 4, honoured by every browser this app targets), so it is not a way to get a rectangle around a rounded control — but it is also not a reason to expect a rounded one: of the 17 `${FOCUS_RING}` interpolations across six files, 7 carry `rounded-md` and get a rounded ring, and the other 10 are bare links and `<summary>` disclosures with no radius at all — the two classes the constant exists for — so they get a rectangle, because that is the shape of their border box. No consumer carries `rounded-[999px]`; the one pill control that does (the merchant chip's `×`) deliberately opts out of `FOCUS_RING` for a paper-coloured ring against the terracotta fill. It is also not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a box-shadow. The choice buys layout independence, not shape and not clipping.
+
+Known divergence: `FOCUS_RING` uses `--accent-terracotta` at full strength while `globals.css` defines `--ring` as the same accent at 55%, which is what every shadcn control uses. Two treatments, not one. Tracked in `TODOS.md`; changing it makes the hand-rolled ring visibly softer, so it wants both seen side by side first.
 
 ---
 

@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { escapeLikePattern, loadTransactions } from "./loadTransactions";
+import { escapeLikePattern, loadTransactions, summarizeByCategory } from "./loadTransactions";
 
 let handle: TestDbHandle;
 
@@ -558,5 +558,293 @@ describe("loadTransactions — includeTransfers (D14=B)", () => {
       includeTransfers: true,
     });
     expect(page2.rows).toHaveLength(1);
+  });
+});
+
+/**
+ * D2 — the drilldown's filter is EXACT, and this is the assertion that stops
+ * anyone from "simplifying" it back into the existing `search` predicate.
+ *
+ * `search` is `LIKE %x%` across three columns. On the real ledger that turns
+ * 11 of 181 merchant groups into supersets — clicking `AMAZON` (59 rows for
+ * the exact key) would land on 71, silently including `AMAZON PRIME`, which
+ * is a different merchant filed to a different category.
+ */
+describe("loadTransactions — merchant filter (D2)", () => {
+  it("matches the key exactly and does NOT match a longer key sharing its prefix", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON PRIME" });
+
+    const exact = loadTransactions(handle.db, { merchant: "AMAZON", page: 1, pageSize: 50 });
+    expect(exact.totalCount).toBe(2);
+    for (const row of exact.rows) expect(row.normalizedMerchant).toBe("AMAZON");
+
+    // The same term through `search` is the superset this decision rejected.
+    const viaSearch = loadTransactions(handle.db, { search: "AMAZON", page: 1, pageSize: 50 });
+    expect(viaSearch.totalCount).toBe(3);
+  });
+
+  it("matches URL-hostile keys literally — no wildcard, no escaping surface", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "GASCO#00000ANYTWN" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ST DMV 000 *SVC" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "UTIL CO/EZ-PAY" });
+
+    for (const key of ["GASCO#00000ANYTWN", "ST DMV 000 *SVC", "UTIL CO/EZ-PAY"]) {
+      const r = loadTransactions(handle.db, { merchant: key, page: 1, pageSize: 50 });
+      expect(r.totalCount).toBe(1);
+      expect(r.rows[0].normalizedMerchant).toBe(key);
+    }
+  });
+
+  it("composes with categoryId, accountId and the date window", () => {
+    const checking = seedAccount("Checking");
+    const savings = seedAccount("Savings");
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: checking.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: gas.id, date: "2026-04-10" });
+    seedTxn({ accountId: checking.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: null, date: "2026-04-10" });
+    seedTxn({ accountId: checking.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: gas.id, date: "2026-05-10" });
+    seedTxn({ accountId: savings.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: gas.id, date: "2026-04-10" });
+
+    expect(
+      loadTransactions(handle.db, { merchant: "COSTCO GAS", page: 1, pageSize: 50 }).totalCount,
+    ).toBe(4);
+    expect(
+      loadTransactions(handle.db, {
+        merchant: "COSTCO GAS",
+        categoryId: gas.id,
+        page: 1,
+        pageSize: 50,
+      }).totalCount,
+    ).toBe(3);
+    expect(
+      loadTransactions(handle.db, {
+        merchant: "COSTCO GAS",
+        accountId: checking.id,
+        dateFrom: "2026-04-01",
+        dateTo: "2026-04-30",
+        page: 1,
+        pageSize: 50,
+      }).totalCount,
+    ).toBe(2);
+  });
+
+  it("applies no predicate when undefined or empty", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY" });
+
+    expect(loadTransactions(handle.db, { page: 1, pageSize: 50 }).totalCount).toBe(2);
+    expect(
+      loadTransactions(handle.db, { merchant: undefined, page: 1, pageSize: 50 }).totalCount,
+    ).toBe(2);
+    expect(loadTransactions(handle.db, { merchant: "", page: 1, pageSize: 50 }).totalCount).toBe(2);
+  });
+
+  it("a key no row carries returns zero rows, not every row", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    const r = loadTransactions(handle.db, { merchant: "amazon", page: 1, pageSize: 50 });
+    expect(r.totalCount).toBe(0);
+    expect(r.rows).toEqual([]);
+  });
+
+  it("totalCount is computed with the same predicate as the rows, across pages", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (let i = 0; i < 5; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", date: `2026-04-0${i + 1}` });
+    }
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON PRIME" });
+
+    const page1 = loadTransactions(handle.db, { merchant: "AMAZON", page: 1, pageSize: 2 });
+    expect(page1.totalCount).toBe(5);
+    expect(page1.rows).toHaveLength(2);
+    const page3 = loadTransactions(handle.db, { merchant: "AMAZON", page: 3, pageSize: 2 });
+    expect(page3.totalCount).toBe(5);
+    expect(page3.rows).toHaveLength(1);
+    for (const row of [...page1.rows, ...page3.rows]) {
+      expect(row.normalizedMerchant).toBe("AMAZON");
+    }
+  });
+
+  it("still excludes transfer-paired rows unless includeTransfers is set", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const plain = seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE" });
+    const paired = seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE" });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: plain.id })
+      .where(eq(schema.transactions.id, paired.id))
+      .run();
+
+    expect(
+      loadTransactions(handle.db, { merchant: "ZELLE", page: 1, pageSize: 50 }).totalCount,
+    ).toBe(1);
+    expect(
+      loadTransactions(handle.db, {
+        merchant: "ZELLE",
+        includeTransfers: true,
+        page: 1,
+        pageSize: 50,
+      }).totalCount,
+    ).toBe(2);
+  });
+});
+
+/**
+ * T9/D18 — the merchant header's `49 filed as Gas` line. It has to describe
+ * the SAME row set as the list under it, which is why it shares
+ * `buildPredicates` rather than rebuilding the WHERE clause.
+ */
+describe("summarizeByCategory", () => {
+  it("groups the filtered rows by category, biggest group first, NULL included", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    for (let i = 0; i < 3; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: gas.id });
+    }
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: groceries.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", categoryId: null });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SOMETHING ELSE", categoryId: gas.id });
+
+    const breakdown = summarizeByCategory(handle.db, { merchant: "COSTCO GAS" });
+    expect(breakdown).toEqual([
+      { categoryId: gas.id, categoryName: gas.name, count: 3 },
+      { categoryId: groceries.id, categoryName: groceries.name, count: 1 },
+      { categoryId: null, categoryName: null, count: 1 },
+    ]);
+  });
+
+  it("its counts sum to the list's own totalCount for the same filter", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: gas.id, date: "2026-04-02" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: null, date: "2026-04-03" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", categoryId: null, date: "2026-05-03" });
+
+    const filter = { merchant: "FUELCO", dateFrom: "2026-04-01", dateTo: "2026-04-30" };
+    const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
+    const summed = summarizeByCategory(handle.db, filter).reduce((n, r) => n + r.count, 0);
+    expect(summed).toBe(totalCount);
+    expect(totalCount).toBe(2);
+  });
+
+  it("returns an empty array when nothing matches", () => {
+    expect(summarizeByCategory(handle.db, { merchant: "NOTHING" })).toEqual([]);
+  });
+});
+
+describe("summarizeByCategory — tie-breaking", () => {
+  it("breaks an equal-count tie by category name, so the header is stable across runs", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const zed = seedCategory("Zed");
+    const alpha = seedCategory("Alpha");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: zed.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: alpha.id });
+
+    const breakdown = summarizeByCategory(handle.db, { merchant: "TIE" });
+    expect(breakdown.map((r) => r.categoryName)).toEqual([alpha.name, zed.name]);
+  });
+
+  it("sorts Uncategorized last even when it is the biggest group, once tied", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: null });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: gas.id });
+
+    const breakdown = summarizeByCategory(handle.db, { merchant: "TIE" });
+    expect(breakdown.map((r) => r.categoryId)).toEqual([gas.id, null]);
+  });
+});
+
+/**
+ * `summarizeByCategory` shares `buildPredicates` with the list, and these pin
+ * the two consequences of that sharing that nothing else reached.
+ *
+ * The transfer case is the one with teeth. The merchant header renders
+ * "Categorize all N →" straight off this breakdown's NULL bucket, and
+ * `/categorize` refuses to show transfer-paired rows at all — so a
+ * summarizer that stopped excluding them would offer to categorize rows the
+ * pair machinery owns, from a link whose destination cannot list them.
+ */
+describe("summarizeByCategory — transfer-paired rows (shared predicates)", () => {
+  function seedPair(accountId: number, batchId: number, merchant: string) {
+    const anchor = seedTxn({ accountId, batchId, merchant, amountCents: -2500 });
+    const partner = seedTxn({ accountId, batchId, merchant, amountCents: 2500 });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+  }
+
+  it("excludes paired rows by default, exactly as the list beneath it does", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedPair(a.id, b.id, "ZELLE");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", categoryId: null });
+
+    const filter = { merchant: "ZELLE" };
+    const breakdown = summarizeByCategory(handle.db, filter);
+    const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
+
+    expect(breakdown.reduce((n, r) => n + r.count, 0)).toBe(totalCount);
+    expect(breakdown).toEqual([{ categoryId: null, categoryName: null, count: 1 }]);
+  });
+
+  it("reveals them when includeTransfers is set, still agreeing with the list", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedPair(a.id, b.id, "ZELLE");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", categoryId: null });
+
+    const filter = { merchant: "ZELLE", includeTransfers: true };
+    const breakdown = summarizeByCategory(handle.db, filter);
+    const { totalCount } = loadTransactions(handle.db, { ...filter, page: 1, pageSize: 50 });
+
+    expect(breakdown.reduce((n, r) => n + r.count, 0)).toBe(totalCount);
+    expect(totalCount).toBe(3);
+  });
+});
+
+/**
+ * The `totalCount !== 0` branch of `/transactions`' zero-result state, which
+ * renders "This page is empty — there are rows in this filter, just not this
+ * far in" and a Back-to-page-1 link. It is reachable from an ordinary
+ * bookmark: page 3 of a filter that has since shrunk. If `totalCount` were
+ * ever computed over the paged window rather than the whole predicate, that
+ * card would flip to "No transactions match this filter" and tell the user
+ * their filter is empty when it is not.
+ */
+describe("loadTransactions — a page past the end", () => {
+  it("returns no rows while still reporting the filter's real totalCount", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (let i = 0; i < 5; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, date: `2026-04-0${i + 1}` });
+    }
+
+    const past = loadTransactions(handle.db, { page: 4, pageSize: 2 });
+    expect(past.rows).toEqual([]);
+    expect(past.totalCount).toBe(5);
   });
 });

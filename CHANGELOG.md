@@ -25,6 +25,168 @@ findings, all in code this release introduced._
 - **A request omitting a card's minimum payment no longer clears it.** Leaving the field empty still clears it, deliberately; not mentioning the field at all is a different statement.
 - **A success message no longer invents a balance** when the account it refers to has been deleted mid-write — it reported "$0.00", which reads as a paid-off card.
 
+## [0.18.0] - 2026-09-07
+
+_The merchant name on `/categorize` finally goes somewhere. `AMAZON` is a
+deliberately lossy key — 59 charges can hide behind it — and the only way to
+see what you were actually filing was to remember the merchant, walk to
+`/transactions`, and search. Now the name opens, shows you three of the bank's
+own memos, and links straight to those exact rows._
+
+### Added
+- **Every merchant on `/categorize` opens.** Click the name and it shows up to
+  three of the bank's real memo lines for that group — the text that actually
+  tells `AMZN MKTP US*2X4RT9KL3` apart from `AMAZON.COM*RT4YU8QQ3` — plus a
+  link to every transaction behind the key, filed ones included. A group whose
+  memos are all identical to the key shows no panel to open, because there
+  would be nothing in it.
+- **`/transactions` filters on an exact merchant.** Arriving from a drilldown,
+  the page leads with the merchant as a removable chip and a line that answers
+  the question you clicked to ask: `50 rows, 1 uncategorized · 49 filed as
+  Gas`. The counts share one predicate builder with the list, so the header
+  cannot describe a different row set than the one under it.
+- **A "Categorize all N" shortcut** from that header back to bulk filing, and a
+  progress counter on `/categorize` (`12 of 181 merchants done`).
+- **Your half-finished pick survives the trip.** Choose a category, drill down
+  to check what those charges were, come back — the pick is still there. It
+  survives a hard reload too, and is discarded when the tab closes.
+
+### Changed
+- **Both transaction lists are ruled rows, not stacked cards**, with column
+  headers that line up with the values under them. At 181 rows the card shells
+  were most of the ink on the page.
+- **Rows show the bank's own memo text**, wrapped to two lines on a phone where
+  there is no tooltip to fall back on. Under a merchant filter the memo takes
+  the headline slot, since repeating the same key 59 times says nothing.
+- **A merchant link narrows what you are already looking at** rather than
+  replacing it — a date range you set deliberately is not silently discarded.
+  A row already matching the active merchant is plain text, not a link to the
+  page you are standing on.
+- **Filtering to a merchant no longer dims the rows already filed.** You asked
+  to see them.
+- The three remaining hand-rolled amber warning surfaces moved onto the shared
+  accent token, leaving `import/preview` as the last one.
+
+### Fixed
+- **A merchant key containing `#`, `?`, `/` or `*` now survives the link.**
+  17 of 363 real keys do. A bare `#` truncates a query string, so the old shape
+  would have filtered on `GASCO` and shown the wrong merchant's rows with no
+  sign anything went wrong.
+- **A stale bookmark explains itself.** A merchant backfill can rewrite the
+  keys these links are built from; a `?merchant=` matching nothing now names
+  the key and offers a substring search as the way back, instead of an empty
+  list.
+- **The transactions rows had a tooltip showing the word `WITHDRAWAL`** on
+  every row since it shipped — `raw_description` holds only that and `DEPOSIT`.
+  Removed; the memo is on the row now.
+- **A merchant with nothing to disclose lost its drilldown link too**, which
+  was exactly backwards: those rows are the ones showing a bare key they cannot
+  elaborate on.
+- **`/transactions` still ships no validation library to the browser.** Pulling
+  the URL schema into a testable module put zod one import away from the client
+  bundle — measured at +376 KB before the constants were split back out into a
+  dependency-free module. Caught in review, so nothing shipped; recorded because
+  the split looks like indirection until you know what it costs to undo.
+- **A picked category could not be re-selected in Safari private mode**, where
+  session storage throws rather than failing quietly — the field stayed empty
+  and Submit stayed disabled.
+- A row with an empty merchant key could produce a link that promised one
+  merchant and landed on all 1,540 rows.
+- **A deliberate page size survived some links and not others.** `?pageSize=200`
+  was dropped by six of the page's own links — the merchant chip's `×`, the
+  transfers toggle, "Back to page 1", both empty-state recovery links, and a
+  row's merchant link — snapping the list back to 50 rows with nothing saying
+  so. `pageSize` is now a member of the filter set, so every link carries it and
+  the round-trip guard covers it like any other field.
+- **The zero-result state could misdiagnose a stale link and then offer two
+  recoveries that both failed.** With a date range also active, "no transactions
+  for X" blamed the merchant key for an empty list the date range had caused,
+  and both escape hatches kept the date range — so the suggested fix landed on
+  another empty page. It now says which case it is in and clears the rest.
+- **The stale-link recovery 404'd for a merchant key over 200 characters**,
+  because merchant keys are unbounded and `search` is capped. It truncates.
+- **An empty trailing URL parameter 404'd the page.** `?merchant=AMAZON&ref=`
+  — the shape a mail client or a link shortener leaves behind — was rejected
+  by the strict schema even though every real filter parsed fine.
+- **A row whose merchant key is empty rendered a link that did nothing**, styled
+  exactly like a working one. It renders as text now, and a rejected URL is
+  logged server-side rather than 404ing with no record of what was wrong.
+- **The tests guarding the stale-link recovery asserted against a copy of the
+  code rather than the code.** The suite documents two bugs that link has
+  already had — keeping the other filters, and not truncating an over-long key
+  — but the expression it checked lived inline in the empty state, and the test
+  file had reimplemented it. Either bug could have come back with all four
+  tests green. The builder is now a named function both sides use.
+- **The session-storage test suite passed only because of the order it ran in.**
+  The module keeps its cache at module scope, and the Safari-private-mode block
+  read from whatever an earlier test had left there; shuffled, it failed 2 runs
+  in 5. That block now takes a fresh module per test.
+- **`191` appeared where the number is `181`** — the count of uncategorized
+  merchant groups, in the README, the plan, `CLAUDE.md`'s rule 10 and two code
+  comments. Re-measured against the live ledger: the page's own predicate
+  returns 181, and `191` matches nothing under any predicate. The `11 of 181`
+  substring-superset figure is exact.
+- **The focus-ring constant's docstring made two claims that were not true of
+  its own consumers** — a call-site count that was really a `grep` line count,
+  and "every consumer is rounded", when 8 of the 14 are bare links and
+  `<summary>` elements with no radius at all.
+- **Three controls in the filter bar had no focus ring**, including "Apply
+  filters" — the ones `DESIGN.md` names as the reason the shared constant
+  exists.
+- **Filing a merchant from `/categorize` left `/transactions` showing it as
+  uncategorized.** The drilldown makes the two pages a round trip, but only one
+  direction marked the other stale, so the page you returned to still listed
+  the rows you had just filed, under a header breakdown that no longer matched
+  the ledger. It cleared on a hard reload, which is not a thing anyone should
+  have to know.
+- **"Show transfers" could suppress the stale-link diagnosis.** On a merchant
+  link that no longer matches anything, the empty state correctly blames the
+  key. One click of the transfers toggle — which only ever ADDS rows — flipped
+  the copy to "the merchant key itself may still be fine", on a page that had
+  got emptier for no new reason. A widening toggle is no longer counted as a
+  filter that could have emptied the list.
+- **A transaction with no merchant name was invisible on `/categorize`.** One
+  blank Memo cell in a CSV produces an empty merchant key, and while
+  `/transactions` labelled that row, `/categorize` rendered a nameless row with
+  a screen-reader label reading "Category for " and no way to drill into it.
+  Both sides now name it the same way.
+- **"Categorize all N →" could name a number the destination would not
+  honour.** The header counts under every active filter; `/categorize` filters
+  on nothing but "uncategorized and not transfer-paired". Select a month and
+  the link read "Categorize all 4 →" while filing all 53 rows of that
+  merchant, $2,647.30 across eight months — reproducible in all eight. It now
+  drops the count and reads "Categorize this merchant →" whenever another
+  filter is narrowing the list.
+- **The zero-result state named a recovery it offered no button for.** With
+  another filter also active it says the merchant key may be fine and that
+  clearing the rest is the quickest way to tell — while the primary action did
+  the opposite, dropping the merchant and keeping the rest, which landed on a
+  second empty page whenever a date range was what emptied the first. That is
+  the bug already fixed on the other link, on the one beside it.
+- **A blocked browser lost every parked category pick without saying so.** The
+  wrapper around the `sessionStorage` property access swallowed the error
+  entirely, and it is the failure that short-circuits all five inner handlers
+  — so in Chrome or Firefox with site data blocked, a dozen picks vanished on
+  reload with both consoles clean. It is exactly the case the module's warning
+  exists for.
+- **The rejected-parameter log could not name the parameter.** A `.strict()`
+  violation carries its offending key names on a field the log discarded,
+  so an unknown param logged as `{path: [], code: "unrecognized_keys"}` —
+  naming nothing, in precisely the in-app-link-builder case the log was added
+  for. Both range guards now log too; a mistyped amount pair was a 404 with no
+  record at all.
+- **A filter could clear every contract gate and still never reach the WHERE
+  clause.** The object handed to the query builder had no type annotation and
+  every field on it is optional, so a filter that was accepted, serialized,
+  typed and carried by the form could simply be missing there — rendering its
+  chip, reporting it in the header, carrying it to page 2, and filtering
+  nothing. It is now annotated, and dropping a field fails `tsc`.
+- **Two docstrings promised more than the code delivers.** The merchant header
+  was documented as unable to describe a row set the list is not showing; it
+  shares the list's predicates, not its read instant, so it can lag by one
+  commit. And the pending-pick pruner justified itself with a second-tab
+  scenario it cannot cover, since session storage is per-tab.
+
 ## [0.17.0] - 2026-09-07
 
 _Merchant names finally group. The ledger had 516 different merchant names for

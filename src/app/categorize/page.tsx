@@ -32,9 +32,14 @@ export default async function CategorizePage() {
             ← Budget
           </Link>
         </div>
-        <h1 className="text-2xl font-semibold">Categorize</h1>
-        <p className="text-sm text-muted-foreground">
-          Pick a category for each merchant group. Tick <em>Remember</em> to
+        <h1 className="font-display text-2xl tracking-[-0.015em]">Categorize</h1>
+        {/* T15/D16 — the disclosure is the feature this page was missing, and
+            a `<details>` chevron alone does not say what is behind it. One
+            sentence naming it is the difference between the samples being
+            found and being shipped unused. */}
+        <p className="text-sm text-ink-2">
+          Pick a category for each merchant group — open a merchant name to see
+          what the bank actually called those charges. Tick <em>Remember</em> to
           save an exact rule so future imports auto-categorize.
         </p>
       </header>

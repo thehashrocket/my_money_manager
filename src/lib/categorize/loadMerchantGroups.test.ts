@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { loadMerchantGroups } from "./loadMerchantGroups";
+import { loadTransactions, summarizeByCategory } from "./loadTransactions";
 
 let handle: TestDbHandle;
 
@@ -56,6 +58,7 @@ function seedTxn(opts: {
   categoryId?: number | null;
   transferPairId?: number | null;
   date?: string;
+  rawMemo?: string;
 }) {
   seq += 1;
   const [row] = handle.db
@@ -64,7 +67,7 @@ function seedTxn(opts: {
       accountId: opts.accountId,
       date: opts.date ?? "2026-04-05",
       rawDescription: "DESC",
-      rawMemo: "MEMO",
+      rawMemo: opts.rawMemo ?? "MEMO",
       normalizedMerchant: opts.merchant,
       amountCents: opts.amountCents,
       categoryId: opts.categoryId ?? null,
@@ -207,5 +210,377 @@ describe("loadMerchantGroups", () => {
     seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000 });
 
     expect(loadMerchantGroups(handle.db)[0].existingRule).toBeNull();
+  });
+});
+
+/**
+ * T7/D16 — the sample memos behind each row's disclosure, and the row count
+ * its drilldown link promises.
+ */
+describe("loadMerchantGroups — sample memos", () => {
+  it("returns up to three DISTINCT memos, ignoring how often each repeats", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (const memo of [
+      "AMAZON MKTPL*8Y21QW",
+      "AMAZON MKTPL*8Y21QW",
+      "AMZN Mktp US*RT4T9",
+      "AMAZON.COM*2K91LM",
+      "AMAZON DIGITAL*QQ2",
+    ]) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000, rawMemo: memo });
+    }
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.normalizedMerchant).toBe("AMAZON");
+    expect(group.sampleMemos).toHaveLength(3);
+    expect(new Set(group.sampleMemos).size).toBe(3);
+    for (const memo of group.sampleMemos) expect(memo).toMatch(/AM/);
+  });
+
+  it("suppresses a memo identical to the key — the 9.8% of rows that would render their own first line twice", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AUDIBLE", amountCents: -1499, rawMemo: "AUDIBLE" });
+    // Star One pads its memos; the comparison has to survive that (rule 3).
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AUDIBLE", amountCents: -1499, rawMemo: "  AUDIBLE  " });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.normalizedMerchant).toBe("AUDIBLE");
+    // Empty means the row renders NO disclosure control at all, rather than a
+    // control that opens onto nothing.
+    expect(group.sampleMemos).toEqual([]);
+  });
+
+  it("trims the memo it returns", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1000, rawMemo: "   SAFEWAY #1234   " });
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["SAFEWAY #1234"]);
+  });
+
+  it("samples only the group's own uncategorized rows", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const cat = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FUELCO", amountCents: -1000, rawMemo: "FUELCO OIL 0000" });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "FUELCO",
+      amountCents: -1000,
+      categoryId: cat.id,
+      rawMemo: "FUELCO SERVICE STN 0",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["FUELCO OIL 0000"]);
+  });
+});
+
+describe("loadMerchantGroups — totalRowCount", () => {
+  it("counts every non-transfer row for the key, filed or not (D3)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    for (let i = 0; i < 49; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+
+    const [group] = loadMerchantGroups(handle.db);
+    // The row's own figure is the backlog; the link promises the history.
+    expect(group.count).toBe(1);
+    expect(group.totalRowCount).toBe(50);
+  });
+
+  it("excludes transfer-paired rows, matching what /transactions shows by default", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -2500 });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+      transferPairId: anchor.id,
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.count).toBe(1);
+    expect(group.totalRowCount).toBe(1);
+  });
+});
+
+describe("loadMerchantGroups — sample memo edges", () => {
+  it("skips a blank or whitespace-only memo rather than disclosing an empty line", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "VENMO", amountCents: -500, rawMemo: "" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "VENMO", amountCents: -500, rawMemo: "   " });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "VENMO",
+      amountCents: -500,
+      rawMemo: "VENMO PAYMENT 7781",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["VENMO PAYMENT 7781"]);
+  });
+
+  it("takes the first three in a deterministic order, not SQLite's scan order", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    // Inserted deliberately out of order: the cap is applied in JS over an
+    // ORDER BY, so which three survive must not depend on insertion order.
+    for (const memo of ["ZED 4", "ALPHA 1", "MID 3", "BETA 2"]) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "KIOSK", amountCents: -100, rawMemo: memo });
+    }
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["ALPHA 1", "BETA 2", "MID 3"]);
+  });
+
+  /**
+   * The cap is PER MERCHANT, and nothing proved it.
+   *
+   * Every other sample-memo test seeds exactly one merchant, so the grouping
+   * and the cap are exercised only in the shape they never run in on the real
+   * page — a 181-group list. Replacing the per-merchant
+   * `existing.length < MAX_SAMPLE_MEMOS` with a single global counter left all
+   * 1,439 tests green, and the resulting bug is invisible rather than loud:
+   * every group after the first renders NO disclosure control, which looks
+   * exactly like the legitimate "this merchant has nothing to disclose" state
+   * the other tests do cover.
+   */
+  it("caps each merchant at three independently, not three across the whole list", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (const merchant of ["ALPHA CO", "BRAVO CO", "CHARLIE CO"]) {
+      for (const n of [1, 2, 3, 4]) {
+        seedTxn({
+          accountId: a.id,
+          batchId: b.id,
+          merchant,
+          amountCents: -100 * n,
+          rawMemo: `${merchant} MEMO ${n}`,
+        });
+      }
+    }
+
+    const groups = loadMerchantGroups(handle.db);
+    expect(groups).toHaveLength(3);
+    for (const group of groups) {
+      expect(group.sampleMemos).toHaveLength(3);
+      // ...and each group's samples are its OWN memos, not a neighbour's.
+      for (const memo of group.sampleMemos) {
+        expect(memo.startsWith(group.normalizedMerchant)).toBe(true);
+      }
+    }
+  });
+
+  it("does not sample a transfer-paired row's memo", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SWEEP",
+      amountCents: -2500,
+      rawMemo: "SWEEP OUT 001",
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SWEEP",
+      amountCents: 2500,
+      transferPairId: anchor.id,
+      rawMemo: "SWEEP IN 002",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["SWEEP OUT 001"]);
+  });
+});
+
+/**
+ * `totalRowCount` and the destination's own count are two INDEPENDENT
+ * queries — `loadTotalRowCounts` here, `buildPredicates` in
+ * `loadTransactions` — and the `/categorize` row promises they agree:
+ * "See all N transactions →" is a claim about what the drilldown will show.
+ * Nothing but this test holds them together, so a predicate added to one and
+ * not the other would make the link lie rather than fail.
+ */
+describe("loadMerchantGroups — totalRowCount agrees with the drilldown it links to", () => {
+  it("matches loadTransactions' totalCount for the same key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    for (let i = 0; i < 4; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+    // A different key, to prove the counts are keyed and not just totals.
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000 });
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "COSTCO GAS",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    const { totalCount } = loadTransactions(handle.db, {
+      merchant: "COSTCO GAS",
+      page: 1,
+      pageSize: 50,
+    });
+    expect(group.totalRowCount).toBe(totalCount);
+    expect(totalCount).toBe(5);
+  });
+
+  it("still agrees when a transfer-paired row is present, which both must exclude", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: -2500,
+    });
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -100 });
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "ZELLE",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    const { totalCount } = loadTransactions(handle.db, {
+      merchant: "ZELLE",
+      page: 1,
+      pageSize: 50,
+    });
+    expect(group.totalRowCount).toBe(totalCount);
+    expect(totalCount).toBe(1);
+  });
+});
+
+/**
+ * The OTHER half of the same cross-surface promise, and the half nothing held.
+ *
+ * A `/categorize` row states two numbers about one key: `count`, its
+ * uncategorized backlog ("AMAZON, 53 rows"), and `totalRowCount`, what the
+ * drilldown opens ("See all 59 transactions →"). The describe above pins the
+ * second against `loadTransactions`. The first has a destination too: the
+ * merchant header on `/transactions` reads its "N uncategorized" and its
+ * "Categorize all N →" action straight off `summarizeByCategory`'s NULL
+ * bucket — a third, independently built WHERE clause.
+ *
+ * So the same defect class applies: a predicate added to `loadMerchantGroups`
+ * and not to `buildPredicates` (or the reverse) makes one surface promise a
+ * backlog the other does not show, with both numbers looking entirely
+ * plausible. That is precisely what D3=A traded away the simpler design for,
+ * so it is worth a test rather than a comment.
+ */
+describe("loadMerchantGroups — count agrees with the drilldown header's backlog", () => {
+  function backlogFromHeader(merchant: string): number {
+    return (
+      summarizeByCategory(handle.db, { merchant }).find((r) => r.categoryId === null)?.count ?? 0
+    );
+  }
+
+  it("the row's uncategorized count is the header's uncategorized count", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    for (let i = 0; i < 3; i += 1) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    }
+    for (let i = 0; i < 4; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+
+    const group = loadMerchantGroups(handle.db).find(
+      (g) => g.normalizedMerchant === "COSTCO GAS",
+    );
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    expect(group.count).toBe(backlogFromHeader("COSTCO GAS"));
+    expect(group.count).toBe(3);
+    // And the two numbers the row shows are genuinely different facts (D3) —
+    // asserting only their agreement would pass if both collapsed to one.
+    expect(group.totalRowCount).toBe(7);
+  });
+
+  it("still agrees when a transfer-paired row carries the same key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: -2500,
+    });
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, anchor.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: anchor.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -100 });
+
+    const group = loadMerchantGroups(handle.db).find((g) => g.normalizedMerchant === "ZELLE");
+    expect(group).toBeDefined();
+    if (group === undefined) return;
+
+    expect(group.count).toBe(backlogFromHeader("ZELLE"));
+    expect(group.count).toBe(1);
   });
 });

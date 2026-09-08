@@ -3,7 +3,7 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { loadTransactions } from "@/lib/categorize/loadTransactions";
 import { nextMonthOf } from "./monthOfIso";
-import { transactionsDrilldownHref } from "./transactionsDrilldownHref";
+import { merchantDrilldownHref, transactionsDrilldownHref } from "./transactionsDrilldownHref";
 
 let handle: TestDbHandle;
 
@@ -157,5 +157,50 @@ describe("transactionsDrilldownHref (D9 regression guard)", () => {
 
     expect(newRows.map((r) => r.date).sort()).toEqual(["2028-02-01", "2028-02-29"]);
     expect(newRows.map((r) => r.id).sort()).toEqual(oldRows.map((r) => r.id).sort());
+  });
+});
+
+/**
+ * T5 — 17 of the 363 real `normalized_merchant` keys on this ledger carry
+ * characters with meaning in a URL (`# * ? /`). `#` is the dangerous one:
+ * a template literal would not error, it would truncate the query string, so
+ * `?merchant=GASCO#00000ANYTWN` becomes a filter on `GASCO` and shows a
+ * different, entirely plausible-looking row set.
+ */
+describe("merchantDrilldownHref", () => {
+  it("builds ?merchant= for a plain key", () => {
+    const url = new URL(merchantDrilldownHref("AMAZON")!, "http://localhost");
+    expect(url.pathname).toBe("/transactions");
+    expect(url.searchParams.get("merchant")).toBe("AMAZON");
+  });
+
+  it("percent-encodes '#' rather than truncating the query at it", () => {
+    const href = merchantDrilldownHref("GASCO#00000ANYTWN")!;
+    expect(href).toBe("/transactions?merchant=GASCO%2300000ANYTWN");
+    const url = new URL(href, "http://localhost");
+    expect(url.hash).toBe("");
+    expect(url.searchParams.get("merchant")).toBe("GASCO#00000ANYTWN");
+  });
+
+  it.each([
+    "CORNER STORE #",
+    "ST DMV 000 *SVC",
+    "UTIL CO/EZ-PAY",
+    "VENDOR.COM/BILL",
+    "NORA?S BBQ JOI ANYTWN",
+    // Shape-preserving stand-in for the ledger's longest real keys (63-69
+    // chars): a colon, parens, a long digit run and spaces. Those keys are
+    // personal Zelle strings carrying a real name, and this repo is public —
+    // the test needs the SHAPE, never the bank data.
+    "INSTANT PAY ID: 000000000000000000 (TRANSFER TO SAVINGS) JANE DOE",
+  ])("round-trips %j unchanged", (key) => {
+    const url = new URL(merchantDrilldownHref(key)!, "http://localhost");
+    expect(url.searchParams.get("merchant")).toBe(key);
+  });
+
+  it("refuses an empty key instead of emitting a bare ?merchant=", () => {
+    // A bare `?merchant=` is normalized straight back to "no filter" by
+    // `flatten()`, so the link would silently land on all 1,540 rows.
+    expect(merchantDrilldownHref("")).toBeNull();
   });
 });
