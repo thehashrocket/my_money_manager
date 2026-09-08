@@ -7,6 +7,7 @@ import {
   bulkCategorize,
   type BulkCategorizeSnapshot,
 } from "@/lib/categorize/bulkCategorize";
+import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
 import { undoBulkCategorize } from "@/lib/categorize/undoBulkCategorize";
 import { validateBulkCategorizeInput } from "@/lib/categorize/validateBulkCategorizeInput";
 import { validateBulkCategorizeSnapshot } from "@/lib/categorize/validateBulkCategorizeSnapshot";
@@ -29,7 +30,12 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     throw new Error(`Invalid bulk categorize input — ${issues}`);
   }
 
-  const result = bulkCategorize(db, parsed.data);
+  /* `allowRuleRemoval` is passed HERE and not defaulted inside the library: the
+     Remember checkbox on this page is a deliberate, per-merchant retrain, which
+     is the only gesture that licenses removing a rule the user has contradicted.
+     It is an argument rather than a form field so no stale or crafted post can
+     turn a sweep into a rule deletion — see `applyRuleWrite`. */
+  const result = bulkCategorize(db, parsed.data, { allowRuleRemoval: true });
 
   const snapshot: BulkCategorizeSnapshot = {
     normalizedMerchant: result.normalizedMerchant,
@@ -61,6 +67,18 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     snapshot,
     updatedCount: result.updatedCount,
     categoryName: categoryRow?.name ?? `Category ${result.categoryId}`,
+    // `/categorize` disables the checkbox for an untrainable key, so this is
+    // normally null. It is still returned because "disabled in the UI" is not
+    // an enforcement boundary: a stale tab can post `rememberMerchant=true`,
+    // and `/subscriptions` calls the same function with no UI in front of it.
+    //
+    // Resolved to a finished sentence here rather than handed over raw — the
+    // fact worth telling the user is the NAME of the category a removed rule
+    // pointed at, and only the server can look that up.
+    ruleRefusal:
+      result.ruleRefusal === null
+        ? null
+        : describeRuleRefusal(db, result.ruleRefusal),
   };
 }
 

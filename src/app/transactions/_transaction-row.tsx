@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
+import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
@@ -100,8 +101,26 @@ export function TransactionRowForm({
         setApplyToPast(false);
         onCategorized(priorCategoryId, result.updatedCount);
 
-        toast.success(
-          `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`,
+        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
+           default collapsed stack (`expand` unset — `layout.tsx`), and
+           `[data-front="false"] > *` is `opacity: 0` there: whichever toast is
+           not the newest has its contents, INCLUDING its action button, drawn
+           invisible until the stack is hovered. So two toasts forced a choice
+           between the warning being readable and the Undo being reachable —
+           and on this surface that Undo is the only way back, both for the rows
+           and for a rule the refusal removed, inside 10 seconds. Merging them
+           puts the notice and its remedy on the same front toast.
+
+           This row cannot disable its checkbox up front the way `/categorize`
+           does, because the list carries no per-key filing history to check
+           against, so the toast is the only channel there is. */
+        const filed = `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
+        const notify =
+          result.ruleRefusal === null ? toast.success : toast.warning;
+        notify(
+          result.ruleRefusal === null
+            ? filed
+            : `${filed} ${result.ruleRefusal.message}`,
           {
             duration: 10_000,
             action: {
@@ -126,7 +145,7 @@ export function TransactionRowForm({
                   );
                   onUndone(priorCategoryId, reverted);
                   toast(
-                    `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.`,
+                    `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
                   );
                 } catch (err) {
                   toast.error(

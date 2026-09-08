@@ -10,6 +10,7 @@ import {
   SavingsGoalCategoryError,
 } from "@/lib/categoryErrors";
 import { categorizeTransaction } from "./categorizeTransaction";
+import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
 import {
   TransactionNotFoundError,
   TransferPairedTransactionError,
@@ -645,5 +646,395 @@ describe("categorizeTransaction — rejections", () => {
         applyToPast: false,
       }),
     ).not.toThrow();
+  });
+});
+
+describe("categorizeTransaction — Remember guard", () => {
+  it("files the row but writes no rule for a lossy key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gifts = seedCategory("Gifts");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "MOBILE",
+      amountCents: -2500,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: gifts.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "MOBILE"))
+        .all(),
+    ).toHaveLength(0);
+  });
+
+  it("refuses when OTHER filed rows for the key disagree with the pick", () => {
+    // Not an ordering test, despite what this used to be called: a read after
+    // the UPDATE would refuse here too. What it pins is that rows the caller is
+    // NOT writing still count — the second AMAZON row is the evidence, and
+    // `excludeTxnIds` must not swallow it along with the target.
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -1500,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: homeGoods.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    expect(result.ruleTouched).toBe(false);
+  });
+
+  it("re-filing a row from one category to the SAME one stays trainable", () => {
+    // The order-dependence guard. The target already carries Groceries, and
+    // the user re-files it to Groceries with Remember ticked. Union = {
+    // Groceries } either way, so this must stay trainable — a check that
+    // double-counted the row's before and after states would see two.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+      categoryId: groceries.id,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: groceries.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+  });
+
+  it("MOVING a row off its only category does not refuse on the category it left", () => {
+    // The target is the key's ONLY filed row, under Groceries, and the user
+    // moves it to Dining with Remember ticked. After the move the key is
+    // unanimously Dining, so one rule IS right and the box must work.
+    //
+    // This is what `excludeTxnIds` buys. The verdict used to be computed over
+    // every filed row including the one being moved, so it refused on the
+    // category the row was LEAVING — a category that no longer exists for this
+    // key once the action commits. The refusal then also deleted the rule, and
+    // with the key still looking split there was no second attempt that would
+    // have worked. The title said this behaviour; the assertions said the
+    // opposite, which is how it survived review.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "JACK IN THE BOX",
+      amountCents: -1200,
+      categoryId: groceries.id,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: dining.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+    const rule = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "JACK IN THE BOX"))
+      .get();
+    expect(rule?.categoryId).toBe(dining.id);
+  });
+
+  it("still writes the rule for an ordinary key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      amountCents: -4000,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: groceries.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+    expect(result.ruleTouched).toBe(true);
+  });
+
+  it("does not refuse when Remember was never ticked", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gifts = seedCategory("Gifts");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ONLINE",
+      amountCents: -2500,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: gifts.id,
+      rememberMerchant: false,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+  });
+});
+
+describe("categorizeTransaction — Remember guard, boundary cases", () => {
+  it("still applies to past rows when the rule is refused", () => {
+    // The refusal withholds the RULE only. applyToPast is a second explicit
+    // instruction about rows the user can see, so it must survive a verdict
+    // about generalizing to rows they cannot.
+    const a = seedAccount();
+    const b = seedBatch();
+    const gifts = seedCategory("Gifts");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ONLINE",
+      amountCents: -2500,
+    });
+    const past1 = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ONLINE",
+      amountCents: -1000,
+      date: "2026-03-01",
+    });
+    const past2 = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ONLINE",
+      amountCents: -700,
+      date: "2026-02-01",
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: gifts.id,
+      rememberMerchant: true,
+      applyToPast: true,
+    });
+
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+    expect(result.ruleTouched).toBe(false);
+    expect(result.updatedCount).toBe(3);
+    expect(result.applyToPastTxnIds.sort()).toEqual([past1.id, past2.id].sort());
+    expect(result.earliestApplyToPastDate).toBe("2026-02-01");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.normalizedMerchant, "ONLINE"))
+      .all();
+    expect(rows.every((r) => r.categoryId === gifts.id)).toBe(true);
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "ONLINE"))
+        .all(),
+    ).toHaveLength(0);
+  });
+
+  it("DELETES an existing rule when it refuses, and the undo puts it back", () => {
+    /* This row is the ONLY surface that could ever retarget an exact rule:
+       `/categorize` never lists a merchant whose rule has already filed its
+       rows. Refusing here while leaving the rule standing therefore made the
+       rule permanent — and the refusal fires precisely because those filed
+       rows disagree with the pick, so it fires on every retrain attempt. The
+       rule goes, snapshotted for undo. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: amazon.id,
+        matchType: "exact",
+        matchValue: "AMAZON",
+        priority: 50,
+        source: "manual",
+      })
+      .run();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -1500,
+    });
+
+    const result = categorizeTransaction(
+      handle.db,
+      {
+        transactionId: t.id,
+        categoryId: homeGoods.id,
+        rememberMerchant: true,
+        applyToPast: false,
+      },
+      { allowRuleRemoval: true },
+    );
+
+    expect(result.ruleRefusal).not.toBeNull();
+    expect(result.ruleRefusal?.removedRule?.categoryId).toBe(amazon.id);
+    expect(result.ruleTouched).toBe(true);
+    expect(result.priorRule?.categoryId).toBe(amazon.id);
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+        .all(),
+    ).toHaveLength(0);
+    // The row was still filed — the refusal withholds the rule, not the work.
+    expect(result.updatedCount).toBe(1);
+
+    const undone = undoCategorizeTransaction(handle.db, {
+      normalizedMerchant: result.normalizedMerchant,
+      newCategoryId: result.newCategoryId,
+      targetTxnId: result.targetTxnId,
+      targetPriorCategoryId: result.targetPriorCategoryId,
+      targetDate: result.targetDate,
+      applyToPastTxnIds: result.applyToPastTxnIds,
+      earliestApplyToPastDate: result.earliestApplyToPastDate,
+      ruleTouched: result.ruleTouched,
+      priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
+    });
+    expect(undone.ruleAction).toBe("restored");
+    const restored = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+      .get();
+    expect(restored?.categoryId).toBe(amazon.id);
+    expect(restored?.priority).toBe(50);
+  });
+
+  it("does NOT delete a rule when Remember was not ticked", () => {
+    /* The deletion is downstream of a refusal, and a refusal only exists when
+       Remember was ticked. Filing a row on an untrainable key without asking
+       to train it must leave the rules table alone. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: amazon.id,
+        matchType: "exact",
+        matchValue: "AMAZON",
+        priority: 50,
+        source: "manual",
+      })
+      .run();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: amazon.id,
+    });
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -1500,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: homeGoods.id,
+      rememberMerchant: false,
+      applyToPast: false,
+    });
+
+    expect(result.ruleRefusal).toBeNull();
+
+    const rule = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "AMAZON"))
+      .get();
+    expect(rule?.categoryId).toBe(amazon.id);
+  });
+
+  it("refuses the EMPTY key with the blank-key wording", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const misc = seedCategory("Misc");
+    const t = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "",
+      amountCents: -1000,
+    });
+
+    const result = categorizeTransaction(handle.db, {
+      transactionId: t.id,
+      categoryId: misc.id,
+      rememberMerchant: true,
+      applyToPast: false,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.ruleTouched).toBe(false);
+    expect(result.ruleRefusal?.reason).toBe("lossy-key");
+    expect(result.ruleRefusal?.message).toContain("no merchant name");
   });
 });

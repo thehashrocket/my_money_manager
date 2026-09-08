@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
-import { applyRuleAtImport, buildRuleMatcher, createOrUpdateRule } from "./rules";
+import {
+  applyRuleAtImport,
+  buildRuleMatcher,
+  createOrUpdateRule,
+  deleteExactRule,
+  readExactRule,
+} from "./rules";
 import { createTestDb, type TestDbHandle } from "./test/db";
 
 let handle: TestDbHandle;
@@ -556,5 +562,131 @@ describe("buildRuleMatcher — archived-category guard (TC31b, X3)", () => {
 
     const match = buildRuleMatcher(handle.db);
     expect(match("GROCERY STORE", -2000)?.categoryId).toBe(active.id);
+  });
+});
+
+// `readExactRule` and `deleteExactRule` both narrow on `match_type = 'exact'`,
+// and that clause is the whole reason they are safe to call: a key can legally
+// carry an exact rule AND a `contains` rule with the SAME `match_value` — the
+// unique index is on the pair (see createOrUpdateRule's test above) — and this
+// is not hypothetical. `drizzle/0006_subscription_rules.sql` SEEDS a `contains`
+// rule on `AMAZON PRIME` and on `GOOGLE ONE`, the exact pair CLAUDE.md rule 10
+// names as the live instance, so every real ledger has this shape already. A
+// `contains` rule is also the one kind no backfill can repair, so the
+// trainability guard's refusal path must never read one as "the key's rule"
+// (readExactRule) and must never delete one (deleteExactRule).
+//
+// The seeded `contains` rule predates any rule these tests add, so it holds the
+// lower rowid: with the `matchType` clause dropped it is exactly what
+// `readExactRule`'s `.get()` and `deleteExactRule`'s `[deleted]` hand back.
+function seededContainsRule(matchValue: string) {
+  const [rule] = handle.db
+    .select()
+    .from(schema.categoryRules)
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "contains"),
+        eq(schema.categoryRules.matchValue, matchValue),
+      ),
+    )
+    .all();
+  // If this ever trips, migration 0006 stopped seeding the key and the fixture
+  // below is no longer discriminating — pick another seeded key, don't delete it.
+  expect(rule, `expected a seeded contains rule on ${matchValue}`).toBeDefined();
+  return rule;
+}
+
+describe("readExactRule", () => {
+  it("returns the exact rule, never a contains rule carrying the same match_value", () => {
+    const seeded = seededContainsRule("AMAZON PRIME");
+    const shopping = seedCategory("Shopping");
+    const exactRule = createOrUpdateRule(handle.db, {
+      normalizedMerchant: "AMAZON PRIME",
+      categoryId: shopping.id,
+      source: "manual",
+    });
+
+    const found = readExactRule(handle.db, "AMAZON PRIME");
+    expect(found?.id).toBe(exactRule.id);
+    expect(found?.matchType).toBe("exact");
+    expect(found?.categoryId).toBe(shopping.id);
+    expect(found?.id).not.toBe(seeded.id);
+  });
+
+  it("returns undefined for a key whose only rule is a contains rule with that value", () => {
+    seededContainsRule("GOOGLE ONE");
+    expect(readExactRule(handle.db, "GOOGLE ONE")).toBeUndefined();
+  });
+
+  it("returns undefined for a key with no rules at all", () => {
+    expect(readExactRule(handle.db, "TAQUERIA NO RULE")).toBeUndefined();
+  });
+});
+
+describe("deleteExactRule", () => {
+  it("deletes only the exact rule and leaves a same-valued contains rule standing", () => {
+    const seeded = seededContainsRule("AMAZON PRIME");
+    const shopping = seedCategory("Shopping");
+    const exactRule = createOrUpdateRule(handle.db, {
+      normalizedMerchant: "AMAZON PRIME",
+      categoryId: shopping.id,
+      source: "manual",
+    });
+
+    const deleted = deleteExactRule(handle.db, "AMAZON PRIME");
+
+    // Callers snapshot the returned row for undo (restorePriorRule), so it has
+    // to be the exact rule, not whichever row the DELETE happened to reach first.
+    expect(deleted?.id).toBe(exactRule.id);
+    expect(deleted?.matchType).toBe("exact");
+    expect(deleted?.categoryId).toBe(shopping.id);
+
+    const survivors = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "AMAZON PRIME"))
+      .all();
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0].id).toBe(seeded.id);
+    expect(survivors[0].matchType).toBe("contains");
+  });
+
+  it("returns null and deletes nothing when only a non-exact rule carries that value", () => {
+    const seeded = seededContainsRule("GOOGLE ONE");
+
+    expect(deleteExactRule(handle.db, "GOOGLE ONE")).toBeNull();
+
+    const survivors = handle.db
+      .select()
+      .from(schema.categoryRules)
+      .where(eq(schema.categoryRules.matchValue, "GOOGLE ONE"))
+      .all();
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0].id).toBe(seeded.id);
+    expect(survivors[0].matchType).toBe("contains");
+  });
+
+  it("returns null when the key has no rules at all", () => {
+    expect(deleteExactRule(handle.db, "TAQUERIA NO RULE")).toBeNull();
+  });
+
+  it("leaves an exact rule on a different key alone", () => {
+    const shopping = seedCategory("Shopping");
+    const storage = seedCategory("Storage");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "AMAZON PRIME",
+      categoryId: shopping.id,
+      source: "manual",
+    });
+    const keep = createOrUpdateRule(handle.db, {
+      normalizedMerchant: "GOOGLE ONE",
+      categoryId: storage.id,
+      source: "manual",
+    });
+
+    deleteExactRule(handle.db, "AMAZON PRIME");
+
+    expect(readExactRule(handle.db, "AMAZON PRIME")).toBeUndefined();
+    expect(readExactRule(handle.db, "GOOGLE ONE")?.id).toBe(keep.id);
   });
 });

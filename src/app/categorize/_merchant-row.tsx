@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useSyncExternalStore, useTransition } from "react";
+import { useId, useState, useSyncExternalStore, useTransition } from "react";
 import { toast } from "sonner";
 import { formatCents } from "@/lib/money";
 import { merchantDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
@@ -10,6 +10,8 @@ import type { LeafCategory } from "@/lib/categories";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
+import { classifyKeyTrainability } from "@/lib/categorize/keyTrainability";
+import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
   clearPendingPick,
@@ -96,7 +98,56 @@ export function MerchantRow({
   const categoryId =
     storedPick ?? (group.existingRule ? String(group.existingRule.categoryId) : "");
 
-  const handlePick = (next: string) => writePendingPick(merchant, next);
+  const handlePick = (next: string) => {
+    writePendingPick(merchant, next);
+    /* CLEAR the tick rather than only masking it. `checked={remember &&
+       trainable}` un-ticks the box on screen, but `remember` stays true, so
+       picking a trainable category again resurrected a tick the user had not
+       re-made — and on that submit a rule really would be written. The mask
+       stays as well, because the verdict can also change from underneath a
+       stale page. */
+    if (
+      !classifyKeyTrainability(
+        merchant,
+        group.filedCategoryIds,
+        next === "" ? null : Number(next),
+      ).trainable
+    ) {
+      setRemember(false);
+    }
+  };
+
+  /**
+   * Whether "Remember" may write a rule for this key, evaluated against the
+   * category currently picked — not against the key alone.
+   *
+   * Passing the pick SEPARATELY from the filed ids is what makes this agree
+   * with the server: `bulkCategorize` calls the same pure predicate with the
+   * same two arguments, so the checkbox is disabled exactly when the write
+   * would be refused, and the sentence shown here is the sentence the server
+   * would have returned. Folding them into one array at each call site — which
+   * this used to do — is what let the client hand over `Number("")` as a
+   * phantom second category; `classifyKeyTrainability` now decides what counts
+   * as a real id, once, for both sides.
+   */
+  const trainability = classifyKeyTrainability(
+    merchant,
+    group.filedCategoryIds,
+    categoryId === "" ? null : Number(categoryId),
+  );
+
+  /* ONE `useId` base, and both ids on this row derive from it.
+     `id={`cat-${merchant}`}` was the previous spelling for the combobox, and
+     while it works (`htmlFor` is a DOM association, not a CSS selector) it is
+     not something to reach for: 17 of the 363 real keys carry `# * ? /` (see
+     `merchantDrilldownHref`), so the resulting id needs `CSS.escape` before it
+     can appear in any selector, and two keys differing only in stripped
+     punctuation would collide outright. Deriving both from `useId` also stops
+     this file contradicting itself, which it did while the reason element used
+     `useId` and the control eight lines below used the raw key. */
+  const rowId = useId();
+  const categoryFieldId = `${rowId}-cat`;
+  const reasonId = `${rowId}-reason`;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -109,8 +160,22 @@ export function MerchantRow({
         const result = await bulkCategorizeMerchantAction(formData);
         clearPendingPick(merchant);
         onDismissedChange(merchant, true);
-        toast.success(
-          `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`,
+        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
+           default collapsed stack (`expand` unset — `layout.tsx`), where
+           `[data-front="false"] > *` is `opacity: 0`: whichever toast is not
+           newest has its contents, INCLUDING its action button, drawn
+           invisible until the stack is hovered. Two toasts therefore forced a
+           choice between the warning being readable and the Undo being
+           reachable, and the Undo is the only thing that puts a removed rule
+           back inside its 10s window. Merging them makes the notice and its
+           remedy the same front toast. */
+        const filed = `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
+        const notify =
+          result.ruleRefusal === null ? toast.success : toast.warning;
+        notify(
+          result.ruleRefusal === null
+            ? filed
+            : `${filed} ${result.ruleRefusal.message}`,
           {
             duration: 10_000,
             action: {
@@ -120,7 +185,9 @@ export function MerchantRow({
                   const undo = await undoBulkCategorizeAction(result.snapshot);
                   onUndo(undo.revertedCount);
                   onDismissedChange(merchant, false);
-                  toast(`Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.`);
+                  toast(
+                    `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
+                  );
                 } catch (err) {
                   toast.error(
                     err instanceof Error ? err.message : "Undo failed.",
@@ -160,11 +227,11 @@ export function MerchantRow({
         {formatCents(group.totalCents)}
       </span>
       <div className="flex flex-wrap items-center gap-3 sm:col-span-3 sm:col-start-1 sm:row-start-2 sm:justify-end">
-        <label className="sr-only" htmlFor={`cat-${merchant}`}>
+        <label className="sr-only" htmlFor={categoryFieldId}>
           Category for {merchantLabel(merchant)}
         </label>
         <CategoryCombobox
-          id={`cat-${merchant}`}
+          id={categoryFieldId}
           name="categoryId"
           value={categoryId}
           onValueChange={handlePick}
@@ -172,14 +239,33 @@ export function MerchantRow({
           required
           className="min-w-[10rem]"
         />
-        <label className="flex min-h-11 items-center gap-1.5 text-xs text-ink-2">
+        <label
+          className={`flex min-h-11 items-center gap-1.5 text-xs ${
+            trainability.trainable ? "text-ink-2" : "cursor-not-allowed text-ink-3"
+          }`}
+          title={trainability.trainable ? undefined : trainability.message}
+        >
           <input
             type="checkbox"
             name="rememberMerchant"
             value="true"
-            checked={remember}
+            /* Never `checked={remember}` alone: the verdict moves with the
+               category picked above, so a box ticked while the key still
+               looked trainable has to un-tick itself when the pick makes it
+               untrainable — otherwise the form posts a Remember the server
+               will refuse, and the user is told after the fact instead of
+               before. */
+            checked={remember && trainability.trainable}
+            disabled={!trainability.trainable}
+            /* The reason is the checkbox's accessible description, not just
+               text that happens to sit nearby: `basis-full` puts it on its
+               own line below the Submit button, so proximity alone does not
+               connect the two. */
+            aria-describedby={
+              trainability.trainable ? undefined : reasonId
+            }
             onChange={(e) => setRemember(e.target.checked)}
-            className="h-4 w-4"
+            className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
           />
           Remember
         </label>
@@ -190,6 +276,26 @@ export function MerchantRow({
         >
           {isPending ? "Saving…" : "Submit"}
         </button>
+        {/* Not a `title=` alone. A disabled control with no visible reason is
+            the thing the user files a bug about; and `title` is unreachable by
+            keyboard and unreliable to screen readers. `basis-full` puts it on
+            its own line inside the same flex row rather than adding a grid
+            cell the `ColumnHeaders` template would then have to know about. */}
+        {trainability.trainable ? null : (
+          /* `sm:text-right`, not `text-right`: the row it belongs to only
+             right-aligns above `sm` (`sm:justify-end` on the wrapper), so a
+             hard right-align left a stray right-edge sentence under a
+             left-aligned control stack on narrow screens. `text-xs` matches
+             the Remember label two elements up — the 11px `--text-xs` token
+             put the one sentence that has to be read at the smallest size on
+             the row. */
+          <p
+            id={reasonId}
+            className="basis-full text-xs text-ink-3 sm:text-right"
+          >
+            {trainability.message}
+          </p>
+        )}
       </div>
     </form>
   );

@@ -8,27 +8,11 @@ import {
   ParentAllocationError,
   SavingsGoalCategoryError,
 } from "@/lib/categoryErrors";
-import { createOrUpdateRule } from "@/lib/rules";
+import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
+import type { PriorRuleSnapshot } from "./priorRuleSnapshot";
 import type { BulkCategorizeInput } from "./validateBulkCategorizeInput";
 
 type Db = typeof defaultDb;
-
-/**
- * Exact snapshot of the rule row that existed BEFORE the bulk upsert. All
- * user-owned columns are captured; `undoBulkCategorize` uses this to either
- * delete the inserted rule (when `priorRule = null`) or restore every column
- * of the prior row verbatim.
- */
-export type PriorRuleSnapshot = {
-  id: number;
-  categoryId: number;
-  matchType: "exact" | "contains" | "regex";
-  matchValue: string;
-  priority: number;
-  source: "auto" | "manual";
-  createdAt: Date;
-  updatedAt: Date;
-};
 
 export type BulkCategorizeSnapshot = {
   normalizedMerchant: string;
@@ -36,15 +20,25 @@ export type BulkCategorizeSnapshot = {
   categoryId: number;
   /** IDs of transactions the bulk actually flipped from NULL → categoryId. */
   txnIds: number[];
-  /** True when the caller ticked Remember and a rule was upserted. */
+  /**
+   * True when this call changed the rules table — either the caller ticked
+   * Remember and a rule was upserted, or the trainability guard refused and
+   * deleted the rule that was already there. Both cases give the undo
+   * something to reverse, which is the only thing this flag is read for.
+   */
   ruleTouched: boolean;
-  /** `null` when no exact rule existed before the upsert. */
+  /**
+   * The rule row as it stood before this call: `null` when no exact rule
+   * existed, otherwise the row that was overwritten (upsert) or removed
+   * (refusal). The undo path cannot tell those two apart and does not need
+   * to — it restores this row either way.
+   */
   priorRule: PriorRuleSnapshot | null;
   /**
    * ID of the newly inserted rule row when `priorRule = null` (no prior rule
    * existed). `undoBulkCategorize` uses this to delete by primary key rather
    * than by (match_type, match_value, category_id), which would be unsafe if
-   * a second bulk ran between the original and the undo.
+   * a second write retargeted that row between the original and the undo.
    * `null` when `priorRule != null` (the undo restores via prior.id instead).
    */
   insertedRuleId: number | null;
@@ -52,9 +46,29 @@ export type BulkCategorizeSnapshot = {
   earliestDate: string | null;
 };
 
+export type BulkCategorizeOptions = {
+  /**
+   * Let a refusal REMOVE the exact rule the user has just contradicted. Off by
+   * default and never sourced from a form — see `applyRuleWrite`, which owns the
+   * reasoning. `/categorize` opts in; `/subscriptions`' sweep does not.
+   */
+  allowRuleRemoval?: boolean;
+};
+
 export type BulkCategorizeResult = BulkCategorizeSnapshot & {
   /** Number of rows actually flipped (== `txnIds.length`). */
   updatedCount: number;
+  /**
+   * Set when Remember was ticked but the key is not safe to train a rule on
+   * (see `keyTrainability.ts`), carrying the rule the refusal removed when it
+   * removed one. The rows are still filed; only the rule is withheld.
+   *
+   * Deliberately NOT part of `BulkCategorizeSnapshot`: it is the reason for a
+   * decision, not state to reverse, and `ruleTouched` + `priorRule` already
+   * carry everything the undo needs — including the case where the refusal
+   * DELETED a rule.
+   */
+  ruleRefusal: RuleRefusalReport | null;
 };
 
 /**
@@ -62,10 +76,18 @@ export type BulkCategorizeResult = BulkCategorizeSnapshot & {
  * onto `categoryId` in a single DB transaction. Optionally upserts the exact
  * rule for the merchant.
  *
- * Rule upsert (C1): when `rememberMerchant` is true, the existing exact rule
- * (if any) is captured into the snapshot BEFORE the upsert runs. The inline
- * badge on `/categorize` already showed the conflict pre-click; this silently
- * replaces the rule target.
+ * Rule handling — including the refusal, and when a refusal deletes the rule
+ * that was already there — lives entirely in `applyRuleWrite`, shared with
+ * `categorizeTransaction`. No `excludeTxnIds` is passed: this only ever touches
+ * `categoryId IS NULL` rows, which the filed-categories query skips anyway.
+ *
+ * A refusal withholds the RULE only; the rows are still filed, because the
+ * user's decision about these rows is sound even when generalizing it is not.
+ * `/categorize` disables the checkbox for such keys, but this path is also
+ * reached without any UI in front of it — `/subscriptions` passes
+ * `rememberMerchant: true` unconditionally — hence a returned `ruleRefusal`
+ * rather than a throw, which would also discard the categorization the user
+ * did want.
  *
  * Invalidation: the earliest month in `txnIds` is the floor for
  * `invalidateForwardRollover`. Spend changed on `categoryId` starting that
@@ -81,6 +103,7 @@ export type BulkCategorizeResult = BulkCategorizeSnapshot & {
 export function bulkCategorize(
   db: Db,
   input: BulkCategorizeInput,
+  options: BulkCategorizeOptions = {},
 ): BulkCategorizeResult {
   const { normalizedMerchant, categoryId, rememberMerchant } = input;
 
@@ -133,43 +156,12 @@ export function bulkCategorize(
       return acc;
     }, null);
 
-    let priorRule: PriorRuleSnapshot | null = null;
-    let insertedRuleId: number | null = null;
-    let ruleTouched = false;
-
-    if (rememberMerchant) {
-      const existing = tx
-        .select()
-        .from(schema.categoryRules)
-        .where(
-          and(
-            eq(schema.categoryRules.matchType, "exact"),
-            eq(schema.categoryRules.matchValue, normalizedMerchant),
-          ),
-        )
-        .get();
-      if (existing) {
-        priorRule = {
-          id: existing.id,
-          categoryId: existing.categoryId,
-          matchType: existing.matchType,
-          matchValue: existing.matchValue,
-          priority: existing.priority,
-          source: existing.source,
-          createdAt: existing.createdAt,
-          updatedAt: existing.updatedAt,
-        };
-      }
-      const upserted = createOrUpdateRule(tx, {
-        normalizedMerchant,
-        categoryId,
-        source: "manual",
-      });
-      ruleTouched = true;
-      if (priorRule === null) {
-        insertedRuleId = upserted.id;
-      }
-    }
+    const rule = applyRuleWrite(tx, {
+      normalizedMerchant,
+      categoryId,
+      rememberMerchant,
+      allowRuleRemoval: options.allowRuleRemoval,
+    });
 
     if (txnIds.length > 0) {
       tx.update(schema.transactions)
@@ -187,12 +179,12 @@ export function bulkCategorize(
       normalizedMerchant,
       categoryId,
       txnIds,
-      ruleTouched,
-      priorRule,
-      insertedRuleId,
+      ruleTouched: rule.ruleTouched,
+      priorRule: rule.priorRule,
+      insertedRuleId: rule.insertedRuleId,
       earliestDate,
       updatedCount: txnIds.length,
+      ruleRefusal: rule.ruleRefusal,
     };
   });
 }
-

@@ -14,8 +14,23 @@ import type { CategorizeTransactionSnapshot } from "./categorizeTransaction";
 const priorRuleSchema = z.object({
   id: z.number().int().positive(),
   categoryId: z.number().int().positive(),
-  matchType: z.enum(["exact", "contains", "regex"]),
-  matchValue: z.string().min(1),
+  /**
+   * `z.literal`, not the full enum. The only rows that reach a snapshot come
+   * from `readExactRule`/`deleteExactRule`, and `restorePriorRule` INSERTs the
+   * snapshot verbatim — so accepting the wide enum let a crafted Undo payload
+   * install `{matchType: "regex", matchValue: ".*"}` as a catch-all rule.
+   * Mirrors the narrowed `PriorRuleSnapshot.matchType`.
+   */
+  matchType: z.literal("exact"),
+  /**
+   * No `.min(1)`. The empty key is a legitimate value everywhere else in this
+   * codebase — a blank bank memo normalizes to `""` (`merchantLabel` exists for
+   * exactly that), `/transactions` resolves the key server-side from the row, and
+   * a refusal on `""` now DELETES that key's rule. Rejecting it here made the
+   * undo of the one action with no other repair path throw
+   * "Invalid undo snapshot".
+   */
+  matchValue: z.string(),
   priority: z.number().int(),
   source: z.enum(["auto", "manual"]),
   createdAt: z.coerce.date(),
@@ -23,7 +38,8 @@ const priorRuleSchema = z.object({
 });
 
 export const categorizeTransactionSnapshotSchema = z.object({
-  normalizedMerchant: z.string().min(1),
+  /** No `.min(1)` — see `priorRuleSchema.matchValue`; `""` is a real key. */
+  normalizedMerchant: z.string(),
   newCategoryId: z.number().int().positive(),
   targetTxnId: z.number().int().positive(),
   targetPriorCategoryId: z.number().int().positive().nullable(),
@@ -35,6 +51,7 @@ export const categorizeTransactionSnapshotSchema = z.object({
     .nullable(),
   ruleTouched: z.boolean(),
   priorRule: priorRuleSchema.nullable(),
+  insertedRuleId: z.number().int().positive().nullable(),
 }) satisfies z.ZodType<CategorizeTransactionSnapshot>;
 
 export type CategorizeTransactionSnapshotValidation =

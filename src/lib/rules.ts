@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
 
@@ -123,6 +123,67 @@ export function createOrUpdateRule(
     .returning()
     .all();
   return upserted;
+}
+
+/**
+ * The exact rule currently held for `normalizedMerchant`, or null.
+ *
+ * One spelling of the "which rule is this key's" lookup, shared by both write
+ * paths and by {@link deleteExactRule}. It was copy-pasted into
+ * `bulkCategorize` and `categorizeTransaction`, and a third copy landed the
+ * moment a refusal also needed it.
+ */
+export function readExactRule(
+  db: AnyDb,
+  normalizedMerchant: string,
+): CategoryRule | undefined {
+  return db
+    .select()
+    .from(schema.categoryRules)
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "exact"),
+        eq(schema.categoryRules.matchValue, normalizedMerchant),
+      ),
+    )
+    .get();
+}
+
+/**
+ * Remove the exact rule for `normalizedMerchant`, returning the row it
+ * deleted (or null if there was none) so an undo can put it back.
+ *
+ * Called ONLY from `applyRuleWrite`, and only when the trainability guard
+ * refuses a key AND the caller opted in to removal. That module owns the whole
+ * policy — which refusals remove a rule, which leave it alone, and why the
+ * opt-in is an argument rather than a default — so this function deliberately
+ * decides nothing.
+ *
+ * The short version of why removal exists at all: a rule pointing a key
+ * somewhere the user has contradicted keeps auto-filing every future import
+ * (rule 6), and the guard closes the repair path. Once its backlog is filed
+ * `/categorize` no longer lists the merchant, because the rule leaves no
+ * NULL-category rows for it to group, and `/transactions` refuses the retrain,
+ * because the rows that same rule filed are what push the key over two distinct
+ * categories. There is no rules-management surface, so the rule would have been
+ * permanent. CLAUDE.md rule 10 assumes a rule can always be retrained from a
+ * row; that assumption needs this.
+ */
+export function deleteExactRule(
+  db: AnyDb,
+  normalizedMerchant: string,
+): CategoryRule | null {
+  const [deleted] = db
+    .delete(schema.categoryRules)
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "exact"),
+        eq(schema.categoryRules.matchValue, normalizedMerchant),
+      ),
+    )
+    .returning()
+    .all();
+  return deleted ?? null;
 }
 
 function compareRules(a: CategoryRule, b: CategoryRule): number {
