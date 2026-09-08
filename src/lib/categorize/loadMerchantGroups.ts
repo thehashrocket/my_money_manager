@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
@@ -8,6 +8,9 @@ export type ExistingRule = {
   categoryName: string;
 };
 
+/** Up to this many distinct bank memos are shown per group (D16). */
+const MAX_SAMPLE_MEMOS = 3;
+
 export type MerchantGroup = {
   normalizedMerchant: string;
   count: number;
@@ -15,6 +18,27 @@ export type MerchantGroup = {
   totalCents: number;
   /** Exact-match manual/auto rule currently targeting this merchant, if any. */
   existingRule: ExistingRule | null;
+  /**
+   * D16 — up to three distinct bank memos from this group's uncategorized
+   * rows, so "AMAZON, 53 rows, −$2,411" can be answered in place instead of
+   * only by navigating away.
+   *
+   * Memos identical to the key itself are excluded in SQL: on the real ledger
+   * `TRIM(raw_memo) = normalized_merchant` on 151 of 1,540 rows (9.8%), and a
+   * sample that repeats the line above it is noise, not evidence. An empty
+   * array therefore means "nothing to disclose" and the row renders no
+   * disclosure control at all — not a control that opens onto nothing.
+   */
+  sampleMemos: string[];
+  /**
+   * Every non-transfer row carrying this key, INCLUDING ones already filed.
+   *
+   * Differs from `count` on purpose (D3): the row's own figure is its
+   * uncategorized backlog, but the drilldown deliberately shows the whole
+   * history, because how a merchant was filed before is the decision support.
+   * Naming the same number in both places would misstate what the link opens.
+   */
+  totalRowCount: number;
 };
 
 /**
@@ -69,6 +93,9 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
     )
     .all();
 
+  const sampleMemosByMerchant = loadSampleMemos(db, merchants);
+  const totalRowCountByMerchant = loadTotalRowCounts(db, merchants);
+
   const ruleByMerchant = new Map<string, ExistingRule>();
   for (const rule of rules) {
     ruleByMerchant.set(rule.merchant, {
@@ -82,6 +109,9 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
     count: Number(r.count),
     totalCents: Number(r.total),
     existingRule: ruleByMerchant.get(r.normalizedMerchant) ?? null,
+    sampleMemos: sampleMemosByMerchant.get(r.normalizedMerchant) ?? [],
+    totalRowCount:
+      totalRowCountByMerchant.get(r.normalizedMerchant) ?? Number(r.count),
   }));
 
   groups.sort((a, b) => {
@@ -90,4 +120,74 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
   });
 
   return groups;
+}
+
+/**
+ * Distinct, trimmed bank memos per merchant, capped at `MAX_SAMPLE_MEMOS`.
+ *
+ * The cap is applied in JS rather than SQL: this reads only the *distinct*
+ * (merchant, memo) pairs among uncategorized rows — a few hundred short
+ * strings on a real ledger, since the whole reason `/categorize` groups is
+ * that these repeat — so a window function to push the cap into SQLite would
+ * buy nothing and cost readability.
+ *
+ * `TRIM` matches the whitespace normalisation on the memo everywhere else it
+ * is compared (rule 3): `parseCsv` preserves Star One's leading padding
+ * verbatim because `import_row_hash` depends on the exact bytes, while the
+ * SimpleFIN feed sends the same row already trimmed.
+ */
+function loadSampleMemos(db: Db, merchants: string[]): Map<string, string[]> {
+  const rows = db
+    .selectDistinct({
+      normalizedMerchant: schema.transactions.normalizedMerchant,
+      memo: sql<string>`TRIM(${schema.transactions.rawMemo})`.as("memo"),
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        isNull(schema.transactions.categoryId),
+        isNull(schema.transactions.transferPairId),
+        inArray(schema.transactions.normalizedMerchant, merchants),
+        ne(sql`TRIM(${schema.transactions.rawMemo})`, ""),
+        // The 9.8% of rows whose memo IS the key — see `sampleMemos`.
+        sql`TRIM(${schema.transactions.rawMemo}) <> ${schema.transactions.normalizedMerchant}`,
+      ),
+    )
+    .orderBy(schema.transactions.normalizedMerchant, sql`memo`)
+    .all();
+
+  const byMerchant = new Map<string, string[]>();
+  for (const row of rows) {
+    const existing = byMerchant.get(row.normalizedMerchant);
+    if (existing === undefined) {
+      byMerchant.set(row.normalizedMerchant, [row.memo]);
+    } else if (existing.length < MAX_SAMPLE_MEMOS) {
+      existing.push(row.memo);
+    }
+  }
+  return byMerchant;
+}
+
+/**
+ * All non-transfer rows per merchant, filed or not — the number the drilldown
+ * link promises. Excludes transfer-paired rows because `/transactions` does
+ * too by default; counting them here would advertise a row count the
+ * destination then does not show.
+ */
+function loadTotalRowCounts(db: Db, merchants: string[]): Map<string, number> {
+  const rows = db
+    .select({
+      normalizedMerchant: schema.transactions.normalizedMerchant,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        isNull(schema.transactions.transferPairId),
+        inArray(schema.transactions.normalizedMerchant, merchants),
+      ),
+    )
+    .groupBy(schema.transactions.normalizedMerchant)
+    .all();
+  return new Map(rows.map((r) => [r.normalizedMerchant, Number(r.count)]));
 }

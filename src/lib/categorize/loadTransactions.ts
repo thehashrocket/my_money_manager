@@ -3,7 +3,8 @@ import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
 
-export type TransactionFilter = {
+/** Everything that narrows the row set — the paging window is not part of it. */
+export type FilterPredicateInput = {
   /** `number` = exact category, `"none"` = NULL-category backlog, `undefined` = any. */
   categoryId?: number | "none";
   accountId?: number;
@@ -33,6 +34,20 @@ export type TransactionFilter = {
   includeTransfers?: boolean;
   /** Matched against rawDescription/normalizedMerchant/payee — SQLite's default `LIKE` is case-insensitive for ASCII. */
   search?: string;
+  /**
+   * D2 — EXACT `normalized_merchant`, the `/categorize` drilldown's filter.
+   *
+   * Deliberately not `search`: that one is `LIKE %x%` across three columns,
+   * and on 11 of 191 real merchant groups it returns a superset (`AMAZON`
+   * 53 rows → 71, by also matching `AMAZON PRIME`). A drilldown that quietly
+   * shows you more rows than the group you clicked is the silent-wrong-result
+   * class this codebase's rules exist to prevent — so this is `eq()`, which
+   * is also index-backed (`transactions_merchant_idx`).
+   */
+  merchant?: string;
+};
+
+export type TransactionFilter = FilterPredicateInput & {
   /** 1-indexed page number. */
   page: number;
   /** Rows per page. Caller clamps to [1, 500]. */
@@ -81,27 +96,13 @@ function searchPredicate(term: string): SQL {
 }
 
 /**
- * Paginated read for `/transactions`. Transfer-paired rows are excluded by
- * default so categorize actions never touch rows owned by the pair machinery
- * (matches `/budget` MTD semantics); `includeTransfers` reveals them.
- *
- * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
- * both, or neither may be set. Replaces the old `year`+`month` window (whole
- * months are now expressed as `dateFrom=monthBoundary(...)`,
- * `dateTo=lastDayOfMonth(...)` by the caller).
- *
- * Amount window is magnitude-based (`ABS(amount_cents)`), not signed — see
- * `TransactionFilter.amountMinCents`. `ABS()` on the column means this
- * predicate can't use an index, same as the `LIKE` search below; both are
- * negligible at this app's realistic row counts (single household, low
- * thousands of rows even after years).
- *
- * Sort: `date DESC, id DESC` — newest first, stable tiebreaker.
+ * The WHERE clause, built once and shared by every read that has to agree
+ * with the visible list: the page's rows, its `totalCount`, and T9's
+ * per-category breakdown in the header. Three call sites re-deriving these
+ * predicates by hand is how a header ends up describing a different row set
+ * than the one under it.
  */
-export function loadTransactions(
-  db: Db,
-  filter: TransactionFilter,
-): LoadTransactionsResult {
+function buildPredicates(filter: FilterPredicateInput): SQL[] {
   const predicates: SQL[] = [];
   if (!filter.includeTransfers) {
     predicates.push(isNull(schema.transactions.transferPairId));
@@ -139,7 +140,36 @@ export function loadTransactions(
     predicates.push(searchPredicate(filter.search.trim()));
   }
 
-  const where = and(...predicates);
+  if (filter.merchant !== undefined && filter.merchant !== "") {
+    predicates.push(eq(schema.transactions.normalizedMerchant, filter.merchant));
+  }
+
+  return predicates;
+}
+
+/**
+ * Paginated read for `/transactions`. Transfer-paired rows are excluded by
+ * default so categorize actions never touch rows owned by the pair machinery
+ * (matches `/budget` MTD semantics); `includeTransfers` reveals them.
+ *
+ * Date window: `dateFrom`/`dateTo` are independent, inclusive bounds — either,
+ * both, or neither may be set. Replaces the old `year`+`month` window (whole
+ * months are now expressed as `dateFrom=monthBoundary(...)`,
+ * `dateTo=lastDayOfMonth(...)` by the caller).
+ *
+ * Amount window is magnitude-based (`ABS(amount_cents)`), not signed — see
+ * `TransactionFilter.amountMinCents`. `ABS()` on the column means this
+ * predicate can't use an index, same as the `LIKE` search below; both are
+ * negligible at this app's realistic row counts (single household, low
+ * thousands of rows even after years).
+ *
+ * Sort: `date DESC, id DESC` — newest first, stable tiebreaker.
+ */
+export function loadTransactions(
+  db: Db,
+  filter: TransactionFilter,
+): LoadTransactionsResult {
+  const where = and(...buildPredicates(filter));
   const offset = (filter.page - 1) * filter.pageSize;
 
   return db.transaction((tx) => {
@@ -191,4 +221,60 @@ export function loadTransactions(
 
     return { rows, totalCount };
   });
+}
+
+export type CategoryBreakdownRow = {
+  /** `null` = the uncategorized backlog inside this filter's row set. */
+  categoryId: number | null;
+  categoryName: string | null;
+  count: number;
+};
+
+/**
+ * T9/D18 — how the rows matching `filter` are already filed, biggest group
+ * first.
+ *
+ * This is what makes the merchant header answer the question the user came
+ * with. D3 chose to show ALL of a merchant's rows, not just its uncategorized
+ * ones, precisely because the prior filing history IS the decision support
+ * ("49 of these are already filed as Gas"). Without this aggregate the header
+ * can only report a total, which is the number the user could already see.
+ *
+ * Shares `buildPredicates` with the list itself, so the breakdown can never
+ * describe a different row set than the one rendered beneath it. Ignores
+ * paging on purpose — it summarises the whole filtered set, not page 1.
+ */
+export function summarizeByCategory(
+  db: Db,
+  filter: FilterPredicateInput,
+): CategoryBreakdownRow[] {
+  return db
+    .select({
+      categoryId: schema.transactions.categoryId,
+      categoryName: schema.categories.name,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(schema.transactions)
+    .leftJoin(
+      schema.categories,
+      eq(schema.categories.id, schema.transactions.categoryId),
+    )
+    .where(and(...buildPredicates(filter)))
+    .groupBy(schema.transactions.categoryId)
+    .all()
+    .map((r) => ({
+      categoryId: r.categoryId,
+      categoryName: r.categoryName,
+      count: Number(r.count),
+    }))
+    // Ties need a deterministic order or the header's "top two filed
+    // categories" would depend on SQLite's grouping order. Uncategorized
+    // sorts last among equals: the header states it separately, and a
+    // *filed* category is the evidence the reader came for.
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      if (a.categoryName === null) return 1;
+      if (b.categoryName === null) return -1;
+      return a.categoryName.localeCompare(b.categoryName);
+    });
 }

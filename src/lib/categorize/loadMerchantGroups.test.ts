@@ -56,6 +56,7 @@ function seedTxn(opts: {
   categoryId?: number | null;
   transferPairId?: number | null;
   date?: string;
+  rawMemo?: string;
 }) {
   seq += 1;
   const [row] = handle.db
@@ -64,7 +65,7 @@ function seedTxn(opts: {
       accountId: opts.accountId,
       date: opts.date ?? "2026-04-05",
       rawDescription: "DESC",
-      rawMemo: "MEMO",
+      rawMemo: opts.rawMemo ?? "MEMO",
       normalizedMerchant: opts.merchant,
       amountCents: opts.amountCents,
       categoryId: opts.categoryId ?? null,
@@ -207,5 +208,111 @@ describe("loadMerchantGroups", () => {
     seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000 });
 
     expect(loadMerchantGroups(handle.db)[0].existingRule).toBeNull();
+  });
+});
+
+/**
+ * T7/D16 — the sample memos behind each row's disclosure, and the row count
+ * its drilldown link promises.
+ */
+describe("loadMerchantGroups — sample memos", () => {
+  it("returns up to three DISTINCT memos, ignoring how often each repeats", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    for (const memo of [
+      "AMAZON MKTPL*8Y21QW",
+      "AMAZON MKTPL*8Y21QW",
+      "AMZN Mktp US*RT4T9",
+      "AMAZON.COM*2K91LM",
+      "AMAZON DIGITAL*QQ2",
+    ]) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000, rawMemo: memo });
+    }
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.normalizedMerchant).toBe("AMAZON");
+    expect(group.sampleMemos).toHaveLength(3);
+    expect(new Set(group.sampleMemos).size).toBe(3);
+    for (const memo of group.sampleMemos) expect(memo).toMatch(/AM/);
+  });
+
+  it("suppresses a memo identical to the key — the 9.8% of rows that would render their own first line twice", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AUDIBLE", amountCents: -1499, rawMemo: "AUDIBLE" });
+    // Star One pads its memos; the comparison has to survive that (rule 3).
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AUDIBLE", amountCents: -1499, rawMemo: "  AUDIBLE  " });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.normalizedMerchant).toBe("AUDIBLE");
+    // Empty means the row renders NO disclosure control at all, rather than a
+    // control that opens onto nothing.
+    expect(group.sampleMemos).toEqual([]);
+  });
+
+  it("trims the memo it returns", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1000, rawMemo: "   SAFEWAY #1234   " });
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["SAFEWAY #1234"]);
+  });
+
+  it("samples only the group's own uncategorized rows", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const cat = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", amountCents: -1000, rawMemo: "SHELL OIL 5522" });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SHELL",
+      amountCents: -1000,
+      categoryId: cat.id,
+      rawMemo: "SHELL SERVICE STN 9",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["SHELL OIL 5522"]);
+  });
+});
+
+describe("loadMerchantGroups — totalRowCount", () => {
+  it("counts every non-transfer row for the key, filed or not (D3)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO GAS", amountCents: -5000 });
+    for (let i = 0; i < 49; i += 1) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO GAS",
+        amountCents: -5000,
+        categoryId: gas.id,
+      });
+    }
+
+    const [group] = loadMerchantGroups(handle.db);
+    // The row's own figure is the backlog; the link promises the history.
+    expect(group.count).toBe(1);
+    expect(group.totalRowCount).toBe(50);
+  });
+
+  it("excludes transfer-paired rows, matching what /transactions shows by default", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({ accountId: a.id, batchId: b.id, merchant: "ZELLE", amountCents: -2500 });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "ZELLE",
+      amountCents: 2500,
+      transferPairId: anchor.id,
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.count).toBe(1);
+    expect(group.totalRowCount).toBe(1);
   });
 });
