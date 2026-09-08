@@ -6,6 +6,7 @@ import type { ZodError } from "zod";
 import {
   syncSimpleFin,
   linkTransferPairManually,
+  rejectTransferPairManually,
   unlinkTransferPair,
 } from "@/lib/simplefin/sync";
 import { undoSyncBatch } from "@/lib/simplefin/undoSync";
@@ -208,6 +209,50 @@ export async function resolveTransferAction(
   }
   revalidateAll();
   return ok("Linked as a transfer — both rows are now excluded from spending.");
+}
+
+/**
+ * The same-account half of the review queue: a transaction and its reversal on
+ * ONE account. A SEPARATE action from `resolveTransferAction` on purpose — the
+ * same-account opt-in is carried by which action ran, not by a form field, so
+ * a crafted or stale POST to the ordinary transfer action can never set it.
+ * Validation is otherwise identical, and `linkTransferPairManually` still
+ * enforces same-day, opposite signs and equal magnitude underneath.
+ */
+export async function resolveSameAccountReversalAction(
+  _prev: SyncActionState,
+  formData: FormData,
+): Promise<SyncActionState> {
+  const parsed = validateResolveTransferInput(Object.fromEntries(formData));
+  if (!parsed.success) {
+    return fail(`Invalid reversal pairing — ${rejectionMessage(parsed.error)}`);
+  }
+
+  // Two buttons, one form, because both need the SAME two <select> values —
+  // "these are a reversal" and "these are not" are answers to one question, and
+  // the rejection is pair-scoped so it has to name the pair the user picked.
+  // Anything that is not exactly "reject" links, so a missing or tampered
+  // intent falls back to the path with the stricter guards rather than the one
+  // that writes a durable "never ask me again".
+  const reject = formData.get("intent") === "reject";
+
+  try {
+    if (reject) {
+      rejectTransferPairManually(parsed.data.aId, parsed.data.bId);
+    } else {
+      linkTransferPairManually(parsed.data.aId, parsed.data.bId, undefined, {
+        allowSameAccountReversal: true,
+      });
+    }
+  } catch (err) {
+    return fail(toMessage(err));
+  }
+  revalidateAll();
+  return ok(
+    reject
+      ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
+      : "Linked as a reversal — both rows are now excluded from spending.",
+  );
 }
 
 export async function unlinkTransferAction(

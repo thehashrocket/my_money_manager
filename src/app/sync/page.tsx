@@ -9,18 +9,22 @@ import { listRemoteAccounts, type RemoteAccount } from "@/lib/simplefin/link";
 import {
   findAmbiguousTransfers,
   findLinkedTransferPairs,
+  findSameAccountReversalCandidates,
 } from "@/lib/simplefin/sync";
+import { overlappingRowIds } from "@/lib/simplefin/sameAccountReversals";
 import { findLastSyncBatch } from "@/lib/simplefin/undoSync";
 import { daysAgoIso, formatLocalDateTime, toLocalIso } from "@/lib/now";
 import {
   classifyBalanceFreshness,
   type BalanceFreshness,
 } from "@/lib/simplefin/balanceFreshness";
+import { ReviewQueue } from "./_review-queue";
 import { SyncButton } from "./SyncButton";
 import { ActionForm } from "./ActionForm";
 import {
   linkAccountAction,
   resolveTransferAction,
+  resolveSameAccountReversalAction,
   undoSyncAction,
   unlinkTransferAction,
 } from "./actions";
@@ -92,6 +96,14 @@ export default function SyncPage() {
     ? countRevertibleCategorizations(db, lastBatch.batchId)
     : 0;
   const ambiguous = findAmbiguousTransfers(daysAgoIso(REVIEW_WINDOW_DAYS));
+  const sameAccountReversals = findSameAccountReversalCandidates(
+    daysAgoIso(REVIEW_WINDOW_DAYS),
+  );
+
+  // The two queues can legitimately claim the same row (see
+  // `overlappingRowIds`). Surface that in both rather than letting either one
+  // decide it silently.
+  const sharedRowIds = overlappingRowIds(ambiguous, sameAccountReversals);
   const linkedPairs = findLinkedTransferPairs(daysAgoIso(REVIEW_WINDOW_DAYS));
 
   let host: string | null = null;
@@ -147,87 +159,40 @@ export default function SyncPage() {
 
       {/* ---- transfers needing a decision ---- */}
       {ambiguous.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-            Transfers needing review ({ambiguous.length})
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Same day, same amount, opposite signs, but not auto-linked — see
-            each item below for why. Pick the two halves of each transfer, or
-            leave it if it isn&apos;t actually one.
-          </p>
-          {ambiguous.map((bucket) => (
-            <ActionForm
-              key={`${bucket.date}-${bucket.absAmountCents}-${bucket.positives[0]?.id}`}
-              action={resolveTransferAction}
-              className="space-y-3 rounded-md border border-border p-4"
-            >
-              <p className="font-mono text-sm font-medium [font-variant-numeric:tabular-nums]">
-                {bucket.date} · {formatCents(bucket.absAmountCents)}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {bucket.reason === "rejected"
-                  ? "You previously marked this pairing “not a transfer.” It stays here in case a different match ever shows up on this date and amount — link it below only if you've changed your mind."
-                  : bucket.reason === "contested"
-                    ? "This date and amount has candidates in more than one other account, so which one it moved to is ambiguous."
-                    : bucket.reason === "cross-source"
-                      ? "One of these rows was already examined for a Star One transaction-number match and declined, so this same-day/same-amount coincidence isn't enough on its own to auto-link."
-                      : "The counts don't balance, so which row pairs with which changes the budget."}
-              </p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">Money in</span>
-                  <select
-                    name="aId"
-                    required
-                    className="w-full rounded-md border border-border bg-transparent px-2 py-1"
-                  >
-                    {bucket.positives.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {accountsById.get(p.accountId)?.name ?? p.accountId} —{" "}
-                        {p.rawMemo.slice(0, 44)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block text-sm">
-                  <span className="mb-1 block text-muted-foreground">Money out</span>
-                  <select
-                    name="bId"
-                    required
-                    className="w-full rounded-md border border-border bg-transparent px-2 py-1"
-                  >
-                    {bucket.negatives.map((n) => (
-                      <option key={n.id} value={n.id}>
-                        {accountsById.get(n.accountId)?.name ?? n.accountId} —{" "}
-                        {n.rawMemo.slice(0, 44)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <button
-                type="submit"
-                className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
-              >
-                {bucket.reason === "rejected" ? "Link as transfer anyway" : "Link as transfer"}
-              </button>
-            </ActionForm>
-          ))}
-        </section>
+        <ReviewQueue
+          title={`Transfers needing review (${ambiguous.length})`}
+          blurb="Same day, same amount, opposite signs, but not auto-linked — see each item below for why. Pick the two halves of each transfer, or leave it if it isn't actually one."
+          buckets={ambiguous}
+          accountsById={accountsById}
+          alsoIn={{ ids: sharedRowIds, queue: "Reversals needing review" }}
+          action={resolveTransferAction}
+        />
+      )}
+
+      {/* ---- same-account reversals: a charge and its cancellation ---- */}
+      {sameAccountReversals.length > 0 && (
+        <ReviewQueue
+          title={`Reversals needing review (${sameAccountReversals.length})`}
+          blurb="A charge and its cancellation on ONE account — a reversed transfer, a disputed charge with a provisional credit, or a returned payment. No matcher can pair these automatically, because the same shape also turns up as pure coincidence (an unrelated refund that happens to match a real charge to the cent, on the same day). Link them only if they are genuinely two halves of one movement; a merchandise refund is NOT one, and already nets against spending on its own."
+          buckets={sameAccountReversals}
+          accountsById={accountsById}
+          alsoIn={{ ids: sharedRowIds, queue: "Transfers needing review" }}
+          action={resolveSameAccountReversalAction}
+        />
       )}
 
       {/* ---- linked transfers, with a way back out ---- */}
       {linkedPairs.length > 0 && (
         <section className="space-y-3">
           <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-            Linked transfers ({linkedPairs.length})
+            Linked pairs ({linkedPairs.length})
           </h2>
-          <p className="text-sm text-muted-foreground">
-            Paired rows are excluded from every spending view. Sync links a pair
-            on its own when the counts balance, so check anything that looks like
-            a coincidence — a same-day, same-amount deposit and charge that
-            aren&apos;t actually two halves of one transfer.
+          <p className="max-w-prose text-sm text-muted-foreground">
+            Paired rows are excluded from every spending view. Sync links a
+            transfer on its own when the counts balance; reversals are only ever
+            linked by hand. Check anything that looks like a coincidence — a
+            same-day, same-amount deposit and charge that aren&apos;t actually
+            two halves of one movement.
           </p>
           <ul className="divide-y divide-border rounded-md border border-border">
             {linkedPairs.map((pair) => (
@@ -238,9 +203,29 @@ export default function SyncPage() {
                 <span className="font-mono [font-variant-numeric:tabular-nums]">
                   {pair.a.date} · {formatCents(Math.abs(pair.a.amountCents))}
                 </span>
+                {/*
+                  A same-account reversal is linked through the same
+                  `transfer_pair_id` column, so it lands in this list too — and
+                  `A ← B` with A and B equal renders as "Checking ← Checking",
+                  an arrow from an account to itself. Name the account once and
+                  say what the pairing is instead.
+                */}
                 <span className="min-w-40 flex-1 text-muted-foreground">
-                  {accountsById.get(pair.a.accountId)?.name ?? pair.a.accountId}{" "}
-                  ← {accountsById.get(pair.b.accountId)?.name ?? pair.b.accountId}
+                  {pair.a.accountId === pair.b.accountId ? (
+                    <>
+                      {accountsById.get(pair.a.accountId)?.name ??
+                        pair.a.accountId}{" "}
+                      · reversal
+                    </>
+                  ) : (
+                    <>
+                      {accountsById.get(pair.a.accountId)?.name ??
+                        pair.a.accountId}{" "}
+                      ←{" "}
+                      {accountsById.get(pair.b.accountId)?.name ??
+                        pair.b.accountId}
+                    </>
+                  )}
                   {pair.b.rawMemo ? ` · ${pair.b.rawMemo.slice(0, 40)}` : ""}
                 </span>
                 <ActionForm action={unlinkTransferAction}>
@@ -249,7 +234,9 @@ export default function SyncPage() {
                     type="submit"
                     className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
                   >
-                    Not a transfer
+                    {pair.a.accountId === pair.b.accountId
+                      ? "Not a reversal"
+                      : "Not a transfer"}
                   </button>
                 </ActionForm>
               </li>

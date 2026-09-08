@@ -13,6 +13,7 @@ const INITIAL: SyncActionState = { status: "idle" };
 export function ActionForm({
   action,
   className,
+  ariaLabelledBy,
   children,
 }: {
   action: (
@@ -20,12 +21,19 @@ export function ActionForm({
     formData: FormData,
   ) => Promise<SyncActionState>;
   className?: string;
+  /**
+   * Id of the element naming this form. The review queues render up to a dozen
+   * structurally identical forms on one page whose only distinguishing text is
+   * a date and an amount, so without this every control announces the same two
+   * names over and over with nothing saying which decision is in focus.
+   */
+  ariaLabelledBy?: string;
   children: React.ReactNode | ((pending: boolean) => React.ReactNode);
 }) {
   const [state, formAction, pending] = useActionState(action, INITIAL);
 
   return (
-    <form action={formAction} className={className}>
+    <form action={formAction} className={className} aria-labelledby={ariaLabelledBy}>
       {typeof children === "function" ? children(pending) : children}
       <ActionStatus state={state} />
     </form>
@@ -46,7 +54,15 @@ export function ActionStatus({ state }: { state: SyncActionState }) {
   return (
     // w-full so that inside a flex-wrap row (the account link form) the status
     // drops to its own line rather than squeezing in beside the controls.
-    <div role="status" className="mt-2 w-full space-y-1">
+    //
+    // `alert` for a refusal, `status` for the rest: a polite live region can be
+    // held until the user goes idle, and on a page of a dozen near-identical
+    // forms a silently-swallowed "already paired" refusal reads as the click
+    // having worked.
+    <div
+      role={state.status === "error" ? "alert" : "status"}
+      className="mt-2 w-full space-y-1"
+    >
       <p className={`text-sm ${tone}`}>{state.message}</p>
       {state.warnings.length > 0 && (
         <ul
