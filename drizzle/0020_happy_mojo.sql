@@ -37,8 +37,8 @@
 -- hides in the "linked" bucket rather than showing up as an unlinked one.
 --
 --   (a) backfills to NULL — sync row whose account is now unlinked:
---         rows with external_id, account linked ..... 35  (24 on ACT-d326a3ba,
---                                                          11 on ACT-bb8ad7b1)
+--         rows with external_id, account linked ..... 35  (24 + 11, across the
+--                                                          two linked feeds)
 --         rows with external_id, account UNLINKED ...  0
 --         csv rows ................................ 1527  (all external_id NULL)
 --
