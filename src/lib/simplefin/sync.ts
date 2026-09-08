@@ -12,6 +12,7 @@ import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
 import { matchTransfers, type AmbiguousBucket } from "./matchTransfers";
+import { findSameAccountReversals } from "./sameAccountReversals";
 import { formatCents, parseAmountToCents } from "@/lib/money";
 import { accountClass } from "@/lib/accounts/accountClass";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
@@ -960,6 +961,7 @@ export function linkTransferPairManually(
   aId: number,
   bId: number,
   db: Db = defaultDb,
+  opts: { allowSameAccountReversal?: boolean } = {},
 ): void {
   const rows = db
     .select()
@@ -969,8 +971,37 @@ export function linkTransferPairManually(
 
   if (rows.length !== 2) throw new Error("Both transactions must exist.");
   const [a, b] = rows;
+  // Same-account is refused by default, and the opt-in is a PARAMETER rather
+  // than something derivable from the two rows. That is deliberate: the shape
+  // "same account, same day, equal magnitude, opposite signs" is ~13% coincidence
+  // on real data (see `sameAccountReversals.ts`), so it cannot be the thing that
+  // authorizes the link — a genuine $3.99 subscription charge sitting opposite an
+  // unrelated $3.99 refund satisfies it perfectly. Only the same-account review
+  // queue passes the flag, and it is a server action argument, never a form
+  // field, so a crafted or stale request cannot set it.
+  //
+  // The same-day requirement is the second half of the narrowing: without it
+  // this would accept any two opposite-sign rows of equal size anywhere in one
+  // account's history, which is not a shape any reviewer is ever shown.
   if (a.accountId === b.accountId) {
-    throw new Error("A transfer pair must span two different accounts.");
+    if (!opts.allowSameAccountReversal) {
+      throw new Error("A transfer pair must span two different accounts.");
+    }
+    if (a.date !== b.date) {
+      throw new Error("A same-account reversal must be same-day.");
+    }
+    // The queue never offers a hand-entered row (`findSameAccountReversalCandidates`
+    // filters NOT_MANUAL), so re-asserting it here costs nothing and closes the
+    // gap between "what the UI shows" and "what the action accepts" — the opt-in
+    // is carried by which action ran, which is not by itself proof the ids came
+    // from the queue. It matters specifically for manual rows: pairing one hides
+    // it from every spend surface, and the row menu's undo (`unmarkCardPayment`)
+    // refuses a pair it did not create, so there would be no ordinary way back.
+    if (a.importSource === "manual" || b.importSource === "manual") {
+      throw new Error(
+        "A hand-entered transaction cannot be paired as a reversal — edit or delete the row instead.",
+      );
+    }
   }
   if (Math.sign(a.amountCents) === Math.sign(b.amountCents)) {
     throw new Error("A transfer pair must have opposite signs.");
@@ -1010,6 +1041,58 @@ export function linkTransferPairManually(
         transferPairId: a.id,
         transferRejectedPartnerId: b.transferRejectedPartnerId === a.id ? null : b.transferRejectedPartnerId,
       })
+      .where(eq(schema.transactions.id, b.id))
+      .run();
+  });
+}
+
+/**
+ * Records "these two are NOT a pair" WITHOUT linking them first.
+ *
+ * `unlinkTransferPair` also writes this marker, but only for a pair that is
+ * already linked (`if (row.transferPairId === null) return;`). That left the
+ * review queues with no way to say no: the only route to a durable rejection
+ * was to create the very link you were rejecting and then undo it, and between
+ * those two clicks both rows leave every spending surface. On a credit card it
+ * was worse still — the linked positive leg briefly counted as debt paid down.
+ * Found by adversarial review during /ship 2026-09-08.
+ *
+ * Pair-scoped, exactly like the marker `unlinkTransferPair` writes: rejecting
+ * one combination in a multi-candidate bucket says nothing about the others,
+ * and `findSameAccountReversals` only drops a bucket once EVERY combination in
+ * it is rejected. Same single-valued caveat as the column itself (CLAUDE.md
+ * rule 4) — a row remembers only its most recent rejection.
+ */
+export function rejectTransferPairManually(
+  aId: number,
+  bId: number,
+  db: Db = defaultDb,
+): void {
+  const rows = db
+    .select()
+    .from(schema.transactions)
+    .where(inArray(schema.transactions.id, [aId, bId]))
+    .all();
+
+  if (rows.length !== 2) throw new Error("Both transactions must exist.");
+  const [a, b] = rows;
+
+  // Rejecting an already-linked pair is `unlinkTransferPair`'s job — it has to
+  // clear the link as well, and doing half of that here would leave the rows
+  // paired while claiming they were rejected.
+  if (a.transferPairId !== null || b.transferPairId !== null) {
+    throw new Error(
+      "One of these transactions is already paired — use “Not a transfer” on the linked pair instead.",
+    );
+  }
+
+  db.transaction((tx) => {
+    tx.update(schema.transactions)
+      .set({ transferRejectedPartnerId: b.id })
+      .where(eq(schema.transactions.id, a.id))
+      .run();
+    tx.update(schema.transactions)
+      .set({ transferRejectedPartnerId: a.id })
       .where(eq(schema.transactions.id, b.id))
       .run();
   });
@@ -1183,6 +1266,55 @@ export function findAmbiguousTransfers(
     }));
 
   return matchTransfers(unlinked, isRejectedPair).ambiguous;
+}
+
+/**
+ * Same-account reversal candidates for the review queue — the DB half of
+ * `findSameAccountReversals`, which owns the reasoning (read that file first).
+ *
+ * Deliberately a SECOND query rather than a widening of `findAmbiguousTransfers`
+ * above: that one hands its rows to `matchTransfers`, whose counting argument
+ * is defined across accounts, and feeding same-account rows into it would
+ * change which CROSS-account buckets it considers balanced. The two classes
+ * share a review surface, not a matcher.
+ *
+ * `NOT_MANUAL` is applied for the same reason it is there: a hand-entered card
+ * charge is not bank activity and has no reversal to find.
+ */
+export function findSameAccountReversalCandidates(
+  sinceIso: string,
+  db: Db = defaultDb,
+): AmbiguousBucket<TransferRow>[] {
+  const unlinked: TransferRow[] = db
+    .select({
+      id: schema.transactions.id,
+      accountId: schema.transactions.accountId,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      rawMemo: schema.transactions.rawMemo,
+      bankTransactionNumber: schema.transactions.bankTransactionNumber,
+      transferRejectedPartnerId: schema.transactions.transferRejectedPartnerId,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        gte(schema.transactions.date, sinceIso),
+        isNull(schema.transactions.transferPairId),
+        NOT_MANUAL,
+      ),
+    )
+    .all()
+    // `adjudicatedByTxnNumber` is carried only to satisfy `TransferRow`.
+    // `findSameAccountReversals` never reads it — the cross-source guard it
+    // feeds lives in `matchTransfers`, and it does not apply here: the CSV ±1
+    // matcher declines a same-account pair on the ACCOUNT rule, so "already
+    // examined and declined" carries no information about this shape.
+    .map((r) => ({
+      ...r,
+      adjudicatedByTxnNumber: r.bankTransactionNumber !== null,
+    }));
+
+  return findSameAccountReversals(unlinked, isRejectedPair);
 }
 
 export type { TransferRow };

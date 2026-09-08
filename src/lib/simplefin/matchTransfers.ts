@@ -73,8 +73,13 @@ export type AmbiguousBucket<T extends TransferCandidate> = {
    * carries a bank transaction number the stronger CSV ±1 matcher already
    * examined and declined to pair, so the weaker counting argument alone
    * isn't corroboration enough to auto-link it.
+   * "same-account" — NOT produced by this function. A transaction and its
+   * reversal, both on ONE account, found by `findSameAccountReversals`
+   * (`./sameAccountReversals.ts`). It shares this type so both feed one review
+   * queue, but it has no auto-link path at all: the shape is ~13% coincidence
+   * on real data, so every one of these is a human decision. See that file.
    */
-  reason: "contested" | "unbalanced" | "rejected" | "cross-source";
+  reason: "contested" | "unbalanced" | "rejected" | "cross-source" | "same-account";
 };
 
 export type MatchResult<T extends TransferCandidate> = {
