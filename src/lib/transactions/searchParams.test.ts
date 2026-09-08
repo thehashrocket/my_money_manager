@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { flatten, MAX_SEARCH_LENGTH, searchParamsSchema } from "./searchParams";
+import {
+  flatten,
+  MAX_PAGE_SIZE,
+  MAX_SEARCH_LENGTH,
+  searchParamsSchema,
+} from "./searchParams";
 
 /**
  * D11 — these were unwritable before the extraction: `searchParamsSchema` and
@@ -88,6 +93,62 @@ describe("searchParamsSchema — the pre-existing contract still holds", () => {
 
   it("rejects a pageSize above the cap", () => {
     expect(searchParamsSchema.safeParse(flatten({ pageSize: "5000" })).success).toBe(false);
+  });
+});
+
+/**
+ * The tampering surface. `/transactions` routes a `safeParse` failure through
+ * `notFound()`, so every rejection below is the difference between Next's 404
+ * and a page that renders a plausible-looking row set from a nonsense filter.
+ */
+describe("searchParamsSchema — bounds and rejections", () => {
+  it.each([
+    ["categoryId", "0"],
+    ["categoryId", "-3"],
+    ["categoryId", "1.5"],
+    ["accountId", "0"],
+    ["page", "0"],
+    ["pageSize", "0"],
+    ["pending", "maybe"],
+    ["dateTo", "2026-02-30"],
+  ])("rejects %s=%j", (key, value) => {
+    expect(searchParamsSchema.safeParse(flatten({ [key]: value })).success).toBe(false);
+  });
+
+  it("accepts the pageSize cap exactly, and page 1", () => {
+    const parsed = searchParamsSchema.safeParse(
+      flatten({ pageSize: String(MAX_PAGE_SIZE), page: "1" }),
+    );
+    expect(parsed.success && parsed.data.pageSize).toBe(MAX_PAGE_SIZE);
+    expect(parsed.success && parsed.data.page).toBe(1);
+  });
+
+  it("treats a whitespace-only amount as no filter rather than an invalid one", () => {
+    // `flatten` only maps "" to undefined; "   " reaches the transform intact.
+    const parsed = searchParamsSchema.safeParse(flatten({ amountMin: "   " }));
+    expect(parsed.success && parsed.data.amountMin).toBe(undefined);
+  });
+
+  it("accepts search at exactly MAX_SEARCH_LENGTH and rejects one character more", () => {
+    const atCap = "x".repeat(MAX_SEARCH_LENGTH);
+    expect(searchParamsSchema.safeParse(flatten({ search: atCap })).success).toBe(true);
+    expect(
+      searchParamsSchema.safeParse(flatten({ search: `${atCap}x` })).success,
+    ).toBe(false);
+  });
+
+  it("the zero-result state's `?search=<key>` recovery link parses for a realistic key", () => {
+    // `EmptyState` offers `buildHref({ ...values, merchant: undefined,
+    // search: merchant })` when an exact merchant key matches nothing
+    // (rule 10). `merchant` is unbounded by design (D12) but `search` is
+    // capped, so the recovery only round-trips while keys stay under the cap —
+    // the longest real key today is 69 chars. Pinned so a future normalizer
+    // that produces longer keys fails here rather than 404ing the escape
+    // hatch.
+    const key = "INSTANT PAY ID: 000000000000000000 (TRANSFER TO SAVINGS) JANE DOE";
+    expect(key.length).toBeLessThanOrEqual(MAX_SEARCH_LENGTH);
+    const parsed = searchParamsSchema.safeParse(flatten({ search: key }));
+    expect(parsed.success && parsed.data.search).toBe(key);
   });
 });
 

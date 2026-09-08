@@ -316,3 +316,57 @@ describe("loadMerchantGroups — totalRowCount", () => {
     expect(group.totalRowCount).toBe(1);
   });
 });
+
+describe("loadMerchantGroups — sample memo edges", () => {
+  it("skips a blank or whitespace-only memo rather than disclosing an empty line", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "VENMO", amountCents: -500, rawMemo: "" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "VENMO", amountCents: -500, rawMemo: "   " });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "VENMO",
+      amountCents: -500,
+      rawMemo: "VENMO PAYMENT 7781",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["VENMO PAYMENT 7781"]);
+  });
+
+  it("takes the first three in a deterministic order, not SQLite's scan order", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    // Inserted deliberately out of order: the cap is applied in JS over an
+    // ORDER BY, so which three survive must not depend on insertion order.
+    for (const memo of ["ZED 4", "ALPHA 1", "MID 3", "BETA 2"]) {
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "KIOSK", amountCents: -100, rawMemo: memo });
+    }
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["ALPHA 1", "BETA 2", "MID 3"]);
+  });
+
+  it("does not sample a transfer-paired row's memo", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const anchor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SWEEP",
+      amountCents: -2500,
+      rawMemo: "SWEEP OUT 001",
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SWEEP",
+      amountCents: 2500,
+      transferPairId: anchor.id,
+      rawMemo: "SWEEP IN 002",
+    });
+
+    const [group] = loadMerchantGroups(handle.db);
+    expect(group.sampleMemos).toEqual(["SWEEP OUT 001"]);
+  });
+});

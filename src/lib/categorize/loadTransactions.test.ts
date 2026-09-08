@@ -745,3 +745,28 @@ describe("summarizeByCategory", () => {
     expect(summarizeByCategory(handle.db, { merchant: "NOTHING" })).toEqual([]);
   });
 });
+
+describe("summarizeByCategory — tie-breaking", () => {
+  it("breaks an equal-count tie by category name, so the header is stable across runs", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const zed = seedCategory("Zed");
+    const alpha = seedCategory("Alpha");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: zed.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: alpha.id });
+
+    const breakdown = summarizeByCategory(handle.db, { merchant: "TIE" });
+    expect(breakdown.map((r) => r.categoryName)).toEqual([alpha.name, zed.name]);
+  });
+
+  it("sorts Uncategorized last even when it is the biggest group, once tied", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: null });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "TIE", categoryId: gas.id });
+
+    const breakdown = summarizeByCategory(handle.db, { merchant: "TIE" });
+    expect(breakdown.map((r) => r.categoryId)).toEqual([gas.id, null]);
+  });
+});
