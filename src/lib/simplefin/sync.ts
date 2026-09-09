@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 import {
   createSnapshot,
   pruneSnapshots,
@@ -118,6 +118,15 @@ export type SyncOutcome =
   | {
       status: "synced";
       batchId: number;
+      /**
+       * Rows actually written, which is NOT necessarily what was staged: a
+       * relink that commits during the feed round trip drops that account's
+       * rows inside the write transaction (`verifyStagedLinks`). It can
+       * therefore be 0 while `status` is still `synced` — the batch exists,
+       * it just holds nothing, and `warnings` says why. The `up-to-date`
+       * early return above only covers "the feed sent nothing new", which is
+       * a different fact and reads differently in the UI.
+       */
       insertedCount: number;
       pairsLinked: number;
       ambiguous: CrossAccountBucket<TransferRow>[];
@@ -754,7 +763,12 @@ export async function syncSimpleFin(
     warnings.push(snapshotWarning);
   }
 
-  const batchId = db.transaction((tx) => {
+  const written = db.transaction((tx) => {
+    // The links were read before the network round trip; re-check them here,
+    // inside the transaction that actually writes. See `verifyStagedLinks`.
+    const { verified, warnings: linkWarnings } = verifyStagedLinks(staged, tx);
+    const verifiedTotal = verified.reduce((n, s) => n + s.rows.length, 0);
+
     // Same contract as the CSV path: read the trained rules once for the batch
     // and resolve every row against them. Keyed on `normalized_merchant`, never
     // on MX's `payee` — see CLAUDE.md's SimpleFIN section.
@@ -771,7 +785,7 @@ export async function syncSimpleFin(
       .returning({ id: schema.importBatches.id })
       .all();
 
-    for (const { account, feedId, rows } of staged) {
+    for (const { account, feedId, rows } of verified) {
       for (const row of rows) {
         const match = matchRule(row.normalizedMerchant, row.amountCents);
 
@@ -824,13 +838,19 @@ export async function syncSimpleFin(
       }
     }
 
+    // `verifiedTotal`, not `totalToInsert`: the batch must count what was
+    // actually written, or `undoSyncBatch` and `/import/success/[batchId]`
+    // both report rows that do not exist.
     tx.update(schema.importBatches)
-      .set({ transactionCount: totalToInsert })
+      .set({ transactionCount: verifiedTotal })
       .where(eq(schema.importBatches.id, batch.id))
       .run();
 
-    return batch.id;
+    return { batchId: batch.id, insertedCount: verifiedTotal, linkWarnings };
   });
+
+  const { batchId, insertedCount } = written;
+  warnings.push(...written.linkWarnings);
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
@@ -850,7 +870,7 @@ export async function syncSimpleFin(
   return {
     status: "synced",
     batchId,
-    insertedCount: totalToInsert,
+    insertedCount,
     pairsLinked,
     ambiguous,
     snapshot,
@@ -865,6 +885,81 @@ function missingAccountWarnings(names: string[]): string[] {
     (n) =>
       `"${n}" disappeared from the ledger while the sync was running, so its balance could not be checked.`,
   );
+}
+
+/**
+ * Re-checks, INSIDE the write transaction, that every staged account is still
+ * linked to the feed its rows were staged against.
+ *
+ * The account list is read before the SimpleFIN round trip and the insert
+ * happens after it, so `account.id` and `feedId` are a PRECONDITION carried
+ * across an `await` — and `setAccountLink` can commit in that window. Both
+ * controls live on the same `/sync` page, so it takes two tabs and no crafted
+ * input:
+ *
+ *   t0  syncSimpleFin reads accounts   account 1 -> feed A
+ *   t1  await fetchAccounts(...)  ─────┐  (seconds; SYNC_TIMEOUT_MS bounds it)
+ *   t2                                │  setAccountLink(1, feed B) commits
+ *   t3  insert with account.id=1, ◄───┘  ...rows from feed A, on an account
+ *       feedId=feed A                     that is now feed B's
+ *
+ * The result is not a duplicate but something the dedup passes cannot see at
+ * all: feed A's rows filed under an account the user has repointed, carrying
+ * feed A provenance. That is the misfiling class migration `0020` exists to
+ * prevent, reintroduced as a race rather than as a schema mistake.
+ *
+ * Same idiom as `undoSyncBatch`, which re-checks its own "still the newest
+ * batch" precondition inside its transaction rather than trusting the page's
+ * initial check (CLAUDE.md rule 5) — that reasoning applies here with more
+ * force, because this write is the one that moves money onto an account.
+ *
+ * DROPS the affected account's rows rather than failing the whole sync. Every
+ * other account's rows were staged against a link that did not move, so they
+ * are correct and refusing them would punish accounts that did nothing. The
+ * dropped rows are not lost: nothing was written for them, so the next sync
+ * re-stages them against whatever the link says then. The warning is what
+ * makes it non-silent, and `/sync` never renders a warning-carrying sync as a
+ * plain success.
+ *
+ * Covers three ways a link stops matching, deliberately as one test rather
+ * than three: repointed to a different feed, unlinked entirely (NULL), and
+ * the account row deleted outright. All three mean the same thing here — the
+ * account this row set was staged for is not the account now in the ledger.
+ */
+function verifyStagedLinks<T extends { account: { id: number; name: string }; feedId: string }>(
+  staged: readonly T[],
+  tx: AnyDb,
+): { verified: T[]; warnings: string[] } {
+  const verified: T[] = [];
+  const warnings: string[] = [];
+
+  for (const entry of staged) {
+    const current = tx
+      .select({ simplefinAccountId: schema.accounts.simplefinAccountId })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, entry.account.id))
+      .get();
+
+    if (current === undefined) {
+      warnings.push(
+        `"${entry.account.name}" was deleted while the sync was running, so its transactions were not imported. Nothing was written for it.`,
+      );
+      continue;
+    }
+    // `!==` covers a repoint AND an unlink: NULL is not the staged feed id
+    // either, and an unlinked account must not receive rows from the feed it
+    // no longer claims.
+    if (current.simplefinAccountId !== entry.feedId) {
+      warnings.push(
+        `"${entry.account.name}" was re-linked to a different bank account while the sync was running, so its transactions were not imported. Nothing was written for it — sync again to import them against the current link.`,
+      );
+      continue;
+    }
+
+    verified.push(entry);
+  }
+
+  return { verified, warnings };
 }
 
 /**

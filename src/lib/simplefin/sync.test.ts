@@ -2853,3 +2853,176 @@ describe("findSameAccountReversalCandidates — the query around the bucketing",
     expect(buckets[0].negatives.map((r) => r.id).sort()).toEqual([debitA.id, debitB.id].sort());
   });
 });
+
+describe("syncSimpleFin re-verifies the account link inside the write transaction", () => {
+  /**
+   * The link set is read BEFORE `await fetchAccounts` and the insert happens
+   * AFTER it, so `account.id` + `feedId` are a precondition carried across an
+   * await. `setAccountLink` can commit in that window — both controls live on
+   * `/sync`, so it takes two tabs and no crafted input.
+   *
+   * These drive the REAL race rather than simulating its outcome: the mocked
+   * `fetchAccounts` mutates the ledger and only then resolves, which is
+   * exactly where a concurrent relink lands.
+   */
+  function relinkDuringFetch(
+    accountId: number,
+    to: string | null,
+    simplefinAccountId: string,
+    transactions: SimpleFinTransaction[],
+  ): void {
+    fetchAccountsMock.mockImplementation(async () => {
+      handle.db
+        .update(schema.accounts)
+        .set({ simplefinAccountId: to })
+        .where(eq(schema.accounts.id, accountId))
+        .run();
+      return {
+        accounts: [
+          {
+            id: simplefinAccountId,
+            name: "REGULAR SAVINGS",
+            balance: "0.00",
+            "available-balance": "0.00",
+            "balance-date": SEP_1_NOON,
+            transactions,
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+  }
+
+  it("writes NOTHING for an account re-pointed to a different feed mid-sync", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    relinkDuringFetch(account.id, "ACT-2", "ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(0);
+
+    // The whole point: feed ACT-1's row must not land on an account that is
+    // now ACT-2's, carrying ACT-1 provenance. Neither dedup pass could ever
+    // have seen that row again.
+    expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
+
+    // Non-silent, and it names the account so the user can act.
+    expect(outcome.warnings.some((w) => w.includes("re-linked") && w.includes("Checking"))).toBe(true);
+
+    // The batch records what actually happened, not what was staged — or
+    // undoSyncBatch and /import/success both report rows that do not exist.
+    const batches = handle.db.select().from(schema.importBatches).all();
+    expect(batches).toHaveLength(1);
+    expect(batches[0].transactionCount).toBe(0);
+  });
+
+  it("writes NOTHING for an account UNLINKED mid-sync (NULL is not the staged feed id)", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    relinkDuringFetch(account.id, null, "ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(0);
+    expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
+    expect(outcome.warnings.some((w) => w.includes("re-linked"))).toBe(true);
+  });
+
+  it("drops ONLY the moved account's rows, and still writes every other account's", async () => {
+    // Refusing the whole sync would punish an account whose link never moved.
+    const moved = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    const steady = seedAccount({ simplefinAccountId: "ACT-9", name: "Savings" });
+
+    fetchAccountsMock.mockImplementation(async () => {
+      handle.db
+        .update(schema.accounts)
+        .set({ simplefinAccountId: "ACT-2" })
+        .where(eq(schema.accounts.id, moved.id))
+        .run();
+      return {
+        accounts: [
+          {
+            id: "ACT-1",
+            name: "CHECKING",
+            balance: "0.00",
+            "available-balance": "0.00",
+            "balance-date": SEP_1_NOON,
+            transactions: [feedTxn("TRN-a", "-4.87")],
+          },
+          {
+            id: "ACT-9",
+            name: "REGULAR SAVINGS",
+            balance: "0.00",
+            "available-balance": "0.00",
+            "balance-date": SEP_1_NOON,
+            transactions: [feedTxn("TRN-z", "-9.99")],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].accountId).toBe(steady.id);
+    expect(rows[0].externalId).toBe("TRN-z");
+    expect(rows[0].simplefinSourceAccountId).toBe("ACT-9");
+
+    expect(handle.db.select().from(schema.importBatches).all()[0].transactionCount).toBe(1);
+  });
+
+  it("writes NOTHING for an account DELETED mid-sync, rather than throwing", async () => {
+    // Same class as the repointed case and folded into the same guard: the
+    // account these rows were staged for is not the account now in the ledger.
+    // finaliseBalances already treats a vanished account as a warning, not a
+    // crash; the write path now agrees with it.
+    const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    fetchAccountsMock.mockImplementation(async () => {
+      handle.db.delete(schema.accounts).where(eq(schema.accounts.id, account.id)).run();
+      return {
+        accounts: [
+          {
+            id: "ACT-1",
+            name: "REGULAR SAVINGS",
+            balance: "0.00",
+            "available-balance": "0.00",
+            "balance-date": SEP_1_NOON,
+            transactions: [feedTxn("TRN-a", "-4.87")],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(0);
+    expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
+    expect(outcome.warnings.some((w) => w.includes("deleted") && w.includes("Checking"))).toBe(true);
+  });
+
+  it("writes normally when the link does NOT move — the guard costs nothing in the ordinary case", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+    respondWith("ACT-1", [feedTxn("TRN-a", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("re-linked"))).toBe(false);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].accountId).toBe(account.id);
+    expect(rows[0].simplefinSourceAccountId).toBe("ACT-1");
+  });
+});
