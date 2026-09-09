@@ -246,6 +246,18 @@ export const transactions = sqliteTable(
     // a real primary key from the source, so it dedupes re-syncs exactly —
     // unlike import_row_hash, which needs a row index to break ties.
     externalId: text("external_id"),
+    // WHICH FEED this row came from — `accounts.simplefin_account_id` as it stood
+    // at import time, not a foreign key. NULL for CSV and manual rows.
+    //
+    // This is provenance, and it is deliberately NOT derivable from
+    // `account_id`: a local account's link can be re-pointed, so joining through
+    // `accounts` tells you where the account points NOW, never where a given row
+    // actually came from. `setAccountLink` used to clear `external_id` on relink
+    // to dodge a unique-index collision, and that erasure is what made the
+    // cross-account double-count unfixable — sync could no longer tell one
+    // account's feed rows from another's. Recording the feed is what lets the
+    // clearing go away entirely.
+    simplefinSourceAccountId: text("simplefin_source_account_id"),
     transferPairId: integer("transfer_pair_id").references(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },
@@ -269,9 +281,24 @@ export const transactions = sqliteTable(
     index("transactions_account_date_idx").on(t.accountId, t.date),
     index("transactions_category_idx").on(t.categoryId),
     index("transactions_merchant_idx").on(t.normalizedMerchant),
-    uniqueIndex("transactions_account_external_id_unique")
-      .on(t.accountId, t.externalId)
+    // Scoped by FEED, not by local account. A SimpleFIN transaction id is unique
+    // within its feed account, which is exactly what this index needs to assert;
+    // `account_id` was only ever a proxy for it, and a wrong one the moment a
+    // link moves. Scoping by the feed also means a re-point needs no data
+    // rewrite at all: the rows keep both their id and their provenance, so the
+    // next sync recognizes them wherever they happen to live.
+    uniqueIndex("transactions_feed_external_id_unique")
+      .on(t.simplefinSourceAccountId, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL`),
+    // Forward-looking, NOT load-bearing today: the unique index above already
+    // covers `syncSimpleFin`'s id pass (`simplefin_source_account_id = ? AND
+    // external_id IS NOT NULL` plans as a covering search on it, verified with
+    // EXPLAIN QUERY PLAN), and the content pass's `ne()` sits inside an OR and
+    // is not sargable. Kept because a per-feed lookup that is not also
+    // external_id-scoped is the obvious next reader, and one extra index on a
+    // table taking a few hundred inserts a year costs nothing measurable.
+    // Do not cite it as backing the dedup lookup — removing it regresses nothing.
+    index("transactions_feed_source_idx").on(t.simplefinSourceAccountId),
   ],
 );
 
