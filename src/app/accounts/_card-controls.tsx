@@ -120,9 +120,12 @@ export function CardControls({
           onReconcileInstead={() => setHandoff((n) => n + 1)}
         />
       ) : null}
-      {/* D2=A — a credit limit and a minimum payment are card-only concepts,
-          so this rides the same gate as the charge affordance rather than
-          appearing on a mortgage row that draws neither. */}
+      {/* D2=A — a credit limit and a minimum payment are card-only concepts, so
+          this is gated on being a CARD and on nothing else. It deliberately
+          does NOT ride the charge affordance's gate: terms have no date to
+          refuse, and folding the two together is what made `Card details`
+          vanish on a card anchored today for one review cycle. See
+          `canEditTerms`' docstring above for the full account. */}
       {canEditTerms ? (
         <CardTermsDisclosure
           accountId={accountId}
