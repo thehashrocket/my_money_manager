@@ -105,7 +105,7 @@ A credit card carries a credit limit and a minimum payment, both editable after 
 
 - **Reconcile** — type what the liability actually owes today, as a positive number. The normal way a card's balance moves, and the only way for any liability that isn't feed-linked — including a car loan.
 - **Refresh** — pull the balance straight from the bank feed. Offered only where it can work: a feed-linked account with no transactions of its own, which in practice means the mortgage. It refreshes balances only; it does not import transactions.
-- **Add a charge** (or a refund) — a hand-entered, categorized transaction, so card spending counts toward its envelope in the month you spent it. A charge dated on or *before* your last reconcile is refused, because that reconcile already includes it and counting it again would be spending that never moved the balance; the refusal hands you to Reconcile instead.
+- **Add a charge** (or a refund) — a hand-entered, categorized transaction, so card spending counts toward its envelope in the month you spent it. A charge dated on or *before* your last reconcile is refused, because that reconcile already includes it and counting it again would be spending that never moved the balance; the refusal hands you to Reconcile instead. When that leaves no valid date at all — the balance you're working from is dated today — the button is hidden rather than offered and then refused. Anything you typed in by hand can be taken back out again from the transaction list's row menu ("Remove this charge", behind a confirmation, and only ever on rows you typed — a transaction from your bank can't be removed this way). Adding the first hand-entered charge to a card whose balance comes from the bank switches that card to Reconcile, which the dialog tells you before you save; removing it hands the balance back to the bank.
 - **Mark a transaction as a card payment** — from the row menu on `/transactions`, pairing the money leaving checking with the money landing on the card. Paired, it counts as neither spending nor income. Unmark it the same way.
 
 Reconcile and Refresh each record the balance they replaced, and the row offers to go back to it. That undo is itself undoable, so it's a toggle rather than a one-shot. Only one prior balance is kept, though — there's no history series behind it, which is also why saving a reconcile that changes nothing is treated as a no-op rather than spending that single slot on it. (A charge or a card payment moves the balance without touching the anchor, so there's nothing for those two to record.)
@@ -138,12 +138,15 @@ src/
                  /sync, /import (+ preview + success)
   components/    shadcn/ui (components/ui) + design-system pieces (components/ledger)
   db/            Drizzle schema + HMR-safe client singleton
-  lib/           parseCsv, normalize, hash, transferPair, snapshot, money, rules
+  lib/           parseCsv, normalize, hash, transferPair, snapshot, money, rules,
+                 revalidateAfterWrite (the one guard every server action puts around
+                 the page refresh that follows a committed write)
   lib/accounts/  Live per-account balance queries, the asset/liability split
                  (accountClass, isLongTermLiability), assets/debt/net worth totals
                  (summarizeBalances), card display rules (resolveUtilizationDisplay,
                  resolveStalenessDisplay, resolveBalanceAction, paidDownCents), and the
-                 hand-entered card write path (manualTransaction, validateCardTermsInput)
+                 hand-entered card write path (manualTransaction — add a charge and
+                 remove one — plus validateCardTermsInput)
   lib/budget/    Month view (loadMonthView, resolveRowDisplay), allocations (upsertAllocation,
                  validateAllocateInput), category CRUD + archive + reclassify (manageCategories,
                  archiveCategory, setCategoryKind, loadAllCategories), copyMonth, monthOfIso.

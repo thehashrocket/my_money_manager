@@ -4,7 +4,8 @@ import { useActionState, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
 import { formatMonthDay } from "@/lib/now";
-import { IDLE, type AccountsActionState } from "./action-state";
+import { IDLE } from "./action-state";
+import { ActionStatus } from "@/components/ledger/action-status";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -21,20 +22,6 @@ import {
  * unmount the route and take the typed balance with it.
  */
 
-function Status({ state }: { state: AccountsActionState }) {
-  if (state.status === "idle") return null;
-  return (
-    <p
-      role="status"
-      aria-live="polite"
-      className={`mt-1 text-base ${
-        state.status === "error" ? "text-redbrown" : "text-ledger"
-      }`}
-    >
-      {state.message}
-    </p>
-  );
-}
 
 /**
  * A disclosure, not a permanently-open form. The layout spec renders
@@ -202,7 +189,7 @@ export function ReconcileForm({
         {pending ? "Saving…" : "Save"}
       </Button>
       <div className="w-full">
-        <Status state={state} />
+        <ActionStatus state={state} />
       </div>
     </form>
   );
@@ -229,7 +216,7 @@ export function RefreshButton({
         {pending ? "Refreshing…" : "Refresh"}
       </Button>
       <span className="sr-only">{`Refresh ${accountName}'s balance from the bank`}</span>
-      <Status state={state} />
+      <ActionStatus state={state} />
     </form>
   );
 }
@@ -280,7 +267,7 @@ export function RevertBalanceButton({
       <span className="sr-only">
         {`Put ${accountName}'s balance back to what it was on ${asOf}`}
       </span>
-      <Status state={state} />
+      <ActionStatus state={state} />
     </form>
   );
 }

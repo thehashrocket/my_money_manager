@@ -44,8 +44,12 @@ Tailwind utilities: `text-terracotta`, `text-ledger`, `text-redbrown`, `text-amb
 | Expense envelope progress bar, warn/over fill (DS40) | `budget/[year]/[month]/_month-editor.tsx`'s `BAR_CLASS.amber` (`envelope-card.tsx`'s `FILL_COLORS` is gone — D8 deleted the component, which held a drifted redbrown-on-overspend copy of this rule) | N/A — a fill color, not text; the 3:1 contrast concern DS8′/DS13 raised is text-specific |
 | Import preview: calendar-invalid rows, pending badge | `import/preview/[id]/page.tsx` | **No** — raw `amber-300`/`amber-50`/`amber-800`/`amber-700`, not Ledger Paper tokens at all |
 | Categorize/transactions sticky backlog banners | `categorize/_categorize-ui.tsx`, `transactions/_transactions-ui.tsx` | Yes — converted by D21 (merchant-drilldown PR); same 18%/45%/50% mix as `BacklogBanner` |
+| Post-commit refresh warning ("saved, but this page couldn't refresh") | `components/ledger/action-status.tsx`'s `StatusWarning`, shared by `/accounts`, `/import`, `/goals` and `/budget` | Yes — 18% / 45%, the same formula `sync/ActionForm.tsx`'s warnings list uses for the byte-identical sentence |
+| "Adding activity by hand switches this card to Reconcile" | `accounts/_charge-dialog.tsx` | Yes — was 12% / 35% (a third mix) until the v0.27.0 review; now on the shared formula |
 | Uncategorized row badge | `transactions/_transaction-row.tsx`'s `CategoryBadge` | Yes — converted by D21. D20 made this one load-bearing: it is the only badge colour encoding a *state* rather than a label, which is why it stays amber while every other category badge is monochrome |
 | Trend chart's 4th category color | `globals.css`'s `--chart-4: var(--accent-amber)` | N/A — categorical chart color, not a warning at all; coincidence of hue, not shared meaning |
+
+**Added v0.27.0:** two more, both on the shared formula. The refresh warning is the one that matters for blast radius — it is now rendered by FOUR routes (`/accounts`, `/import`, `/goals`, `/budget`) through one component, across seven call sites, which is the widest spread any single amber surface has. (It is not the first with more than one caller: `BacklogBanner`, the first row of this table, is rendered from `/` and `/budget/[year]/[month]`.) `/sync` renders the byte-identical sentence through its own older `ActionForm.tsx` warnings list, and `/accounts`' charge dialog sends it to a Sonner `toast.warning` instead, because that dialog closes on success — neither is a call site of this component. `/sync`'s list IS on the same 18%/45% mix; the toast is not, and cannot be: `src/app/layout.tsx` mounts `<Toaster richColors>` and nothing in this app styles Sonner, so that one delivery of the sentence renders in Sonner's own warning palette. One sentence, two visual languages — recorded rather than fixed, because restyling Sonner is a change to every toast in the app. The charge dialog's "switches it to Reconcile" panel is the other addition, and it is the token's first use as a *consequence-of-this-action* notice rather than a state.
 
 **What DS48 anticipated vs. what's actually here:** DS48 named four meanings (backlog-exists, categorize-count, late-assigning, `stale`). The real count is higher — sync warnings, the F1 banner, the progress-bar fill, and the chart color all also use the token, and **one** surface still uses the *raw* Tailwind amber palette instead of the token at all — `import/preview` — which is a second, separate kind of drift `mm-design-system-documented-not-adopted` already named. It was three: D21 (the merchant-drilldown PR) converted the two sticky backlog strips and the transaction row badge, and deliberately left `import/preview` alone because it sits on the import path, the most correctness-critical code in the repo. That last one is tracked in `TODOS.md`. Distinguishable today by context; enforced by nothing. No consolidation in this pass — recorded so a future change to `--accent-amber` (or a future addition of a fifth meaning) has one place to check for blast radius, per DS48's own scope.
 
@@ -364,6 +368,18 @@ It is per-row rather than a page-level button because eligibility is a
 per-account property — a page-level "Refresh balances" would silently do
 nothing for the Visa and owe the user a sentence like "1 refreshed, 2
 skipped".
+
+**"Exactly one" is about the BALANCE control and nothing else (v0.27.0).** The
+card's own affordances — "Add a charge" and "Card details" — are gated
+separately, so a feed-linked card draws `[ Refresh ] [ Add a charge ]
+[ Card details ]` rather than `Refresh` alone. Rendering them inside the
+Reconcile branch is what the mockup above looks like it implies, and it
+deadlocked that row: the only way to reach the form that creates the first
+charge was to already have one. "Add a charge" additionally disappears when
+no legal charge date exists (the anchor has caught up to today), because an
+always-present button that can only refuse is the failure `assignableKinds`
+established the pattern against; "Card details" never does, since terms have
+no date to refuse. CLAUDE.md rule 9 carries the full account.
 
 **Zero liabilities keeps the section (DS54).** One neutral `--bg-inset` row
 reading "No liabilities tracked yet" plus "Add a credit card or loan →".

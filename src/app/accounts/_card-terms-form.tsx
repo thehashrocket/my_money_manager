@@ -3,7 +3,8 @@
 import { useActionState, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
-import { IDLE, type AccountsActionState } from "./action-state";
+import { IDLE } from "./action-state";
+import { ActionStatus } from "@/components/ledger/action-status";
 import { updateCardTermsAction } from "./actions";
 
 /**
@@ -24,18 +25,6 @@ const LABEL = "mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3";
 const FIELD =
   "w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]";
 
-function Status({ state }: { state: AccountsActionState }) {
-  if (state.status === "idle") return null;
-  return (
-    <p
-      role="status"
-      aria-live="polite"
-      className={`mt-1 text-base ${state.status === "error" ? "text-redbrown" : "text-ledger"}`}
-    >
-      {state.message}
-    </p>
-  );
-}
 
 export function CardTermsDisclosure({
   accountId,
@@ -144,7 +133,7 @@ export function CardTermsDisclosure({
         Cancel
       </Button>
       <div className="w-full">
-        <Status state={state} />
+        <ActionStatus state={state} />
       </div>
     </form>
   );

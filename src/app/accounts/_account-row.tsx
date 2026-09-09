@@ -55,6 +55,12 @@ export function AccountRow({
   const utilization = resolveUtilizationDisplay(account.balanceCents, account.creditLimitCents);
   const action = resolveBalanceAction(account, account.hasAnyRows);
 
+  // Is there any date a hand-entered charge could legally carry? The window is
+  // `startingBalanceDate < date <= today`, so it closes exactly when the anchor
+  // has caught up to today. Derived here rather than inside the dialog because
+  // it decides whether the affordance is OFFERED, not what it says once open.
+  const chargeableDateExists = account.startingBalanceDate < today;
+
   const amountLabel = isLiability
     ? `owed ${formatCents(Math.abs(account.balanceCents))}`
     : undefined;
@@ -153,10 +159,13 @@ export function AccountRow({
           `/import`'s repair form excludes every liability (E18) while
           pointing the user at this page.
           
-          `longTerm` gates only the CHARGE affordance, which is a genuinely
-          separate question — a mortgage takes no hand-entered charges (D3=A),
-          but it still has a balance somebody may need to correct. */}
-      {isLiability && action === "reconcile" ? (
+          `longTerm` gates the two CARD affordances instead — hand-entered
+          charges and the card-terms form — and neither of those is the balance
+          question: a mortgage takes no charges and has no credit limit (D3=A),
+          but it still has a balance somebody may need to correct. This
+          paragraph has now named the wrong number of gates twice — if a third
+          card-only affordance appears, name it here too. */}
+      {isLiability ? (
         <CardControls
           accountId={account.id}
           accountName={account.name}
@@ -165,7 +174,43 @@ export function AccountRow({
           categories={categories}
           creditLimitCents={account.creditLimitCents}
           minimumPaymentCents={account.minimumPaymentCents}
-          canAddCharge={!longTerm}
+          // OFFERED ONLY WHEN THE SERVER WILL ACCEPT IT. `createCardActivity`
+          // refuses `date <= startingBalanceDate` and the dialog caps the date
+          // at today, so on a feed-refreshed card whose anchor IS today the
+          // legal date set is EMPTY — the button could only ever refuse.
+          // `refreshLiabilityBalances` writes that anchor from the bank's own
+          // balance-date, so it is the ordinary state on a sync day, not an
+          // edge case. (When the feed's date lags, which is the common case on
+          // the real ledger, the button appears and works.)
+          //
+          // This is the pattern rule 8 already established: v0.24.0's
+          // `assignableKinds` work made the row menu's kind item appear exactly
+          // when the server would accept it, because a refusal the user can
+          // only discover by triggering it is worse than an absent control.
+          // Card DETAILS stays available either way — it has no date to refuse.
+          canAddCharge={!longTerm && chargeableDateExists}
+          // NOT `canAddCharge`. Terms have no date to refuse, so the credit-limit
+          // repair form must stay reachable on a card anchored today — that is
+          // the half of the original deadlock that always mattered, and folding
+          // it into the charge flag took it away again for one review cycle.
+          canEditTerms={!longTerm}
+          // DS55 IS INTACT: `action` still solely decides which balance control
+          // renders, and it is relayed here rather than re-derived.
+          //
+          // What changed is that `CardControls` used to be mounted ONLY on the
+          // `reconcile` branch, which silently gated two things that have
+          // nothing to do with the balance control — "Add a charge" and the
+          // card-terms form — on it. That deadlocked a feed-linked card:
+          // `resolveBalanceAction` returns "refresh" while `hasAnyRows` is
+          // false, so the row offered Refresh and nothing else, and the only
+          // way to reach the charge form was to already have a row. A card
+          // cannot get its first hand-entered charge, and a mistyped credit
+          // limit cannot be repaired — which is the exact purpose rule 9 gives
+          // that form — without unlinking the account from SimpleFIN first.
+          //
+          // The two questions were always separate; the DS55 block above has
+          // said so since it was written. Only the nesting disagreed.
+          showReconcile={action === "reconcile"}
         />
       ) : null}
       {isLiability && action === "refresh" ? (

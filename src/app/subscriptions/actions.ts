@@ -4,18 +4,35 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db, schema } from "@/db";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
 import {
   fileAllSubscriptions,
   fileSubscription,
-  type CategorizeAllSubscriptionsOutcome,
-  type SubscriptionCategorizeOutcome,
 } from "@/lib/subscriptions/categorizeSubscriptions";
+import type {
+  CategorizeAllSubscriptionsResult,
+  SubscriptionCategorizeResult,
+  SubscriptionDismissResult,
+} from "./action-state";
 
 const merchantSchema = z.object({
   normalizedMerchant: z.string().min(1).max(500),
 });
 
-export async function dismissSubscriptionAction(formData: FormData) {
+/**
+ * Route tag for `guardRefresh`'s log line; not user-facing.
+ *
+ * Declared above its first use rather than at the foot of the file: every
+ * reference today sits in a deferred function body, so the old placement
+ * worked — but only for that reason, and the next module-level use above the
+ * declaration would be a TDZ `ReferenceError` at import time that `tsc` does
+ * not flag.
+ */
+const SCOPE = "/subscriptions";
+
+export async function dismissSubscriptionAction(
+  formData: FormData,
+): Promise<SubscriptionDismissResult> {
   const parsed = merchantSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) throw new Error("Invalid input");
 
@@ -24,10 +41,12 @@ export async function dismissSubscriptionAction(formData: FormData) {
     .onConflictDoNothing()
     .run();
 
-  revalidatePath("/subscriptions");
+  return { warning: guardRefresh(SCOPE, () => revalidatePath("/subscriptions")) };
 }
 
-export async function restoreSubscriptionAction(formData: FormData) {
+export async function restoreSubscriptionAction(
+  formData: FormData,
+): Promise<SubscriptionDismissResult> {
   const parsed = merchantSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) throw new Error("Invalid input");
 
@@ -40,7 +59,7 @@ export async function restoreSubscriptionAction(formData: FormData) {
     )
     .run();
 
-  revalidatePath("/subscriptions");
+  return { warning: guardRefresh(SCOPE, () => revalidatePath("/subscriptions")) };
 }
 
 /**
@@ -53,7 +72,7 @@ export async function restoreSubscriptionAction(formData: FormData) {
  */
 export async function categorizeSubscriptionAction(
   formData: FormData,
-): Promise<SubscriptionCategorizeOutcome> {
+): Promise<SubscriptionCategorizeResult> {
   const parsed = merchantSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) throw new Error("Invalid input");
 
@@ -63,14 +82,14 @@ export async function categorizeSubscriptionAction(
     subscriptionsCategoryId(),
   );
 
-  revalidateAfterFiling();
-  return outcome;
+  // The spread order is deliberate: `outcome` first, warning second, so the
+  // refusal/retarget sentences can never be clobbered by the refresh half.
+  return { ...outcome, warning: revalidateAfterFiling() };
 }
 
-export async function categorizeAllSubscriptionsAction(): Promise<CategorizeAllSubscriptionsOutcome> {
+export async function categorizeAllSubscriptionsAction(): Promise<CategorizeAllSubscriptionsResult> {
   const outcome = fileAllSubscriptions(db, subscriptionsCategoryId());
-  revalidateAfterFiling();
-  return outcome;
+  return { ...outcome, warning: revalidateAfterFiling() };
 }
 
 function subscriptionsCategoryId(): number {
@@ -88,10 +107,24 @@ function subscriptionsCategoryId(): number {
  * filing a subscription empties part of the uncategorized backlog and moves
  * spend into a category, and neither of those was revalidated before, so both
  * surfaces kept showing rows this action had already filed.
+ *
+ * Guarded, and returning `string | undefined` rather than `void`. This ran bare
+ * after a COMMITTED `bulkCategorize`, so a throw from `revalidatePath` escaped
+ * the action and rendered `/subscriptions/error.tsx` — discarding the whole
+ * per-merchant outcome object on the way out. That object is not decoration
+ * here: this page has no undo (rule 6), and `refusal` / `retargetedRule` are
+ * the ONLY place the user is ever told that a hand-trained rule was withheld or
+ * silently repointed. A refresh failure must not be able to swallow it.
+ *
+ * The guard lives here rather than at the two call sites so there is one place
+ * to get it right, which is the same argument that put the try/catch in
+ * `src/lib/revalidateAfterWrite.ts` rather than in seven route files.
  */
-function revalidateAfterFiling(): void {
-  revalidatePath("/subscriptions");
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/budget", "layout");
+function revalidateAfterFiling(): string | undefined {
+  return guardRefresh(SCOPE, () => {
+    revalidatePath("/subscriptions");
+    revalidatePath("/transactions");
+    revalidatePath("/categorize");
+    revalidatePath("/budget", "layout");
+  });
 }

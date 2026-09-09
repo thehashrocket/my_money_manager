@@ -11,6 +11,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { StatusWarning } from "@/components/ledger/action-status";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import type { ReclassifyCandidate } from "@/lib/budget/setCategoryKind";
 import { setCategoryKindAction, type SetCategoryKindActionState } from "../../actions";
@@ -95,12 +96,36 @@ export function ReclassifyIncomeBanner({ candidates }: { candidates: ReclassifyC
             ) : null}
 
             {state.status === "error" ? <p className="text-money-neg">{state.message}</p> : null}
+            {/* The write LANDED but the page behind it is stale. Rendered here
+                because this banner does not unmount on success — the route
+                re-renders it away only once the revalidation it is reporting on
+                has failed to happen — so without this the user sees the category
+                still filed as an expense and clicks again. */}
+            {state.status === "ok" && state.warning !== undefined ? (
+              <StatusWarning warning={state.warning} />
+            ) : null}
           </div>
 
           <DialogFooter showCloseButton>
             <form action={formAction}>
               <input type="hidden" name="categoryId" value={categoryId} />
               <input type="hidden" name="kind" value="income" />
+              {/* THE CONFIRMATION THIS DIALOG ALREADY IS.
+                  
+                  `setCategoryKind` refuses the X1 branch without it (rule 8,
+                  v0.26.0), and this form never sent it — so the banner, which is
+                  the ONLY repair for an uncomputable `leftToBudgetCents`, was
+                  refused for every USED category. That is the entire population
+                  it serves: X1 exists to reclassify a category that already has
+                  paychecks in it, and "used" is X1's own precondition.
+                  
+                  Sending it is honest rather than a rubber stamp. This whole
+                  dialog IS the confirmation the server is asking about — it
+                  names the consequence, requires an explicit pick, and disables
+                  the button until the picked category is all-positive. The row
+                  menu's dialog sends the same flag for the same reason; what
+                  neither may do is send it from a path with no dialog. */}
+              <input type="hidden" name="confirmedIrreversible" value="yes" />
               <Button
                 type="submit"
                 variant="primary"

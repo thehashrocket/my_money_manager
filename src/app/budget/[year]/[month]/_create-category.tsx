@@ -67,13 +67,37 @@ export function NewCategoryRow({
     if (trimmed === "" || pending) return;
     setPending(true);
     setError(null);
-    const result = await createCategoryAction({ name: trimmed, kind, parentId });
-    setPending(false);
+    let result;
+    try {
+      result = await createCategoryAction({ name: trimmed, kind, parentId });
+    } catch {
+      // `createCategoryAction` returns only `CategoryNameTakenError` /
+      // `CategoryNotFoundError` as refusals and RETHROWS everything else —
+      // SQLITE_BUSY, a driver error, a dropped round trip. The call site is
+      // `void submit()` with no `.catch`, so without this the rejection is
+      // unhandled AND `setPending(false)` below never runs: the input stays
+      // `disabled` for the life of the page with `error` still null, which is
+      // a dead text box that says nothing about whether the category exists.
+      // The message has to admit that ambiguity rather than claim a failure —
+      // in a production build Next.js replaces a thrown action's message with
+      // a digest, so this side genuinely cannot tell.
+      setError("Something went wrong. Reload the page to see whether it was created.");
+      return;
+    } finally {
+      // In the `finally`, not after the `try`: the `return` above is exactly
+      // the path that skipped it.
+      setPending(false);
+    }
     if (result.status === "error") {
       setError(result.message);
       return;
     }
     setName("");
+    // The category EXISTS — but this component's whole appear-then-focus dance
+    // above depends on the revalidated payload rendering the new row, so a
+    // failed refresh leaves the user staring at a list the category is not in.
+    // Saying so is the difference between "stale" and "it didn't work".
+    if (result.warning) toast.warning(result.warning);
     cancelWaitRef.current?.();
     cancelWaitRef.current = waitForCategoryInput(result.category.id, () => {
       cancelWaitRef.current = null;
@@ -154,13 +178,25 @@ export function NewGroupRow() {
     if (trimmed === "") return;
     setPending(true);
     setError(null);
-    const result = await createCategoryGroupAction(trimmed);
-    setPending(false);
+    let result;
+    try {
+      result = await createCategoryGroupAction(trimmed);
+    } catch {
+      // Same shape and same reason as `NewCategoryRow.submit` above: the
+      // action rethrows anything that is not `CategoryNameTakenError`, the
+      // call site is `void submitGroup()`, and a skipped `setPending(false)`
+      // leaves both the input and the Add button disabled with nothing said.
+      setError("Something went wrong. Reload the page to see whether it was created.");
+      return;
+    } finally {
+      setPending(false);
+    }
     if (result.status === "error") {
       setError(result.message);
       return;
     }
     setName("");
+    if (result.warning) toast.warning(result.warning);
     setPendingGroup({ id: result.category.id, name: result.category.name });
   }
 
@@ -226,12 +262,28 @@ function FirstLeafForm({ parentId, parentName, onDone }: { parentId: number; par
     if (trimmed === "") return;
     setPending(true);
     setError(null);
-    const result = await createCategoryAction({ name: trimmed, kind: "expense", parentId });
-    setPending(false);
+    let result;
+    try {
+      result = await createCategoryAction({ name: trimmed, kind: "expense", parentId });
+    } catch {
+      // Same as `NewCategoryRow.submit`, and this is the worst of the three
+      // places to lose the input: the group already exists by the time this
+      // form renders, so a dead text box here strands it childless — the
+      // leaf-shaped empty group the surrounding docblock exists to prevent,
+      // with no way to complete the step and no message explaining why.
+      setError("Something went wrong. Reload the page to see whether it was created.");
+      return;
+    } finally {
+      setPending(false);
+    }
     if (result.status === "error") {
       setError(result.message);
       return;
     }
+    // Same reason as `NewCategoryRow` above: the row only appears via the
+    // revalidated payload, so a refresh failure is indistinguishable from a
+    // failed create unless it is said out loud.
+    if (result.warning) toast.warning(result.warning);
     cancelWaitRef.current?.();
     cancelWaitRef.current = waitForCategoryInput(result.category.id, () => {
       cancelWaitRef.current = null;

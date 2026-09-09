@@ -9,6 +9,7 @@ import { formatLongDate } from "@/lib/now";
 import { Button } from "@/components/ui/button";
 import { createAccountAction } from "./actions";
 import { IDLE_CREATE_ACCOUNT, type CreateAccountField } from "./action-state";
+import { ActionStatus } from "@/components/ledger/action-status";
 
 /**
  * DS64 — the account-creation form, and the one surface where the sign
@@ -49,7 +50,14 @@ export function CreateAccountForm({ today }: { today: string }) {
   // including a rejected one, which would have left this form clearing the
   // name on a validation error while pointing `aria-invalid` at the field it
   // had just emptied. `type`, `balance` and `asOf` already survived because
-  // they were state; `name` was the one that did not.
+  // they were state; `name` was the one that did not, and was fixed here.
+  //
+  // STILL TRUE OF TWO FIELDS. `creditLimit` and `minimumPayment` are
+  // uncontrolled, both carry `aria-invalid`, and `validateCreateAccountInput`
+  // emits issues on both paths (`optionalPositiveDollarsSchema`, plus the
+  // cards-only refinements) — so a rejected card create still blanks exactly
+  // the two fields it is pointing at. Unfixed — this comment read as though
+  // the whole class was closed.
   const [name, setName] = useState("");
   const [balance, setBalance] = useState("");
   const [asOf, setAsOf] = useState(today);
@@ -276,17 +284,13 @@ export function CreateAccountForm({ today }: { today: string }) {
           A thrown action replaced this page with error.tsx's generic card and
           took every typed field with it, so the DS61 message the schema was
           written to produce never reached anyone. */}
-      {state.status !== "idle" ? (
-        <p
-          role="status"
-          aria-live="polite"
-          className={`sm:col-span-2 text-base ${
-            state.status === "error" ? "text-redbrown" : "text-ledger"
-          }`}
-        >
-          {state.message}
-        </p>
-      ) : null}
+      {/* The shared component, not a local derivation. This block used to
+          re-implement `warningOf`, `statusRole`, `statusTone` and the
+          message/warning concatenation inline — a fourth spelling of one
+          decision, inside the change whose subject is that hand-maintained
+          copies drift. `CreateAccountState` satisfies `ActionState`
+          structurally; its `field` is read by the inputs above, not here. */}
+      <ActionStatus state={state} className="sm:col-span-2" />
     </form>
   );
 }

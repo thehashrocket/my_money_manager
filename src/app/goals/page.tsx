@@ -6,7 +6,7 @@ import { formatCents } from "@/lib/money";
 import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { currentMonth } from "@/lib/now";
-import { createGoalAction, updateGoalTargetAction } from "./actions";
+import { CreateGoalForm, UpdateTargetForm } from "./_goal-forms";
 
 export default async function GoalsPage() {
   await connection();
@@ -68,66 +68,6 @@ export default async function GoalsPage() {
         </>
       )}
     </main>
-  );
-}
-
-function CreateGoalForm() {
-  return (
-    <form
-      action={createGoalAction}
-      className="rounded-lg border border-border bg-card p-4 space-y-3"
-    >
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="sm:col-span-1">
-          <label className="block text-xs text-muted-foreground mb-1" htmlFor="goal-name">
-            Name
-          </label>
-          <input
-            id="goal-name"
-            name="name"
-            type="text"
-            required
-            placeholder="e.g. Emergency Fund"
-            className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-muted-foreground mb-1" htmlFor="goal-target">
-            Target ($)
-          </label>
-          <input
-            id="goal-target"
-            name="targetDollars"
-            type="number"
-            required
-            min="0.01"
-            step="0.01"
-            placeholder="1000.00"
-            className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-muted-foreground mb-1" htmlFor="goal-carryover">
-            Carryover
-          </label>
-          <select
-            id="goal-carryover"
-            name="carryoverPolicy"
-            className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="none">None</option>
-            <option value="rollover">Rollover</option>
-            <option value="reset">Reset</option>
-          </select>
-        </div>
-      </div>
-      <button
-        type="submit"
-        className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity"
-      >
-        Create fund
-      </button>
-    </form>
   );
 }
 
@@ -227,55 +167,6 @@ function GoalCard({ goal, year, month }: { goal: GoalRow; year: number; month: n
         <MonthlyBreakdownTable breakdown={goal.monthlyBreakdown} />
       )}
     </div>
-  );
-}
-
-/**
- * `currentTargetCents` is nullable, and the NULL case must not prefill.
- *
- * It used to take `number`, fed by `loadGoals`' `?? 0` — so a fund with no
- * target opened this form already filled in with `0.00`, which fails
- * `updateGoalTargetSchema`'s `.positive()`. `updateGoalTargetAction` throws on
- * a validation failure and nothing catches it, so submitting the value the
- * form itself supplied took out the page via `error.tsx` (and in a production
- * build the message is replaced by a generic digest, so it did not even say
- * why). An empty field with a placeholder cannot do that: `required` stops the
- * submit in the browser first.
- */
-function UpdateTargetForm({
-  categoryId,
-  currentTargetCents,
-}: {
-  categoryId: number;
-  currentTargetCents: number | null;
-}) {
-  const currentDollars =
-    currentTargetCents === null ? undefined : (currentTargetCents / 100).toFixed(2);
-  return (
-    <details className="text-sm">
-      <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground transition-colors select-none">
-        {currentTargetCents === null ? "Set target" : "Edit target"}
-      </summary>
-      <form action={updateGoalTargetAction} className="mt-2 flex gap-2 items-center">
-        <input type="hidden" name="categoryId" value={categoryId} />
-        <input
-          name="targetDollars"
-          type="number"
-          required
-          min="0.01"
-          step="0.01"
-          defaultValue={currentDollars}
-          placeholder="1000.00"
-          className="w-32 rounded-md border border-border bg-background px-3 py-1 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-        />
-        <button
-          type="submit"
-          className="rounded-md border border-border px-3 py-1 text-xs hover:bg-muted transition-colors"
-        >
-          Save
-        </button>
-      </form>
-    </details>
   );
 }
 

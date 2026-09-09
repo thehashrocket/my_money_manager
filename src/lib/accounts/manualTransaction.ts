@@ -39,6 +39,12 @@ export type ManualRefusalReason =
   | "not-a-card"
   | "before-anchor"
   | "already-paired"
+  /** `removeCardActivity` only: the row is a BANK row, so there is nothing to
+   *  repair here — deleting it would destroy imported history. */
+  | "not-manual"
+  /** `removeCardActivity` only: the caller did not confirm an irreversible
+   *  delete. Absence is a refusal, never an assumed yes (rules 4 and 8). */
+  | "unconfirmed"
   | "invalid";
 
 export type ManualWriteResult =
@@ -244,10 +250,32 @@ export function createCardActivity(
     if (input.date <= account.startingBalanceDate) {
       return refused(
         "before-anchor",
-        // DS61 #12. States the consequence, names no schema concept, and the
-        // caller pairs it with "Reconcile instead →" — which is genuinely the
-        // right fix, since a fresh reconcile already includes this charge.
-        `This is dated before your last reconcile (${formatMonthDay(account.startingBalanceDate)}), so it wouldn't count toward the balance.`,
+        // DS61 #12. States the consequence and names no schema concept.
+        //
+        // TWO WORDINGS, because there are two ways this account got its anchor
+        // and only one of them mentions something the user did. On a
+        // hand-reconciled card the caller pairs this with "Reconcile instead →"
+        // and that IS the right fix, since a fresh reconcile already includes
+        // the charge. On a FEED-refreshed card there is no reconcile to point
+        // at — the row renders Refresh instead (`resolveBalanceAction`), the
+        // anchor is the bank's own balance-date, and `refreshLiabilityBalances`
+        // moves it forward on every sync. Telling that user about "your last
+        // reconcile" names an act they never performed and a control they
+        // cannot see, so it says where the date came from and what would work.
+        //
+        // Found by the red team during /ship: the un-nesting that made this
+        // dialog reachable on a feed-refreshed card made this refusal its most
+        // likely outcome, since the anchor is frequently today.
+        account.balanceSource === "feed"
+          ? `${account.name}'s balance comes from your bank as of ${formatMonthDay(account.startingBalanceDate)}, so a charge has to be dated after that.`
+          // Origin-NEUTRAL, because there are three ways a non-feed anchor got
+          // here and only one of them is a reconcile: `createAccountAction`
+          // writes `balance_source = 'manual'` at creation too, so a card whose
+          // balance was only ever typed on the create form was being told about
+          // "your last reconcile" — an act the user never performed. Naming the
+          // date without naming the act is true of all of them, and covers a
+          // NULL `balance_source` as well.
+          : `${account.name}'s balance is set as of ${formatMonthDay(account.startingBalanceDate)}, so a charge has to be dated after that.`,
         input.accountId,
       );
     }
@@ -604,5 +632,167 @@ export function unmarkCardPayment(
       balanceCents === null
         ? "Payment removed."
         : `Payment removed. The balance is now ${formatCents(balanceCents)}.`,
+  };
+}
+
+/**
+ * D10 path 2, REVERSED — remove a hand-entered card charge or refund.
+ *
+ * This did not exist, and its absence was the whole defect. `createCardActivity`
+ * was the only write path in the app with NO way back: `grep '\.delete('` across
+ * `src/lib` and `src/app` found exactly two transaction deletes, `undoSyncBatch`
+ * (a whole sync batch) and `unmarkCardPayment` (its own synthetic mirror, and it
+ * refuses anything else). So a mistyped amount, a wrong date or a charge on the
+ * wrong card was permanent, from a plain `variant="outline"` button whose dialog
+ * said only "A charge counts as spending in its envelope, in the month you made
+ * it."
+ *
+ * That mattered more than an ordinary missing affordance because of what the
+ * first row COSTS. `hasAnyTransactionRows` has no anchor filter (E16), so one
+ * row flips the account off `resolveBalanceAction`'s `refresh` branch forever
+ * and makes `refreshLiabilityBalances` skip it with a warning on every sync
+ * (D7/D15). A card with a live feed balance had no way to get back to zero rows
+ * once a charge landed. It does now — delete the last one and the feed pass
+ * picks the account up again on the next run, because both gates ask the same
+ * question of the same table.
+ *
+ * SIX GUARDS plus one cleanup. The first is the one that matters:
+ *
+ *   confirmedIrreversible      REQUIRED, and absence is a REFUSAL. There is no
+ *                              undo and no snapshot for this delete, so the
+ *                              confirmation is a fact the SERVER checks rather
+ *                              than one the client is trusted to have
+ *                              performed. Same discipline rule 8 arrived at for
+ *                              `setCategoryKind`'s one-way branch and rule 4
+ *                              for the reversal form's `intent`, both written
+ *                              after being burned: never let ABSENCE be the
+ *                              affirmative signal for the destructive branch.
+ *   the row exists             a stale tab acting on a row another tab removed.
+ *   import_source = 'manual'   never a bank row. CSV and feed rows are
+ *                              imported history; `undoSyncBatch` reverts a
+ *                              whole batch and there is deliberately no
+ *                              per-row delete for them.
+ *   transfer_pair_id IS NULL   a paired row is a payment leg. Deleting one
+ *                              side strands the other — that is precisely the
+ *                              damage `unmarkCardPayment`'s E12 note describes
+ *                              — so this refuses and names the right tool.
+ *   category_id IS NOT NULL    the synthetic payment mirror is `manual` AND
+ *                              uncategorized (`unmarkCardPayment` classifies it
+ *                              on exactly that pair). Belt and braces with the
+ *                              pair check above, and it holds even if a mirror
+ *                              were somehow left unpaired.
+ *   the account is a card      same predicate as every other manual write
+ *                              (E17), via `requireCardAccount`.
+ *
+ *   (cleanup, not a guard)     the row's batch goes too. E21 gives every manual
+ *                              operation its own batch, so leaving it behind
+ *                              orphans a row claiming `transaction_count: 1`
+ *                              against zero rows.
+ *
+ * The row menu filters TWO of these — not a transfer, and `import_source`
+ * `manual` — and nothing more. The uncategorized-mirror and not-a-card cases
+ * are reachable from a rendered menu item, not merely from a stale tab, which
+ * is why their messages name the tool to use instead rather than assuming
+ * nobody will see them.
+ */
+export function removeCardActivity(
+  input: { transactionId: number },
+  db: Db = defaultDb,
+  { confirmedIrreversible = false }: { confirmedIrreversible?: boolean } = {},
+): ManualWriteResult {
+  // Checked before the transaction opens: it needs no ledger state, and a
+  // refusal here must not hold a write transaction open. Defaults to FALSE, so
+  // a caller that forgets it is refused rather than obeyed — the flag means
+  // nothing if it can be satisfied by omission.
+  if (!confirmedIrreversible) {
+    return refused(
+      "unconfirmed",
+      "Removing a charge can't be undone, so it needs to be confirmed first.",
+    );
+  }
+
+  let cardAccountId: number | null = null;
+  let removedWasRefund = false;
+
+  const result = db.transaction((tx): ManualWriteResult => {
+    const row = tx
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, input.transactionId))
+      .get();
+    if (!row) return refused("not-found", "That transaction no longer exists.");
+
+    // Re-read inside the transaction, like every other guard here: the row
+    // could have been paired by the automatic matcher since the menu rendered.
+    if (row.importSource !== "manual") {
+      return refused(
+        "not-manual",
+        // DS61 — names the consequence, not the column. There is no repair to
+        // offer, because a bank row disappearing from the ledger is not one.
+        "That transaction came from your bank, so it can't be removed here.",
+      );
+    }
+    if (row.transferPairId !== null) {
+      return refused(
+        "already-paired",
+        "That's part of a card payment. Use “Not a card payment” instead.",
+      );
+    }
+    if (row.categoryId === null) {
+      // The synthetic mirror shape. Unreachable while the pair check above
+      // holds, and kept because the two facts are independent: a mirror left
+      // unpaired by a partial failure would otherwise be deletable here, and
+      // `unmarkCardPayment` would then refuse to clean up its partner.
+      return refused(
+        "invalid",
+        // Reachable from a RENDERED menu item, not just a stale tab: the menu
+        // filters on `!isTransfer && isManual` only, so an unpaired synthetic
+        // mirror still offers "Remove this charge…". Names the tool that owns
+        // it rather than reading as a dead end.
+        "That row was created by a card payment. Use “Not a card payment” instead.",
+      );
+    }
+
+    const guard = requireCardAccount(row.accountId, tx);
+    if (!guard.ok) return guard.result;
+
+    tx.delete(schema.transactions).where(eq(schema.transactions.id, row.id)).run();
+
+    // The batch existed only to carry this one row (E21). Scoped to
+    // `source = 'manual'` so a mis-set `import_batch_id` can never take a CSV
+    // or sync batch — and with it every OTHER row's provenance — down too.
+    tx.delete(schema.importBatches)
+      .where(
+        and(
+          eq(schema.importBatches.id, row.importBatchId),
+          eq(schema.importBatches.source, "manual"),
+        ),
+      )
+      .run();
+
+    cardAccountId = row.accountId;
+    // Rule 1: a card CHARGE is negative, a refund positive. Captured inside the
+    // transaction, from the row actually deleted.
+    removedWasRefund = row.amountCents > 0;
+    return { status: "ok", message: "", transactionId: row.id, balanceCents: 0 };
+  });
+
+  if (result.status !== "ok" || cardAccountId === null) return result;
+  const noun = removedWasRefund ? "Refund" : "Charge";
+  // Read AFTER the commit, so the figure quoted is the one the row will show.
+  // `currentBalanceCents` returns null rather than 0 for a missing account, so
+  // a concurrent delete cannot make this claim the card is paid off.
+  const balanceCents = currentBalanceCents(cardAccountId, db);
+  return {
+    ...result,
+    balanceCents: balanceCents ?? 0,
+    message:
+      // "Charge" is wrong for half the rows this accepts: `createCardActivity`
+      // also mints `kind: "refund"` (positive amount), and the row menu offers
+      // the same item for both. Derived from the row's own sign rather than
+      // from a second parameter nobody would remember to pass.
+      balanceCents === null
+        ? `${noun} removed.`
+        : `${noun} removed. The balance is now ${formatCents(balanceCents)}.`,
   };
 }

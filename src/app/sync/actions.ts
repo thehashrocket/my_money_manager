@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { formatCents } from "@/lib/money";
+import { guardRefresh as guardSharedRefresh } from "@/lib/revalidateAfterWrite";
 import type { ZodError } from "zod";
 import {
   syncSimpleFin,
@@ -28,43 +29,21 @@ function rejectionMessage(error: ZodError): string {
 }
 
 /**
- * The one sentence a caller adds to an ALREADY-COMMITTED success when the
- * refresh behind it failed.
+ * Wraps the shared `guardRefresh` for this route.
  *
- * Deliberately says the write survived. The alternative the user would
- * otherwise get is `error.tsx`, which states "Nothing was imported. Your ledger
- * is unchanged" — copy written for `syncNowAction` and false for every other
- * action here once the write has landed.
- */
-const REFRESH_FAILED_WARNING =
-  "Your change was saved, but this page couldn't refresh — reload to see the current state.";
-
-/**
- * Runs a revalidation that follows a COMMITTED write, and turns a failure into
- * a warning instead of a throw.
+ * The warning sentence and the try/catch used to live here; they are now
+ * `src/lib/revalidateAfterWrite.ts`, because six other route action files
+ * needed the same thing and a second hand-maintained copy had already drifted
+ * on the wording. `/sync`'s callers fold ARRAYS of warnings into `ok(...)`, so
+ * the shared `string | undefined` is adapted here rather than at nine call
+ * sites.
  *
- * Every `revalidateAll()` call in this file sits AFTER its `try`, which is
- * correct — inside it, a throw from `revalidatePath` reported an already-durable
- * write as a refusal. But outside it the throw simply escaped the Server Action
- * instead, and there is no `try` above it: it lands in `src/app/sync/error.tsx`,
- * whose copy affirmatively promises the ledger is unchanged. That trades
- * "reported a commit as a refusal" for "reported a commit as a guarantee that
- * nothing happened", which is worse, and it breaks the contract stated at the
- * top of this file that these actions return their outcome rather than throw.
- *
- * So the refresh is guarded on its own. The write is already durable at this
- * point; a stale page plus an accurate message beats a crash plus a false one.
- * Logged as well as returned, because a failing `revalidatePath` is a bug in
- * this app rather than a user error, and nothing else on /sync would record it.
+ * Returns any warning produced by the refresh itself — NOT void. A caller must
+ * fold the result into its `ok(...)` warnings, or a failed refresh is silent.
  */
 function guardRefresh(run: () => void): string[] {
-  try {
-    run();
-    return [];
-  } catch (err) {
-    console.error("[/sync] revalidation failed after a committed write", err);
-    return [REFRESH_FAILED_WARNING];
-  }
+  const warning = guardSharedRefresh("/sync", run);
+  return warning === undefined ? [] : [warning];
 }
 
 /**

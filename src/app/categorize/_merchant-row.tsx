@@ -9,6 +9,7 @@ import type { MerchantGroup } from "@/lib/categorize/loadMerchantGroups";
 import type { LeafCategory } from "@/lib/categories";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
 import { classifyKeyTrainability } from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
@@ -160,43 +161,31 @@ export function MerchantRow({
         const result = await bulkCategorizeMerchantAction(formData);
         clearPendingPick(merchant);
         onDismissedChange(merchant, true);
-        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
-           default collapsed stack (`expand` unset — `layout.tsx`), where
-           `[data-front="false"] > *` is `opacity: 0`: whichever toast is not
-           newest has its contents, INCLUDING its action button, drawn
-           invisible until the stack is hovered. Two toasts therefore forced a
-           choice between the warning being readable and the Undo being
-           reachable, and the Undo is the only thing that puts a removed rule
-           back inside its 10s window. Merging them makes the notice and its
-           remedy the same front toast. */
+        /* ONE toast, not a success plus a warning — rule 6, spelled once in
+           `notifyWrite` (this was one of its three hand-copies). Its docstring
+           carries the collapsed-stack argument and the reason `result.warning`
+           joins the refusal in the same toast instead of stacking behind it.
+
+           On this surface the checkbox above IS already disabled up front when
+           the key is untrainable, so the toast is the SECOND channel for a
+           refusal rather than the only one — it is what catches the verdict
+           moving under a stale page. */
         const filed = `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
-        const notify =
-          result.ruleRefusal === null ? toast.success : toast.warning;
-        notify(
-          result.ruleRefusal === null
-            ? filed
-            : `${filed} ${result.ruleRefusal.message}`,
-          {
-            duration: 10_000,
-            action: {
-              label: "Undo",
-              onClick: async () => {
-                try {
-                  const undo = await undoBulkCategorizeAction(result.snapshot);
-                  onUndo(undo.revertedCount);
-                  onDismissedChange(merchant, false);
-                  toast(
-                    `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                  );
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Undo failed.",
-                  );
-                }
-              },
-            },
+        notifyWrite(filed, [result.ruleRefusal?.message, result.warning], {
+          onUndo: async () => {
+            try {
+              const undo = await undoBulkCategorizeAction(result.snapshot);
+              onUndo(undo.revertedCount);
+              onDismissedChange(merchant, false);
+              notifyUndo(
+                `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
+                undo.warning,
+              );
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Undo failed.");
+            }
           },
-        );
+        });
       } catch (err) {
         // Revert optimistic counter on error.
         onUndo(group.count);

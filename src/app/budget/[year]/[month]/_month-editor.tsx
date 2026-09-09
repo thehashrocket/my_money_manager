@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { toast } from "sonner";
 import {
   createContext,
   useCallback,
@@ -26,6 +27,9 @@ import type { MonthPhase } from "@/lib/budget/monthOfIso";
 import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
+// Safe in a client component: `refreshWarning` has ZERO imports, so this
+// pulls nothing else into the route bundle (the +376 KB `limits.ts` shape).
+import { REFRESH_FAILED_WARNING } from "@/lib/refreshWarning";
 import { cn } from "@/lib/utils";
 import { LeftToBudget } from "@/components/ledger/left-to-budget";
 import { CurrencyInput, type CurrencyInputCommitResult } from "@/components/ledger/currency-input";
@@ -307,7 +311,24 @@ export function MonthEditor(props: MonthEditorProps) {
     setAllocations(buildAllocations());
   }
 
-  const dirtyRef = useRef(false);
+  /**
+   * How many commits have LANDED since the last flush — not a boolean.
+   *
+   * It was a boolean, and one shared by every row in the island (`commit` is
+   * one callback, passed to every cell). Clearing it on a REFUSED commit
+   * therefore discarded the pending flush for an EARLIER SUCCESSFUL one:
+   * fund a goal in row A, get refused in row B (a category archived in another
+   * tab, a parent, an out-of-bounds figure), leave the island — and
+   * `revalidateBudgetSurfacesAction` never ran for A. Since
+   * `commitAllocationAction` deliberately does not revalidate, that action is
+   * the ONLY invalidation the editable FUNDS band gets, so the user funds a
+   * goal, opens `/goals`, and reads the old total.
+   *
+   * A counter says the thing the boolean was standing in for: "is there
+   * committed work this island has not flushed yet". A refusal decrements only
+   * its own increment, so it can never cancel a sibling's.
+   */
+  const dirtyRef = useRef(0);
 
   // `year`/`month` are NOT read by this body any more — `revalidatePath` moved
   // to the pattern form, so the action takes no arguments. They stay in the
@@ -319,9 +340,33 @@ export function MonthEditor(props: MonthEditorProps) {
   // flushing the edits made to the first one — the exact case the effect's own
   // comment says it exists for.
   const revalidate = useCallback(() => {
-    if (!dirtyRef.current) return;
-    dirtyRef.current = false;
-    void revalidateBudgetSurfacesAction();
+    if (dirtyRef.current === 0) return;
+    dirtyRef.current = 0;
+    // The allocations this flushes were committed by `commitAllocationAction`
+    // long before this fires — so a `revalidatePath` throw in here is by
+    // construction a throw after a durable write. `revalidateBudgetSurfacesAction`
+    // catches it and hands back a warning; surfacing it is what keeps a user
+    // who then navigates to `/goals` and sees the old total from concluding the
+    // allocation never saved.
+    //
+    // The guard closes the `revalidatePath` throw INSIDE the action. It cannot
+    // close a failure of the CALL — the Server Action round trip itself can
+    // reject (the network drops, the RSC endpoint 500s), and that rejection
+    // arrives here, not there. A bare `void promise` does not swallow a
+    // rejection, it merely leaves it unhandled: no toast, and a console
+    // "unhandled promise rejection" as the only trace. Both halves therefore
+    // land on the same warning, because the user's situation is identical
+    // either way — the allocation is saved, this page is stale — and the
+    // difference between "the refresh threw" and "the refresh call never
+    // arrived" is not something they can act on.
+    void revalidateBudgetSurfacesAction()
+      .then((warning) => {
+        if (warning) toast.warning(warning);
+      })
+      .catch((err) => {
+        console.error("[/budget] the revalidation call itself failed after a committed write", err);
+        toast.warning(REFRESH_FAILED_WARNING);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
 
@@ -341,9 +386,26 @@ export function MonthEditor(props: MonthEditorProps) {
       // fallback below never fires either) checked `dirtyRef.current` while
       // it was still `false` from before this write started, silently
       // skipping the revalidate this exact write existed to trigger.
-      dirtyRef.current = true;
+      dirtyRef.current += 1;
       const result = await commitAllocationAction(categoryId, year, month, cents);
       if (result.status === "error") {
+        // NOTHING WAS COMMITTED, so the dirty flag must not survive. It is set
+        // before the await (see above) and was never cleared on the refusal
+        // path — so a rejected commit (a stale tab editing a category archived
+        // in another tab) left the flag standing, and the next blur ran the
+        // refresh anyway. Any failure there then reported "your change was
+        // saved, but this page couldn't refresh" and logged "after a committed
+        // write" about a write that never happened. Reporting a save that did
+        // not occur is the mirror image of the defect this whole branch closes,
+        // and it is the worse direction: the user stops trying.
+        //
+        // DECREMENT, never clear. The counter is shared by every row in the
+        // island, so assigning 0 here cancelled the pending flush for any
+        // sibling commit that had already SUCCEEDED — trading a false warning
+        // for a withheld refresh after a durable write, which is the same
+        // defect pointed the other way. Undoing this commit's own increment
+        // leaves exactly the siblings' work outstanding.
+        dirtyRef.current = Math.max(0, dirtyRef.current - 1);
         return { ok: false, message: result.message };
       }
       setAllocations((prev) => {

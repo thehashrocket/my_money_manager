@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import type { LeafCategory } from "@/lib/categories";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { merchantLabel } from "@/lib/transactions/merchantLabel";
@@ -140,55 +141,44 @@ export function RetargetForm({
          `filed[0]` — now the destination the rows just landed in. */
       setFromChoice("");
 
-      /* ONE toast, never a success plus a warning — `<Toaster>` runs
-         Sonner's default collapsed stack, where a non-front toast has its
-         contents INCLUDING its action button drawn at `opacity: 0` until the
-         stack is hovered. Two toasts would force a choice between the
-         refusal being readable and this Undo being reachable, and this Undo
-         is the only way back for a move that just touched every row for a
-         merchant. */
+      /* ONE toast, never a success plus a warning — rule 6, spelled once in
+         `notifyWrite` (this was one of its three hand-copies). Its docstring
+         carries the collapsed-stack argument and the reason `result.warning`
+         merges in rather than stacking behind. This surface is the one where
+         losing the Undo costs the most: a move touches every row for a
+         merchant, not one. */
       const moved = `Moved ${result.updatedCount} row${
         result.updatedCount === 1 ? "" : "s"
       } from ${result.fromCategoryName} to ${result.categoryName}.`;
-      const notify =
-        result.ruleRefusal === null ? toast.success : toast.warning;
-      notify(
-        result.ruleRefusal === null
-          ? moved
-          : `${moved} ${result.ruleRefusal.message}`,
-        {
-          duration: 10_000,
-          action: {
-            label: "Undo",
-            onClick: async () => {
-              let undo: Awaited<ReturnType<typeof undoBulkRetargetAction>>;
-              try {
-                undo = await undoBulkRetargetAction(result.snapshot);
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : "Undo failed.");
-                return;
-              }
-              if (undo.status === "error") {
-                toast.error(undo.message);
-                return;
-              }
-              /* "Moved 0 rows back" is honest but unreadable on its own — it
-                 is the same sentence whether there was nothing to move or
-                 whether the user re-categorized all 49 inside the window.
-                 The snapshot knows which, so it says which. */
-              const scope =
-                undo.revertedCount === result.snapshot.txnIds.length
-                  ? ""
-                  : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
-              toast(
-                `Moved ${undo.revertedCount} row${
-                  undo.revertedCount === 1 ? "" : "s"
-                } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`,
-              );
-            },
-          },
+      notifyWrite(moved, [result.ruleRefusal?.message, result.warning], {
+        onUndo: async () => {
+          let undo: Awaited<ReturnType<typeof undoBulkRetargetAction>>;
+          try {
+            undo = await undoBulkRetargetAction(result.snapshot);
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Undo failed.");
+            return;
+          }
+          if (undo.status === "error") {
+            toast.error(undo.message);
+            return;
+          }
+          /* "Moved 0 rows back" is honest but unreadable on its own — it is
+             the same sentence whether there was nothing to move or whether
+             the user re-categorized all 49 inside the window. The snapshot
+             knows which, so it says which. */
+          const scope =
+            undo.revertedCount === result.snapshot.txnIds.length
+              ? ""
+              : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
+          notifyUndo(
+            `Moved ${undo.revertedCount} row${
+              undo.revertedCount === 1 ? "" : "s"
+            } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`,
+            undo.warning,
+          );
         },
-      );
+      });
     });
   };
 

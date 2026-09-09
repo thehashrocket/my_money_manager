@@ -193,7 +193,8 @@ describe("loadCategoryKindUsage", () => {
 
 /* The menu renders this when `assignableKinds` has collapsed to one entry.
    It is the only explanation the app still has for a kind lock: the `⋯` menu
-   on /budget is the sole surface that reaches `setCategoryKindAction`, so a
+   on /budget is the sole surface that reaches `setCategoryKindAction` for an
+   arbitrary kind (`_reclassify-income.tsx` reaches it for X1 alone), so a
    locked row that says only "locked" leaves the user unable to tell a refusal
    from a missing feature. */
 describe("kindLockReason", () => {

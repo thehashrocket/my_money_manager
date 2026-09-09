@@ -70,6 +70,14 @@ export type TransactionRow = {
   categoryName: string | null;
   accountId: number;
   accountName: string;
+  /**
+   * Which write path produced this row. Carried because the `/transactions`
+   * row menu offers "Remove this charge" for a HAND-ENTERED card row only —
+   * `removeCardActivity` refuses a bank row, and a menu that offered the item
+   * anyway would be a refusal the user can only discover by triggering it
+   * (the rule 8 mistake `assignableKinds` exists to avoid repeating).
+   */
+  importSource: "csv" | "simplefin" | "manual";
   /** Non-null only on a paired row, and only when `includeTransfers` is set. */
   transferPairId: number | null;
   /** The other leg's account name — what makes a revealed row legible. */
@@ -202,6 +210,7 @@ export function loadTransactions(
         categoryName: schema.categories.name,
         accountId: schema.transactions.accountId,
         accountName: schema.accounts.name,
+        importSource: schema.transactions.importSource,
         transferPairId: schema.transactions.transferPairId,
         // T26 needs to name the other side ("paired with Visa"), or a
         // revealed row is just a transaction that mysteriously does not count.

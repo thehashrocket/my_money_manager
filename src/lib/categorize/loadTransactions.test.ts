@@ -61,6 +61,7 @@ function seedTxn(opts: {
   rawDescription?: string;
   payee?: string | null;
   isPending?: boolean;
+  importSource?: "csv" | "simplefin" | "manual";
 }) {
   seq += 1;
   const [row] = handle.db
@@ -74,7 +75,7 @@ function seedTxn(opts: {
       payee: opts.payee ?? null,
       amountCents: opts.amountCents ?? -1000,
       categoryId: opts.categoryId ?? null,
-      importSource: "csv",
+      importSource: opts.importSource ?? "csv",
       importBatchId: opts.batchId,
       importRowHash: `hash-${seq}`,
       transferPairId: opts.transferPairId ?? null,
@@ -846,5 +847,46 @@ describe("loadTransactions — a page past the end", () => {
     const past = loadTransactions(handle.db, { page: 4, pageSize: 2 });
     expect(past.rows).toEqual([]);
     expect(past.totalCount).toBe(5);
+  });
+});
+
+/**
+ * `importSource` on the row — added in v0.26.0 and, until now, selected by
+ * `loadTransactions` and asserted by nothing.
+ *
+ * It is not decoration. `_transaction-row.tsx` passes
+ * `isManual={row.importSource === "manual"}` into the row menu, and that flag
+ * alone decides whether "Remove this charge…" is offered. Drop the column from
+ * the SELECT and `row.importSource` is `undefined` for every row, so the
+ * comparison is false everywhere and the menu item silently disappears from the
+ * only surface that can reach `removeCardActivity` — the ledger looks fine, the
+ * repair path is simply gone. Nothing else in the suite would fail.
+ *
+ * The converse matters just as much: a bank row must never report `manual`, or
+ * the menu offers a delete the server then refuses with `not-manual` — a
+ * refusal the user can only discover by triggering it.
+ */
+describe("loadTransactions — importSource", () => {
+  it("returns each row's write path verbatim, so the row menu can gate on it", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const cat = seedCategory("Dining");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "HAND-ENTERED",
+      categoryId: cat.id,
+      importSource: "manual",
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FROM-CSV", importSource: "csv" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FROM-FEED", importSource: "simplefin" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const byMerchant = new Map(r.rows.map((row) => [row.normalizedMerchant, row.importSource]));
+
+    expect(byMerchant.get("HAND-ENTERED")).toBe("manual");
+    // Neither bank path may masquerade as hand-entered.
+    expect(byMerchant.get("FROM-CSV")).toBe("csv");
+    expect(byMerchant.get("FROM-FEED")).toBe("simplefin");
   });
 });

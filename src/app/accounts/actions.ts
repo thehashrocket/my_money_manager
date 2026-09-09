@@ -10,6 +10,7 @@ import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
 import {
   createCardActivity,
   markAsCardPayment,
+  removeCardActivity,
   unmarkCardPayment,
 } from "@/lib/accounts/manualTransaction";
 import type { AccountsActionState, CardActivityState } from "./action-state";
@@ -21,6 +22,7 @@ import {
 } from "@/lib/import/accountAnchorFields";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
 import { refreshLiabilityBalancesOnly } from "@/lib/simplefin/sync";
 
 /**
@@ -45,20 +47,108 @@ function fail(message: string, field?: "balance" | "date"): AccountsActionState 
   return { status: "error", message, field };
 }
 
+/**
+ * A positive integer transaction id, or null.
+ *
+ * Hand-rolled `Number(formData.get(...))` treated an ABSENT field as id 0
+ * (`Number(null)` is 0, and `Number.isInteger(0)` passes), so a request that
+ * omitted the field reached the write instead of being refused. Shared by the
+ * three row actions so the destructive one cannot be the only one fixed.
+ */
+function readTransactionId(formData: FormData): number | null {
+  return readPositiveIntField(formData, "transactionId");
+}
+
+/** The shared reader. `readTransactionId` is the named case; `cardAccountId`
+ *  goes through the same one, because leaving it on bare `Number()` two lines
+ *  below a docstring enumerating that coercion's leniencies is how the pair
+ *  drifts back apart. */
+function readPositiveIntField(formData: FormData, field: string): number | null {
+  const raw = formData.get(field);
+  if (typeof raw !== "string") return null;
+  // DECIMAL DIGITS ONLY, checked before `Number`. Bare coercion also accepts
+  // "0x10" (16), "1e3" (1000) and " 7 ", so a guard written against the
+  // absent-field case alone would leave the comment above true and the code
+  // below still lenient.
+  if (!/^[0-9]+$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 function toMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Every surface that renders a balance.
+ *
+ *  A SUPERSET of `/sync`'s list — the same five plus `/accounts` and `/import`.
+ *  The `"/budget/[year]/[month]"` page pattern is deliberately NOT here: it
+ *  belongs to the card-activity variant only, because an anchor move changes no
+ *  envelope's spend.
+ *
+ *  Deliberately NOT `revalidatePath("/", "layout")` either — that unmounts the
+ *  client components holding `useActionState` and would strand a row's button
+ *  on "Saving…" forever. */
+const BALANCE_SURFACES = [
+  "/accounts",
+  "/",
+  "/import",
+  "/sync",
+  "/transactions",
+  "/categorize",
+  "/budget",
+] as const;
+
 /**
- * Revalidates every surface that renders a balance. Same set as
- * `/sync`'s revalidateAll, and deliberately NOT `revalidatePath("/", "layout")`
- * — that unmounts the client components holding `useActionState` and would
- * strand a row's button on "Saving…" forever.
+ * Revalidates every surface that renders a balance (see `BALANCE_SURFACES`).
+ *
+ * RETURNS A WARNING, AND CANNOT THROW. That is the load-bearing part, and it
+ * is what makes T28/E20's promise at the top of this file true rather than
+ * merely stated. Every action here wraps its WHOLE body — this call included —
+ * in one `try` whose `catch` returns `fail(...)`. `revalidatePath` throws, so
+ * an unguarded call inside that `try` converts an ALREADY-COMMITTED write into
+ * `{status:"error"}`: the contract this file exists to keep, broken by the
+ * refresh that follows the write it is keeping the contract about.
+ *
+ * The concrete harm is rule 9's, and it is not a stale page:
+ *
+ *   reconcile $1,200 ─▶ UPDATE commits, prior := 1200 ─▶ revalidate throws
+ *        ▶ inline form says "failed"
+ *        ▶ user resubmits, believing nothing saved
+ *        ▶ second UPDATE reads the row the FIRST one wrote
+ *        ▶ prior := 500 — the value from the "failed" attempt
+ *        ▶ the true prior anchor no longer exists anywhere
+ *
+ * `prior_starting_balance_*` is ONE slot (rule 9), so that is the whole undo,
+ * spent on a figure that was never current. CLAUDE.md documents exactly this
+ * harm for the feed's balance pass; this is the same harm on the hand path,
+ * reached through the refresh rather than through a race.
+ *
+ * Because `guardRefresh` cannot throw, the enclosing `try/catch` in every
+ * caller is now unreachable from this call, and each caller folds the returned
+ * warning into its `ok` outcome instead. A caller that DISCARDS the return
+ * makes a failed refresh silent again.
  */
-function revalidateBalanceSurfaces(): void {
-  for (const p of ["/accounts", "/", "/import", "/sync", "/transactions", "/categorize", "/budget"]) {
-    revalidatePath(p);
-  }
+function revalidateBalanceSurfaces(): string | undefined {
+  return guardRefresh("/accounts", () => {
+    for (const p of BALANCE_SURFACES) revalidatePath(p);
+  });
+}
+
+/**
+ * The card-activity variant: the balance surfaces PLUS the month view, because
+ * a charge changes an envelope's spend. One guarded pass rather than two, so a
+ * failure in either half produces one warning.
+ *
+ * Appends to the shared list rather than restating it — the two were verbatim
+ * copies of the same seven paths, which is the drift shape this whole branch is
+ * about.
+ */
+function revalidateCardActivitySurfaces(): string | undefined {
+  return guardRefresh("/accounts", () => {
+    for (const p of BALANCE_SURFACES) revalidatePath(p);
+    revalidatePath("/budget/[year]/[month]", "page");
+  });
 }
 
 /**
@@ -170,8 +260,8 @@ export async function updateLiabilityBalanceAction(
       .where(eq(schema.accounts.id, accountId))
       .run();
 
-    revalidateBalanceSurfaces();
-    return { status: "ok", message: `${account.name} is now ${formatCents(cents)}.` };
+    const warning = revalidateBalanceSurfaces();
+    return { status: "ok", message: `${account.name} is now ${formatCents(cents)}.`, warning };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -236,13 +326,14 @@ export async function revertLiabilityBalanceAction(
       .where(eq(schema.accounts.id, accountId))
       .run();
 
-    revalidateBalanceSurfaces();
+    const warning = revalidateBalanceSurfaces();
     // Names the restored ANCHOR date, not a dollar figure: what is stored is
     // the anchor, what the row shows is the derived balance, and they differ
     // whenever activity was entered between the two reconciles.
     return {
       status: "ok",
       message: `${account.name} is back to where it was on ${account.priorStartingBalanceDate}.`,
+      warning,
     };
   } catch (err) {
     return fail(toMessage(err));
@@ -321,8 +412,8 @@ export async function updateCardTermsAction(
 
     db.update(schema.accounts).set(patch).where(eq(schema.accounts.id, accountId)).run();
 
-    revalidateBalanceSurfaces();
-    return { status: "ok", message: `Updated ${account.name}'s card details.` };
+    const warning = revalidateBalanceSurfaces();
+    return { status: "ok", message: `Updated ${account.name}'s card details.`, warning };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -383,14 +474,25 @@ export async function refreshLiabilityBalanceAction(
     // so refreshing the mortgage could render a warning about the Visa in red
     // under the mortgage's own button.
     const outcome = await refreshLiabilityBalancesOnly({ accountId }, db);
-    revalidateBalanceSurfaces();
 
+    // A REFUSAL IS RETURNED BEFORE THE REFRESH. CLAUDE.md names this as its own
+    // bug class and lists `no-linked-accounts` as one of the four instances it
+    // was already got wrong once: revalidating re-renders the form holding the
+    // inline `role="alert"` out from under the only rendering of the refusal.
+    // The previous version computed the warning here and merely commented that
+    // these branches existed below — which also let `guardRefresh` log
+    // "revalidation failed after a committed write" about a write that never
+    // happened.
     if (outcome.status === "no-linked-accounts") {
       return fail("No accounts are linked to SimpleFIN yet.");
     }
 
+    // Below this line every branch reports a WRITE or a refusal that is
+    // decided by `outcome` alone, so the refresh runs once, here, and only the
+    // reporting branches carry its warning.
     const update = outcome.updates.find((u) => u.accountId === accountId);
     if (update) {
+      const refreshWarning = revalidateBalanceSurfaces();
       // Warnings can accompany a SUCCESSFUL write — the credit-balance notice
       // is the case, and it is exactly the moment its "if that is wrong, use
       // Reconcile" copy was written for. Reporting only in the no-update
@@ -399,6 +501,7 @@ export async function refreshLiabilityBalanceAction(
       return {
         status: "ok",
         message: `${account.name} is now ${formatCents(update.balanceCents)}.${note}`,
+        warning: refreshWarning,
       };
     }
 
@@ -412,7 +515,11 @@ export async function refreshLiabilityBalanceAction(
     if (outcome.warnings.length > 0) {
       return fail(outcome.warnings.join(" "));
     }
-    return { status: "ok", message: `${account.name} is unchanged — the bank reports the same balance.` };
+    return {
+      status: "ok",
+      message: `${account.name} is unchanged — the bank reports the same balance.`,
+      warning: revalidateBalanceSurfaces(),
+    };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -480,10 +587,10 @@ export async function addCardActivityAction(
       return { status: "error", message: result.message, reason: result.reason };
     }
 
-    revalidateBalanceSurfaces();
-    // A charge changes an envelope's spend, so the month view has to go too.
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    // A charge changes an envelope's spend, so the month view goes too — see
+    // `revalidateCardActivitySurfaces`, which folds both into one guarded pass.
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }
@@ -495,9 +602,9 @@ export async function markAsCardPaymentAction(
   formData: FormData,
 ): Promise<CardActivityState> {
   try {
-    const transactionId = Number(formData.get("transactionId"));
-    const cardAccountId = Number(formData.get("cardAccountId"));
-    if (!Number.isInteger(transactionId) || !Number.isInteger(cardAccountId)) {
+    const transactionId = readTransactionId(formData);
+    const cardAccountId = readPositiveIntField(formData, "cardAccountId");
+    if (transactionId === null || cardAccountId === null) {
       return { status: "error", message: "That transaction no longer exists." };
     }
 
@@ -505,9 +612,8 @@ export async function markAsCardPaymentAction(
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }
-    revalidateBalanceSurfaces();
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }
@@ -522,17 +628,59 @@ export async function unmarkCardPaymentAction(
   formData: FormData,
 ): Promise<CardActivityState> {
   try {
-    const transactionId = Number(formData.get("transactionId"));
-    if (!Number.isInteger(transactionId)) {
+    const transactionId = readTransactionId(formData);
+    if (transactionId === null) {
       return { status: "error", message: "That transaction no longer exists." };
     }
     const result = unmarkCardPayment({ transactionId }, db);
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }
-    revalidateBalanceSurfaces();
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
+  }
+}
+
+/**
+ * The way back from `addCardActivityAction`, which had none.
+ *
+ * Deliberately NOT on `/accounts`, where the charge is entered: `/accounts`
+ * renders account rows, and this operates on a TRANSACTION. It is offered from
+ * the `/transactions` row menu, beside "Not a card payment" — the row is the
+ * thing being removed, and that menu is already where a card row's per-row
+ * repairs live. `removeCardActivity` refuses everything the menu would not
+ * have offered anyway (E17 and the guards on its docblock), because a
+ * Server Action is a network endpoint regardless of what rendered.
+ */
+export async function removeCardActivityAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    // `Number(null)` is 0 and `Number.isInteger(0)` is TRUE, so an omitted
+    // field used to fall straight through this guard into the delete. It failed
+    // closed only because no row has id 0 — the guard was not what stopped it.
+    // The same coercion also accepts "0x10" (16) and "1e3" (1000).
+    const transactionId = readTransactionId(formData);
+    if (transactionId === null) {
+      return { status: "error", message: "That transaction no longer exists." };
+    }
+    // The dialog sends this; nothing else does. `CategoryMenu` deliberately
+    // omits the equivalent flag on its REVERSIBLE path for the same reason —
+    // a flag that is always present means nothing.
+    const confirmedIrreversible = formData.get("confirmedIrreversible") === "yes";
+    const result = removeCardActivity({ transactionId }, db, { confirmedIrreversible });
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+    // Removing the LAST row on a card makes it eligible for the feed balance
+    // pass again (`hasAnyTransactionRows`), so `/accounts` and `/sync` both
+    // render differently afterwards — the balance surfaces are not optional
+    // here even though this is a transaction-level write.
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }
