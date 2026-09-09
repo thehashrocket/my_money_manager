@@ -2,13 +2,8 @@ import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
 import { parseIsoMonth } from "@/lib/budget/monthOfIso";
-import {
-  CategoryArchivedError,
-  CategoryNotFoundError,
-  ParentAllocationError,
-  SavingsGoalCategoryError,
-} from "@/lib/categoryErrors";
 import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
+import { assertAssignableCategory } from "./assertAssignableCategory";
 import {
   TransactionNotFoundError,
   TransferPairedTransactionError,
@@ -108,32 +103,7 @@ export function categorizeTransaction(
   const { transactionId, categoryId, rememberMerchant, applyToPast } = input;
 
   return db.transaction((tx) => {
-    const category = tx
-      .select({
-        id: schema.categories.id,
-        name: schema.categories.name,
-        kind: schema.categories.kind,
-        archivedAt: schema.categories.archivedAt,
-      })
-      .from(schema.categories)
-      .where(eq(schema.categories.id, categoryId))
-      .get();
-    if (!category) throw new CategoryNotFoundError(categoryId);
-    // A2: kind is authoritative, not is_savings_goal (T5).
-    if (category.kind === "fund") {
-      throw new SavingsGoalCategoryError(category.id, category.name);
-    }
-    if (category.archivedAt !== null) {
-      throw new CategoryArchivedError(category.id, category.name);
-    }
-
-    const firstChild = tx
-      .select({ id: schema.categories.id })
-      .from(schema.categories)
-      .where(eq(schema.categories.parentId, categoryId))
-      .limit(1)
-      .get();
-    if (firstChild) throw new ParentAllocationError(category.id, category.name);
+    const category = assertAssignableCategory(tx, categoryId);
 
     const target = tx
       .select({
