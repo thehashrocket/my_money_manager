@@ -7,7 +7,6 @@ import { syncSimpleFin } from "./sync";
 import { undoSyncBatch } from "./undoSync";
 import { mapTransaction } from "./mapTransaction";
 import {
-  COFFEE_MEMO,
   NOW,
   SEP_1_NOON,
   droppedOrThrow,
