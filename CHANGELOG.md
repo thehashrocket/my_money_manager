@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-09-08
+
+### Added
+- **You can now put money into a fund from the month you are budgeting.** Funds were visible on `/budget` but read-only, and the page they pointed you at for "contributions" never had a contribution form — so a fund could be created and then never funded, by any route in the app. The Funds band is now editable exactly like Income and Expenses: type an amount in the Allocate column and it counts against Left to budget the same way an expense does, because that is what putting money aside actually costs you this month. Each fund row also shows what you have put in across every month so far and how far that is from its target, so the two questions a fund raises — "how much have I saved?" and "how much is left?" — are answered next to the field you type in rather than on another page.
+- **Move every transaction for a merchant from one category to another, in one step.** Filing a merchant to the wrong category used to be repairable only one transaction at a time once the ten-second undo expired, and the page you filed it on stops listing the merchant the moment it is filed — so the mistake became invisible exactly where it was made. The repair now lives on the merchant's own transaction list (`/transactions`, reached from the "See all N transactions" link): pick the category the rows are wrongly under, pick where they should go, and move all of them at once. It has its own undo, and transactions you have since re-categorized by hand are left alone rather than dragged along.
+- **Ticking "Remember" on that move can now retrain the merchant's rule instead of deleting it.** Moving a merchant's whole history to one category is the case where the app can be *most* confident about what the rule should say — so where a previous release could only refuse and remove a rule for a merchant filed two ways, this one recognises that the move itself has just made the merchant consistent, and updates the rule to match.
+
+### Changed
+- **Funds are called funds everywhere.** The sidebar, the page heading, the create form and the help text all said "goals" in some places and "funds" in others, for the same thing. They now all say Funds. The web address is still `/goals`, so any bookmark you have still works.
+- **The Funds page headline is now what you have actually contributed**, with money taken back out shown on its own line beneath it rather than quietly folded into one number. It also links straight to the current month's Funds band, so seeing a fund is short and doing something about it are one click apart.
+- **A fund's name now opens its transactions**, the same as a category name in the other two bands. Clicking a category name to see its rows is the learned habit on that page, and fund rows were the one exception to it.
+
+### Fixed
+- **Categorizing a transaction now refreshes the pages that depend on it.** Filing a transaction updated the transaction list and the budget, but left the Funds page and the dashboard showing figures computed before your change — so a fund's progress, or the dashboard's spending chart, could sit visibly out of date until something unrelated happened to refresh them. All the pages that read a transaction's category are now updated together.
+
 ## [0.22.0] - 2026-09-08
 
 ### Added
