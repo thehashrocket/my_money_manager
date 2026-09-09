@@ -1076,3 +1076,64 @@ describe("removeCardActivity", () => {
     expect(balanceOf(card.id)).toBe(-100000);
   });
 });
+
+/**
+ * The FIFTH guard, and the only one `removeCardActivity`'s own suite above
+ * leaves standing: the synthetic-mirror shape (`import_source = 'manual'` AND
+ * `category_id IS NULL`).
+ *
+ * Its docblock calls it belt-and-braces — unreachable while the
+ * `transfer_pair_id` check holds — and that is exactly why it needs a test
+ * rather than none. The two facts are independent: a mirror left UNPAIRED by a
+ * partial failure passes the pair check, and this is the only thing between it
+ * and deletion. Delete it and `unmarkCardPayment` is then asked to clean up a
+ * partner that no longer exists, from a page with no way back.
+ *
+ * CLAUDE.md's standing rule for exactly this class: a defensive check reachable
+ * only from a stale tab or a crafted post "must not be allowed to drift".
+ */
+describe("removeCardActivity — the mirror-shape guard", () => {
+  it("REFUSES an UNPAIRED payment mirror, and names the tool that owns it", () => {
+    const checking = seedAccount({
+      name: "Checking",
+      type: "checking",
+      cents: 500_000,
+      anchor: "2026-01-01",
+    });
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100_000, anchor: "2026-01-01" });
+    const debit = seedCheckingDebit(checking.id, "2026-02-01", -20_000);
+    const marked = markAsCardPayment({ transactionId: debit.id, cardAccountId: card.id }, handle.db);
+    if (marked.status !== "ok") throw new Error("setup failed");
+
+    const mirror = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .get()!;
+    // The mirror IS the shape: hand-written and deliberately uncategorized.
+    expect(mirror.importSource).toBe("manual");
+    expect(mirror.categoryId).toBeNull();
+
+    // Strand it, the way a partial failure would: the pair is gone, so the
+    // `already-paired` guard above can no longer catch this row and the
+    // category check is the last thing standing.
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: null })
+      .where(eq(schema.transactions.id, mirror.id))
+      .run();
+
+    const result = removeCardActivity({ transactionId: mirror.id }, handle.db);
+
+    expect(result).toMatchObject({ status: "refused", reason: "invalid" });
+    expect(result.status === "refused" && result.message).toContain("Not a card payment");
+    // The row survives. Deleting it is the outcome this guard exists to stop.
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, mirror.id))
+        .get(),
+    ).toBeDefined();
+  });
+});

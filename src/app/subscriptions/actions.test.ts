@@ -59,6 +59,7 @@ const {
   categorizeAllSubscriptionsAction,
   categorizeSubscriptionAction,
   dismissSubscriptionAction,
+  restoreSubscriptionAction,
 } = await import("./actions");
 
 /** The outcome the page cannot afford to lose: a rule was repointed, no undo. */
@@ -178,6 +179,34 @@ describe("dismissSubscriptionAction", () => {
 
     // The row IS written; only the refresh failed.
     expect(insertRunMock).toHaveBeenCalled();
+    expect(outcome.warning).toBe(REFRESH_WARNING);
+  });
+});
+
+/**
+ * The RESTORE half, which had no coverage at all.
+ *
+ * It is not a redundant copy of the dismiss case above. v0.26.0 turned both
+ * buttons from plain `<form action={serverAction}>` submits into one client
+ * island (`DismissSubscriptionButton`) that picks the action from a `mode`
+ * prop — so `restoreSubscriptionAction` became reachable through a code path
+ * that did not exist before, and it is the only route on this page back from a
+ * dismissal. A dismissal is a STANDING instruction (rule 10 preserves the
+ * oldest one on a backfill collision), so a restore that appears not to have
+ * worked is a subscription the user has now permanently hidden by accident.
+ */
+describe("restoreSubscriptionAction", () => {
+  it("deletes the dismissal and reports it as saved when the refresh throws", async () => {
+    const restore = makeRefreshThrow();
+
+    const outcome = await restoreSubscriptionAction(formData("NETFLIX"));
+    restore();
+
+    // The delete landed; only the page is stale. A throw here would render
+    // `/subscriptions/error.tsx`, whose copy denies the write happened — and
+    // the row is still on the dismissed list either way, so the user's only
+    // evidence agrees with the false message.
+    expect(deleteRunMock).toHaveBeenCalled();
     expect(outcome.warning).toBe(REFRESH_WARNING);
   });
 });

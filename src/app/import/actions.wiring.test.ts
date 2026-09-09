@@ -31,6 +31,7 @@ const redirectMock = vi.hoisted(() => vi.fn());
 const commitImportMock = vi.hoisted(() => vi.fn());
 const readPendingImportMock = vi.hoisted(() => vi.fn());
 const deletePendingImportMock = vi.hoisted(() => vi.fn());
+const undoImportCategorizationMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({ revalidatePath: revalidatePathMock }));
 
@@ -67,7 +68,14 @@ vi.mock("@/db", async (importOriginal) => {
   return { ...actual, db: {} };
 });
 
-const { confirmImportAction } = await import("./actions");
+vi.mock("@/lib/categorize/undoImportCategorization", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("@/lib/categorize/undoImportCategorization")
+  >();
+  return { ...actual, undoImportCategorization: undoImportCategorizationMock };
+});
+
+const { confirmImportAction, undoImportCategorizationAction } = await import("./actions");
 
 /** A real 36-char UUID: `validateImportIdInput` requires one, and a short
  *  placeholder made every case here fail on validation before it reached the
@@ -86,6 +94,8 @@ beforeEach(() => {
   commitImportMock.mockReset();
   readPendingImportMock.mockReset();
   deletePendingImportMock.mockReset();
+  undoImportCategorizationMock.mockReset();
+  undoImportCategorizationMock.mockReturnValue({ revertedCount: 0, perCategory: [] });
 
   readPendingImportMock.mockReturnValue({
     id: PENDING_ID,
@@ -220,5 +230,50 @@ describe("the warning string is the shared one", () => {
     // re-typed here.
     const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
     expect(REFRESH_FAILED_WARNING).toBe(REFRESH_WARNING);
+  });
+});
+
+/**
+ * The SECOND redirecting action in this file, and it was the untested half.
+ *
+ * `confirmImportAction` above pins that the guard does not eat the redirect on
+ * the import path. `undoImportCategorizationAction` has the same two-line
+ * shape — `guardRefresh(...)` then `redirect(...)` — written from the same
+ * comment, and nothing held it there: moving the `redirect` inside `run` (the
+ * obvious "tidy these two into one block" edit) compiles, and `guardRefresh`
+ * would then catch the navigation signal and return it as a warning string
+ * nobody reads. The user stays on the page they submitted from, which is the
+ * SAME URL this redirects to, so the only visible symptom is a stale
+ * revertible-count — indistinguishable from the undo not having worked, on the
+ * one surface that offers it.
+ */
+describe("undoImportCategorizationAction — the guard must not eat the redirect", () => {
+  it("returns to the batch's success page when revalidatePath throws", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const url = await redirectedTo(undoImportCategorizationAction(formData({ batchId: "77" })));
+    logged.mockRestore();
+
+    // The rows were reverted before this line; an escaping throw would render
+    // `import/error.tsx` and claim otherwise.
+    expect(undoImportCategorizationMock).toHaveBeenCalled();
+    expect(url).toBe("/import/success/77");
+  });
+
+  it("revalidates the success page itself, then redirects to it", async () => {
+    // The stale-payload case a `/ship` review found: this redirect returns to
+    // the exact URL that was just rendered with the PRE-undo count, so the
+    // success page has to be in the revalidated set or Next can serve it back
+    // unchanged.
+    revalidatePathMock.mockImplementation(() => {});
+
+    const url = await redirectedTo(undoImportCategorizationAction(formData({ batchId: "77" })));
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/import/success/77");
+    expect(revalidatePathMock).toHaveBeenCalledWith("/budget/[year]/[month]", "page");
+    expect(url).toBe("/import/success/77");
   });
 });

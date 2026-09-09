@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const createCardActivityMock = vi.hoisted(() => vi.fn());
+const removeCardActivityMock = vi.hoisted(() => vi.fn());
 const revalidatePathMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({
@@ -41,15 +42,21 @@ vi.mock("@/db", async (importOriginal) => {
 
 vi.mock("@/lib/accounts/manualTransaction", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/accounts/manualTransaction")>();
-  return { ...actual, createCardActivity: createCardActivityMock };
+  return {
+    ...actual,
+    createCardActivity: createCardActivityMock,
+    removeCardActivity: removeCardActivityMock,
+  };
 });
 
-const { updateLiabilityBalanceAction, addCardActivityAction } = await import("./actions");
+const { updateLiabilityBalanceAction, addCardActivityAction, removeCardActivityAction } =
+  await import("./actions");
 const { IDLE, IDLE_ACTIVITY } = await import("./action-state");
 const { STARTING_BALANCE_DOLLARS_MAX } = await import("@/lib/import/accountAnchorFields");
 
 beforeEach(() => {
   createCardActivityMock.mockReset();
+  removeCardActivityMock.mockReset();
   revalidatePathMock.mockReset();
 });
 
@@ -378,5 +385,97 @@ describe("a failed refresh never denies a committed write", () => {
     // written for a stale page to be stale about.
     expect(state).toMatchObject({ status: "error", reason: "before-anchor" });
     expect(logged).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `removeCardActivityAction` — the NEW action, and the only one in this file
+ * whose write DELETES a row.
+ *
+ * `addCardActivityAction`'s suite above covers the shared refresh guard, but
+ * not this wrapper: it has its own input coercion, and it is the wrapper that
+ * decides a committed DELETE is reported as `ok`. That distinction is sharper
+ * here than anywhere else on the page — the row is gone, the dialog that
+ * launched it says in as many words "This cannot be undone in the app", and an
+ * `{status:"error"}` for a delete that landed invites a second click that then
+ * refuses with `not-found`, which reads as the app contradicting itself.
+ */
+describe("removeCardActivityAction", () => {
+  function form(transactionId: string): FormData {
+    return formData({ transactionId });
+  }
+
+  it("REFUSES a non-numeric transaction id, and never reaches the writer", async () => {
+    // `Number("abc")` is NaN. A Server Action is a network endpoint regardless
+    // of what the menu rendered, so the coercion has to be checked here.
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, form("abc"));
+
+    expect(state.status).toBe("error");
+    expect(removeCardActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the refusal REASON through, so the bank-row message survives", async () => {
+    // `not-manual` is the guard that protects the ledger rather than a
+    // mechanism. Dropping `reason` on the floor is how a refusal becomes a
+    // generic failure the user cannot act on.
+    removeCardActivityMock.mockReturnValue({
+      status: "refused",
+      reason: "not-manual",
+      message: "That transaction came from your bank, so it can't be removed here.",
+    });
+
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, form("42"));
+
+    expect(state).toMatchObject({ status: "error", reason: "not-manual" });
+    // Refused before any refresh — nothing was written for a page to be stale
+    // about, and revalidating would re-render the menu holding the message.
+    expect(revalidatePathMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a COMMITTED delete as ok with a warning when the refresh throws", async () => {
+    removeCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Charge removed. The balance is now -$1,000.00.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, form("42"));
+    logged.mockRestore();
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toMatch(/Charge removed/);
+    expect(state.warning).toBe(
+      "Your change was saved, but this page couldn't refresh — reload to see the current state.",
+    );
+  });
+
+  it("revalidates the MONTH view too — a removed charge changes an envelope's spend", async () => {
+    // `revalidateCardActivitySurfaces`, not `revalidateBalanceSurfaces`. The
+    // row carried a category, so `/budget/[year]/[month]` is stale without it;
+    // and removing the LAST row makes the card eligible for the feed balance
+    // pass again, which is why the balance surfaces go as well.
+    removeCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Charge removed.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    revalidatePathMock.mockImplementation(() => {});
+
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, form("42"));
+
+    expect(state).toMatchObject({ status: "ok" });
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.warning).toBeUndefined();
+    expect(revalidatePathMock).toHaveBeenCalledWith("/budget/[year]/[month]", "page");
+    for (const path of ["/accounts", "/", "/sync", "/transactions"]) {
+      expect(revalidatePathMock).toHaveBeenCalledWith(path);
+    }
   });
 });
