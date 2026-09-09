@@ -2927,7 +2927,7 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
     if (outcome.status !== "synced") throw new Error("unreachable");
     expect(outcome.insertedCount).toBe(0);
     expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
-    expect(outcome.warnings.some((w) => w.includes("re-linked"))).toBe(true);
+    expect(outcome.warnings.some((w) => w.includes("unlinked") && w.includes("link it again"))).toBe(true);
   });
 
   it("drops ONLY the moved account's rows, and still writes every other account's", async () => {

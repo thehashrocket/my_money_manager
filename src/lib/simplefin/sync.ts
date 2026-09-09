@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
-import { db as defaultDb, schema, type AnyDb } from "@/db";
+import { db as defaultDb, schema } from "@/db";
 import {
   createSnapshot,
   pruneSnapshots,
@@ -35,6 +35,18 @@ import { toLocalIso, todayIso } from "@/lib/now";
 import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
+
+/**
+ * The handle `db.transaction()` hands its callback — NOT `Db`, and not `AnyDb`.
+ *
+ * `verifyStagedLinks` exists for exactly one property: that the re-read happens
+ * INSIDE the write transaction. Typed as `AnyDb` that property was enforced by
+ * a comment and one call site, so a refactor hoisting the call out of the
+ * callback for readability would compile, pass every test (a same-tick relink
+ * does not interleave under test), and silently reinstate the race the function
+ * was written to close. Naming the transaction type makes that a build error.
+ */
+type SyncTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
  * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
@@ -859,8 +871,26 @@ export async function syncSimpleFin(
   // That is the same lie `verifiedTotal` exists to prevent, one layer up, and
   // `AccountSyncSummary` is a public field even though only the aggregate is
   // rendered today.
+  //
+  // EVERY field, not just `insertedCount`. The rest of the record was computed
+  // against a feed this account no longer holds, and each one is its own wrong
+  // statement: `duplicateBy*` counted matches against the OLD feed's ids and
+  // content budget, and `reportedBalanceCents`/`availableBalanceCents`/
+  // `balanceDate` are the old feed's balance — which `finaliseBalances` would
+  // then subtract from a ledger deliberately missing the withheld rows and
+  // report as `driftCents`, i.e. rule 1's "a row is missing or duplicated"
+  // signal, manufactured. Nulling the reported balance is what makes
+  // `driftCents` come back null instead of fabricated.
+  const dropped = new Set(written.droppedAccountIds);
   for (const c of counts) {
-    if (written.droppedAccountIds.includes(c.accountId)) c.insertedCount = 0;
+    if (!dropped.has(c.accountId)) continue;
+    c.insertedCount = 0;
+    c.duplicateByExternalId = 0;
+    c.duplicateByContent = 0;
+    c.skippedPending = 0;
+    c.reportedBalanceCents = null;
+    c.availableBalanceCents = null;
+    c.balanceDate = null;
   }
 
   // Prune only now that the write has committed, so a failed sync never evicts
@@ -939,7 +969,7 @@ function missingAccountWarnings(names: string[]): string[] {
  */
 function verifyStagedLinks<T extends { account: { id: number; name: string }; feedId: string }>(
   staged: readonly T[],
-  tx: AnyDb,
+  tx: SyncTx,
 ): { verified: T[]; warnings: string[]; droppedAccountIds: number[] } {
   const verified: T[] = [];
   const warnings: string[] = [];
@@ -955,6 +985,20 @@ function verifyStagedLinks<T extends { account: { id: number; name: string }; fe
     if (current === undefined) {
       warnings.push(
         `"${entry.account.name}" was deleted while the sync was running, so its transactions were not imported. Nothing was written for it.`,
+      );
+      droppedAccountIds.push(entry.account.id);
+      continue;
+    }
+    // Split from the repoint case deliberately. Both are "not the account
+    // these rows were staged for", but the REMEDIES are opposites and the
+    // warning is the entire mechanism that makes the drop non-silent. An
+    // unlinked account is excluded from the next run's `linked` query, so
+    // "sync again" imports nothing for it, says nothing about it, and the
+    // rows quietly never arrive — the docstring's "the next sync re-stages
+    // them" is true of a repoint and false of an unlink.
+    if (current.simplefinAccountId === null) {
+      warnings.push(
+        `"${entry.account.name}" was unlinked while the sync was running, so its transactions were not imported. Nothing was written for it — link it again to import them.`,
       );
       droppedAccountIds.push(entry.account.id);
       continue;

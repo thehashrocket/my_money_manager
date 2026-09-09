@@ -151,6 +151,17 @@ function syncedOrThrow(outcome: Awaited<ReturnType<typeof syncSimpleFin>>) {
   return outcome;
 }
 
+/**
+ * Every sentence `verifyStagedLinks` emits for a dropped account. Deliberately
+ * the clause all three share rather than the verb: the drop reasons (repointed,
+ * unlinked, deleted) carry DIFFERENT remedies, so they are different sentences
+ * with different verbs and different tails, and a test keyed on one verb
+ * silently stopped counting the unlink case the moment it got its own copy —
+ * which is exactly what happened. The shared middle is the invariant: whatever
+ * the reason, nothing was written and the sentence says so.
+ */
+const WAS_DROPPED = /while the sync was running, so its transactions were not imported/;
+
 describe("verifyStagedLinks — the warning is not a false positive", () => {
   it("does not report a relink when the mid-sync UPDATE sets the SAME feed id", async () => {
     // `setAccountLink` re-saving the value it already holds is an ordinary
@@ -165,7 +176,7 @@ describe("verifyStagedLinks — the warning is not a false positive", () => {
     const outcome = syncedOrThrow(await syncSimpleFin({ now: NOW }, handle.db));
 
     expect(outcome.insertedCount).toBe(1);
-    expect(outcome.warnings.some((w) => w.includes("re-linked"))).toBe(false);
+    expect(outcome.warnings.some((w) => WAS_DROPPED.test(w))).toBe(false);
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(1);
   });
 
@@ -197,7 +208,7 @@ describe("verifyStagedLinks — the warning is not a false positive", () => {
 
     expect(outcome.insertedCount).toBe(0);
     expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
-    expect(outcome.warnings.filter((w) => w.includes("re-linked"))).toHaveLength(2);
+    expect(outcome.warnings.filter((w) => WAS_DROPPED.test(w))).toHaveLength(2);
     expect(outcome.warnings.some((w) => w.includes("Checking"))).toBe(true);
     expect(outcome.warnings.some((w) => w.includes("Savings"))).toBe(true);
   });
@@ -249,7 +260,7 @@ describe("verifyStagedLinks — an emptied batch is still a well-formed batch", 
     expect(outcome.insertedCount).toBe(0);
     expect(outcome.pairsLinked).toBe(0);
     expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
-    expect(outcome.warnings.filter((w) => w.includes("re-linked"))).toHaveLength(2);
+    expect(outcome.warnings.filter((w) => WAS_DROPPED.test(w))).toHaveLength(2);
     expect(outcome.warnings.some((w) => w.includes("Checking"))).toBe(true);
     expect(outcome.warnings.some((w) => w.includes("Savings"))).toBe(true);
 
@@ -412,11 +423,14 @@ describe("verifyStagedLinks — what the outcome still reports about a dropped a
     expect(outcome.accounts).toEqual([]);
   });
 
-  it("still computes drift for a re-pointed account, against the ledger WITHOUT the withheld rows", async () => {
-    // The drift figure is honest about the ledger as it stands: the rows really
-    // are missing, and the guard is why. Pinned so nobody "fixes" the drift by
-    // counting rows that were deliberately not written — that would hide the
-    // one signal telling the user to sync again.
+  it("reports NO drift for a re-pointed account, because the old feed's balance is not a fact about it", async () => {
+    // This test previously asserted a drift of 487 and called it "honest about
+    // the ledger as it stands". It is not: `reportedBalanceCents` came from the
+    // feed the account was staged against and no longer holds, so subtracting
+    // it from the account's CURRENT ledger produces a number about two
+    // different accounts. Rule 1 reads a non-zero drift as "a row is missing or
+    // duplicated", so the old assertion pinned a manufactured version of the
+    // app's own corruption signal.
     const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
     respondAfter(() => relink(account.id, "ACT-2"), [
       { id: "ACT-1", balance: "-4.87", transactions: [feedTxn("TRN-a", "-4.87")] },
@@ -427,7 +441,11 @@ describe("verifyStagedLinks — what the outcome still reports about a dropped a
     expect(outcome.accounts).toHaveLength(1);
     expect(outcome.accounts[0].accountId).toBe(account.id);
     expect(outcome.accounts[0].computedBalanceCents).toBe(0);
-    expect(outcome.accounts[0].reportedBalanceCents).toBe(-487);
-    expect(outcome.accounts[0].driftCents).toBe(487);
+    // Nulled with the rest of the dropped account's record; `driftCents`
+    // short-circuits to null on a null reported balance.
+    expect(outcome.accounts[0].reportedBalanceCents).toBeNull();
+    expect(outcome.accounts[0].driftCents).toBeNull();
+    expect(outcome.accounts[0].insertedCount).toBe(0);
+    expect(outcome.accounts[0].duplicateByExternalId).toBe(0);
   });
 });
