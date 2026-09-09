@@ -2976,6 +2976,17 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
     expect(rows[0].simplefinSourceAccountId).toBe("ACT-9");
 
     expect(handle.db.select().from(schema.importBatches).all()[0].transactionCount).toBe(1);
+
+    // The PER-ACCOUNT summary must agree with the aggregate. `counts` is built
+    // in the staging loop, BEFORE the link re-check, so without the correction
+    // the moved account reports the row it almost got (1) beside an
+    // outcome.insertedCount of 1 that does not include it — two numbers in one
+    // response that cannot both be true.
+    const moved_ = outcome.accounts.find((a) => a.accountId === moved.id);
+    const steady_ = outcome.accounts.find((a) => a.accountId === steady.id);
+    expect(moved_?.insertedCount).toBe(0);
+    expect(steady_?.insertedCount).toBe(1);
+    expect(outcome.accounts.reduce((n, a) => n + a.insertedCount, 0)).toBe(outcome.insertedCount);
   });
 
   it("writes NOTHING for an account DELETED mid-sync, rather than throwing", async () => {

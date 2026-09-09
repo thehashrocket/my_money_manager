@@ -766,7 +766,7 @@ export async function syncSimpleFin(
   const written = db.transaction((tx) => {
     // The links were read before the network round trip; re-check them here,
     // inside the transaction that actually writes. See `verifyStagedLinks`.
-    const { verified, warnings: linkWarnings } = verifyStagedLinks(staged, tx);
+    const { verified, warnings: linkWarnings, droppedAccountIds } = verifyStagedLinks(staged, tx);
     const verifiedTotal = verified.reduce((n, s) => n + s.rows.length, 0);
 
     // Same contract as the CSV path: read the trained rules once for the batch
@@ -846,11 +846,22 @@ export async function syncSimpleFin(
       .where(eq(schema.importBatches.id, batch.id))
       .run();
 
-    return { batchId: batch.id, insertedCount: verifiedTotal, linkWarnings };
+    return { batchId: batch.id, insertedCount: verifiedTotal, linkWarnings, droppedAccountIds };
   });
 
   const { batchId, insertedCount } = written;
   warnings.push(...written.linkWarnings);
+
+  // The PER-ACCOUNT summary has to agree with the aggregate. `counts` is built
+  // in the staging loop above, before the link re-check runs, so a dropped
+  // account would otherwise report the rows it ALMOST got — `insertedCount: 1`
+  // sitting beside an `outcome.insertedCount` and a `transaction_count` of 0.
+  // That is the same lie `verifiedTotal` exists to prevent, one layer up, and
+  // `AccountSyncSummary` is a public field even though only the aggregate is
+  // rendered today.
+  for (const c of counts) {
+    if (written.droppedAccountIds.includes(c.accountId)) c.insertedCount = 0;
+  }
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
@@ -929,9 +940,10 @@ function missingAccountWarnings(names: string[]): string[] {
 function verifyStagedLinks<T extends { account: { id: number; name: string }; feedId: string }>(
   staged: readonly T[],
   tx: AnyDb,
-): { verified: T[]; warnings: string[] } {
+): { verified: T[]; warnings: string[]; droppedAccountIds: number[] } {
   const verified: T[] = [];
   const warnings: string[] = [];
+  const droppedAccountIds: number[] = [];
 
   for (const entry of staged) {
     const current = tx
@@ -944,6 +956,7 @@ function verifyStagedLinks<T extends { account: { id: number; name: string }; fe
       warnings.push(
         `"${entry.account.name}" was deleted while the sync was running, so its transactions were not imported. Nothing was written for it.`,
       );
+      droppedAccountIds.push(entry.account.id);
       continue;
     }
     // `!==` covers a repoint AND an unlink: NULL is not the staged feed id
@@ -953,13 +966,14 @@ function verifyStagedLinks<T extends { account: { id: number; name: string }; fe
       warnings.push(
         `"${entry.account.name}" was re-linked to a different bank account while the sync was running, so its transactions were not imported. Nothing was written for it — sync again to import them against the current link.`,
       );
+      droppedAccountIds.push(entry.account.id);
       continue;
     }
 
     verified.push(entry);
   }
 
-  return { verified, warnings };
+  return { verified, warnings, droppedAccountIds };
 }
 
 /**
