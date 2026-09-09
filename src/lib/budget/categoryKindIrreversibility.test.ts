@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ALL_KINDS, kindsImplyUsed } from "@/lib/budget/kindsImplyUsed";
 import {
   assignableKinds,
   isCategoryUsed,
@@ -28,7 +29,8 @@ import {
  * one, and `tsc` cannot see either.
  */
 
-const KINDS: CategoryKind[] = ["expense", "income", "fund"];
+// The schema enum's own list, not a fourth hand-copy of it.
+const KINDS: readonly CategoryKind[] = ALL_KINDS;
 
 /**
  * Every usage shape that can reach `assignableKinds`, including the impossible
@@ -46,6 +48,35 @@ function usageShapes(): CategoryKindUsage[] {
   }
   return shapes;
 }
+
+describe("the predicate CategoryMenu actually evaluates (`kindsImplyUsed`)", () => {
+  it("is the biconditional, through the extracted function rather than the literal", () => {
+    // The gap this closes: every other test in this file asserts things about
+    // `assignableKinds`, so `kindsImplyUsed`'s body could be changed to
+    // `< 2` — silently removing the confirm dialog from the one-way X1 write —
+    // and the entire suite stayed green. The module was extracted precisely
+    // because the literal was "restated in a component where no test could
+    // reach it", and then it was not tested. This is that test.
+    for (const usage of usageShapes()) {
+      for (const kind of KINDS) {
+        expect({ usage, kind, used: kindsImplyUsed(assignableKinds(kind, usage)) }).toEqual({
+          usage,
+          kind,
+          used: isCategoryUsed(usage),
+        });
+      }
+    }
+  });
+
+  it("keys off the schema enum's arity, so a fourth kind cannot silently un-gate it", () => {
+    // `ALL_KINDS.length` is the whole point: hardcoding 3 meant adding a kind
+    // would make an UNUSED category read as used, putting "This cannot be
+    // undone" in front of a reversible change.
+    expect(ALL_KINDS).toHaveLength(3);
+    expect(kindsImplyUsed(ALL_KINDS)).toBe(false);
+    expect(kindsImplyUsed(ALL_KINDS.slice(0, 2))).toBe(true);
+  });
+});
 
 describe("the premise CategoryMenu's confirm step reads (`assignableKinds.length < 3`)", () => {
   it("(1) offers all three kinds if and only if the category is UNUSED", () => {

@@ -27,6 +27,25 @@ import type { CategoryKind } from "./categoryKindLock";
  * compiler erases. `categoryKindLock.ts` re-exports this so the server side
  * still reads rule 8's vocabulary from one place.
  */
+/**
+ * Every kind the schema enum admits — the ONE list, and the one
+ * `assignableKinds` returns from its unused branch.
+ *
+ * The `3` below is the CARDINALITY of that enum, and nothing tied it there.
+ * Add a fourth kind and `kindsImplyUsed` starts returning `true` for an unused
+ * category, so `CategoryMenu` shows "This cannot be undone" before a
+ * REVERSIBLE change — teaching people to click through the one modal in the
+ * app that guards a one-way write. `tsc` would say nothing. This is the same
+ * class `CategoryKind`'s derivation from the schema exists to prevent: the
+ * type was derived, the arity was not.
+ */
+export const ALL_KINDS = ["expense", "income", "fund"] as const satisfies readonly CategoryKind[];
+
+/** Adding a kind to the schema without adding it here is a build error. */
+type _AllKindsIsExhaustive = CategoryKind extends (typeof ALL_KINDS)[number] ? true : never;
+const _ALL_KINDS_IS_EXHAUSTIVE: _AllKindsIsExhaustive = true;
+void _ALL_KINDS_IS_EXHAUSTIVE;
+
 export function kindsImplyUsed(kinds: readonly CategoryKind[]): boolean {
-  return kinds.length < 3;
+  return kinds.length < ALL_KINDS.length;
 }

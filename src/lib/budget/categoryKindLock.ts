@@ -1,4 +1,5 @@
 import { inArray, sql } from "drizzle-orm";
+import { ALL_KINDS } from "./kindsImplyUsed";
 import { schema, type AnyDb } from "@/db";
 
 // Derived, not retyped: a hand-duplicated union would silently drift the
@@ -7,13 +8,15 @@ import { schema, type AnyDb } from "@/db";
 // FundRow, and `_month-editor.tsx` imports it from there.
 export type CategoryKind = (typeof schema.categories.$inferSelect)["kind"];
 
-// Re-exported, not defined here: this module imports drizzle and `@/db`, and
-// the two consumers of the predicate are `"use client"` files, so a VALUE
-// import from here would pull better-sqlite3 into the browser bundle (the
-// measured +376 KB shape CLAUDE.md records for `limits.ts`). It lives in a
-// DB-free module and is re-exported so server-side readers still find rule 8's
-// vocabulary in one place.
-export { kindsImplyUsed } from "./kindsImplyUsed";
+// `kindsImplyUsed` deliberately lives in `./kindsImplyUsed` and is NOT
+// re-exported from here. This module imports drizzle and `@/db`, so a
+// re-export would make `import { kindsImplyUsed } from ".../categoryKindLock"`
+// a compiling, silently bundle-poisoning import from a `"use client"` file —
+// the measured +376 KB shape CLAUDE.md records for `limits.ts`, reintroduced
+// by the very bridge meant to keep rule 8's vocabulary in one place. The
+// comparators it was modelled on (`limits.ts`, `merchantLabel.ts`,
+// `keyTrainability.ts`) are all standalone with no such bridge back.
+// @see ./kindsImplyUsed
 
 /**
  * The three counts rule 8's "is this category used?" test reads, and nothing
@@ -69,7 +72,7 @@ export function isCategoryUsed(usage: CategoryKindUsage): boolean {
  * so relaxing on its absence would be relaxing on no signal at all.
  */
 export function assignableKinds(previousKind: CategoryKind, usage: CategoryKindUsage): CategoryKind[] {
-  if (!isCategoryUsed(usage)) return ["expense", "income", "fund"];
+  if (!isCategoryUsed(usage)) return [...ALL_KINDS];
 
   const kinds: CategoryKind[] = [previousKind];
   const isX1Eligible = previousKind === "expense" && usage.txnCount > 0 && usage.negativeTxnCount === 0;

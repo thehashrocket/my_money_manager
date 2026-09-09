@@ -32,6 +32,13 @@ import {
 
 type CarryoverPolicy = "none" | "rollover" | "reset";
 
+/** Which dialog is open, carrying whatever that dialog needs to render. */
+type ActiveDialog =
+  | { kind: "rename" }
+  | { kind: "archive" }
+  | { kind: "setKind"; newKind: CategoryKind }
+  | null;
+
 export type CategoryMenuProps = {
   categoryId: number;
   categoryName: string;
@@ -102,8 +109,13 @@ export function CategoryMenu({
   canMoveDown,
   isGroup = false,
 }: CategoryMenuProps) {
-  const [activeDialog, setActiveDialog] = useState<"rename" | "archive" | "kind" | null>(null);
-  const [pendingKind, setPendingKind] = useState<CategoryKind | null>(null);
+  // Payload INSIDE the discriminant. `activeDialog` and a separate
+  // `pendingKind` were two pieces of state encoding one fact with nothing
+  // making them agree, which forced three dead branches on the dialog: a
+  // `?? ""` in its title, a `newKind === null` in its disabled test, and an
+  // early return in its confirm handler — each of which a reader has to prove
+  // dead. Same discipline as `SyncOutcome`.
+  const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
   const [moveAnnouncement, setMoveAnnouncement] = useState("");
   const [isPending, startTransition] = useTransition();
 
@@ -159,8 +171,7 @@ export function CategoryMenu({
   function requestKind(newKind: CategoryKind) {
     if (newKind === kind) return;
     if (kindChangeIsIrreversible) {
-      setPendingKind(newKind);
-      setActiveDialog("kind");
+      setActiveDialog({ kind: "setKind", newKind });
       return;
     }
     setKind(newKind);
@@ -172,9 +183,19 @@ export function CategoryMenu({
       const formData = new FormData();
       formData.set("categoryId", String(categoryId));
       formData.set("kind", newKind);
-      const result = await setCategoryKindAction({ status: "idle" }, formData);
-      if (result.status === "error") toast.error(result.message);
-      else toast.success(`"${categoryName}" is now ${newKind}.`);
+      // Not sent: this path only runs for an UNUSED category, where the change
+      // is reversible and the server does not ask. Sending it here would make
+      // the flag meaningless by always being present.
+      try {
+        const result = await setCategoryKindAction({ status: "idle" }, formData);
+        if (result.status === "error") toast.error(result.message);
+        else if (result.status === "ok" && result.warning) toast.warning(result.warning);
+        else toast.success(`"${categoryName}" is now ${newKind}.`);
+      } catch {
+        // Without this, a rethrow produced NEITHER toast — success and hard
+        // failure looked identical (the menu just closed).
+        toast.error("Something went wrong. Reload the page to see the current kind.");
+      }
     });
   }
 
@@ -203,7 +224,7 @@ export function CategoryMenu({
           ⋯
         </DropdownMenuTrigger>
         <DropdownMenuContent>
-          <DropdownMenuItem onClick={() => setActiveDialog("rename")}>Rename…</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setActiveDialog({ kind: "rename" })}>Rename…</DropdownMenuItem>
           <DropdownMenuSeparator />
           {/* DS16: "44×44 hit area" — min-h-11 (44px) rather than the
               shared DropdownMenuItem's default compact padding, since
@@ -269,7 +290,7 @@ export function CategoryMenu({
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              <DropdownMenuItem variant="destructive" onClick={() => setActiveDialog("archive")}>
+              <DropdownMenuItem variant="destructive" onClick={() => setActiveDialog({ kind: "archive" })}>
                 Archive…
               </DropdownMenuItem>
             </>
@@ -282,25 +303,29 @@ export function CategoryMenu({
       </div>
 
       <RenameDialog
-        open={activeDialog === "rename"}
-        onOpenChange={(open) => setActiveDialog(open ? "rename" : null)}
+        open={activeDialog?.kind === "rename"}
+        onOpenChange={(open) => setActiveDialog(open ? { kind: "rename" } : null)}
         categoryId={categoryId}
         categoryName={categoryName}
       />
       <ArchiveDialog
-        open={activeDialog === "archive"}
-        onOpenChange={(open) => setActiveDialog(open ? "archive" : null)}
+        open={activeDialog?.kind === "archive"}
+        onOpenChange={(open) => setActiveDialog(open ? { kind: "archive" } : null)}
         categoryId={categoryId}
         categoryName={categoryName}
       />
-      <SetKindDialog
-        open={activeDialog === "kind"}
-        onOpenChange={(open) => setActiveDialog(open ? "kind" : null)}
-        categoryId={categoryId}
-        categoryName={categoryName}
-        currentKind={kind}
-        newKind={pendingKind}
-      />
+      {activeDialog?.kind === "setKind" ? (
+        <SetKindDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setActiveDialog(null);
+          }}
+          categoryId={categoryId}
+          categoryName={categoryName}
+          currentKind={kind}
+          newKind={activeDialog.newKind}
+        />
+      ) : null}
     </>
   );
 }
@@ -335,7 +360,7 @@ function SetKindDialog({
   categoryId: number;
   categoryName: string;
   currentKind: CategoryKind;
-  newKind: CategoryKind | null;
+  newKind: CategoryKind;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -354,12 +379,28 @@ function SetKindDialog({
   }
 
   function confirm() {
-    if (newKind === null) return;
     startTransition(async () => {
       const formData = new FormData();
       formData.set("categoryId", String(categoryId));
       formData.set("kind", newKind);
-      const result = await setCategoryKindAction({ status: "idle" }, formData);
+      // The server REQUIRES this on the X1 branch and refuses without it, so a
+      // stale tab that never rendered this dialog cannot reach the one-way
+      // write. Absence is a refusal, not a default.
+      formData.set("confirmedIrreversible", "yes");
+      let result;
+      try {
+        result = await setCategoryKindAction({ status: "idle" }, formData);
+      } catch {
+        // `setCategoryKindAction` rethrows anything that is not one of its four
+        // domain refusals — SQLITE_BUSY, a driver error. In a production build
+        // Next.js replaces the message with a digest, so there is nothing to
+        // show but there IS something to say: this write may have landed, and
+        // claiming it failed would be the more misleading of the two lies.
+        setError(
+          "Something went wrong. This change may or may not have been saved — reload the page to see.",
+        );
+        return;
+      }
       // Stay OPEN on a refusal and render it here, like RenameDialog and
       // ArchiveDialog. Closing optimistically and routing the message to a
       // toast made `isPending` unobservable (the dialog unmounted in the same
@@ -371,7 +412,9 @@ function SetKindDialog({
         return;
       }
       onOpenChange(false);
-      toast.success(`"${categoryName}" is now ${newKind}.`);
+      // A refresh failure is a warning ON a successful write, never an error.
+      if (result.status === "ok" && result.warning) toast.warning(result.warning);
+      else toast.success(`"${categoryName}" is now ${newKind}.`);
     });
   }
 
@@ -380,7 +423,7 @@ function SetKindDialog({
       <DialogContent initialFocus={closeRef}>
         <DialogHeader>
           <DialogTitle>
-            Change “{categoryName}” from {currentKind} to {newKind ?? ""}?
+            Change “{categoryName}” from {currentKind} to {newKind}?
           </DialogTitle>
           <DialogDescription>
             This category already has activity, so the change is not a setting — it rewrites how the
@@ -414,8 +457,8 @@ function SetKindDialog({
               banner's primary button does not transfer: there the write
               REPAIRS a broken state (no income categories, Left to Budget
               uncomputable) and is reached from an amber prompt. */}
-          <Button type="button" variant="destructive" disabled={isPending || newKind === null} onClick={confirm}>
-            {isPending ? "Changing…" : newKind ? `Change to ${newKind}` : "Change"}
+          <Button type="button" variant="destructive" disabled={isPending} onClick={confirm}>
+            {isPending ? "Changing…" : `Change to ${newKind}`}
           </Button>
         </DialogFooter>
       </DialogContent>
