@@ -7,6 +7,14 @@ import { schema, type AnyDb } from "@/db";
 // FundRow, and `_month-editor.tsx` imports it from there.
 export type CategoryKind = (typeof schema.categories.$inferSelect)["kind"];
 
+// Re-exported, not defined here: this module imports drizzle and `@/db`, and
+// the two consumers of the predicate are `"use client"` files, so a VALUE
+// import from here would pull better-sqlite3 into the browser bundle (the
+// measured +376 KB shape CLAUDE.md records for `limits.ts`). It lives in a
+// DB-free module and is re-exported so server-side readers still find rule 8's
+// vocabulary in one place.
+export { kindsImplyUsed } from "./kindsImplyUsed";
+
 /**
  * The three counts rule 8's "is this category used?" test reads, and nothing
  * more. Split out from `setCategoryKind`'s inline queries so the READ side can

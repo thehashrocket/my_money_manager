@@ -13,6 +13,7 @@ import {
 } from "react";
 import type { EffectiveAllocation } from "@/lib/budget";
 import type { CategoryKind } from "@/lib/budget/categoryKindLock";
+import { kindsImplyUsed } from "@/lib/budget/kindsImplyUsed";
 import type {
   FundRow,
   IncomeLeafRow,
@@ -1234,7 +1235,7 @@ function liveAssignableKinds(
   live: LeafAllocation | null,
 ): CategoryKind[] {
   if (live === null) return serverKinds;
-  if (serverKinds.length < 3) return serverKinds;
+  if (kindsImplyUsed(serverKinds)) return serverKinds;
   return [currentKind];
 }
 
@@ -1253,7 +1254,7 @@ function liveKindLockReason(
   serverReason: string | null,
   live: LeafAllocation | null,
 ): string | null {
-  if (live === null || serverKinds.length < 3) return serverReason;
+  if (live === null || kindsImplyUsed(serverKinds)) return serverReason;
   return "a month is already budgeted here";
 }
 

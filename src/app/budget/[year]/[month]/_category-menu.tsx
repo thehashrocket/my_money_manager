@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState, useTransition } from "react";
+import { useId, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { CategoryKind } from "@/lib/budget/categoryKindLock";
+import { kindsImplyUsed } from "@/lib/budget/kindsImplyUsed";
 import {
   archiveCategoryAction,
   moveCategoryAction,
@@ -122,7 +123,7 @@ export function CategoryMenu({
    * keys off, and it is reading the live prop, so an allocation committed in
    * this session narrows it here too.
    */
-  const kindChangeIsIrreversible = assignableKinds.length < 3;
+  const kindChangeIsIrreversible = kindsImplyUsed(assignableKinds);
 
   function moveTo(direction: "up" | "down") {
     startTransition(async () => {
@@ -241,7 +242,12 @@ export function CategoryMenu({
               <DropdownMenuSeparator />
               {assignableKinds.length > 1 ? (
                 assignableKinds.map((k) => (
-                  <DropdownMenuItem key={k} disabled={k === kind} onClick={() => requestKind(k)}>
+                  <DropdownMenuItem
+                    key={k}
+                    disabled={k === kind}
+                    variant={k !== kind && kindChangeIsIrreversible ? "destructive" : undefined}
+                    onClick={() => requestKind(k)}
+                  >
                     Set kind: {k}
                     {k !== kind && kindChangeIsIrreversible ? "…" : ""}
                   </DropdownMenuItem>
@@ -289,20 +295,11 @@ export function CategoryMenu({
       />
       <SetKindDialog
         open={activeDialog === "kind"}
-        onOpenChange={(open) => {
-          setActiveDialog(open ? "kind" : null);
-          if (!open) setPendingKind(null);
-        }}
+        onOpenChange={(open) => setActiveDialog(open ? "kind" : null)}
+        categoryId={categoryId}
         categoryName={categoryName}
         currentKind={kind}
         newKind={pendingKind}
-        pending={isPending}
-        onConfirm={() => {
-          if (pendingKind === null) return;
-          setKind(pendingKind);
-          setActiveDialog(null);
-          setPendingKind(null);
-        }}
       />
     </>
   );
@@ -328,23 +325,59 @@ export function CategoryMenu({
 function SetKindDialog({
   open,
   onOpenChange,
+  categoryId,
   categoryName,
   currentKind,
   newKind,
-  pending,
-  onConfirm,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  categoryId: number;
   categoryName: string;
   currentKind: CategoryKind;
   newKind: CategoryKind | null;
-  pending: boolean;
-  onConfirm: () => void;
 }) {
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Reset on the OPEN transition, not on close — the same render-time pattern
+  // (and the same reason) as RenameDialog below. `DialogContent` stays mounted
+  // through its exit animation, so clearing state on close renders a degraded
+  // frame for the duration of it: the title losing its kind, the button label
+  // falling back to the generic "Change" and going disabled, all while the
+  // user watches it animate away.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setError(null);
+  }
+
+  function confirm() {
+    if (newKind === null) return;
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("categoryId", String(categoryId));
+      formData.set("kind", newKind);
+      const result = await setCategoryKindAction({ status: "idle" }, formData);
+      // Stay OPEN on a refusal and render it here, like RenameDialog and
+      // ArchiveDialog. Closing optimistically and routing the message to a
+      // toast made `isPending` unobservable (the dialog unmounted in the same
+      // commit it went true) and put the server's evidence — the transaction
+      // count and date range rule 8 refuses with — somewhere the user had
+      // already lost the context for.
+      if (result.status === "error") {
+        setError(result.message);
+        return;
+      }
+      onOpenChange(false);
+      toast.success(`"${categoryName}" is now ${newKind}.`);
+    });
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent initialFocus={closeRef}>
         <DialogHeader>
           <DialogTitle>
             Change “{categoryName}” from {currentKind} to {newKind ?? ""}?
@@ -354,16 +387,35 @@ function SetKindDialog({
             months it appears in are calculated.
           </DialogDescription>
         </DialogHeader>
-        <div className="rounded-md bg-[var(--bg-inset)] px-3 py-2 text-sm text-ink-1">
+        {/* Warning surface, not the neutral evidence inset the banner uses for
+            row counts: this panel carries no evidence, only the consequence,
+            and it is the only thing standing between a click and a rewrite of
+            every prior month. */}
+        <div className="rounded-md border border-[color-mix(in_oklch,var(--accent-redbrown)_35%,transparent)] bg-[color-mix(in_oklch,var(--accent-redbrown)_12%,var(--background))] px-3 py-2 text-sm text-ink-1">
           <p>
             This month&apos;s summary, every prior month, the spending trend chart, and whether this
             category can receive transactions all change.
           </p>
           <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
         </div>
-        <DialogFooter showCloseButton>
-          <Button type="button" variant="primary" disabled={pending || newKind === null} onClick={onConfirm}>
-            {newKind ? `Change to ${newKind}` : "Change"}
+        {error ? <p className="text-sm text-money-neg">{error}</p> : null}
+        <DialogFooter>
+          {/* Close first in DOM order AND the initialFocus target: Base UI
+              focuses the first tabbable element in the popup, which would
+              otherwise park the keyboard on an irreversible commit that a
+              second Enter fires. */}
+          <Button ref={closeRef} type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          {/* `destructive`, not `primary`. ArchiveDialog in this same file uses
+              destructive for an action its own copy says can be undone from
+              /budget/categories; styling this one as an ordinary Save inverted
+              visual weight against consequence inside one component. The
+              banner's primary button does not transfer: there the write
+              REPAIRS a broken state (no income categories, Left to Budget
+              uncomputable) and is reached from an amber prompt. */}
+          <Button type="button" variant="destructive" disabled={isPending || newKind === null} onClick={confirm}>
+            {isPending ? "Changing…" : newKind ? `Change to ${newKind}` : "Change"}
           </Button>
         </DialogFooter>
       </DialogContent>
