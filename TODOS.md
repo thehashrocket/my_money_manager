@@ -1557,6 +1557,54 @@ column).
       after today. (`src/lib/accounts/paidDownCents.ts`,
       `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`,
       `src/lib/simplefin/sync.ts`, `src/lib/accounts/manualTransaction.ts`)
+      **CORRECTED AGAIN 2026-09-09 (round-6 triage). "Do (b) now" was wrong,
+      and all THREE of the benefits the paragraph above claims for it are
+      false — measured against the live ledger, not re-read from the code.**
+      This is the third consecutive round where a stated blocker or benefit
+      turned out to be misdiagnosed, and the first where acting on the entry
+      would have cost something, because (b) is a 30-second click that
+      presents as free.
+      1. **"no utilization bar renders (`credit_limit_cents` is NULL)" is
+         already stale.** The limit is `320000` ($3,200). Against `-220643`
+         owed the bar renders at ~69%. `resolveUtilizationDisplay` gates on
+         the limit being present and positive (DS64), nothing else, so this
+         has been true since the limit was entered — the entry was describing
+         the ledger of a few hours earlier.
+      2. **(b) does NOT make `paidDownCents` non-zero.** The figure is
+         month-bounded — `between(monthBoundary(y, m), lastDayOfMonth(y, m))` —
+         and the four `CITI CARD ONLINEPAYMENT` rows are dated 2026-06-26,
+         07-20, 08-14 and 08-27. September, the only month `/accounts` and the
+         dashboard render, stays `$0`. And DS58 omits the line at `0` as well
+         as at `null`, so the visible change on either surface is **nothing**.
+         It would make June, July and August non-zero — months no surface
+         displays.
+      3. **(b) permanently disables the card's automatic balance.** Writing
+         the mirror rows makes `hasAnyTransactionRows(4)` true, and
+         `refreshLiabilityBalances` (`src/lib/simplefin/sync.ts`) SKIPS any
+         balance-only account that has rows, with a warning, because
+         SimpleFIN's `balance-date` is an instant and rule 1's anchor must be
+         a close-of-day figure. Today that pass runs on every `/sync` and the
+         Citi anchor is moving daily (`balance_source: 'feed'`,
+         `prior_starting_balance_date: '2026-09-07'` against an anchor of
+         `2026-09-08`). `resolveBalanceAction` flips the row from Refresh to
+         Reconcile at the same moment. That is the design working exactly as
+         D7/D15 specify — it is just not free, and the entry called it cheap.
+      `unmarkCardPayment` is the way back, so this is revertible; the anchor
+      moves it would strand are not, since `prior_starting_balance_*` holds
+      exactly one value (rule 9).
+      **RE-SEQUENCED: do (b) only alongside (a), not before it.** When a real
+      post-anchor card charge exists, the card has rows anyway and the feed
+      refresh is going away regardless — at that point the mirror rows cost
+      nothing and (a) + (b) together validate spend, utilization, the balance
+      sum AND the pairing path, which is the whole feature rather than a
+      quarter of it. Until then the card's balance is correct and current for
+      free, which is worth more than four backlog rows.
+      **The general rule, worth more than this entry:** a usage-pass TODO
+      written from code-reading names benefits the ledger has already
+      delivered, or that a month-bounded query cannot deliver. Re-measure
+      every premise against the live database before acting on one — and
+      specifically check whether the write trips a `hasAnyTransactionRows` or
+      other zero-row gate somewhere else in the app.
 
 
 ## Follow-ups from the `/plan-eng-review` pass (2026-09-08, sync pending-state plan)
@@ -2153,3 +2201,137 @@ conditions are both met by the measurements above.
       helper's premise as much as the code.
       (`src/lib/budget.test.ts`, `src/lib/budget/loadMonthView.test.ts`,
       `src/app/budget/actions.test.ts`)
+
+## Follow-ups from the `/plan-eng-review` "what next" pass (2026-09-08, round 6)
+
+Sixth triage. `PLAN.md`'s three 1.0.0 gates were all closed going in, so this
+pass had no gate to measure and went looking for what should follow one.
+Codex (gpt-5.4) ran as the outside voice. Decisions **D1=A** (ship the two
+safety items as one release), **D2=A** (correct the liability entry, defer the
+pass), **D3=B** (hold 1.0.0 behind a written post-gate criterion).
+
+**Both reviewers independently ranked the same two items above every feature
+candidate, and neither was on the slate this pass assembled** — one came from
+Codex, one from both of us at once. Both shipped in this release.
+
+Measured against the live ledger inside the container, 2026-09-09: 1,562
+transactions; uncategorized non-transfer backlog **236 → 188**, still moving
+purely by clicking; `import_source='manual'` rows **still 0**; credit card and
+mortgage **still 0 rows each**; funds 1; budgeted months 2; rollover categories
+1; 177 rules. `integrity_check` ok, `foreign_key_check` clean, 0 rows in the
+residual-duplication class, 0 legacy orphans. 1,802 → **1,807 tests**.
+
+**The backlog residue is harder than what has been cleared, and the number
+alone hides it.** Of the remaining 188, `ONLINE` (19) and `MOBILE` (15) are
+`LOSSY_MERCHANT_KEYS` that rule 6 refuses to train, and `COSTCO WHSE` (10) and
+`AMAZON` (9) are the known-unresolvable multi-category pair. That is 53 rows /
+28% in groups where no exact rule can ever be right. The 437 → 188 clearing
+took the tractable 57% first, which is correct, but it means the remaining
+per-row cost is not the same as the cleared per-row cost. Do not project the
+burn-down rate forward.
+
+### Shipped in this release
+
+- [x] **P1 — `/sync` re-verifies the account link inside the write
+      transaction.** Found by Codex; the four-section review missed it. The
+      linked-account set is read at `sync.ts` before `await fetchAccounts` and
+      the insert happens after it, so `account.id` and `feedId` are a
+      precondition carried across an await — and `setAccountLink` can commit in
+      that window, from a second tab, with both controls on the same `/sync`
+      page. Feed A's rows would land on an account now pointed at feed B,
+      carrying feed A provenance: invisible to the id pass (wrong feed),
+      invisible to content dedup (`eq(accountId, …)`-scoped), and unprotected
+      by the partial unique index. That is the misfiling class migration `0020`
+      exists to prevent, reintroduced as a race rather than as a schema
+      mistake. `verifyStagedLinks` drops the moved account's rows rather than
+      failing the sync, since every other account was staged against a link
+      that did not move; nothing is written for a dropped account, so the next
+      sync re-stages it. `insertedCount` and `import_batches.transaction_count`
+      now report what was WRITTEN, not what was staged, which means a `synced`
+      outcome can carry `insertedCount: 0`. Four of the five new tests fail
+      without the guard; the fifth is the ordinary-case control.
+      **The idiom already existed and had not been applied here:**
+      `undoSyncBatch` re-checks its own precondition inside its transaction
+      rather than trusting the page's check (rule 5) — reasoning that applies
+      with more force to the write that moves rows onto an account.
+      (`src/lib/simplefin/sync.ts`)
+
+- [x] **P1 — the budget row menu confirms before an irreversible kind
+      change.** Found by this review and by Codex independently.
+      `_category-menu.tsx` called `setCategoryKindAction` straight from a
+      dropdown click, while `_reclassify-income.tsx` has always gated the same
+      write behind a dialog that says it cannot be undone — and v0.24.0's
+      `assignableKinds` work made the menu item appear exactly when the server
+      WILL accept it, so the unguarded path became the MORE discoverable of the
+      two. X1 is one-way: rule 8 refuses income → expense on a used category,
+      and being used is X1's own precondition. The gate keys off
+      `assignableKinds.length < 3`, which is exact rather than heuristic —
+      `assignableKinds` returns all three kinds iff the category is unused, so
+      fewer than three means used, and on a used category the only change the
+      menu can offer IS X1. Unused categories still apply immediately; a modal
+      on reversible setup is friction that teaches people to click through
+      modals. Verified in a browser across all four branches.
+      (`src/app/budget/[year]/[month]/_category-menu.tsx`)
+
+### Corrected rather than carried
+
+- [x] **The liability usage-pass entry had three false premises and would have
+      cost something.** See the CORRECTED AGAIN block on that entry above. The
+      utilization claim was already stale (the limit is $3,200, the bar
+      renders), `paidDownCents` is month-bounded so the four pre-September
+      payments cannot move September, and the mirror rows would trip
+      `hasAnyTransactionRows` and permanently disable the card's automatic feed
+      balance. Re-sequenced to run alongside (a) rather than before it.
+
+### Still open
+
+- [ ] **P2** — **`revalidateBudgetSurfacesAction` is TWO bugs, not one.**
+      Carried forward from the 2026-09-09 `/ship` section above, with Codex's
+      addition: fixing the unawaited commit alone does not fix the dashboard,
+      because `revalidateBudgetSurfacesAction` never touches `/` and
+      `src/app/page.tsx` reads `loadMonthView` for the current month. Both
+      halves are one user action — edit a cell, click Home — so they should
+      land together or the fix looks complete and is not.
+      (`src/components/ledger/currency-input.tsx`,
+      `src/app/budget/[year]/[month]/_month-editor.tsx`,
+      `src/app/budget/actions.ts`)
+
+- [ ] **P2** — **The container spends a snapshot retention slot on every
+      restart, not on every migration.** `docker/entrypoint.src.mjs` takes a
+      full `VACUUM INTO` and calls `pruneSnapshots(…, 10, PRE_MIGRATE_PREFIX)`
+      on every successful boot regardless of whether `migrate()` applied
+      anything — `runMigrations` does not report it, so the entrypoint cannot
+      tell the difference. Measured on the live volume: 10 snapshots, 8 of them
+      predating migration `0021` (verified by opening each and checking for the
+      dropped column), accumulated in ~2 days under `restart: unless-stopped`;
+      two are 3 minutes apart with identical schema and identical row counts.
+      Detection is trivial and already testable — `__drizzle_migrations` holds
+      22, `drizzle/meta/_journal.json` holds 22, and `entrypoint.test.mjs`
+      already drives `runMigrations` against a temp DB. Snapshotting only when
+      migrations are pending would also let the degraded-snapshot P2 above
+      become a refusal rather than a warning, since a degraded snapshot only
+      matters when there is a migration to roll back.
+      **Two things this does NOT do, both corrections from Codex.** It does not
+      fix the crash-loop case: after a FAILED migration, migrations are still
+      pending on every restart and pruning still runs only on success, so
+      snapshots still grow unbounded there. And it does not rescue `0021` — the
+      surviving pre-0021 snapshots hold 23 `budget_periods` rows where the live
+      ledger now holds 48, so that rollback is already lossy. This is hardening
+      for the NEXT destructive migration, not recovery of the last one. Do not
+      schedule it as urgent on the strength of the countdown; the thing
+      expiring has no rollback value left.
+      (`docker/entrypoint.src.mjs`, `src/lib/snapshot.ts`)
+
+- [ ] **P3** — **The composite index on `transactions(category_id,
+      amount_cents)` is real and premature.** Premise verified:
+      `loadCategoryKindUsage` is unconditional per `/budget/[year]/[month]`
+      render, date-unbounded and whole-ledger, on a synchronous driver, and the
+      whole-ledger scope is not avoidable because rule 8's `isUsed` is a
+      whole-ledger fact. But the measurement behind it (1.702ms → 0.517ms) is
+      on a **10,800-row synthetic** and this ledger holds 1,562. Downgraded
+      from P2 to P3 on that gap alone — it is correct work at the wrong time,
+      and it is a migration. Revisit when the ledger is large enough for the
+      number to mean something. Related and unmeasured: the entrypoint's
+      boot-time `VACUUM INTO` is a full ledger copy that also grows linearly
+      forever.
+      (`src/db/schema.ts`, `src/lib/budget/categoryKindLock.ts`)
