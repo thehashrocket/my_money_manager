@@ -12,6 +12,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { EffectiveAllocation } from "@/lib/budget";
+import type { CategoryKind } from "@/lib/budget/categoryKindLock";
 import type {
   FundRow,
   IncomeLeafRow,
@@ -608,6 +609,9 @@ function ExpenseTable({
                       categoryName={section.parentName}
                       kind="expense"
                       carryoverPolicy="none"
+                      // A group's own `kind` is never read and it can never
+                      // hold an allocation, so no kind is assignable to it.
+                      assignableKinds={[]}
                       isGroup
                       canMoveUp={groupIndex > 0}
                       canMoveDown={groupIndex < groupSections.length - 1}
@@ -721,6 +725,7 @@ function ExpenseDesktopRow({
           categoryName={leaf.name}
           kind="expense"
           carryoverPolicy={leaf.carryoverPolicy}
+          assignableKinds={liveAssignableKinds(leaf.assignableKinds, "expense", allocation)}
           canMoveUp={canMoveUp}
           canMoveDown={canMoveDown}
         />
@@ -876,6 +881,7 @@ function IncomeDesktopRow({ income, year, month }: { income: IncomeLeafRow; year
           categoryName={income.name}
           kind="income"
           carryoverPolicy="none"
+          assignableKinds={liveAssignableKinds(income.assignableKinds, "income", allocation)}
           // Income rows sort by planned amount, never `sort_order`
           // (`incomeCompare` in loadMonthView.ts) — reordering would swap a
           // column nothing here ever reads, so it's never offered.
@@ -946,6 +952,7 @@ function MobileExpenseList({
                     categoryName={section.parentName}
                     kind="expense"
                     carryoverPolicy="none"
+                    assignableKinds={[]}
                     isGroup
                     canMoveUp={groupIndex > 0}
                     canMoveDown={groupIndex < groupSections.length - 1}
@@ -1042,6 +1049,7 @@ function MobileExpenseRow({
           categoryName={leaf.name}
           kind="expense"
           carryoverPolicy={leaf.carryoverPolicy}
+          assignableKinds={liveAssignableKinds(leaf.assignableKinds, "expense", allocation)}
           canMoveUp={canMoveUp}
           canMoveDown={canMoveDown}
         />
@@ -1124,6 +1132,7 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
           categoryName={income.name}
           kind="income"
           carryoverPolicy="none"
+          assignableKinds={liveAssignableKinds(income.assignableKinds, "income", allocation)}
           canMoveUp={false}
           canMoveDown={false}
         />
@@ -1181,6 +1190,38 @@ function livePlannedToDateCents(
   const serverThisMonth = fund.allocation?.allocatedCents ?? 0;
   const liveThisMonth = live?.allocatedCents ?? 0;
   return fund.plannedToDateCents - serverThisMonth + liveThisMonth;
+}
+
+/**
+ * `assignableKinds` narrowed by what the editor has committed since the
+ * server rendered it.
+ *
+ * Same staleness as {@link livePlannedToDateCents}, one column further right,
+ * and it was live: `commitAllocationAction` deliberately does not revalidate
+ * and `revalidateBudgetSurfacesAction` only fires when focus leaves the WHOLE
+ * island, so allocating to a previously-unused category and then opening that
+ * row's `⋯` in the same pass still offered every kind — each of which the
+ * server would now refuse, because the commit just wrote the `budget_periods`
+ * row that makes rule 8's `isUsed` true. Verified in the browser against the
+ * real ledger before this existed.
+ *
+ * Only the ALL-THREE case narrows, and that precision matters. A three-entry
+ * list means the server saw no transactions AND no `budget_periods` row, so
+ * committing one locks the category to its current kind. Any shorter list is
+ * already a used category, where a new period row changes nothing — including
+ * the `["expense", "income"]` X1 case, whose guard is `txnCount > 0 &&
+ * negativeCount === 0`. X1 turns on TRANSACTIONS, which this commit cannot
+ * create, so blanket-narrowing on a live allocation would silently withdraw
+ * the one repair path rule 8's X1 exists to provide.
+ */
+function liveAssignableKinds(
+  serverKinds: CategoryKind[],
+  currentKind: CategoryKind,
+  live: LeafAllocation | null,
+): CategoryKind[] {
+  if (live === null) return serverKinds;
+  if (serverKinds.length < 3) return serverKinds;
+  return [currentKind];
 }
 
 /**
@@ -1324,6 +1365,7 @@ function FundDesktopRow({
           categoryName={fund.name}
           kind="fund"
           carryoverPolicy={fund.carryoverPolicy}
+          assignableKinds={liveAssignableKinds(fund.assignableKinds, "fund", allocation)}
           // Funds sort by name, never `sort_order` (`fundRows`' own sort in
           // loadMonthView.ts) — same reasoning as income rows: reordering
           // would swap a column nothing on this band reads.
@@ -1409,6 +1451,7 @@ function MobileFundRow({
           categoryName={fund.name}
           kind="fund"
           carryoverPolicy={fund.carryoverPolicy}
+          assignableKinds={liveAssignableKinds(fund.assignableKinds, "fund", allocation)}
           canMoveUp={false}
           canMoveDown={false}
         />

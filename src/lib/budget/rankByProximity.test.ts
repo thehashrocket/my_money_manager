@@ -22,6 +22,9 @@ function leaf(
     pendingCents: opts.pending ?? 0,
     remainingCents: effective - spent,
     isOverspent: spent > effective,
+    // Inert here — `rankByProximity` ranks on the money columns and never
+    // reads the row's menu affordances.
+    assignableKinds: ["expense"],
   };
 }
 

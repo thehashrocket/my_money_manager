@@ -1788,7 +1788,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
 
 ### P1 — behavior newly reachable because the FUNDS band became editable
 
-- [ ] **A `$0` allocation permanently locks a fund's `kind`, and the row's own menu still offers to change it.**
+- [x] **DONE (round-5, 2026-09-08 — D2=A: fixed the UI, did NOT relax the rule; `assignableKinds` in `categoryKindLock.ts` is now the ONE spelling of rule 8 + X1, read by both `setCategoryKind` and `loadMonthView`, and `liveAssignableKinds` closes the window where the client's copy is stale).** A `$0` allocation permanently locks a fund's `kind`, and the row's own menu still offers to change it.**
       `setCategoryKind`'s `const isUsed = txnStats.count > 0 || periodCount > 0`
       (`src/lib/budget/setCategoryKind.ts`) treats a single `budget_periods` row as
       "used", and rule 8's X1 exception is `expense → income` only, so it never
@@ -1804,7 +1804,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
       for that direction the way X1 relaxes expense→income).
       (`src/lib/budget/setCategoryKind.ts`, `src/app/budget/[year]/[month]/_month-editor.tsx`)
 
-- [ ] **`loadGoals` has no `archivedAt` filter, so an archived fund advertises a link to a page that will not show it.**
+- [x] **DONE (round-5, 2026-09-08 — excluded outright rather than marked; every affordance the page offers an archived fund is a dead end).** `loadGoals` has no `archivedAt` filter, so an archived fund advertises a link to a page that will not show it.**
       `loadGoals` filters on `eq(categories.kind, "fund")` alone
       (`src/lib/goals/loadGoals.ts:59`), so an archived fund still renders a card —
       and D3=C gave every card a "Fund this month →" link into `#funds-band`.
@@ -1817,7 +1817,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
       them on the card and suppress the link.
       (`src/lib/goals/loadGoals.ts`, `src/app/goals/page.tsx`)
 
-- [ ] **"Planned to date" has no upper time bound, so a future month's allocation inflates this month's figure.**
+- [x] **ALREADY DONE in v0.23.0 (verified round-5: `loadMonthView.ts` bounds the SUM at the viewed month as a (year, month) pair). Never struck here.** "Planned to date" has no upper time bound, so a future month's allocation inflates this month's figure.**
       `loadFundPlannedToDate` sums `budget_periods.allocated_cents` with
       `inArray(categoryId, fundIds)` and no `(year, month) <=` clause. Its docstring
       defends unboundedness backwards — "since the fund existed" — but
@@ -1830,7 +1830,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
 
 ### P1 — a semantic disagreement this branch created
 
-- [ ] **A positive row filed to a fund inflates that fund's rollover; `loadGoals` deliberately refuses the same move.**
+- [x] **DONE (round-5, 2026-09-08 — `loadGoals` wins, per rule 1 and `rules.ts`'s existing "poisons that category" guard. Fund-scoped, in SQL, with 3 tests incl. one proving an expense envelope's refund still carries forward).** A positive row filed to a fund inflates that fund's rollover; `loadGoals` deliberately refuses the same move.**
       D3=C put fund leaves into `rolloverCategoryIds` for the first time, so
       `rollover = max(0, prevEffective - spent)` now runs for funds — and `spent` is
       `0 - SUM(amount_cents)` with no `kind` filter in
@@ -1847,7 +1847,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
 
 ### P2 — correctness-adjacent
 
-- [ ] **`RetargetForm` silently substitutes a different source group when the chosen one disappears.**
+- [x] **ALREADY DONE in v0.23.0 (verified round-5: `chosenIsGone` disables submit and names the problem). Never struck here.** `RetargetForm` silently substitutes a different source group when the chosen one disappears.**
       `const from = filed.find((f) => String(f.categoryId) === fromChoice) ?? filed[0]`
       is "derived, not synced" — so when an unrelated revalidation changes `filed`
       (categorizing a row on the same page, a second tab, an Undo landing) and the
@@ -1859,7 +1859,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
       say "that group no longer exists — pick again" instead of substituting.
       (`src/app/transactions/_retarget-form.tsx`)
 
-- [ ] **Thrown Server Action messages are dev-only, so `bulkRetargetErrors`' carefully-worded refusals never reach a user.**
+- [x] **ALREADY DONE in v0.23.0 (verified round-5: `runBulkRetarget`/`runUndoBulkRetarget` return outcomes as STATE). Never struck here.** Thrown Server Action messages are dev-only, so `bulkRetargetErrors`' carefully-worded refusals never reach a user.**
       `bulkRetargetErrors.ts`'s docstring says each error "carries the facts a
       person needs instead of a generic failure", but both are thrown out of a
       Server Action and rendered via `err.message`; Next.js replaces uncaught
@@ -1881,7 +1881,7 @@ The Red Team found a class the six per-file specialists structurally could not: 
       `bulkRetarget` moves only empty-key rows.
       (`src/lib/categorize/bulkRetarget.ts`, `src/lib/categorize/loadTransactions.ts`)
 
-- [ ] **`/budget`'s "Planned to date" and "Left to target" read the server prop while the cell beside them reads optimistic state.**
+- [x] **ALREADY DONE in v0.23.0 (verified round-5: `livePlannedToDateCents`). Never struck here — and the same staleness class recurred one column right, in `assignableKinds`; see the round-5 section.** `/budget`'s "Planned to date" and "Left to target" read the server prop while the cell beside them reads optimistic state.**
       `formatCents(fund.plannedToDateCents)` and `fundTargetGap(fund)` come from the
       RSC prop; the `AllocationCell` one cell to the left reads `getAllocation()`.
       Since `plannedToDateCents` includes the current month, committing $200 into an
@@ -1962,3 +1962,105 @@ The Red Team found a class the six per-file specialists structurally could not: 
       is left with zero production consumers (referenced only from `loadGoals.test.ts`).
       Add `totalContributedCents` to `GoalsView` and consume it, the way
       `totalTargetCents` already is one line below.
+
+## Follow-ups from the `/plan-eng-review` "what next" pass (2026-09-08, round 5)
+
+Fifth triage. It set out to answer "what next" against `TODOS.md` and `PLAN.md`
+and found two things worth more than any individual item in either file.
+
+**First: the list is not trustworthy as a count.** Five of the twelve entries in
+the newest section were already fixed during v0.23.0's own ship review and never
+struck. Open items read 63 → 100 → 125 across six releases while product facts
+stayed flat, and part of that growth is bookkeeping, not debt. Verify before
+scheduling.
+
+**Second: the one measured fact that moved in six releases moved by USE.** The
+backlog went 437 → 236 because someone sat and clicked. v0.23.0 shipped the
+FUNDS band specifically so a fund could be funded, and funds was still 0 when
+this pass started. So this release is a narrow script with a before/after
+measurement, not a feature. Codex (gpt-5.4) ran as the outside voice and made
+the sequencing call sharper on every point; decisions **D1=A** (narrow script),
+**D2=A** (fix the UI lie, do NOT relax rule 8), **D3=A** (close gate #2 by
+documenting the model the code already implements).
+
+**Codex's decisive correction, which reversed this pass's own recommendation:
+gate #2 was never closable by use.** `progressCents` (`allocated − withdrawn`)
+and `totalContributedCents` can only diverge if a fund has transaction rows, and
+nothing can file one — `assertAssignableCategory` throws
+`SavingsGoalCategoryError` on `kind='fund'` for all three categorize paths,
+`CategoryCombobox` filters funds out of the picker, and `rules.ts` refuses a
+positive row into a fund at import. The two numbers are identical on any ledger
+this app can produce. There was no experiment to run, only a decision to write
+down. This is the second round running that a gate's stated blocker turned out
+to be misdiagnosed; both times the outside voice found it.
+
+Measured before → after, live ledger inside the container:
+funds **0 → 1**; fund `budget_periods` rows **0 → 2**; categories on
+`carryover_policy='rollover'` **0 → 1**; budgeted months **1 → 2** (2026-09 and
+2026-10, 24 rows each). Rollover executed for the first time in the app's
+history and rendered `+$250.00 rollover → $500.00` at first paint on a cold load.
+1,804 tests pass. Backlog unchanged at 236; manual rows still 0.
+
+**PLAN.md's 1.0.0 gate is now fully open to closing:** #1 was already closed, #2
+is documented in `DESIGN.md` ("What a fund's progress means"), and #3's two
+conditions are both met by the measurements above.
+
+### Corrected in `PLAN.md` rather than carried as a TODO
+
+- [x] **Gate #3 cited evidence that was not evidence.** It read "every
+      `budget_periods` row has `effective_allocation_cents = NULL`" as proof the
+      rollover subsystem had never run. TS1 deleted `getEffectiveAllocation`'s
+      `persist` option, so the ONLY non-NULL writer left is
+      `src/lib/test/primeCache.ts` — a test helper. All-NULL is the designed
+      steady state. Nor is the invalidation contract "fired from four call
+      sites" idle: `invalidateForwardRollover`/`Many` runs from **13 sites
+      across 11 files** on every categorize, allocate, retarget, undo,
+      copy-month, kind change and archive — it executes constantly and does
+      nothing. `src/lib/budget.ts`'s own docstring says so and names fund work
+      as its removal trigger.
+
+### Still open
+
+- [ ] **P2** — **Delete the dead `effective_allocation_cents` cache, or give it
+      a real writer.** 13 call sites across 11 files maintain an invalidation
+      contract for a column no production code ever writes non-NULL; every new
+      write path has to remember to call it (`bulkRetarget` added two more in
+      v0.23.0) and CLAUDE.md documents it as a contract. Its docstring defers on
+      "PR3's fund work may legitimately want a real cache" — that trigger has now
+      arrived and the answer, from this pass, is that it does not: `loadMonthView`
+      recomputes from `allocated_cents` and transaction sums and the fund band
+      showed no measurable cost at 1,562 rows. **Deliberately sequenced AFTER
+      this release, not before:** touching 13 write-path call sites in the same
+      change that runs rollover for the first time is backwards. Now that it has
+      run, this is safe to do. (`src/lib/budget.ts`, plus the 11 callers)
+
+- [ ] **P3** — **`liveAssignableKinds` is module-private in a `"use client"`
+      file and unreachable from a test.** It carries a real precision the pure
+      half cannot: it narrows ONLY the all-three case, because X1 turns on
+      TRANSACTIONS (which an allocation commit cannot create) and a blanket
+      narrowing would silently withdraw rule 8's one repair path. Same shape as
+      the existing entry about `resolveActiveCategoryName` in `page.tsx`, and the
+      same reason it is not tested: the V1 exclusion list rules out UI-component
+      tests. The pure rule underneath IS covered
+      (`categoryKindLock.test.ts`). If those module-private helpers ever get
+      extracted, this one goes with them.
+      (`src/app/budget/[year]/[month]/_month-editor.tsx`)
+
+- [ ] **P3** — **A stale server prop feeding a client menu is now a known
+      recurring shape, and nothing catches it.** v0.23.0 fixed it for
+      "Planned to date" (`livePlannedToDateCents`); this pass reintroduced it one
+      column right with `assignableKinds` and only caught it by clicking the menu
+      in a browser against the real ledger — the full suite was green with the
+      bug present. The cause is structural: `commitAllocationAction` deliberately
+      does not revalidate and `revalidateBudgetSurfacesAction` fires only when
+      focus leaves the WHOLE island, so ANY server prop describing a row's state
+      is stale between a commit and a blur. Worth a rule rather than a third
+      one-off fix: a prop consumed inside `<MonthEditor>` that a commit can
+      change needs a `live*` reader beside it.
+      (`src/app/budget/[year]/[month]/_month-editor.tsx`)
+
+- [ ] **P3** — **Freeze broad triage (Codex #5).** The remaining ~118 items are
+      mostly review exhaust. The recommendation carried out of this pass is to
+      keep only what blocks the next narrow script or can corrupt money, and
+      treat the rest as parking lot rather than as a queue. Named explicitly so
+      the next reader does not mistake the file's length for a plan.

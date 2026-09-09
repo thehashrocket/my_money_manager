@@ -790,6 +790,104 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
     });
   });
 
+  /* REGRESSION (round-5 eng review). Funds joined `rolloverCategoryIds` in
+     v0.23.0 and the spend expression underneath them had no kind discipline:
+     spend is `0 - SUM(amount_cents)`, so a POSITIVE row made spend negative
+     and `max(0, prevEffective - spent)` carried MORE than was ever allocated.
+
+     Every pre-existing fund-rollover test seeds allocations with zero
+     transactions, which is exactly why this survived a six-specialist review:
+     the fixtures could not express the bug.
+
+     The app had already decided this elsewhere — `rules.ts` refuses to
+     auto-file a positive row into a fund ("poisons that category"),
+     `assertAssignableCategory` refuses a fund on all three categorize paths,
+     and `loadGoals` keeps `withdrawn` outflows-only per rule 1. */
+  it("(round-5) a POSITIVE row filed to a rollover fund does not inflate its carried balance", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const fund = seedCategory("Emergency", { kind: "fund", carryoverPolicy: "rollover" });
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+    // An interest credit landing in March. Under the signed convention this
+    // is spend of -$50, which used to ADD to the carried balance.
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-15",
+      amountCents: 5000,
+    });
+
+    const row = loadMonthView(handle.db, 2026, 4).fundRows[0];
+    expect(row.allocation).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 40000,
+      effectiveCents: 50000,
+    });
+  });
+
+  /* The other half, and the reason the fix cannot be a post-GROUP BY clamp:
+     one month holding both a credit and a withdrawal is summed in SQL before
+     any JS sees it, so the credit would silently cancel part of the real
+     outflow. $100 out and $50 in must carry $300, not $350. */
+  it("(round-5) a fund month with BOTH a credit and a withdrawal counts only the withdrawal", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const fund = seedCategory("Emergency", { kind: "fund", carryoverPolicy: "rollover" });
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 0);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-10",
+      amountCents: -10000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-20",
+      amountCents: 5000,
+    });
+
+    const row = loadMonthView(handle.db, 2026, 4).fundRows[0];
+    expect(row.allocation?.rolloverCents).toBe(30000);
+  });
+
+  /* The guard is fund-scoped, NOT a blanket "ignore positive rows". An
+     expense envelope's refund still restores buying capacity — rule 1 settled
+     that in v0.19.0 and this fix must not quietly reverse it. */
+  it("(round-5) a refund on a rollover EXPENSE envelope still increases what carries forward", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Groceries", { kind: "expense", carryoverPolicy: "rollover" });
+    seedAllocation(cat.id, 2026, 3, 40000);
+    seedAllocation(cat.id, 2026, 4, 0);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-10",
+      amountCents: -10000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-20",
+      amountCents: 5000,
+    });
+
+    const leaf = loadMonthView(handle.db, 2026, 4).sections.flatMap((s) => s.categories).find((c) => c.categoryId === cat.id);
+    // $400 allocated − ($100 spent − $50 refunded) = $350 carried.
+    expect(leaf?.allocation?.rolloverCents).toBe(35000);
+  });
+
   /* `plannedFundCents` is `allocated_cents`, NEVER `effective_allocation_cents`
      (D3A) — and now that `FundRow` carries `allocation.effectiveCents` right
      beside `plannedCents`, the "tidy-up" that swaps one for the other is one

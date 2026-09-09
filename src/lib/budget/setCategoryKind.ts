@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
+import { assignableKinds } from "@/lib/budget/categoryKindLock";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 
 type Db = typeof defaultDb;
@@ -233,19 +234,25 @@ export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKin
         .where(eq(schema.budgetPeriods.categoryId, categoryId))
         .get()?.count ?? 0;
 
-    const isUsed = txnStats.count > 0 || periodCount > 0;
-    if (isUsed) {
-      const isX1Exception =
-        previousKind === "expense" && newKind === "income" && txnStats.count > 0 && txnStats.negativeCount === 0;
-      if (!isX1Exception) {
-        throw new CategoryKindChangeRefusedError(
-          category.id,
-          category.name,
-          txnStats.count,
-          txnStats.earliestDate,
-          txnStats.latestDate,
-        );
-      }
+    // Rule 8's `isUsed` + X1 live in `assignableKinds` (categoryKindLock.ts),
+    // not inline here, because `loadMonthView` has to answer the same question
+    // to render an honest `CategoryMenu`. They were one spelling in one place
+    // until the FUNDS band became editable and gave a fund a write path to a
+    // `budget_periods` row — after which the menu kept offering a kind change
+    // this function always refused (DS32).
+    const allowed = assignableKinds(previousKind, {
+      txnCount: txnStats.count,
+      negativeTxnCount: txnStats.negativeCount,
+      periodCount,
+    });
+    if (!allowed.includes(newKind)) {
+      throw new CategoryKindChangeRefusedError(
+        category.id,
+        category.name,
+        txnStats.count,
+        txnStats.earliestDate,
+        txnStats.latestDate,
+      );
     }
 
     // Dual-write (T5, D1B/A2): `createGoalAction` already keeps

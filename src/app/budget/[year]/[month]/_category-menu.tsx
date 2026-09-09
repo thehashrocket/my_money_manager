@@ -34,6 +34,22 @@ export type CategoryMenuProps = {
   categoryName: string;
   kind: CategoryKind;
   carryoverPolicy: CarryoverPolicy;
+  /**
+   * Which kinds `setCategoryKind` will still accept (rule 8 + X1), from
+   * `loadMonthView`. Always includes the current kind.
+   *
+   * Server-computed on purpose: the answer depends on whether the category has
+   * ANY transaction or ANY month's `budget_periods` row, which is not
+   * derivable from anything else this menu is handed. Rendering all three
+   * unconditionally is what let a fund offer "Set kind: expense" that always
+   * refused — a fund acquires a `budget_periods` row from one keystroke in the
+   * FUNDS band (`$0` included) or one "Copy previous month", and rule 8's X1
+   * exception is expense→income only, so it never applies to a fund.
+   *
+   * A single-entry array is the normal state for a used category, and it means
+   * the kind block renders nothing at all rather than a row of dead items.
+   */
+  assignableKinds: CategoryKind[];
   /** DS16 — "disabled rather than hidden" at list ends, so the control
    * column never reflows depending on position. */
   canMoveUp: boolean;
@@ -71,6 +87,7 @@ export function CategoryMenu({
   categoryName,
   kind,
   carryoverPolicy,
+  assignableKinds,
   canMoveUp,
   canMoveDown,
   isGroup = false,
@@ -156,12 +173,20 @@ export function CategoryMenu({
           </DropdownMenuItem>
           {isGroup ? null : (
             <>
-              <DropdownMenuSeparator />
-              {(["expense", "income", "fund"] as const).map((k) => (
-                <DropdownMenuItem key={k} disabled={k === kind} onClick={() => setKind(k)}>
-                  Set kind: {k}
-                </DropdownMenuItem>
-              ))}
+              {/* Only the kinds the server will accept. A used category has
+                  just its own kind here, so the whole block (separator
+                  included) drops out rather than leaving one disabled item
+                  that reads as a control the user has failed to satisfy. */}
+              {assignableKinds.length > 1 ? (
+                <>
+                  <DropdownMenuSeparator />
+                  {assignableKinds.map((k) => (
+                    <DropdownMenuItem key={k} disabled={k === kind} onClick={() => setKind(k)}>
+                      Set kind: {k}
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              ) : null}
               <DropdownMenuSeparator />
               {(["none", "rollover", "reset"] as const).map((p) => (
                 <DropdownMenuItem key={p} disabled={p === carryoverPolicy} onClick={() => setPolicy(p)}>

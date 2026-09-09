@@ -2,6 +2,12 @@ import { and, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { computeEffectiveAllocationsForRollover, periodKey, type RolloverPeriod } from "@/lib/budget";
 import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
+import {
+  assignableKinds,
+  loadCategoryKindUsage,
+  NO_USAGE,
+  type CategoryKind,
+} from "@/lib/budget/categoryKindLock";
 import { loadUncategorizedBacklog, type UncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 
 // Re-exported so existing importers (app/page.tsx, BacklogBanner, the
@@ -31,6 +37,14 @@ export type LeafRow = {
   /** `effectiveCents - spentCents`, or `-spentCents` when no allocation. */
   remainingCents: number;
   isOverspent: boolean;
+  /**
+   * Which kinds `setCategoryKind` will still accept for this category (rule 8
+   * + X1), computed server-side by the SAME function the writer enforces.
+   * `CategoryMenu` renders only these, so it can never offer a change that is
+   * a guaranteed refusal — the DS32 shape the FUNDS band made reachable the
+   * moment a fund could acquire a `budget_periods` row.
+   */
+  assignableKinds: CategoryKind[];
 };
 
 /** A `kind='income'` leaf's row on the INCOME band (A1). */
@@ -48,6 +62,14 @@ export type IncomeLeafRow = {
   pendingCents: number;
   /** Whether a `budget_periods` row exists for this leaf this month (DS14). */
   hasAllocation: boolean;
+  /**
+   * Which kinds `setCategoryKind` will still accept for this category (rule 8
+   * + X1), computed server-side by the SAME function the writer enforces.
+   * `CategoryMenu` renders only these, so it can never offer a change that is
+   * a guaranteed refusal — the DS32 shape the FUNDS band made reachable the
+   * moment a fund could acquire a `budget_periods` row.
+   */
+  assignableKinds: CategoryKind[];
 };
 
 /**
@@ -123,6 +145,14 @@ export type FundRow = {
    * too rather than inventing a progress claim the app declines to make.
    */
   plannedToDateCents: number;
+  /**
+   * Which kinds `setCategoryKind` will still accept for this category (rule 8
+   * + X1), computed server-side by the SAME function the writer enforces.
+   * `CategoryMenu` renders only these, so it can never offer a change that is
+   * a guaranteed refusal — the DS32 shape the FUNDS band made reachable the
+   * moment a fund could acquire a `budget_periods` row.
+   */
+  assignableKinds: CategoryKind[];
 };
 
 /**
@@ -299,12 +329,29 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   const rolloverCategoryIds = [...expenseLeaves, ...fundLeaves]
     .filter((c) => c.carryoverPolicy === "rollover")
     .map((c) => c.id);
+  const rolloverFundCategoryIds = fundLeaves
+    .filter((c) => c.carryoverPolicy === "rollover")
+    .map((c) => c.id);
   const effectiveByCategoryId =
     rolloverCategoryIds.length > 0
-      ? loadRolloverEffectiveByCategory(db, rolloverCategoryIds, year, month)
+      ? loadRolloverEffectiveByCategory(db, rolloverCategoryIds, rolloverFundCategoryIds, year, month)
       : new Map<number, Map<string, number>>();
 
   const targetKey = periodKey(year, month);
+
+  // Query #7 — rule 8's "which kinds may this category still become?", for
+  // every leaf the page renders a `CategoryMenu` on. Read here rather than
+  // derived in the client because the answer depends on the WHOLE ledger (any
+  // transaction, any month's `budget_periods` row), not on this month's view;
+  // `hasAllocation` is a this-month fact and is NOT a substitute for it.
+  // Without it the menu offered kind changes `setCategoryKind` always refuses
+  // — reachable on any fund the moment the FUNDS band wrote it a row (DS32).
+  const menuLeafIds = [...expenseLeaves, ...incomeLeaves, ...fundLeaves].map((c) => c.id);
+  const kindUsageByCategoryId = loadCategoryKindUsage(db, menuLeafIds);
+  // The band a leaf sits in IS its kind — `expenseLeaves` is the `kind='expense'`
+  // partition — so the current kind is passed in rather than re-selected.
+  const assignableKindsFor = (categoryId: number, kind: "income" | "expense" | "fund") =>
+    assignableKinds(kind, kindUsageByCategoryId.get(categoryId) ?? NO_USAGE);
 
   /**
    * The `{allocated, rollover, effective}` triple for one leaf, or `null` when
@@ -350,6 +397,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       pendingCents,
       remainingCents,
       isOverspent: remainingCents < 0,
+      assignableKinds: assignableKindsFor(leaf.id, "expense"),
     };
   });
 
@@ -367,6 +415,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       varianceCents: receivedCents - plannedCents,
       pendingCents,
       hasAllocation: hasPeriodRow.has(leaf.id),
+      assignableKinds: assignableKindsFor(leaf.id, "income"),
     };
   });
 
@@ -391,6 +440,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       carryoverPolicy: leaf.carryoverPolicy,
       targetCents: leaf.targetCents,
       plannedToDateCents: plannedToDateByFundId.get(leaf.id) ?? 0,
+      assignableKinds: assignableKindsFor(leaf.id, "fund"),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -567,10 +617,33 @@ function loadSpendForMonth(
  * month (sparse — only months with a real row); #5 is their spend, GROUP BY
  * (category, year, month) via `strftime`, over the same span. Both queries
  * run once regardless of how many rollover categories exist.
+ *
+ * `fundCategoryIds` is the subset of `categoryIds` with `kind='fund'`, and it
+ * exists to keep a POSITIVE row from manufacturing rollover. Spend here is
+ * `0 - SUM(amount_cents)` — the signed convention rule 1 settled — so a
+ * positive unpaired row (an interest credit, an unmatched savings deposit)
+ * makes `spent` NEGATIVE, and `max(0, prevEffective - spent)` then carries a
+ * balance LARGER than anything ever allocated. On an expense envelope that is
+ * correct and deliberate: a refund restores buying capacity. On a fund it is
+ * money appearing from nowhere.
+ *
+ * The app had already decided this everywhere else and this was the one place
+ * that had not heard. `src/lib/rules.ts:80` refuses to auto-file a positive
+ * row into a fund at import time — its comment says such a row "poisons" the
+ * category — `assertAssignableCategory` refuses a fund outright on all three
+ * categorize paths, and `loadGoals` keeps `withdrawn` outflows-only for
+ * exactly this reason (rule 1's closing note). Funds only reached this code at
+ * all in v0.23.0, when they joined `rolloverCategoryIds` for the first time.
+ *
+ * So: for a fund, positive rows contribute 0 rather than negative spend. It
+ * has to happen in SQL, not after the GROUP BY — a month holding both a $50
+ * credit and a $100 withdrawal nets to $50 of spend once summed, and no
+ * clamp applied afterwards can recover the $100.
  */
 function loadRolloverEffectiveByCategory(
   db: Db,
   categoryIds: number[],
+  fundCategoryIds: number[],
   year: number,
   month: number,
 ): Map<number, Map<string, number>> {
@@ -598,7 +671,10 @@ function loadRolloverEffectiveByCategory(
       categoryId: schema.transactions.categoryId,
       yr: sql<string>`strftime('%Y', ${schema.transactions.date})`,
       mo: sql<string>`strftime('%m', ${schema.transactions.date})`,
-      total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+      total:
+        fundCategoryIds.length > 0
+          ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.amountCents} > 0 AND ${inArray(schema.transactions.categoryId, fundCategoryIds)} THEN 0 ELSE ${schema.transactions.amountCents} END), 0)`
+          : sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
     })
     .from(schema.transactions)
     .where(

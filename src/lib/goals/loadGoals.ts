@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 
 type Db = typeof defaultDb;
@@ -86,7 +86,19 @@ export function loadGoals(db: Db): GoalsView {
       eq(schema.budgetPeriods.categoryId, schema.categories.id),
     )
     // A2: kind is authoritative, not is_savings_goal (T5).
-    .where(eq(schema.categories.kind, "fund"))
+    //
+    // Archived funds are excluded outright rather than marked, because every
+    // affordance this page offers an archived fund is a dead end: D3=C gave
+    // each card a "Fund this month →" link into `#funds-band`, but
+    // `notHiddenByArchive` (loadMonthView) drops an archived fund from any
+    // month where it has neither a nonzero allocation nor spend, so the
+    // destination row is usually absent — and if it was the only fund, the
+    // whole band is gone, since `<MonthEditor>` gates the section on
+    // `fundRows.length > 0`. Even when the row does render, `upsertAllocation`
+    // throws `CategoryArchivedError` on commit. Three ways to land nowhere.
+    // `/budget/categories` remains the one surface that lists and unarchives
+    // it, which is rule 8's stated contract.
+    .where(and(eq(schema.categories.kind, "fund"), isNull(schema.categories.archivedAt)))
     .groupBy(schema.categories.id)
     .orderBy(schema.categories.name)
     .all();
