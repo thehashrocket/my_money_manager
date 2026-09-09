@@ -2898,9 +2898,10 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
-    expect(outcome.status).toBe("synced");
-    if (outcome.status !== "synced") throw new Error("unreachable");
-    expect(outcome.insertedCount).toBe(0);
+    // Every staged account moved, so the write transaction rolled back: no
+    // batch, and the same outcome shape a quiet sync returns.
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
 
     // The whole point: feed ACT-1's row must not land on an account that is
     // now ACT-2's, carrying ACT-1 provenance. Neither dedup pass could ever
@@ -2910,11 +2911,8 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
     // Non-silent, and it names the account so the user can act.
     expect(outcome.warnings.some((w) => w.includes("re-linked") && w.includes("Checking"))).toBe(true);
 
-    // The batch records what actually happened, not what was staged — or
-    // undoSyncBatch and /import/success both report rows that do not exist.
-    const batches = handle.db.select().from(schema.importBatches).all();
-    expect(batches).toHaveLength(1);
-    expect(batches[0].transactionCount).toBe(0);
+    // No empty batch to displace the previous sync's undo target.
+    expect(handle.db.select().from(schema.importBatches).all()).toEqual([]);
   });
 
   it("writes NOTHING for an account UNLINKED mid-sync (NULL is not the staged feed id)", async () => {
@@ -2923,9 +2921,8 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
-    expect(outcome.status).toBe("synced");
-    if (outcome.status !== "synced") throw new Error("unreachable");
-    expect(outcome.insertedCount).toBe(0);
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
     expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
     expect(outcome.warnings.some((w) => w.includes("unlinked") && w.includes("link it again"))).toBe(true);
   });
@@ -3013,9 +3010,8 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
-    expect(outcome.status).toBe("synced");
-    if (outcome.status !== "synced") throw new Error("unreachable");
-    expect(outcome.insertedCount).toBe(0);
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
     expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
     expect(outcome.warnings.some((w) => w.includes("deleted") && w.includes("Checking"))).toBe(true);
   });

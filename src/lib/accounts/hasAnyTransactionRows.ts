@@ -1,7 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
-
-type Db = typeof defaultDb;
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 
 /**
  * Does this account own ANY transaction row at all?
@@ -21,8 +19,13 @@ type Db = typeof defaultDb;
  * unobservable," and it only holds when there are genuinely no rows to drop.
  *
  * So: EXISTS, no anchor filter, one helper for all three call sites.
+ *
+ * Takes `AnyDb` so a caller inside a write transaction can pass its handle:
+ * the feed balance pass re-checks this INSIDE its per-account transaction,
+ * because a row imported during the fetch window makes the account ineligible
+ * (D7/D15) and the pre-transaction answer could say otherwise.
  */
-export function hasAnyTransactionRows(accountId: number, db: Db = defaultDb): boolean {
+export function hasAnyTransactionRows(accountId: number, db: AnyDb = defaultDb): boolean {
   const row = db
     .select({ one: sql<number>`1` })
     .from(schema.transactions)
