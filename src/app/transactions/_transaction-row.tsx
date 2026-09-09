@@ -286,6 +286,10 @@ export function TransactionRowForm({
           transactionId={row.id}
           isTransfer={false}
           transferPartnerAccountName={null}
+          // Hand-entered card activity is the only row with a per-row delete;
+          // `removeCardActivity` refuses every other kind. Passed rather than
+          // derived in the menu so the menu stays a presenter.
+          isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
           onChanged={onPairingChanged}
         />
@@ -548,6 +552,11 @@ export function TransferRowItem({
           transactionId={row.id}
           isTransfer
           transferPartnerAccountName={row.transferPartnerAccountName}
+          // Always false in effect on this branch — a paired row is a payment
+          // leg, which `removeCardActivity` refuses and "Not a card payment"
+          // owns. Passed honestly rather than hard-coded so the menu's own
+          // precedence rule stays the single place that decides.
+          isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
           onChanged={onPairingChanged}
         />

@@ -28,6 +28,7 @@ export function CardControls({
   creditLimitCents,
   minimumPaymentCents,
   canAddCharge,
+  showReconcile,
 }: {
   accountId: number;
   accountName: string;
@@ -43,6 +44,18 @@ export function CardControls({
    * that may need correcting, so Reconcile is NOT gated on this.
    */
   canAddCharge: boolean;
+  /**
+   * Whether `resolveBalanceAction` picked `reconcile` for this row. DS55's
+   * "exactly one balance control" is still decided by that function ALONE —
+   * this only relays the answer, so the Reconcile form and the Refresh button
+   * cannot both appear.
+   *
+   * It exists because this component holds TWO unrelated things: the balance
+   * control, and the card's own affordances (charge, terms). Nesting the
+   * second inside the first deadlocked a feed-linked card — see the note in
+   * `_account-row.tsx`.
+   */
+  showReconcile: boolean;
 }) {
   // Bumping a key remounts ReconcileDisclosure in its open state, which is
   // also what moves focus into the balance field (DS66: a handoff that
@@ -51,20 +64,32 @@ export function CardControls({
 
   return (
     <div className="mt-2 flex flex-col flex-wrap items-stretch gap-2 sm:flex-row sm:items-start">
-      <ReconcileDisclosure
-        key={handoff}
-        accountId={accountId}
-        accountName={accountName}
-        balanceCents={balanceCents}
-        today={today}
-        startOpen={handoff > 0}
-      />
+      {showReconcile ? (
+        <ReconcileDisclosure
+          key={handoff}
+          accountId={accountId}
+          accountName={accountName}
+          balanceCents={balanceCents}
+          today={today}
+          startOpen={handoff > 0}
+        />
+      ) : null}
       {canAddCharge ? (
         <ChargeDialog
           accountId={accountId}
           accountName={accountName}
           categories={categories}
           today={today}
+          // DS56's handoff only exists where the destination does. On a
+          // feed-refreshed card the row offers Refresh instead, so
+          // "Reconcile instead →" would point at a form that is not on screen.
+          canReconcile={showReconcile}
+          // `!showReconcile` is exactly `resolveBalanceAction === "refresh"`,
+          // which is exactly "feed-linked and holding no rows" — the state the
+          // first charge ENDS. Passed so the dialog can say so before the
+          // click rather than leaving the user to notice the Refresh button
+          // has gone.
+          endsFeedRefresh={!showReconcile}
           onReconcileInstead={() => setHandoff((n) => n + 1)}
         />
       ) : null}

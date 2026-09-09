@@ -6,8 +6,11 @@ import { loadAccountBalances } from "./loadAccountBalances";
 import {
   createCardActivity,
   markAsCardPayment,
+  removeCardActivity,
   unmarkCardPayment,
 } from "./manualTransaction";
+import { hasAnyTransactionRows } from "./hasAnyTransactionRows";
+import { resolveBalanceAction } from "./resolveBalanceAction";
 
 let handle: TestDbHandle;
 let seq = 0;
@@ -847,5 +850,229 @@ describe("unmarkCardPayment — works from either leg", () => {
         .get(),
     ).toBeUndefined();
     expect(balanceOf(visa.id)).toBe(-200_000);
+  });
+});
+
+/**
+ * `removeCardActivity` — the way back from `createCardActivity`, which had none.
+ *
+ * Before this existed, a hand-entered charge was the only write in the app with
+ * no reverse: the sole transaction deletes were `undoSyncBatch` (a whole batch)
+ * and `unmarkCardPayment` (its own synthetic mirror, and it refuses anything
+ * else). A mistyped amount or a charge on the wrong card was permanent.
+ */
+describe("removeCardActivity", () => {
+  function seedCardWithCharge() {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    const category = seedCategory();
+    const created = createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        date: "2026-01-05",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: category.id,
+      },
+      handle.db,
+    );
+    if (created.status !== "ok") throw new Error(`setup failed: ${created.message}`);
+    return { card, created };
+  }
+
+  it("deletes the row and moves the balance back", () => {
+    const { card, created } = seedCardWithCharge();
+    expect(balanceOf(card.id)).toBe(-108025);
+
+    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db);
+
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") throw new Error("unreachable");
+    expect(result.balanceCents).toBe(-100000);
+    // The quoted figure is read AFTER the commit, so it is the one the row shows.
+    expect(result.message).toContain("$1,000.00");
+    expect(balanceOf(card.id)).toBe(-100000);
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, created.transactionId))
+        .get(),
+    ).toBeUndefined();
+  });
+
+  it("removes the row's own batch, which existed only to carry it (E21)", () => {
+    const { created } = seedCardWithCharge();
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, created.transactionId))
+      .get()!;
+
+    removeCardActivity({ transactionId: created.transactionId }, handle.db);
+
+    expect(
+      handle.db
+        .select()
+        .from(schema.importBatches)
+        .where(eq(schema.importBatches.id, row.importBatchId))
+        .get(),
+    ).toBeUndefined();
+  });
+
+  /**
+   * The reason this function is worth more than an ordinary undo.
+   *
+   * `hasAnyTransactionRows` has NO anchor filter (E16), so ONE row flips a
+   * feed-linked card off `resolveBalanceAction`'s `refresh` branch and makes
+   * `refreshLiabilityBalances` skip it (D7/D15). Before this existed there was
+   * no way back to zero rows, so the first hand-entered charge permanently
+   * converted a card whose balance the bank maintained into one the user
+   * maintains. Both gates ask the same question of the same table, so removing
+   * the last row restores it — that round trip is the property, and neither
+   * half of it can be seen from a test of either function alone.
+   */
+  it("RESTORES a feed-linked card's automatic balance by taking the last row away", () => {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    handle.db
+      .update(schema.accounts)
+      .set({ simplefinAccountId: "ACT-visa" })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+    const linked = { simplefinAccountId: "ACT-visa" };
+
+    expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
+    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("refresh");
+
+    const category = seedCategory();
+    const created = createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        date: "2026-01-05",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: category.id,
+      },
+      handle.db,
+    );
+    if (created.status !== "ok") throw new Error("setup failed");
+
+    // One row is enough, and its date is irrelevant — that is E16.
+    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("reconcile");
+
+    removeCardActivity({ transactionId: created.transactionId }, handle.db);
+
+    expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
+    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("refresh");
+  });
+
+  it("REFUSES a bank row — deleting one would destroy imported history", () => {
+    // The guard that matters. Every other refusal here protects a mechanism;
+    // this one protects the ledger.
+    const checking = seedAccount({
+      name: "Checking",
+      type: "checking",
+      cents: 500000,
+      anchor: "2026-01-01",
+    });
+    const bankRow = seedCheckingDebit(checking.id, "2026-01-05", -8025);
+
+    const result = removeCardActivity({ transactionId: bankRow.id }, handle.db);
+
+    expect(result).toMatchObject({ status: "refused", reason: "not-manual" });
+    expect(
+      handle.db.select().from(schema.transactions).where(eq(schema.transactions.id, bankRow.id)).get(),
+    ).toBeDefined();
+  });
+
+  it("REFUSES a payment leg, and names the tool that owns it", () => {
+    // Deleting one leg strands the other — the damage E12 describes. The
+    // refusal has to point somewhere, or the user's next move is
+    // `unlinkTransferPair`, which is the operation E12 exists to avoid.
+    const checking = seedAccount({
+      name: "Checking",
+      type: "checking",
+      cents: 500000,
+      anchor: "2026-01-01",
+    });
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    const debit = seedCheckingDebit(checking.id, "2026-02-01", -20000);
+    const marked = markAsCardPayment(
+      { transactionId: debit.id, cardAccountId: card.id },
+      handle.db,
+    );
+    if (marked.status !== "ok") throw new Error("setup failed");
+
+    const mirror = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .get()!;
+
+    // From the MIRROR's own row — the manual, card-account leg, which is the
+    // one that looks most like something this function should accept.
+    const result = removeCardActivity({ transactionId: mirror.id }, handle.db);
+
+    expect(result).toMatchObject({ status: "refused", reason: "already-paired" });
+    expect(result.status === "refused" && result.message).toContain("Not a card payment");
+    // Both legs survive.
+    expect(balanceOf(card.id)).toBe(-80000);
+  });
+
+  it("REFUSES a manual row on an account that is not a card (E17)", () => {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    const category = seedCategory();
+    const created = createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        date: "2026-01-05",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: category.id,
+      },
+      handle.db,
+    );
+    if (created.status !== "ok") throw new Error("setup failed");
+    // Retype the account under it, the way a stale tab or a hand-edited
+    // request would reach this.
+    handle.db
+      .update(schema.accounts)
+      .set({ type: "loan" })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+
+    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db);
+
+    expect(result).toMatchObject({ status: "refused", reason: "not-a-card" });
+  });
+
+  it("refuses a transaction id that no longer exists", () => {
+    expect(removeCardActivity({ transactionId: 99999 }, handle.db)).toMatchObject({
+      status: "refused",
+      reason: "not-found",
+    });
+  });
+
+  it("a REFUND is removable on the same terms as a charge (E13)", () => {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    const category = seedCategory();
+    const created = createCardActivity(
+      {
+        kind: "refund",
+        accountId: card.id,
+        date: "2026-01-05",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: category.id,
+      },
+      handle.db,
+    );
+    if (created.status !== "ok") throw new Error("setup failed");
+    expect(balanceOf(card.id)).toBe(-91975);
+
+    expect(removeCardActivity({ transactionId: created.transactionId }, handle.db).status).toBe("ok");
+    expect(balanceOf(card.id)).toBe(-100000);
   });
 });

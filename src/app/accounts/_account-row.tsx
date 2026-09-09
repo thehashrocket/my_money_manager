@@ -156,7 +156,7 @@ export function AccountRow({
           `longTerm` gates only the CHARGE affordance, which is a genuinely
           separate question — a mortgage takes no hand-entered charges (D3=A),
           but it still has a balance somebody may need to correct. */}
-      {isLiability && action === "reconcile" ? (
+      {isLiability ? (
         <CardControls
           accountId={account.id}
           accountName={account.name}
@@ -166,6 +166,23 @@ export function AccountRow({
           creditLimitCents={account.creditLimitCents}
           minimumPaymentCents={account.minimumPaymentCents}
           canAddCharge={!longTerm}
+          // DS55 IS INTACT: `action` still solely decides which balance control
+          // renders, and it is relayed here rather than re-derived.
+          //
+          // What changed is that `CardControls` used to be mounted ONLY on the
+          // `reconcile` branch, which silently gated two things that have
+          // nothing to do with the balance control — "Add a charge" and the
+          // card-terms form — on it. That deadlocked a feed-linked card:
+          // `resolveBalanceAction` returns "refresh" while `hasAnyRows` is
+          // false, so the row offered Refresh and nothing else, and the only
+          // way to reach the charge form was to already have a row. A card
+          // cannot get its first hand-entered charge, and a mistyped credit
+          // limit cannot be repaired — which is the exact purpose rule 9 gives
+          // that form — without unlinking the account from SimpleFIN first.
+          //
+          // The two questions were always separate; the comment below has said
+          // so about `longTerm` since DS55. Only the nesting disagreed.
+          showReconcile={action === "reconcile"}
         />
       ) : null}
       {isLiability && action === "refresh" ? (

@@ -10,6 +10,7 @@ import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
 import {
   createCardActivity,
   markAsCardPayment,
+  removeCardActivity,
   unmarkCardPayment,
 } from "@/lib/accounts/manualTransaction";
 import type { AccountsActionState, CardActivityState } from "./action-state";
@@ -583,6 +584,41 @@ export async function unmarkCardPaymentAction(
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
+  }
+}
+
+/**
+ * The way back from `addCardActivityAction`, which had none.
+ *
+ * Deliberately NOT on `/accounts`, where the charge is entered: `/accounts`
+ * renders account rows, and this operates on a TRANSACTION. It is offered from
+ * the `/transactions` row menu, beside "Not a card payment" — the row is the
+ * thing being removed, and that menu is already where a card row's per-row
+ * repairs live. `removeCardActivity` refuses everything the menu would not
+ * have offered anyway (E17 and the four guards on its docblock), because a
+ * Server Action is a network endpoint regardless of what rendered.
+ */
+export async function removeCardActivityAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    const transactionId = Number(formData.get("transactionId"));
+    if (!Number.isInteger(transactionId)) {
+      return { status: "error", message: "That transaction no longer exists." };
+    }
+    const result = removeCardActivity({ transactionId }, db);
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+    // Removing the LAST row on a card makes it eligible for the feed balance
+    // pass again (`hasAnyTransactionRows`), so `/accounts` and `/sync` both
+    // render differently afterwards — the balance surfaces are not optional
+    // here even though this is a transaction-level write.
     const warning = revalidateCardActivitySurfaces();
     return { status: "ok", message: result.message, warning };
   } catch (err) {
