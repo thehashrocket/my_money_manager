@@ -100,11 +100,6 @@ export function ChargeDialog({
   const [handledState, setHandledState] = useState(state);
   if (state !== handledState) {
     setHandledState(state);
-    // A refresh warning KEEPS THE DIALOG OPEN. Closing on it would be the
-    // worst of both: the row behind is stale (that is what the warning says),
-    // and the one sentence telling the user so is dismissed in the same frame.
-    // Staying open puts the message where they are already looking, and the
-    // fields are cleared either way because the charge did save.
     if (state.status === "ok") {
       // CLEAR AND CLOSE, OR NEITHER. `createCardActivity` is not idempotent —
       // each call mints its own batch and its own `import_row_hash` — so
