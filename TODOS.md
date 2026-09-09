@@ -1506,3 +1506,113 @@ column).
       account, sync will refuse to re-import them and this account's balance will
       run short until they are moved. (`src/lib/accounts/paidDownCents.ts`,
       `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`)
+
+## Follow-ups from the `/plan-eng-review` pass (2026-09-08, sync pending-state plan)
+
+- [ ] **P3** — The ~12 other server-rendered submit buttons outside `/sync` have the
+      same no-feedback gap the sync branch fixes: `/import` (4), `/budget` (4),
+      `/accounts` (3), `/goals` (2), `/subscriptions` (1) — enumerate with
+      `grep -rn 'type="submit"' src/app`. Two of them write money (`/import`'s confirm,
+      `/accounts`' Reconcile), and none of them greys out or changes label while the
+      server action is in flight, so a double click is one impatient moment away. The
+      sync branch builds the reusable half — `src/app/sync/_submit-button.tsx`, exporting
+      `PendingFieldset` (a `<fieldset disabled={pending}>` that freezes the payload
+      controls, not just the button) and `SubmitButton` (label swap + `disabled` +
+      `disabled:opacity-50`), both reading `useFormStatus`. Adopting it elsewhere is one
+      line per call site. Do the promotion at that point: `git mv` it to
+      `src/components/ledger/submit-button.tsx` and add a row to `DESIGN.md`'s state
+      components table, which is where the second consumer earns it a place in the design
+      system. Two caveats before starting. (1) It is NOT uniformly mechanical: `/budget`'s
+      buttons live in client components that already hold a transition, where
+      `useTransition` is the better fit and `useFormStatus` buys nothing — check each
+      surface for `"use client"` first (`grep -rl '"use client"' src/app`). (2) None of
+      these routes has UI test coverage and CLAUDE.md line 308 says that stays true, so
+      every surface needs a manual pass. **Depends on:** the sync pending-state branch
+      landing first, since it is what creates the component.
+      (`src/app/sync/_submit-button.tsx`, `src/components/ledger/`, `DESIGN.md`)
+
+- [ ] **P4** — `src/app/sync/ActionForm.tsx:54` declares
+      `children: React.ReactNode | ((pending: boolean) => React.ReactNode)` and the
+      `typeof children === "function"` branch below it
+      unwraps it, advertising a pending API that **no caller can ever use**: both consumers
+      (`_review-queue.tsx`, `page.tsx`) are Server Components with no `"use client"`
+      directive, and a function child is not serializable across the RSC boundary. Verified
+      zero callers by grep. It is a live footgun — it is the first thing you reach for when
+      adding pending state to a `/sync` button, and it costs twenty minutes to discover why
+      it cannot work. Narrow the type to `React.ReactNode` and drop the
+      `typeof children === "function"` branch; `pnpm exec tsc --noEmit` proves the deletion
+      is safe. Four lines. Deliberately deferred out of the pending-state branch (D5) to
+      keep an unrelated cleanup out of a small UX fix, even though that branch edits the
+      same file for `announceSuccess`. The replacement it should have been is
+      `useFormStatus` in a nested client component, which is what
+      `node_modules/next/dist/docs/01-app/02-guides/forms.md:316` documents for exactly this
+      case. **Depends on:** the sync pending-state branch landing first, so the replacement
+      exists before the dead path is removed. (`src/app/sync/ActionForm.tsx`)
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-08, sync pending-state)
+
+Nine reviewers ran over this branch — six specialists, a red-team pass, and two adversarial
+passes (Claude and Codex). Everything with a money consequence was fixed on the branch; these
+are what was deliberately left.
+
+- [ ] **P2** — `/sync`'s five forms lost progressive enhancement when `ActionForm` started
+      wrapping the Server Action in an inline client closure for `useActionState`. React's
+      server renderer emits a form's `action` attribute and its hidden `$ACTION_*` fields
+      only when the action carries `$$FORM_ACTION`, and `useActionState` propagates that
+      only from the action it was handed — a closure has none. So these forms now render
+      with no `action` and default to **GET on the current URL**: a submit before hydration
+      navigates to `/sync?batchId=7` (or `?aId=…&bId=…&intent=reject`), performs no
+      mutation, and reports nothing. `/sync` ignores `searchParams`, so it is a silent
+      no-op plus one extra live SimpleFIN round-trip, not a wrong write. Low impact on a
+      local single-user app that hydrates in milliseconds, which is why it was deferred
+      rather than fixed under time pressure — but it is a silent failure where none
+      existed, and it is the shape that gets rediscovered as "the undo button sometimes
+      just reloads the page". The fix is to keep the raw server action as
+      `useActionState`'s argument and move the `publish` call somewhere that does not sit
+      between the two — most likely into `ActionFeedbackProvider`, driven by the state
+      `ActionForm` already returns. Found by both adversarial reviewers during /ship.
+      (`src/app/sync/ActionForm.tsx`, `src/app/sync/_action-feedback.tsx`)
+
+- [ ] **P3** — Keyboard focus drops to `<body>` on every `/sync` submit. `SubmitButton`
+      sets `disabled={pending || disabled}` on the button the user just activated, and
+      `PendingFieldset` disables the rest of the card in the same commit; a disabled element
+      cannot hold focus, and nothing restores it. On the review queue, which renders up to a
+      dozen structurally identical cards, one Enter press sends the next Tab back to the top
+      of the document. This is a regression: before the pending work the buttons were plain
+      `<button type="submit">` with no `disabled`, so focus survived. The plan's manual
+      checklist (step 10) anticipated it and it was accepted for the branch. Fix by keeping
+      the pressed submitter focusable — `aria-disabled` plus an `onClick` guard on the
+      button itself, leaving the hard `disabled` to the `<select>`s that are the payload —
+      or by capturing a ref and re-`focus()`ing when `pending` clears.
+      (`src/app/sync/_submit-button.tsx`)
+
+- [ ] **P3** — Rejecting one combination of a MULTI-CANDIDATE reversal bucket leaves the
+      rejected pair selected and unmarked. `bucketKey`
+      (`${reason}-${date}-${absAmountCents}-${positives[0]?.id}`) is unchanged by a
+      rejection, because `findSameAccountReversals` returns the full `positives`/`negatives`
+      arrays and uses `isRejected` only to drop a bucket once EVERY combination is dead. So
+      React reuses the node, the two uncontrolled `<select>`s keep the pair just rejected,
+      and every `<option>` still reads as available. The live ledger has a 2x4 bucket, so
+      this is the real shape. Landing the inline `ActionStatus` (D1 during /ship) means the
+      card at least says what happened, which is what made this survivable — but the pair
+      is still selected and one more click on "Link as reversal" will link it, because
+      `linkTransferPairManually` CLEARS a rejection rather than refusing it
+      (`clearPairRejection`, `sync.ts`). Two fixes, ideally both: return the rejected
+      `(positiveId, negativeId)` set from `findSameAccountReversals` so the queue can
+      disable those option combinations, and fold a rejection count into `bucketKey` so the
+      card remounts and clears its selection. Consider also making
+      `linkTransferPairManually` refuse — rather than silently clear — a pair that currently
+      has a `transfer_pair_rejections` row; the silent clear is only defensible for the
+      cross-account queue, which has an explicit "Link as transfer anyway" affordance and
+      copy for it. The same-account queue has neither. Found by the red-team pass during
+      /ship. (`src/lib/simplefin/sameAccountReversals.ts`, `src/app/sync/_review-queue.tsx`,
+      `src/lib/simplefin/sync.ts`)
+
+- [ ] **P4** — None of `/sync`'s five submit buttons carries `FOCUS_RING`
+      (`src/components/ledger/focus-ring.ts`), so they fall back to the UA outline while 17
+      call sites across six other files use the terracotta ring. `DESIGN.md` names
+      FOCUS_RING as the one focus treatment for interactive elements outside
+      `components/ui`, including buttons written inline. Pre-existing, but `SubmitButton` is
+      now the single place that fixes all five at once: fold it into the `cn(...)` there.
+      Every caller already carries `rounded-md`. Do this with the P3 promotion above if that
+      lands first. (`src/app/sync/_submit-button.tsx`, `src/components/ledger/focus-ring.ts`)

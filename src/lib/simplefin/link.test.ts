@@ -100,6 +100,26 @@ describe("setAccountLink", () => {
     expect(read(acct.id)?.simplefinAccountId).toBeNull();
   });
 
+  /**
+   * `linkChanged` distinguishes a real move from a re-save of the same value.
+   *
+   * It was computed and discarded until v0.22.0, which is why
+   * `linkAccountAction` reported a double-clicked Save as "Account linked".
+   * The caller cannot re-derive it: by the time it sees the result the UPDATE
+   * has landed and the prior value is gone.
+   */
+  it("reports linkChanged only when the link actually moved", () => {
+    const acct = seedAccount("Checking");
+
+    expect(setAccountLink(acct.id, "ACT-abc123", handle.db).linkChanged).toBe(true);
+    // Same value again — the UPDATE still runs, but nothing moved.
+    expect(setAccountLink(acct.id, "ACT-abc123", handle.db).linkChanged).toBe(false);
+    expect(setAccountLink(acct.id, "ACT-different", handle.db).linkChanged).toBe(true);
+    expect(setAccountLink(acct.id, null, handle.db).linkChanged).toBe(true);
+    // Unlinking an already-unlinked account: null === null.
+    expect(setAccountLink(acct.id, null, handle.db).linkChanged).toBe(false);
+  });
+
   it("refuses to link a SimpleFIN account already claimed by another account", () => {
     // Guards the partial unique index — two local accounts pointing at one
     // feed account would double-import every row.

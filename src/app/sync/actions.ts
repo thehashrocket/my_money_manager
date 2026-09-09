@@ -8,10 +8,12 @@ import {
   linkTransferPairManually,
   rejectTransferPairManually,
   unlinkTransferPair,
+  type RejectOutcome,
 } from "@/lib/simplefin/sync";
 import { undoSyncBatch } from "@/lib/simplefin/undoSync";
 import { setAccountLink } from "@/lib/simplefin/link";
 import {
+  REJECT_INTENT,
   validateLinkAccountInput,
   validateResolveTransferInput,
   validateResolveReversalInput,
@@ -25,7 +27,51 @@ function rejectionMessage(error: ZodError): string {
     .join("; ");
 }
 
-function revalidateAll(): void {
+/**
+ * The one sentence a caller adds to an ALREADY-COMMITTED success when the
+ * refresh behind it failed.
+ *
+ * Deliberately says the write survived. The alternative the user would
+ * otherwise get is `error.tsx`, which states "Nothing was imported. Your ledger
+ * is unchanged" — copy written for `syncNowAction` and false for every other
+ * action here once the write has landed.
+ */
+const REFRESH_FAILED_WARNING =
+  "Your change was saved, but this page couldn't refresh — reload to see the current state.";
+
+/**
+ * Runs a revalidation that follows a COMMITTED write, and turns a failure into
+ * a warning instead of a throw.
+ *
+ * Every `revalidateAll()` call in this file sits AFTER its `try`, which is
+ * correct — inside it, a throw from `revalidatePath` reported an already-durable
+ * write as a refusal. But outside it the throw simply escaped the Server Action
+ * instead, and there is no `try` above it: it lands in `src/app/sync/error.tsx`,
+ * whose copy affirmatively promises the ledger is unchanged. That trades
+ * "reported a commit as a refusal" for "reported a commit as a guarantee that
+ * nothing happened", which is worse, and it breaks the contract stated at the
+ * top of this file that these actions return their outcome rather than throw.
+ *
+ * So the refresh is guarded on its own. The write is already durable at this
+ * point; a stale page plus an accurate message beats a crash plus a false one.
+ * Logged as well as returned, because a failing `revalidatePath` is a bug in
+ * this app rather than a user error, and nothing else on /sync would record it.
+ */
+function guardRefresh(run: () => void): string[] {
+  try {
+    run();
+    return [];
+  } catch (err) {
+    console.error("[/sync] revalidation failed after a committed write", err);
+    return [REFRESH_FAILED_WARNING];
+  }
+}
+
+/**
+ * Returns any warning produced by the refresh itself — NOT void. A caller must
+ * fold the result into its `ok(...)` warnings, or a failed refresh is silent.
+ */
+function revalidateAll(): string[] {
   // A sync moves balances, the categorize backlog, the transaction list and
   // every month view at once.
   //
@@ -34,10 +80,12 @@ function revalidateAll(): void {
   // useActionState, so the transition never settles and the button sticks on
   // "Syncing…" forever. Target the pages instead, using the route pattern for
   // the dynamic month segments so they are covered too.
-  for (const p of ["/sync", "/", "/transactions", "/categorize", "/budget"]) {
-    revalidatePath(p);
-  }
-  revalidatePath("/budget/[year]/[month]", "page");
+  return guardRefresh(() => {
+    for (const p of ["/sync", "/", "/transactions", "/categorize", "/budget"]) {
+      revalidatePath(p);
+    }
+    revalidatePath("/budget/[year]/[month]", "page");
+  });
 }
 
 /**
@@ -99,11 +147,20 @@ export async function syncNowAction(): Promise<SyncActionState> {
     return fail(toMessage(err));
   }
 
-  revalidateAll();
-
+  // Checked BEFORE the refresh, like every other refusal in this file.
+  // `syncSimpleFin` returns this status before it writes anything, so there is
+  // nothing to refresh and revalidating would only re-render the page under a
+  // message about a write that never happened. This was the THIRD instance of
+  // revalidate-before-fail, not one of two: it went unnoticed because
+  // `SyncButton` renders at a fixed position and never unmounts, so unlike the
+  // undo and unlink forms it does not lose its own refusal — which makes it a
+  // latent trap for whoever next moves that button into a conditional section
+  // rather than a live bug.
   if (outcome.status === "no-linked-accounts") {
     return fail("No accounts are linked to SimpleFIN yet — link one below first.");
   }
+
+  const refresh = revalidateAll();
 
   // The warnings carry the only signal that a bank connection is broken:
   // SimpleFIN reports per-institution failures in `errors[]` on an HTTP 200, and
@@ -122,7 +179,7 @@ export async function syncNowAction(): Promise<SyncActionState> {
       balanceNote === null
         ? "Already up to date — nothing new to import."
         : `No new transactions. ${balanceNote}`;
-    return ok(message, outcome.warnings);
+    return ok(message, [...outcome.warnings, ...refresh]);
   }
 
   const parts = [
@@ -133,7 +190,10 @@ export async function syncNowAction(): Promise<SyncActionState> {
     parts.push(`${outcome.ambiguous.length} needing review`);
   }
   const summary = parts.join(", ") + ".";
-  return ok(balanceNote === null ? summary : `${summary} ${balanceNote}`, outcome.warnings);
+  return ok(balanceNote === null ? summary : `${summary} ${balanceNote}`, [
+    ...outcome.warnings,
+    ...refresh,
+  ]);
 }
 
 export async function undoSyncAction(
@@ -152,11 +212,17 @@ export async function undoSyncAction(
     return fail(toMessage(err));
   }
 
-  revalidateAll();
-
   // Discarding this result made a no-op undo indistinguishable from a
   // successful one: the page revalidated, nothing was deleted, and the user was
   // told nothing either way. Reachable by double-clicking or from a second tab.
+  //
+  // These two checks run BEFORE `revalidateAll()`, and the order is the whole
+  // point. Both are paths that wrote nothing, so revalidating is not merely
+  // wasted — it re-renders `page.tsx`'s `{lastBatch && …}` section out from
+  // under the form whose inline `role="alert"` is the only place this refusal
+  // is ever shown. `ActionForm`'s "a failure skips revalidateAll(), so the form
+  // is still on screen" is the contract; this used to be one of three places
+  // that broke it, alongside `unlinkTransferAction` and `syncNowAction`.
   if (result.status === "nothing-to-undo") {
     return fail(
       "That sync has already been undone, or is no longer the batch shown here — reload the page.",
@@ -165,8 +231,10 @@ export async function undoSyncAction(
   if (result.status === "stale") {
     return fail(result.reason);
   }
+
   return ok(
     `Undid the sync — removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}.`,
+    revalidateAll(),
   );
 }
 
@@ -184,12 +252,35 @@ export async function linkAccountAction(
   } catch (err) {
     return fail(toMessage(err));
   }
-  revalidatePath("/sync");
+  const refresh = guardRefresh(() => revalidatePath("/sync"));
+  const warnings = result.warning ? [result.warning, ...refresh] : refresh;
+
+  // A no-op does not claim to have done something. `setAccountLink` already
+  // computes `linkChanged` (it gates both of its warnings on it) and used to
+  // discard it, so saving the value an account already had reported "Account
+  // linked — it will be included in the next sync." Reachable by double-clicking
+  // Save, or from a second tab. Same class as `nothing-to-undo` and
+  // `already-unpaired`; this was the fourth and last one in this file.
+  //
+  // Unlike those two it is `ok`, not `fail`. They refuse because a durable fact
+  // the user asked for is MISSING — no rows deleted, no "not a transfer"
+  // recorded. Here the end state is exactly what was asked for; it just already
+  // held. Reporting that as an error would train the user to distrust a page
+  // that is telling them the truth.
+  if (!result.linkChanged) {
+    return ok(
+      parsed.data.simplefinAccountId
+        ? "That account was already linked to this SimpleFIN account — nothing changed."
+        : "That account was already unlinked — nothing changed.",
+      warnings,
+    );
+  }
+
   return ok(
     parsed.data.simplefinAccountId
       ? "Account linked — it will be included in the next sync."
       : "Account unlinked — it will no longer be synced.",
-    result.warning ? [result.warning] : [],
+    warnings,
   );
 }
 
@@ -201,15 +292,43 @@ export async function resolveTransferAction(
   if (!parsed.success) {
     return fail(`Invalid transfer pairing — ${rejectionMessage(parsed.error)}`);
   }
+  let linked: { clearedRejection: boolean };
   try {
-    linkTransferPairManually(parsed.data.aId, parsed.data.bId);
+    linked = linkTransferPairManually(parsed.data.aId, parsed.data.bId);
   } catch (err) {
     // Includes the stale-tab race ("already paired — reload the page"), which
     // is a normal thing to hit with two tabs open, not a crash.
     return fail(toMessage(err));
   }
-  revalidateAll();
-  return ok("Linked as a transfer — both rows are now excluded from spending.");
+  return ok(
+    linkMessage(
+      "Linked as a transfer — both rows are now excluded from spending.",
+      linked.clearedRejection,
+      "transfer",
+    ),
+    revalidateAll(),
+  );
+}
+
+/**
+ * Appends the erasure to a link's success message when there was one.
+ *
+ * Linking a pair DELETES any `transfer_pair_rejections` row for it, which is a
+ * durable decision the user made earlier and cannot get back from any surface
+ * in this app. Saying so is the whole point: on the cross-account queue the
+ * `rejected` bucket at least explains itself in its own blurb, but on a
+ * multi-candidate reversal bucket the card is byte-identical before and after a
+ * rejection, so a second click here silently reverses an answer the user
+ * believes is still recorded. CLAUDE.md rule 4 names this as the reason the
+ * link branch is not the reversible one.
+ */
+function linkMessage(
+  base: string,
+  clearedRejection: boolean,
+  noun: "transfer" | "reversal",
+): string {
+  if (!clearedRejection) return base;
+  return `${base} This also cleared the “not a ${noun}” you had recorded for this pair.`;
 }
 
 /**
@@ -240,32 +359,66 @@ export async function resolveSameAccountReversalAction(
   // "these are a reversal" and "these are not" are answers to one question, and
   // the rejection is pair-scoped so it has to name the pair the user picked.
   // `intent` is validated with everything else rather than read raw off
-  // FormData; see `resolveReversalInputSchema` for why the fail-safe default
-  // is "link".
+  // FormData, and it is REQUIRED with no default: absence is a REFUSAL, never
+  // an answer. An earlier revision defaulted a missing value to "link" and
+  // called that fail-safe; see `resolveReversalInputSchema` for why both halves
+  // of that argument were false. Do not reintroduce a default here to quiet an
+  // `Invalid reversal pairing — intent: …` refusal — that refusal is a lost
+  // submitter, and defaulting it silently LINKS the pair.
   const parsed = validateResolveReversalInput(Object.fromEntries(formData));
   if (!parsed.success) {
     return fail(`Invalid reversal pairing — ${rejectionMessage(parsed.error)}`);
   }
   const { aId, bId, intent } = parsed.data;
 
+  // Only the DB call is inside the `try`. `revalidateAll()` used to sit inside
+  // it on the reject branch, so a throw from `revalidatePath` reported an
+  // already-committed `transfer_pair_rejections` row as a refusal — and a
+  // rejection permanently suppresses both automatic matchers for that pair,
+  // with no "Linked pairs" list to undo it from. Same shape as the no-op
+  // refusals in `undoSyncAction` (above) and `unlinkTransferAction` (below),
+  // which is why both branches here now revalidate in one place.
+  //
+  // Moving it out was only half the fix, though: outside the try the same throw
+  // escaped the action entirely and hit `error.tsx`, which promises the ledger
+  // is unchanged. `revalidateAll` guards itself now and returns a warning
+  // instead — see `guardRefresh`.
+  // Discriminated rather than two nullable locals, so that "which branch ran"
+  // and "what it returned" cannot drift apart — with a nullable pair, reading
+  // the link result after the reject branch needs a `!` that tsc cannot check.
+  let resolution:
+    | { kind: "rejected"; outcome: RejectOutcome }
+    | { kind: "linked"; clearedRejection: boolean };
   try {
-    if (intent === "reject") {
-      const outcome = rejectTransferPairManually(aId, bId);
-      revalidateAll();
-      return ok(
-        outcome === "recorded"
-          ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
-          : "You had already marked these two as not a reversal — nothing changed.",
-      );
-    }
-    linkTransferPairManually(aId, bId, undefined, {
-      allowSameAccountReversal: true,
-    });
+    resolution =
+      intent === REJECT_INTENT
+        ? { kind: "rejected", outcome: rejectTransferPairManually(aId, bId) }
+        : {
+            kind: "linked",
+            ...linkTransferPairManually(aId, bId, undefined, {
+              allowSameAccountReversal: true,
+            }),
+          };
   } catch (err) {
     return fail(toMessage(err));
   }
-  revalidateAll();
-  return ok("Linked as a reversal — both rows are now excluded from spending.");
+  const refresh = revalidateAll();
+  if (resolution.kind === "rejected") {
+    return ok(
+      resolution.outcome === "recorded"
+        ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
+        : "You had already marked these two as not a reversal — nothing changed.",
+      refresh,
+    );
+  }
+  return ok(
+    linkMessage(
+      "Linked as a reversal — both rows are now excluded from spending.",
+      resolution.clearedRejection,
+      "reversal",
+    ),
+    refresh,
+  );
 }
 
 export async function unlinkTransferAction(
@@ -282,16 +435,22 @@ export async function unlinkTransferAction(
   } catch (err) {
     return fail(toMessage(err));
   }
-  revalidateAll();
   // A no-op is NOT reported as a completed correction. `unlinkTransferPair`
   // returns early when the row is already unpaired, and that path records no
   // rejection — so the ordinary success message would be claiming a durable
   // "not a transfer" that was never written. Same reasoning as
-  // `undoSyncAction`'s `nothing-to-undo` branch above.
+  // `undoSyncAction`'s `nothing-to-undo` branch above, including the ordering:
+  // this refusal is checked BEFORE `revalidateAll()`, because revalidating
+  // drops this pair's `<li>` out of `linkedPairs` and takes the form — and so
+  // the only rendering of this message — with it.
   if (outcome === "already-unpaired") {
     return fail(
       "These rows were already unpaired — nothing was changed, and no “not a transfer” was recorded. Reload the page to see the current state.",
     );
   }
-  return ok("Unpaired — both rows count towards spending again.");
+
+  return ok(
+    "Unpaired — both rows count towards spending again.",
+    revalidateAll(),
+  );
 }

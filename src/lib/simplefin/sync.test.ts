@@ -16,6 +16,7 @@ import {
 } from "./sync";
 import { setAccountLink } from "./link";
 import {
+  clearPairRejection,
   loadRejectedPairs,
   pairKey,
   recordPairRejection,
@@ -713,6 +714,55 @@ describe("transfer_pair_rejections — automatic matchers never resurface a reje
 
     // And the escape hatch actually works: explicit re-link is still allowed.
     expect(() => linkTransferPairManually(a.id, b.id, handle.db)).not.toThrow();
+  });
+
+  /**
+   * The link REPORTS that it erased a rejection, so the surface can say so.
+   *
+   * `clearPairRejection` runs unconditionally on every link, and the row it
+   * deletes is a durable decision with no undo anywhere in the app. Both
+   * returned `void` until v0.22.0, so `resolveSameAccountReversalAction` could
+   * not have mentioned it even if it wanted to — and on a multi-candidate
+   * reversal bucket the card looks identical before and after a rejection, so
+   * the erasing click is exactly the one the user cannot see coming. CLAUDE.md
+   * rule 4 names this as the reason link is not the "reversible" branch.
+   */
+  it("reports whether linking erased a rejection the user had recorded", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const batch = seedBatch("simplefin");
+    const a = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -2500,
+      rawMemo: "TRANSFER",
+      date: "2026-09-07",
+    });
+    const b = seedTxn({
+      accountId: savings.id,
+      batchId: batch.id,
+      amountCents: 2500,
+      rawMemo: "TRANSFER",
+      date: "2026-09-07",
+    });
+
+    // No rejection on record yet — nothing to erase.
+    expect(linkTransferPairManually(a.id, b.id, handle.db).clearedRejection).toBe(
+      false,
+    );
+
+    // Unlinking records one; re-linking must own up to destroying it.
+    unlinkTransferPair(a.id, handle.db);
+    expect(linkTransferPairManually(a.id, b.id, handle.db).clearedRejection).toBe(
+      true,
+    );
+
+    // And it is genuinely gone rather than reported twice.
+    unlinkTransferPair(a.id, handle.db);
+    clearPairRejection(handle.db, a.id, b.id);
+    expect(linkTransferPairManually(a.id, b.id, handle.db).clearedRejection).toBe(
+      false,
+    );
   });
 
   // The rejection used to be a self-referencing id on EACH leg, checked as

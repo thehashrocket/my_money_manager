@@ -128,15 +128,34 @@ export function recordPairRejection(db: AnyDb, aId: number, bId: number): boolea
  * (`marker === partner ? null : marker`) to avoid destroying a rejection
  * recorded against a THIRD row; with a row per pair that hazard cannot arise,
  * which is the same reason the erasure bug is gone.
+ *
+ * Returns whether a rejection was actually there to forget. That fact is not
+ * bookkeeping: erasing a recorded "not a pair" is the reason CLAUDE.md rule 4
+ * says the link branch is NOT the reversible one, and so not a safe default for
+ * `intent`. Until v0.22.0 this returned void, so the surface that performs the
+ * erasure had no way to mention it and the success message said only "Linked as
+ * a reversal" — the user's earlier decision disappeared with no record that it
+ * had ever existed.
  */
-export function clearPairRejection(db: AnyDb, aId: number, bId: number): void {
+export function clearPairRejection(db: AnyDb, aId: number, bId: number): boolean {
   const { low, high } = ordered(aId, bId);
-  db.delete(schema.transferPairRejections)
-    .where(
-      and(
-        eq(schema.transferPairRejections.lowTransactionId, low),
-        eq(schema.transferPairRejections.highTransactionId, high),
-      ),
-    )
-    .run();
+  const pair = and(
+    eq(schema.transferPairRejections.lowTransactionId, low),
+    eq(schema.transferPairRejections.highTransactionId, high),
+  );
+
+  // Read-then-delete for the same reason `recordPairRejection` above reads
+  // before its insert: `AnyDb` erases the driver result type (it has to, to
+  // accept a transaction handle too), so `.run()`'s `changes` comes back as
+  // `unknown`. Both callers already hold a transaction, so the read and the
+  // delete cannot be interleaved.
+  const existing = db
+    .select({ lowTransactionId: schema.transferPairRejections.lowTransactionId })
+    .from(schema.transferPairRejections)
+    .where(pair)
+    .get();
+
+  db.delete(schema.transferPairRejections).where(pair).run();
+
+  return existing !== undefined;
 }

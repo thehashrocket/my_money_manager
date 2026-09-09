@@ -22,6 +22,7 @@ import { ReviewQueue } from "./_review-queue";
 import { ActionFeedbackProvider } from "./_action-feedback";
 import { SyncButton } from "./SyncButton";
 import { ActionForm } from "./ActionForm";
+import { PendingFieldset, SubmitButton } from "./_submit-button";
 import {
   linkAccountAction,
   undoSyncAction,
@@ -226,16 +227,26 @@ export default function SyncPage() {
                   )}
                   {pair.b.rawMemo ? ` · ${pair.b.rawMemo.slice(0, 40)}` : ""}
                 </span>
-                <ActionForm action={unlinkTransferAction}>
-                  <input type="hidden" name="id" value={pair.a.id} />
-                  <button
-                    type="submit"
-                    className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
-                  >
-                    {pair.a.accountId === pair.b.accountId
-                      ? "Not a reversal"
-                      : "Not a transfer"}
-                  </button>
+                {/*
+                  `announceSuccess` because this row is GONE on success: the
+                  pair leaves `linkedPairs`, the `<li>` unmounts, and the
+                  confirmation would be destroyed before it could paint —
+                  leaving an unpairing that moves two rows back into every
+                  spending total looking exactly like a misclick.
+                */}
+                <ActionForm action={unlinkTransferAction} announceSuccess>
+                  <PendingFieldset>
+                    <input type="hidden" name="id" value={pair.a.id} />
+                    <SubmitButton
+                      label={
+                        pair.a.accountId === pair.b.accountId
+                          ? "Not a reversal"
+                          : "Not a transfer"
+                      }
+                      busyLabel="Unlinking…"
+                      className="min-h-11 rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+                    />
+                  </PendingFieldset>
                 </ActionForm>
               </li>
             ))}
@@ -277,14 +288,33 @@ export default function SyncPage() {
                 without undoing the whole sync.
               </p>
             )}
-            <ActionForm action={undoSyncAction} className="mt-3">
-              <input type="hidden" name="batchId" value={lastBatch.batchId} />
-              <button
-                type="submit"
-                className="rounded-md border border-destructive/40 px-3 py-1 text-sm text-destructive hover:bg-destructive/10"
-              >
-                Undo this sync
-              </button>
+            {/*
+              `announceSuccess` because this section is gated on `lastBatch`.
+              When the undone batch was the only one, the whole section
+              unmounts and takes the confirmation with it. When an OLDER batch
+              remains it is worse: the form is unkeyed, React reuses the node,
+              and "Undid the sync — removed N transactions" would render under
+              a DIFFERENT batch's description, which reads as true.
+            */}
+            <ActionForm
+              action={undoSyncAction}
+              className="mt-3"
+              announceSuccess
+              // Keyed on the batch so the node cannot be REUSED when an older
+              // batch takes its place. Without this a refusal ("undo is no
+              // longer safe") stays inline — errors are deliberately not
+              // republished — and, after the next sync, renders under a
+              // different batch's description, where it reads as true.
+              key={lastBatch.batchId}
+            >
+              <PendingFieldset>
+                <input type="hidden" name="batchId" value={lastBatch.batchId} />
+                <SubmitButton
+                  label="Undo this sync"
+                  busyLabel="Undoing…"
+                  className="min-h-11 rounded-md border border-destructive/40 px-3 py-1 text-sm text-destructive hover:bg-destructive/10"
+                />
+              </PendingFieldset>
             </ActionForm>
           </div>
         </section>
@@ -343,52 +373,62 @@ async function RemoteSections({ host }: { host: string | null }) {
           <ul className="divide-y divide-border rounded-md border border-border">
             {accounts.map((a) => (
               <li key={a.id} className="px-4 py-3 text-sm">
-                <ActionForm
-                  action={linkAccountAction}
-                  className="flex flex-wrap items-center gap-3"
-                >
-                  <input type="hidden" name="accountId" value={a.id} />
-                  <div className="min-w-40 flex-1">
-                    <span className="font-medium">{a.name}</span>
-                    <span className="ml-2 text-muted-foreground">({a.type})</span>
-                  </div>
-                  <select
-                    // Uncontrolled: React will not re-apply defaultValue when it
-                    // reconciles this node after a link is saved, so the select
-                    // would keep showing "Not linked". Keying on the saved value
-                    // forces a remount whenever the link actually changes.
-                    key={a.simplefinAccountId ?? "unlinked"}
-                    name="simplefinAccountId"
-                    defaultValue={a.simplefinAccountId ?? ""}
-                    disabled={!host || remote.length === 0}
-                    className="rounded-md border border-border bg-transparent px-2 py-1"
-                  >
-                    <option value="">Not linked (CSV only)</option>
-                    {remote.map((r) => (
-                      <option
-                        key={r.simplefinAccountId}
-                        value={r.simplefinAccountId}
-                        disabled={
-                          r.linkedAccountId !== null && r.linkedAccountId !== a.id
-                        }
-                      >
-                        {r.name}
-                        {r.balanceCents !== null
-                          ? ` — ${formatCents(r.balanceCents)}`
-                          : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="submit"
-                    // A disabled <select> is omitted from FormData entirely, so
-                    // submitting here would fail validation and surface an error
-                    // overlay rather than doing nothing.
-                    disabled={!host || remote.length === 0}
-                    className="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted disabled:opacity-50"
-                  >
-                    Save
-                  </button>
+                {/*
+                  The flex-wrap row lives on the FIELDSET, not the form: the
+                  fieldset wraps every submitted control, so leaving the layout
+                  on the form would make it the single flex item and collapse
+                  the row into a column. `ActionStatus` is `ActionForm`'s own
+                  last child and therefore now sits below the row rather than
+                  wrapping inside it.
+                */}
+                <ActionForm action={linkAccountAction}>
+                  <PendingFieldset className="flex flex-wrap items-center gap-3">
+                    <input type="hidden" name="accountId" value={a.id} />
+                    <div className="min-w-40 flex-1">
+                      <span className="font-medium">{a.name}</span>
+                      <span className="ml-2 text-muted-foreground">({a.type})</span>
+                    </div>
+                    <select
+                      // Uncontrolled: React will not re-apply defaultValue when it
+                      // reconciles this node after a link is saved, so the select
+                      // would keep showing "Not linked". Keying on the saved value
+                      // forces a remount whenever the link actually changes.
+                      key={a.simplefinAccountId ?? "unlinked"}
+                      name="simplefinAccountId"
+                      defaultValue={a.simplefinAccountId ?? ""}
+                      disabled={!host || remote.length === 0}
+                      className="rounded-md border border-border bg-transparent px-2 py-1"
+                    >
+                      <option value="">Not linked (CSV only)</option>
+                      {remote.map((r) => (
+                        <option
+                          key={r.simplefinAccountId}
+                          value={r.simplefinAccountId}
+                          disabled={
+                            r.linkedAccountId !== null && r.linkedAccountId !== a.id
+                          }
+                        >
+                          {r.name}
+                          {r.balanceCents !== null
+                            ? ` — ${formatCents(r.balanceCents)}`
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <SubmitButton
+                      label="Save"
+                      busyLabel="Saving…"
+                      // A disabled <select> is omitted from FormData entirely, so
+                      // submitting here would fail validation and surface an error
+                      // overlay rather than doing nothing. ORed with the pending
+                      // state inside `SubmitButton`, not replaced by it — the
+                      // fieldset only covers "an action is in flight", never "this
+                      // account has nothing to link to", and either alone is
+                      // enough to disable.
+                      disabled={!host || remote.length === 0}
+                      className="min-h-11 rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+                    />
+                  </PendingFieldset>
                 </ActionForm>
               </li>
             ))}
