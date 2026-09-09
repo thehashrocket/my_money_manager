@@ -69,8 +69,10 @@ describe("statusTone", () => {
   });
 
   it("does NOT mark a warned success as an error", () => {
-    // The message stays neutral; the amber rides on the warning block. Toning
-    // the whole thing as an error would say the write failed.
+    // The amber rides on the warning BLOCK, so the message keeps the success
+    // tone. This deliberately reverses what the predecessor `_status.tsx`
+    // pinned (it toned a warned message `ink-1`, because back then the warning
+    // was concatenated into the same sentence with nothing of its own).
     expect(statusTone(warned)).toBe(statusTone(ok));
     expect(statusTone(warned)).not.toContain("redbrown");
   });

@@ -55,6 +55,12 @@ export function AccountRow({
   const utilization = resolveUtilizationDisplay(account.balanceCents, account.creditLimitCents);
   const action = resolveBalanceAction(account, account.hasAnyRows);
 
+  // Is there any date a hand-entered charge could legally carry? The window is
+  // `startingBalanceDate < date <= today`, so it closes exactly when the anchor
+  // has caught up to today. Derived here rather than inside the dialog because
+  // it decides whether the affordance is OFFERED, not what it says once open.
+  const chargeableDateExists = account.startingBalanceDate < today;
+
   const amountLabel = isLiability
     ? `owed ${formatCents(Math.abs(account.balanceCents))}`
     : undefined;
@@ -165,7 +171,21 @@ export function AccountRow({
           categories={categories}
           creditLimitCents={account.creditLimitCents}
           minimumPaymentCents={account.minimumPaymentCents}
-          canAddCharge={!longTerm}
+          // OFFERED ONLY WHEN THE SERVER WILL ACCEPT IT. `createCardActivity`
+          // refuses `date <= startingBalanceDate` and the dialog caps the date
+          // at today, so on a feed-refreshed card whose anchor IS today the
+          // legal date set is EMPTY — the button could only ever refuse.
+          // `refreshLiabilityBalances` writes that anchor from the bank's own
+          // balance-date, so it is the ordinary state on a sync day, not an
+          // edge case. (When the feed's date lags, which is the common case on
+          // the real ledger, the button appears and works.)
+          //
+          // This is the pattern rule 8 already established: v0.24.0's
+          // `assignableKinds` work made the row menu's kind item appear exactly
+          // when the server would accept it, because a refusal the user can
+          // only discover by triggering it is worse than an absent control.
+          // Card DETAILS stays available either way — it has no date to refuse.
+          canAddCharge={!longTerm && chargeableDateExists}
           // DS55 IS INTACT: `action` still solely decides which balance control
           // renders, and it is relayed here rather than re-derived.
           //

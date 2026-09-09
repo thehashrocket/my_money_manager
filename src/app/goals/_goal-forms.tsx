@@ -3,6 +3,7 @@
 import { useActionState } from "react";
 import { createGoalAction, updateGoalTargetAction } from "./actions";
 import { IDLE_GOALS, type GoalsActionState } from "./action-state";
+import { StatusWarning } from "@/components/ledger/action-status";
 
 /**
  * The two write forms on `/goals`, as client islands.
@@ -28,11 +29,14 @@ import { IDLE_GOALS, type GoalsActionState } from "./action-state";
  */
 function RefreshWarning({ state }: { state: GoalsActionState }) {
   if (state.warning === undefined) return null;
-  return (
-    <p role="alert" className="text-sm text-foreground">
-      {state.warning}
-    </p>
-  );
+  // `StatusWarning`, not a local `<p>`. `/goals`' state is the one shape that
+  // does NOT satisfy `ActionState` — it carries a warning and nothing else,
+  // because both actions still THROW on a validation failure — so it cannot
+  // render `<ActionStatus>` wholesale. It can still share the BLOCK, which is
+  // the part that has to look the same everywhere: this is the byte-identical
+  // sentence `/sync` and `/accounts` render, and a fifth visual language for
+  // it is how a design system stops being one.
+  return <StatusWarning warning={state.warning} />;
 }
 
 export function CreateGoalForm() {

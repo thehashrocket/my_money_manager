@@ -31,9 +31,13 @@
  *          resubmits, which under rule 9 spends the account's one
  *          `prior_starting_balance_*` slot on a value that was never current.
  *
- *   tone   A warned success is not an error. Error is `redbrown`; a plain
- *          success is `ledger`; the message on a warned success stays neutral
- *          and the WARNING carries the amber.
+ *   tone   A warned success is not an error. Error is `redbrown`; a success
+ *          is `ledger` whether or not it carries a warning — the MESSAGE is
+ *          still reporting a write that landed, and the amber block below it
+ *          is what carries the signal. (The predecessor `_status.tsx` toned a
+ *          warned message `ink-1` and pinned the inequality in a test; that
+ *          made sense while the warning was concatenated into the same
+ *          sentence with no block of its own.)
  *
  *   amber  The warning renders in the same amber block `/sync` uses for the
  *          byte-identical sentence (`ActionForm.tsx`'s warnings list). Two

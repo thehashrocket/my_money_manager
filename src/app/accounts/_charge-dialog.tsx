@@ -13,7 +13,7 @@ import {
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import type { LeafCategory } from "@/lib/categories";
 import { IDLE_ACTIVITY } from "./action-state";
-import { StatusWarning, statusRole, warningOf } from "@/components/ledger/action-status";
+import { StatusWarning, statusRole, statusTone, warningOf } from "@/components/ledger/action-status";
 import { addCardActivityAction } from "./actions";
 
 /**
@@ -276,7 +276,7 @@ export function ChargeDialog({
             // `<ActionStatus>` because it also decides whether to close on the
             // same state, and re-deriving them here is how the pair drifts.
             <div role="alert" aria-live="assertive">
-              <p className="text-base text-ledger">{state.status === "ok" ? state.message : ""}</p>
+              <p className={`text-base ${statusTone(state)}`}>{state.status === "ok" ? state.message : ""}</p>
               <StatusWarning warning={warningOf(state)!} />
             </div>
           ) : null}

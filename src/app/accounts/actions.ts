@@ -57,8 +57,13 @@ function fail(message: string, field?: "balance" | "date"): AccountsActionState 
  */
 function readTransactionId(formData: FormData): number | null {
   const raw = formData.get("transactionId");
-  if (typeof raw !== "string" || raw.trim() === "") return null;
-  const n = Number(raw);
+  if (typeof raw !== "string") return null;
+  // DECIMAL DIGITS ONLY, checked before `Number`. Bare coercion also accepts
+  // "0x10" (16), "1e3" (1000) and " 7 ", so a guard written against the
+  // absent-field case alone would leave the comment above true and the code
+  // below still lenient.
+  if (!/^[0-9]+$/.test(raw.trim())) return null;
+  const n = Number(raw.trim());
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
@@ -66,9 +71,16 @@ function toMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Every surface that renders a balance. Deliberately NOT
- *  `revalidatePath("/", "layout")` — that unmounts the client components
- *  holding `useActionState` and would strand a row's button on "Saving…". */
+/** Every surface that renders a balance.
+ *
+ *  A SUPERSET of `/sync`'s list — the same five plus `/accounts` and `/import`.
+ *  The `"/budget/[year]/[month]"` page pattern is deliberately NOT here: it
+ *  belongs to the card-activity variant only, because an anchor move changes no
+ *  envelope's spend.
+ *
+ *  Deliberately NOT `revalidatePath("/", "layout")` either — that unmounts the
+ *  client components holding `useActionState` and would strand a row's button
+ *  on "Saving…" forever. */
 const BALANCE_SURFACES = [
   "/accounts",
   "/",
@@ -80,10 +92,7 @@ const BALANCE_SURFACES = [
 ] as const;
 
 /**
- * Revalidates every surface that renders a balance. Same set as
- * `/sync`'s revalidateAll, and deliberately NOT `revalidatePath("/", "layout")`
- * — that unmounts the client components holding `useActionState` and would
- * strand a row's button on "Saving…" forever.
+ * Revalidates every surface that renders a balance (see `BALANCE_SURFACES`).
  *
  * RETURNS A WARNING, AND CANNOT THROW. That is the load-bearing part, and it
  * is what makes T28/E20's promise at the top of this file true rather than
@@ -634,7 +643,7 @@ export async function unmarkCardPaymentAction(
  * the `/transactions` row menu, beside "Not a card payment" — the row is the
  * thing being removed, and that menu is already where a card row's per-row
  * repairs live. `removeCardActivity` refuses everything the menu would not
- * have offered anyway (E17 and the four guards on its docblock), because a
+ * have offered anyway (E17 and the guards on its docblock), because a
  * Server Action is a network endpoint regardless of what rendered.
  */
 export async function removeCardActivityAction(

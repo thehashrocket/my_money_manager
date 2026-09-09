@@ -128,7 +128,10 @@ describe("createCardActivity — charges", () => {
       expect(result.reason).toBe("before-anchor");
       // DS56 needs the account id to open the right row's reconcile form.
       expect(result.accountId).toBe(visa.id);
-      expect(result.message).toContain("wouldn't count toward the balance");
+      // Wording changed with the origin-neutral rewrite: the refusal names the
+      // anchor DATE and stops naming an act ("your last reconcile") that a
+      // card created-but-never-reconciled had not performed.
+      expect(result.message).toContain("has to be dated after that");
       // A human date, not a raw ISO string, inside a user-facing sentence.
       expect(result.message).toContain("Sep 20");
       expect(result.message).not.toContain("2026-09-20");
@@ -1253,12 +1256,45 @@ describe("createCardActivity — the before-anchor refusal knows where the ancho
     expect(result.message).not.toContain("reconcile");
   });
 
-  it("still names the reconcile when the user is the one who set the anchor", () => {
+  it("names the date WITHOUT naming an act when the anchor is not the feed's", () => {
+    // `createAccountAction` also writes `balance_source = 'manual'`, so this
+    // branch covers a card whose balance was only ever typed on the create
+    // form. Saying "your last reconcile" there named something the user never
+    // did — the same class of wrongness as the feed case, one origin over.
     const result = seedCardCharge("manual");
 
     expect(result).toMatchObject({ status: "refused", reason: "before-anchor" });
     if (result.status !== "refused") throw new Error("unreachable");
-    expect(result.message).toContain("your last reconcile");
+    expect(result.message).toContain("balance is set as of");
+    expect(result.message).toContain("Mar 10");
+    expect(result.message).not.toContain("reconcile");
+  });
+
+  it("uses the same neutral wording when `balance_source` is NULL", () => {
+    // Neither "feed" nor "manual". Nothing sets NULL today, but the column is
+    // nullable and the branch is `=== "feed"`, so this is what it falls to.
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-03-10" });
+    handle.db
+      .update(schema.accounts)
+      .set({ balanceSource: null })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        date: "2026-03-10",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+
+    expect(result).toMatchObject({ status: "refused", reason: "before-anchor" });
+    if (result.status !== "refused") throw new Error("unreachable");
+    expect(result.message).toContain("balance is set as of");
   });
 
   it("keeps `before-anchor` as the reason on BOTH, so DS56's handoff still keys off it", () => {

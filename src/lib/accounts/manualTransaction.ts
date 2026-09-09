@@ -268,7 +268,14 @@ export function createCardActivity(
         // likely outcome, since the anchor is frequently today.
         account.balanceSource === "feed"
           ? `${account.name}'s balance comes from your bank as of ${formatMonthDay(account.startingBalanceDate)}, so a charge has to be dated after that.`
-          : `This is dated before your last reconcile (${formatMonthDay(account.startingBalanceDate)}), so it wouldn't count toward the balance.`,
+          // Origin-NEUTRAL, because there are three ways a non-feed anchor got
+          // here and only one of them is a reconcile: `createAccountAction`
+          // writes `balance_source = 'manual'` at creation too, so a card whose
+          // balance was only ever typed on the create form was being told about
+          // "your last reconcile" — an act the user never performed. Naming the
+          // date without naming the act is true of all of them, and covers a
+          // NULL `balance_source` as well.
+          : `${account.name}'s balance is set as of ${formatMonthDay(account.startingBalanceDate)}, so a charge has to be dated after that.`,
         input.accountId,
       );
     }
@@ -649,7 +656,7 @@ export function unmarkCardPayment(
  * picks the account up again on the next run, because both gates ask the same
  * question of the same table.
  *
- * FIVE GUARDS plus one cleanup. The first guard is the one that matters:
+ * SIX GUARDS plus one cleanup. The first is the one that matters:
  *
  *   confirmedIrreversible      REQUIRED, and absence is a REFUSAL. There is no
  *                              undo and no snapshot for this delete, so the
