@@ -5,6 +5,11 @@ import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { categorizeTransaction } from "@/lib/categorize/categorizeTransaction";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
+import { bulkRetarget } from "@/lib/categorize/bulkRetarget";
+import type { BulkRetargetSnapshot } from "@/lib/categorize/bulkRetarget";
+import { undoBulkRetarget } from "@/lib/categorize/undoBulkRetarget";
+import { validateBulkRetargetInput } from "@/lib/categorize/validateBulkRetargetInput";
+import { bulkRetargetSnapshotSchema } from "@/lib/categorize/validateBulkRetargetSnapshot";
 import { categorizeTransactionSnapshotSchema } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
 import type { CategorizeTransactionSnapshot } from "@/lib/categorize/categorizeTransaction";
 
@@ -347,6 +352,113 @@ describe("categorizeTransactionAction — ruleRefusal pass-through", () => {
         .select()
         .from(schema.categoryRules)
         .where(eq(schema.categoryRules.matchValue, "ONLINE"))
+        .all(),
+    ).toHaveLength(0);
+  });
+});
+
+/**
+ * The same mirror for `bulkRetargetAction` + `undoBulkRetargetAction`:
+ *
+ *   FormData → validate → bulkRetarget(db, {allowRuleRemoval}) → snapshot
+ *   snapshot → JSON round-trip → validate → undoBulkRetarget(db)
+ *
+ * Both halves of that pipeline have their own suites; what neither can state
+ * is that the ACTION wires them together correctly. The two things pinned
+ * here are the two the sibling above was written for after each broke once:
+ * the snapshot has to survive the Server Action serialization boundary and
+ * re-validate on the way back in, and the `allowRuleRemoval` opt-in has to be
+ * passed by the action rather than merely supported by the library.
+ */
+describe("bulkRetargetAction — end-to-end pipeline", () => {
+  it("validates string FormData values, moves the rows, and the snapshot survives JSON", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: gas.id });
+
+    // Exactly what `Object.fromEntries(formData)` hands the action: strings.
+    const parsed = validateBulkRetargetInput({
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: String(gas.id),
+      categoryId: String(groceries.id),
+      rememberMerchant: "true",
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+
+    const result = bulkRetarget(handle.db, parsed.data, { allowRuleRemoval: true });
+    expect(result.updatedCount).toBe(1);
+    expect(result.fromCategoryName).toBe(gas.name);
+    expect(result.categoryName).toBe(groceries.name);
+
+    const snapshot: BulkRetargetSnapshot = {
+      normalizedMerchant: result.normalizedMerchant,
+      fromCategoryId: result.fromCategoryId,
+      categoryId: result.categoryId,
+      txnIds: result.txnIds,
+      ruleTouched: result.ruleTouched,
+      priorRule: result.priorRule,
+      insertedRuleId: result.insertedRuleId,
+      earliestDate: result.earliestDate,
+    };
+
+    /* The boundary. `priorRule.createdAt`/`updatedAt` are real `Date`s on the
+       way out and ISO strings on the way back; `z.coerce.date()` is what makes
+       that survivable, and a plain `z.date()` would fail here and nowhere
+       else. */
+    const reparsed = bulkRetargetSnapshotSchema.safeParse(
+      JSON.parse(JSON.stringify(snapshot)),
+    );
+    expect(reparsed.success).toBe(true);
+    if (!reparsed.success) return;
+
+    const undone = undoBulkRetarget(handle.db, reparsed.data);
+    expect(undone.revertedCount).toBe(1);
+    expect(
+      handle.db
+        .select({ categoryId: schema.transactions.categoryId })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, txn.id))
+        .get()?.categoryId,
+    ).toBe(gas.id);
+  });
+
+  it("passes allowRuleRemoval, so a contradicted rule goes with the rows", () => {
+    /* Rule 6's discipline: the opt-in is an ARGUMENT and never a form field,
+       and `/transactions`' retarget is one of only two callers that may set
+       it. Drop it from the action and every test in `bulkRetarget.test.ts`
+       still passes while the wrong rule keeps auto-filing every future import
+       — with the merchant kept off `/categorize` precisely BECAUSE the rule
+       keeps filing it. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const other = seedCategory("Other");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: gas.id });
+    // A second filed category is what makes the key look split, so Remember
+    // is refused — and the refusal is what may remove the rule.
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: other.id });
+    handle.db
+      .insert(schema.categoryRules)
+      .values({ categoryId: other.id, matchType: "exact", matchValue: "COSTCO", priority: 0, source: "manual" })
+      .run();
+
+    const result = bulkRetarget(
+      handle.db,
+      { normalizedMerchant: "COSTCO", fromCategoryId: gas.id, categoryId: groceries.id, rememberMerchant: true },
+      { allowRuleRemoval: true },
+    );
+
+    expect(result.ruleRefusal).not.toBeNull();
+    expect(result.priorRule?.categoryId).toBe(other.id);
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "COSTCO"))
         .all(),
     ).toHaveLength(0);
   });

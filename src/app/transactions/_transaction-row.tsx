@@ -81,6 +81,38 @@ export function TransactionRowForm({
   const [applyToPast, setApplyToPast] = useState(false);
   const [isPending, startTransition] = useTransition();
 
+  /* "Adjust state during render" — React's documented pattern for resetting
+     derived state when a prop changes, and the same shape `_month-editor.tsx`
+     uses for its three band props. Using state rather than a ref or an effect
+     is enforced here by lint (`react-hooks/refs`, `react-hooks/set-state-in-effect`).
+
+     Without this the three fields above were seeded once at mount and never
+     resynced, so anything that recategorized this row WITHOUT going through
+     this form left the badge asserting the old category indefinitely. That was
+     already reachable from a second tab; `bulkRetargetAction` made it reachable
+     in one click on this very page — move 49 rows and the header said
+     "49 filed as Groceries" directly above 49 rows each badged GAS. `rows` is
+     a new object graph only when the server component actually re-executes, so
+     this fires on a genuine fresh payload rather than on any local re-render.
+
+     `pickerValue` is resynced only when it is UNTOUCHED — still equal to the
+     row's own category. It is an input holding a half-finished intent, and an
+     unrelated revalidation (another row's submit revalidates the whole path)
+     must not throw away a category the user has picked but not yet saved. The
+     badge has no such claim on it: it reports stored state, so it always
+     follows the server. */
+  const [prevRow, setPrevRow] = useState(row);
+  if (prevRow !== row) {
+    const pickerUntouched =
+      pickerValue === (prevRow.categoryId !== null ? String(prevRow.categoryId) : "");
+    setPrevRow(row);
+    setCurrentCategoryId(row.categoryId);
+    setCurrentCategoryName(row.categoryName);
+    if (pickerUntouched) {
+      setPickerValue(row.categoryId !== null ? String(row.categoryId) : "");
+    }
+  }
+
   const merchantFiltered = filterValues.merchant !== undefined;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {

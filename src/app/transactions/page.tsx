@@ -26,6 +26,7 @@ import {
   hasNonMerchantFilters,
   type TransactionsFilterValues,
 } from "./_filter-bar";
+import { RetargetForm, type FiledCategory } from "./_retarget-form";
 import { TransactionsUi } from "./_transactions-ui";
 
 /**
@@ -152,6 +153,30 @@ export default async function TransactionsPage({
   const categoryBreakdown =
     merchant !== undefined ? summarizeByCategory(db, predicateInput) : null;
 
+  // The SAME aggregate over `{ merchant }` alone — deliberately not
+  // `predicateInput`. `bulkRetarget` derives its rows from the key and ignores
+  // every other filter (see its header for why), so the control has to be
+  // labelled with the key-wide count or its button would promise a number it
+  // will not move. That is the same failure `MerchantSummary.scoped` exists to
+  // prevent, arriving from the other side: there the fix is to omit a count we
+  // cannot honour, here it is to show the one we can.
+  //
+  // A second grouped query rather than a conditional reuse of the one above:
+  // they coincide only when NO other filter is active, and `includeTransfers`
+  // — which `hasNonMerchantFilters` deliberately ignores, because it only ever
+  // widens the list — is enough on its own to make them differ.
+  const merchantWideBreakdown =
+    merchant !== undefined ? summarizeByCategory(db, { merchant }) : null;
+
+  const filedCategories: FiledCategory[] =
+    merchantWideBreakdown === null
+      ? []
+      : merchantWideBreakdown.flatMap((row) =>
+          row.categoryId === null || row.categoryName === null
+            ? []
+            : [{ categoryId: row.categoryId, categoryName: row.categoryName, count: row.count }],
+        );
+
   // X3/B7: the picker excludes archived categories (you can't re-file a
   // transaction into one), but a `?categoryId=` filter can point at a
   // category that's since been archived — e.g. a `/budget` row link
@@ -196,6 +221,19 @@ export default async function TransactionsPage({
         totalCount={totalCount}
         categoryBreakdown={categoryBreakdown}
       />
+
+      {/* Under the header rather than inside it: the header answers "what am I
+          looking at", and this is a write. It renders only on the merchant
+          drilldown and only when that merchant HAS filed rows — with nothing
+          filed there is nothing to move, and `bulkCategorize` on /categorize is
+          the right tool for what is left. */}
+      {merchant !== undefined && filedCategories.length > 0 ? (
+        <RetargetForm
+          normalizedMerchant={merchant}
+          filed={filedCategories}
+          leafCategories={leafCategories}
+        />
+      ) : null}
 
       <FilterBar values={filterValues} leafCategories={leafCategories} accounts={accounts} />
 
