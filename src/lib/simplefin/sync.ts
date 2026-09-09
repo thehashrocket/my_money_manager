@@ -8,6 +8,7 @@ import {
 import { unlinkSync } from "node:fs";
 import { dbPath, snapshotDir } from "../paths";
 import { readAccessUrl } from "./accessUrl";
+import { asFeedAccountId, type FeedAccountId } from "./feedAccountId";
 import { fetchAccounts } from "./client";
 import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
@@ -334,7 +335,7 @@ function refreshLiabilityBalances(
   for (const account of balanceOnlyAccounts) {
     // The feed this account was linked to when the account list was read,
     // BEFORE the network round trip. The re-check below compares against it.
-    const stagedFeedId = account.simplefinAccountId!;
+    const stagedFeedId = asFeedAccountId(account.simplefinAccountId!);
     const remote = byExternalId.get(stagedFeedId);
     if (!remote) {
       // The staging loop has its own version of this warning; a balance-only
@@ -668,7 +669,7 @@ export async function syncSimpleFin(
   // value that decided a row was new is the value stored as its provenance.
   type Staged = {
     account: (typeof linked)[number];
-    feedId: string;
+    feedId: FeedAccountId;
     rows: MappedRow[];
     /** Pending-skip and dead-connection notes, flushed only if this account survives the link re-check. */
     accountWarnings: string[];
@@ -681,7 +682,10 @@ export async function syncSimpleFin(
     // query. Named once because the id pass, the content pass and the insert
     // below all key off it, and `accounts.$inferSelect` types the column as
     // nullable.
-    const feedId = account.simplefinAccountId!;
+    // Minted once, here. Everything downstream — the dedup predicates, the
+    // provenance column, the link re-check — takes the branded type, so the
+    // transaction id or a bare name cannot reach any of them.
+    const feedId = asFeedAccountId(account.simplefinAccountId!);
     const remote = byExternalId.get(feedId);
     // Buffered, not pushed. Every warning in this loop is a statement about an
     // import that has not happened yet — `verifyStagedLinks` can still withhold
@@ -1127,8 +1131,8 @@ class NothingVerifiedError extends Error {}
 function verifyStagedLinksReadOnly<
   T extends {
     account: { id: number; name: string };
-    feedId: string;
-    rows: readonly unknown[];
+    feedId: FeedAccountId;
+    rows: readonly MappedRow[];
     accountWarnings: readonly string[];
   },
 >(staged: readonly T[], db: Db): { warnings: string[] } {
@@ -1222,8 +1226,8 @@ function missingAccountWarnings(names: string[]): string[] {
 function verifyStagedLinks<
   T extends {
     account: { id: number; name: string };
-    feedId: string;
-    rows: readonly unknown[];
+    feedId: FeedAccountId;
+    rows: readonly MappedRow[];
     accountWarnings: readonly string[];
   },
 >(
