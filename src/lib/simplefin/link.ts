@@ -94,6 +94,18 @@ export type SetAccountLinkResult = {
    *     relink is the one moment a person can act on it.
    */
   warning: string | null;
+  /**
+   * Whether this call actually MOVED the link, as opposed to re-saving the
+   * value the account already had.
+   *
+   * Computed either way (it gates both warnings above), but discarded until
+   * v0.22.0 — so `linkAccountAction` reported a no-op re-save as "Account
+   * linked — it will be included in the next sync." Reachable by double-clicking
+   * Save or from a second tab. Returned rather than re-derived by the caller
+   * because the caller cannot: by the time it sees the result the UPDATE has
+   * already landed and the prior value is gone.
+   */
+  linkChanged: boolean;
 };
 
 export function setAccountLink(
@@ -239,6 +251,9 @@ export function setAccountLink(
       .where(eq(schema.accounts.id, localAccountId))
       .run();
 
-    return { warning: warnings.length > 0 ? warnings.join(" ") : null };
+    return {
+      warning: warnings.length > 0 ? warnings.join(" ") : null,
+      linkChanged,
+    };
   });
 }

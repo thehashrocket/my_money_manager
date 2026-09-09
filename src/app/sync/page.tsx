@@ -420,10 +420,11 @@ async function RemoteSections({ host }: { host: string | null }) {
                       busyLabel="Saving…"
                       // A disabled <select> is omitted from FormData entirely, so
                       // submitting here would fail validation and surface an error
-                      // overlay rather than doing nothing. ANDed with the pending
+                      // overlay rather than doing nothing. ORed with the pending
                       // state inside `SubmitButton`, not replaced by it — the
                       // fieldset only covers "an action is in flight", never "this
-                      // account has nothing to link to".
+                      // account has nothing to link to", and either alone is
+                      // enough to disable.
                       disabled={!host || remote.length === 0}
                       className="min-h-11 rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
                     />

@@ -7,15 +7,24 @@ import type { SyncActionState } from "./actions";
 /**
  * A status region that OUTLIVES the form that produced it.
  *
- * Forms that stay put render their outcome inline, via `useActionState` — the
- * account-link form is the only one left in that case. Inline silently fails
- * for the review queues: a successful resolve calls `revalidateAll()`, the
- * resolved bucket leaves `buckets`, and the keyed `<ActionForm>` unmounts —
- * taking the `ok(...)` message with it before it can paint. The card just
- * vanishes. The unlink and undo forms have the same problem, so all three set
- * `announceSuccess` and route ok/warning here instead. ERRORS stay inline
- * everywhere: a failure skips `revalidateAll()`, so the form is still on
- * screen and the refusal belongs beside the controls that caused it.
+ * EVERY form renders its outcome inline, via `useActionState`. This region is
+ * ADDITIVE on top of that — never a replacement for it — for the three forms
+ * that can VANISH before the inline copy is any use: a successful resolve calls
+ * `revalidateAll()`, the resolved bucket leaves `buckets`, and the keyed
+ * `<ActionForm>` unmounts, taking the `ok(...)` message with it before it can
+ * paint. The card just disappears. The unlink row (its `<li>` leaves
+ * `linkedPairs`) and the undo form (its section is gated on `lastBatch`) have
+ * the same problem, so all three set `announceSuccess` and route ok/warning
+ * here AS WELL AS inline.
+ *
+ * "Vanishes" is not certain for any of the three, which is why suppressing the
+ * inline copy on an `announceSuccess` form was tried and reverted: a reversal
+ * bucket with more than one candidate pair SURVIVES a rejection, and inline is
+ * then the only thing distinguishing that card from one nobody ever clicked.
+ * See the render site in `ActionForm`.
+ *
+ * ERRORS are inline ONLY: a failure skips `revalidateAll()`, so the form is
+ * still on screen and the refusal belongs beside the controls that caused it.
  *
  * That was survivable while "resolve" meant one thing. It stopped being
  * survivable when the reversal queue grew a second button: "Link as reversal"

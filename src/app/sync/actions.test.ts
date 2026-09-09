@@ -75,7 +75,11 @@ beforeEach(() => {
   unlinkTransferPairMock.mockReturnValue("unlinked");
   undoSyncBatchMock.mockReset();
   undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2 });
-  vi.mocked(revalidatePath).mockClear();
+  // mockRESET, not mockClear: the refresh-failure tests below install a
+  // throwing implementation, and `mockClear` only wipes call history. Leaving
+  // the implementation in place would make every later test in this file
+  // revalidate into an exception.
+  vi.mocked(revalidatePath).mockReset();
 });
 
 afterEach(() => {
@@ -90,7 +94,10 @@ function formData(fields: Record<string, string>): FormData {
 
 describe("linkAccountAction — warning forwarding", () => {
   it("forwards setAccountLink's warning into the returned state", async () => {
-    setAccountLinkMock.mockReturnValue({ warning: "5 previously-imported transactions carry no SimpleFIN de-dup tag." });
+    setAccountLinkMock.mockReturnValue({
+      warning: "5 previously-imported transactions carry no SimpleFIN de-dup tag.",
+      linkChanged: true,
+    });
 
     const state = await linkAccountAction(
       { status: "idle" },
@@ -105,7 +112,7 @@ describe("linkAccountAction — warning forwarding", () => {
   });
 
   it("reports plain success with no warnings when setAccountLink returns none", async () => {
-    setAccountLinkMock.mockReturnValue({ warning: null });
+    setAccountLinkMock.mockReturnValue({ warning: null, linkChanged: true });
 
     const state = await linkAccountAction(
       { status: "idle" },
@@ -116,11 +123,70 @@ describe("linkAccountAction — warning forwarding", () => {
     if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warnings).toEqual([]);
   });
+
+  /**
+   * A re-save that moved nothing does not claim to have linked anything.
+   *
+   * `setAccountLink` has always computed `linkChanged` — it gates both of its
+   * warnings on it — and until v0.22.0 discarded it, so saving the value an
+   * account already held reported "Account linked — it will be included in the
+   * next sync." Reachable by double-clicking Save or from a second tab. Last of
+   * the four no-op-reads-as-success paths in this file.
+   */
+  it("does not claim a link it did not make", async () => {
+    setAccountLinkMock.mockReturnValue({ warning: null, linkChanged: false });
+
+    const state = await linkAccountAction(
+      { status: "idle" },
+      formData({ accountId: "1", simplefinAccountId: "ACT-abc123" }),
+    );
+
+    // `ok`, not `error`: unlike `nothing-to-undo` and `already-unpaired`, no
+    // durable fact the user asked for is missing here — the end state is
+    // exactly what they wanted, it just already held.
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(/already linked/i);
+    expect(state.status !== "idle" && state.message).not.toMatch(
+      /will be included in the next sync/i,
+    );
+  });
+
+  it("says 'already unlinked' rather than 'unlinked' for a no-op unlink", async () => {
+    setAccountLinkMock.mockReturnValue({ warning: null, linkChanged: false });
+
+    const state = await linkAccountAction(
+      { status: "idle" },
+      formData({ accountId: "1", simplefinAccountId: "" }),
+    );
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(/already unlinked/i);
+  });
+});
+
+describe("syncNowAction — a refusal must not revalidate first", () => {
+  it("does not revalidate when no accounts are linked", async () => {
+    // `syncSimpleFin` returns this status before it writes anything, so there
+    // is nothing to refresh. This was the THIRD revalidate-before-fail in this
+    // file and the one the earlier fixes missed; it is latent rather than live
+    // only because `SyncButton` never unmounts, so it does not lose its own
+    // refusal the way the undo and unlink forms did.
+    const { syncSimpleFin } = await import("@/lib/simplefin/sync");
+    vi.mocked(syncSimpleFin).mockResolvedValue({
+      status: "no-linked-accounts",
+    } as Awaited<ReturnType<typeof syncSimpleFin>>);
+
+    const { syncNowAction } = await import("./actions");
+    const state = await syncNowAction();
+
+    expect(state.status).toBe("error");
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
 });
 
 describe("resolve actions — the same-account opt-in is carried by WHICH action ran", () => {
   it("resolveSameAccountReversalAction passes allowSameAccountReversal", () => {
-    linkTransferPairManuallyMock.mockReturnValue(undefined);
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: false });
 
     return resolveSameAccountReversalAction(
       { status: "idle" },
@@ -138,7 +204,7 @@ describe("resolve actions — the same-account opt-in is carried by WHICH action
     // argument, never form data. If this ever regressed, the cross-account
     // review queue would silently gain the power to pair two rows on one
     // account — the exact shape that is ~13% coincidence on real data.
-    linkTransferPairManuallyMock.mockReturnValue(undefined);
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: false });
 
     return resolveTransferAction(
       { status: "idle" },
@@ -155,7 +221,7 @@ describe("resolve actions — the same-account opt-in is carried by WHICH action
     // A crafted or stale POST is the threat model, and FormData is the only
     // thing an attacker controls. `validateResolveTransferInput` parses to
     // {aId, bId}, so an extra field can never reach the call.
-    linkTransferPairManuallyMock.mockReturnValue(undefined);
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: false });
 
     return resolveTransferAction(
       { status: "idle" },
@@ -230,7 +296,7 @@ describe("resolveSameAccountReversalAction — failures come back as state, neve
   });
 
   it("revalidates every affected page on success, so a linked reversal leaves the spending surfaces", async () => {
-    linkTransferPairManuallyMock.mockReturnValue(undefined);
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: false });
 
     const state = await resolveSameAccountReversalAction(
       { status: "idle" },
@@ -316,8 +382,8 @@ describe("resolveSameAccountReversalAction — the reject branch", () => {
     },
   );
 
-  it("links on an explicit intent=link", async () => {
-    await resolveSameAccountReversalAction(
+  it("links on an explicit intent=link, and SAYS it linked", async () => {
+    const state = await resolveSameAccountReversalAction(
       { status: "idle" },
       formData({ aId: "7", bId: "9", intent: "link" }),
     );
@@ -326,6 +392,21 @@ describe("resolveSameAccountReversalAction — the reject branch", () => {
       allowSameAccountReversal: true,
     });
     expect(rejectTransferPairManuallyMock).not.toHaveBeenCalled();
+
+    // The message assertion is not decoration. This describe block's own
+    // docstring says swapping the two success messages used to pass the whole
+    // suite; that was fixed for the REJECT branch only, so replacing this
+    // branch's copy with the rejection copy still passed 48/48 until v0.22.0.
+    // The two branches have opposite effects on money — a link removes both
+    // rows from every spending surface, a rejection deliberately leaves them in
+    // it — so a user shown the wrong copy believes their totals are intact
+    // while two rows have just left them, with nothing on the page to correct
+    // it.
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(
+      /linked as a reversal/i,
+    );
+    expect(state.status !== "idle" && state.message).not.toMatch(/not a reversal/i);
   });
 
   it("REFUSES when intent is absent entirely — it does not fall back to link", async () => {
@@ -346,11 +427,7 @@ describe("resolveSameAccountReversalAction — the reject branch", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  it("revalidates the reject branch OUTSIDE its own try, so a commit is never reported as a refusal", async () => {
-    // `revalidateAll()` used to sit inside the `try` on this branch only. A
-    // throw from `revalidatePath` there reported an already-committed
-    // `transfer_pair_rejections` row as a failure — and a rejection is durable,
-    // with no UI to undo it.
+  it("revalidates the reject branch after the write, not skipped", async () => {
     rejectTransferPairManuallyMock.mockReturnValue("recorded");
 
     const state = await resolveSameAccountReversalAction(
@@ -359,9 +436,101 @@ describe("resolveSameAccountReversalAction — the reject branch", () => {
     );
 
     expect(state.status).toBe("ok");
-    // The write happened, so the refresh must follow it — not be skipped, and
-    // not be able to turn it into an error.
     expect(revalidatePath).toHaveBeenCalledWith("/sync");
+  });
+
+  /**
+   * A COMMITTED write whose refresh then fails is still a committed write.
+   *
+   * This replaces a test that claimed to pin the same property and could not:
+   * it asserted `status === "ok"` with `revalidatePath` mocked as a bare
+   * `vi.fn()` that never throws, so both orderings passed it and restoring the
+   * pre-v0.22.0 structure (revalidate INSIDE the try) left the suite green. The
+   * mock has to throw or there is nothing being tested.
+   *
+   * Making it throw also showed the fix had been half-done. Moving
+   * `revalidateAll()` out of the `try` stopped the commit being reported as a
+   * refusal, but the throw then escaped the action entirely and landed in
+   * `src/app/sync/error.tsx`, whose copy says "Nothing was imported. Your
+   * ledger is unchanged" — an affirmative promise that is false once the
+   * `transfer_pair_rejections` row exists, and a rejection has no UI to undo it.
+   * `guardRefresh` catches it and downgrades the outcome to a warning instead.
+   */
+  it("reports a COMMITTED rejection as a success even when the refresh throws", async () => {
+    rejectTransferPairManuallyMock.mockReturnValue("recorded");
+    // Silenced, not asserted, here — the logging itself is the next test.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(revalidatePath).mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9", intent: "reject" }),
+    );
+    logged.mockRestore();
+
+    // Not a throw (which would hit error.tsx and promise the opposite), and
+    // not an error state (which would deny a write that happened).
+    expect(state.status).toBe("warning");
+    if (state.status !== "warning") throw new Error("unreachable");
+    expect(state.message).toMatch(/not a reversal/i);
+    expect(state.warnings).toEqual([
+      "Your change was saved, but this page couldn't refresh — reload to see the current state.",
+    ]);
+  });
+
+  it("does not swallow the refresh failure silently", async () => {
+    // The user-facing half is above; this is the developer-facing half. A
+    // failing `revalidatePath` is a bug in this app, not a user error, and
+    // nothing else on /sync records one.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(revalidatePath).mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9", intent: "reject" }),
+    );
+
+    expect(logged).toHaveBeenCalledWith(
+      "[/sync] revalidation failed after a committed write",
+      expect.any(Error),
+    );
+    logged.mockRestore();
+  });
+
+  it("says so when linking ERASES a rejection the user had recorded", async () => {
+    // The link path calls `clearPairRejection` unconditionally, so this click
+    // destroys a durable decision with no way back. On a multi-candidate bucket
+    // the card is byte-identical before and after a rejection, so without this
+    // sentence the user has no way to know the answer they gave earlier is
+    // gone. CLAUDE.md rule 4 cites exactly this as why link is not the
+    // "reversible" branch and so was never a safe default for `intent`.
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: true });
+
+    const state = await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9", intent: "link" }),
+    );
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(/linked as a reversal/i);
+    expect(state.status !== "idle" && state.message).toMatch(
+      /cleared the .not a reversal./i,
+    );
+  });
+
+  it("stays silent about an erasure that did not happen", async () => {
+    linkTransferPairManuallyMock.mockReturnValue({ clearedRejection: false });
+
+    const state = await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9", intent: "link" }),
+    );
+
+    expect(state.status !== "idle" && state.message).not.toMatch(/cleared/i);
   });
 });
 

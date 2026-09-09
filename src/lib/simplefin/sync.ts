@@ -1036,13 +1036,21 @@ export function linkTransfersByBucket(
   return { pairsLinked: pairs.length, ambiguous };
 }
 
-/** Manually pair two rows the bucket matcher could not decide between. */
+/**
+ * Manually pair two rows the bucket matcher could not decide between.
+ *
+ * Returns what the caller has to be able to SAY, not just whether it worked:
+ * `clearedRejection` reports that this link erased a "not a pair" the user had
+ * recorded earlier. Every refusal is still a throw, so the return value carries
+ * no success/failure information — only this one fact, which no caller can
+ * recover afterwards because the row is gone by then.
+ */
 export function linkTransferPairManually(
   aId: number,
   bId: number,
   db: Db = defaultDb,
   opts: { allowSameAccountReversal?: boolean } = {},
-): void {
+): { clearedRejection: boolean } {
   // The read, every guard and the write share ONE transaction. They used to be
   // a bare SELECT followed by `db.transaction(...)`, which was correct only
   // because better-sqlite3 is synchronous and nothing between them yielded —
@@ -1052,7 +1060,7 @@ export function linkTransferPairManually(
   // re-checks its own staleness condition inside its transaction for exactly
   // this reason (CLAUDE.md rule 5); this now matches. Throwing rolls back, and
   // nothing has been written at that point anyway.
-  db.transaction((tx) => {
+  return db.transaction((tx) => {
     const rows = tx
       .select()
       .from(schema.transactions)
@@ -1115,7 +1123,7 @@ export function linkTransferPairManually(
     // also erase a rejection recorded against a THIRD row, so linking A to C
     // could make A forget it had rejected B. With one row per pair the hazard is
     // structural rather than guarded: there is nothing to clobber.
-    clearPairRejection(tx, a.id, b.id);
+    const clearedRejection = clearPairRejection(tx, a.id, b.id);
     tx.update(schema.transactions)
       .set({ transferPairId: b.id })
       .where(eq(schema.transactions.id, a.id))
@@ -1124,6 +1132,7 @@ export function linkTransferPairManually(
       .set({ transferPairId: a.id })
       .where(eq(schema.transactions.id, b.id))
       .run();
+    return { clearedRejection };
   });
 }
 
