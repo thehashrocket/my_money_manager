@@ -45,8 +45,8 @@ function formatZodIssues(error: z.ZodError): string {
  * Create or update a single leaf category's allocation for a given month.
  *
  * Thin wrapper around `validateAllocateInput` (pure) + `upsertAllocation`
- * (DB-bound): parse FormData → validate shape → run upsert + forward
- * invalidation in a transaction → revalidate → redirect. Follows the
+ * (DB-bound): parse FormData → validate shape → upsert and read back the
+ * reconciled triple in one transaction → revalidate → redirect. Follows the
  * redirect-outside-try/catch pattern from `src/app/import/actions.ts`.
  *
  * Validation failures, unknown categories, and parent-category rejects
@@ -82,9 +82,13 @@ export async function upsertBudgetAllocationAction(
 
   const { year, month } = parsed.data;
   revalidatePath("/budget");
-  // Pattern form, not the literal path: `upsertAllocation`'s rollover
-  // invalidation can touch every month forward of this one, and the literal
-  // form only ever revalidates the one month just submitted.
+  // Pattern form, not the literal path, and still load-bearing after
+  // migration 0021 removed the rollover cache — only the reason changed. A
+  // rollover category's carried balance is derived from every prior month, so
+  // changing THIS month's allocation changes what every LATER month renders.
+  // Nothing is invalidated in the database any more (each month recomputes on
+  // read), but Next still has those later months cached, and the literal form
+  // would only ever revalidate the one month just submitted.
   revalidatePath("/budget/[year]/[month]", "page");
   redirect(`/budget/${year}/${month}`);
 }

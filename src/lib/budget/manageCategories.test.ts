@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq, isNull } from "drizzle-orm";
 import * as schema from "@/db/schema";
+import { getEffectiveAllocation } from "@/lib/budget";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import {
   createCategory,
@@ -10,7 +11,6 @@ import {
   setCarryoverPolicy,
 } from "./manageCategories";
 import { CategoryNameTakenError, CategoryNotFoundError } from "@/lib/categoryErrors";
-import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 
 let handle: TestDbHandle;
 
@@ -183,22 +183,24 @@ describe("renameCategory (T25)", () => {
 });
 
 describe("setCarryoverPolicy", () => {
-  it("updates the policy and invalidates forward rollover from the earliest budget_periods row", () => {
+  it("updates the policy, and April stops carrying March's unspent balance", () => {
     const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
     handle.db.insert(schema.budgetPeriods).values({ categoryId: cat.id, year: 2026, month: 3, allocatedCents: 5000 }).run();
     handle.db.insert(schema.budgetPeriods).values({ categoryId: cat.id, year: 2026, month: 4, allocatedCents: 1000 }).run();
-    primeCacheOnDb(handle.db, cat.id, 2026, 4);
+
+    // While rolling over, April opens at its own $10 plus March's unspent $50.
+    expect(getEffectiveAllocation(handle.db, cat.id, 2026, 4)?.effectiveCents).toBe(6000);
 
     setCarryoverPolicy(handle.db, cat.id, "none");
 
     expect(readCategory(cat.id).carryoverPolicy).toBe("none");
-    const period = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, cat.id))
-      .all()
-      .find((p) => p.month === 4)!;
-    expect(period.effectiveAllocationCents).toBeNull();
+    // This used to assert a cleared cache column. The cache is gone, so it
+    // asserts the consequence the clearing existed to produce.
+    expect(getEffectiveAllocation(handle.db, cat.id, 2026, 4)).toEqual({
+      allocatedCents: 1000,
+      rolloverCents: 0,
+      effectiveCents: 1000,
+    });
   });
 
   it("throws CategoryNotFoundError for an unknown id", () => {
@@ -206,8 +208,9 @@ describe("setCarryoverPolicy", () => {
   });
 
   it("updates the policy without error when the category has no budget_periods row yet", () => {
-    // earliestPeriod is null here — invalidateForwardRollover must be
-    // skipped entirely rather than throwing on a nonexistent starting point.
+    // A category with no budget_periods row at all: the policy write must
+    // stand on its own. (This existed because the removed invalidation had to
+    // skip a nonexistent starting month rather than throw.)
     const cat = seedCategory("Gifts");
     const result = setCarryoverPolicy(handle.db, cat.id, "rollover");
     expect(result).toEqual({ categoryId: cat.id, carryoverPolicy: "rollover" });

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { primeCache } from "@/lib/test/primeCache";
 import { bulkRetarget } from "./bulkRetarget";
 import { undoBulkRetarget } from "./undoBulkRetarget";
 
@@ -299,56 +298,6 @@ describe("undoBulkRetarget — rules", () => {
     });
 
     expect(undoBulkRetarget(handle.db, snap).ruleAction).toBe("none");
-  });
-});
-
-describe("undoBulkRetarget — invalidation", () => {
-  it("clears the cached rollover chain on BOTH categories again", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const gas = seedCategory("Gas", { carryoverPolicy: "rollover" });
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    for (const category of [gas, groceries]) {
-      handle.db
-        .insert(schema.budgetPeriods)
-        .values([
-          { categoryId: category.id, year: 2026, month: 2, allocatedCents: 1000 },
-          { categoryId: category.id, year: 2026, month: 3, allocatedCents: 1000 },
-          { categoryId: category.id, year: 2026, month: 4, allocatedCents: 1000 },
-        ])
-        .run();
-    }
-
-    seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "COSTCO",
-      amountCents: -5000,
-      date: "2026-02-10",
-      categoryId: gas.id,
-    });
-
-    const snap = bulkRetarget(handle.db, {
-      normalizedMerchant: "COSTCO",
-      fromCategoryId: gas.id,
-      categoryId: groceries.id,
-      rememberMerchant: false,
-    });
-
-    // Re-prime so the undo's own invalidation is what we observe.
-    primeCache(handle.db, gas.id, 2026, 4);
-    primeCache(handle.db, groceries.id, 2026, 4);
-    const primed = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.month, 4))
-      .all();
-    expect(primed.every((r) => r.effectiveAllocationCents !== null)).toBe(true);
-
-    undoBulkRetarget(handle.db, snap);
-
-    const after = handle.db.select().from(schema.budgetPeriods).all();
-    expect(after.every((r) => r.effectiveAllocationCents === null)).toBe(true);
   });
 });
 

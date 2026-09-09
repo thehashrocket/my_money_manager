@@ -21,9 +21,8 @@ export type LeafCategory = {
  * an ALREADY-categorized row's display label, and excluding archived there
  * makes that lookup return nothing — the row's own category name goes
  * blank. Callers doing label resolution over historical data must pass
- * `{ includeArchived: true }` explicitly; the option shape mirrors
- * `getEffectiveAllocation`'s "read what's there, no persist-side-effect"
- * posture rather than introducing a second function.
+ * `{ includeArchived: true }` explicitly, rather than reaching for a second
+ * function that differs only in one WHERE clause.
  *
  * Sort: by name ASC. Two SELECTs is fine at V1 scale (dozens of categories)
  * and keeps the query readable; can fold into one query if it ever matters.

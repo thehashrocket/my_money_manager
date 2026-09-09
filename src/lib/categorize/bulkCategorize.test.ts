@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import {
   CategoryArchivedError,
   CategoryNotFoundError,
@@ -72,10 +71,6 @@ function seedCategory(
     .returning()
     .all();
   return row;
-}
-
-function primeCache(categoryId: number, year: number, month: number) {
-  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -342,71 +337,6 @@ describe("bulkCategorize — rule upsert", () => {
     const rows = handle.db.select().from(schema.categoryRules).where(eq(schema.categoryRules.matchType, "exact")).all();
     expect(rows).toHaveLength(1);
     expect(rows[0].updatedAt.getTime()).toBeGreaterThan(prior.updatedAt.getTime());
-  });
-});
-
-describe("bulkCategorize — forward invalidation", () => {
-  it("clears cached effective_allocation_cents from the earliest txn month onward", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    // Seed allocations for Feb / Mar / Apr with a cached effective.
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([
-        { categoryId: groceries.id, year: 2026, month: 2, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 3, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
-      ])
-      .run();
-    primeCache(groceries.id, 2026, 2);
-    primeCache(groceries.id, 2026, 3);
-    primeCache(groceries.id, 2026, 4);
-
-    // Earliest txn is Feb 2026.
-    seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "SAFEWAY",
-      amountCents: -5000,
-      date: "2026-02-10",
-    });
-
-    bulkCategorize(handle.db, {
-      normalizedMerchant: "SAFEWAY",
-      categoryId: groceries.id,
-      rememberMerchant: false,
-    });
-
-    const after = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, groceries.id))
-      .all();
-    // Feb/Mar/Apr all cleared since earliest = Feb.
-    expect(after.every((r) => r.effectiveAllocationCents === null)).toBe(true);
-  });
-
-  it("does not invalidate when no rows matched (earliestDate is null)", () => {
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values({ categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 })
-      .run();
-    primeCache(groceries.id, 2026, 4);
-
-    bulkCategorize(handle.db, {
-      normalizedMerchant: "NONE",
-      categoryId: groceries.id,
-      rememberMerchant: false,
-    });
-
-    const row = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, groceries.id))
-      .get();
-    expect(row?.effectiveAllocationCents).toBe(1000);
   });
 });
 

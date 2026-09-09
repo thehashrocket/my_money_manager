@@ -107,7 +107,7 @@ See [PLAN.md](./PLAN.md). Detail when starting each weekend.
 - [x] **P2** — `syncNowAction` discards `outcome.warnings`. Fixed: `SyncActionState` carries `warnings` and a `warning` status, rendered by `ActionStatus`. A sync carrying warnings is never shown as a plain success, so a dark account can no longer report "Already up to date." (`src/app/sync/actions.ts`)
 - [x] **P3** — Test gaps: `warnings[]` forwarding, the pending-row refusal, the cross-source candidacy guard, the whitespace dedup case, the out-of-window dedup case, unlink round-trips and WAL snapshot consistency are all covered (375 → 402 tests). Still uncovered: `findAmbiguousTransfers`'s window + stateless-resolution contract, and a non-zero `driftCents` case. (`src/lib/simplefin/`)
 
-## Follow-ups from the `/ship` pre-landing review (2026-09-09, fund-usage-pass)
+## Follow-ups from the `/ship` pre-landing review (2026-09-09, fund-usage-pass + drop-dead-rollover-cache)
 
 The pre-landing review army caught one CRITICAL that was fixed in-branch: the round-5 fund clamp had been applied to `loadRolloverEffectiveByCategory` (the set-based render path) but NOT to `getEffectiveAllocation` (the per-category scalar read `upsertAllocation` returns), so a rollover fund's carried balance was correct on page load and inflated the moment the user typed into the Allocate cell. Both now route through `spendIgnoresPositiveRows`. These three were deferred.
 
@@ -118,6 +118,8 @@ The pre-landing review army caught one CRITICAL that was fixed in-branch: the ro
 - [ ] **P3** — **No budget write revalidates `/`, but the dashboard reads `loadMonthView` for the current month.** `src/app/page.tsx` renders a "This month" summary and the "Closest to limit" tile from `loadMonthView(db, currentMonth)`, and none of `upsertBudgetAllocationAction`, `revalidateBudgetSurfacesAction`, `copyPreviousMonthAction` or `setCarryoverPolicyAction` invalidate `/`. Allocate, copy a month, or flip a carryover policy, then go Home: the dashboard can serve the pre-edit Allocated/Remaining figures until some unrelated mutation refreshes it. Same shape v0.23.0 fixed four instances of for `/goals` and the trend chart; `/` is the one that never got the same treatment. Cheap on its own (`revalidatePath("/")` on the four actions) but wants a test that actually pins it, which no revalidation in this repo currently has. Found by the Codex adversarial pass during `/ship` 2026-09-09. (`src/app/budget/actions.ts`, `src/app/page.tsx`)
 
 - [ ] **P3** — **X1 (expense→income) from the row menu applies instantly, while the banner flow treats the same change as needing confirmation.** `_reclassify-income.tsx` wraps the reclassify in a deliberate confirm step because the rewrite changes past AND current month budget math and every dashboard trend. `CategoryMenu`'s "Set kind: income" calls `setCategoryKindAction` straight from the dropdown with no confirmation and no undo, and v0.24.0's `assignableKinds` work means the item now appears exactly when the server WILL accept it — so the one-click path is more discoverable than before, not less. Either route the menu item through the same confirmation, or make X1 undoable. Pre-existing, surfaced by the Codex adversarial pass during `/ship` 2026-09-09. (`src/app/budget/[year]/[month]/_category-menu.tsx`, `src/app/budget/[year]/[month]/_reclassify-income.tsx`)
+
+- [ ] **P2** — **Migration 0021's only rollback point lives in the snapshot pool the container auto-prunes.** `docker/entrypoint.src.mjs` writes the pre-migrate snapshot under `PRE_MIGRATE_PREFIX` and then calls `pruneSnapshots(..., SNAPSHOT_RETENTION /* 10 */, PRE_MIGRATE_PREFIX)` on every successful boot, under `compose.yaml`'s `restart: unless-stopped`. Ten boots after 0021 lands, the last pre-0021 snapshot is evicted. This repo already made exactly this argument for the merchant backfill — `snapshot.ts` gives it its own `BACKFILL_PREFIX` because "a shared pool would have evicted it silently" — and 0021 is the first `DROP COLUMN` in the chain with the same property. Two candidate fixes: give a migration that DROPS anything its own prefix, or skip pruning on a boot where `migrate()` applied zero migrations (a no-op boot has nothing worth snapshotting and currently costs a retention slot). Found by the Data-Migration specialist and confirmed by the Red Team during `/ship` 2026-09-09. (`docker/entrypoint.src.mjs`, `src/lib/snapshot.ts`)
 
 - [ ] **P3** — **`liveAssignableKinds` (`_month-editor.tsx`) is pure logic with a counter-intuitive invariant and zero tests.** Its `if (serverKinds.length < 3) return serverKinds;` guard deliberately does NOT narrow the two-entry X1 case, because blanket-narrowing on a live allocation would withdraw the one repair path rule 8's X1 exists to provide. It is unexported and lives in a client island, so CLAUDE.md's "no tests for UI components" rule leaves it unprotected — and the simplification that breaks it (`if (live !== null) return [currentKind]`) reads as obviously equivalent and would remove the X1 menu item after any allocation commit with the whole suite green. It has no React dependency: move it beside `assignableKinds` in `categoryKindLock.ts` and pin its three branches. Found by the Testing specialist during `/ship` 2026-09-09. (`src/app/budget/[year]/[month]/_month-editor.tsx`, `src/lib/budget/categoryKindLock.ts`)
 
@@ -231,8 +233,14 @@ considered and explicitly scoped out, not forgotten.
   `computeMtdSpent` per leaf category, and `getEffectiveAllocation` recurses into prior
   months (`src/lib/budget.ts:92`) doing three more queries per level — roughly `2N + 3ND`
   queries per render. In-process and free under better-sqlite3; one socket round trip each
-  under Postgres. The cold path is the common one, since `invalidateForwardRollover`
-  clears `effective_allocation_cents` on every categorize and every allocation edit.
+  under Postgres. **STALE as of 2026-09-08 — re-derive before acting on it.** Its cost
+  model assumed a cold cache refilled constantly, but there is no cache: migration 0021
+  dropped `effective_allocation_cents` and deleted `invalidateForwardRollover` entirely,
+  and `loadMonthView` has used the set-based prefix scan (two queries for every rollover
+  category at once) since T8 rather than calling `getEffectiveAllocation` per leaf. The
+  `2N + 3ND` fan-out this entry is built on does not describe the code. The tests it
+  cites as covering "both persist modes and all three invalidation triggers" were
+  deleted with the cache.
   **Close this item with the number:** T18 adds a dev-only query counter and records
   `/budget` cold and warm on real data right after cutover. Under ~150ms cold, close it
   as not-needed. Over it, replace the loop with one join for allocations and one grouped
@@ -1160,7 +1168,7 @@ Design debt surfaced while reviewing [docs/plans/envelope-budgeting.md](./docs/p
 
 Second eng review of [docs/plans/envelope-budgeting.md](./docs/plans/envelope-budgeting.md), run after the design review added 13 tasks and re-specced PR2's editor. 30 decisions were folded into the plan; these three were captured deliberately rather than folded into scope. (The fourth, month-scoping, amends the existing entry above rather than duplicating it.)
 
-- [ ] **P3** — **PR3: drop `effective_allocation_cents` and the whole `invalidateForwardRollover` mechanism.** After PR1a this is a column that eight code paths write NULL into and nothing can read. Task T8 replaces the per-leaf rollover recursion with a set-based clamped prefix scan, removing the column's last reader-that-could-hit; decision TS1 then deletes `getEffectiveAllocation`'s `persist` option, removing the last writer of a non-NULL value. So `budget.ts:60`'s cache-hit branch becomes unreachable while `upsertAllocation`, `categorizeTransaction`, `bulkCategorize`, the three undo paths, `setCarryoverPolicy` and `setCategoryKind` all keep faithfully clearing it — PR2a's `copyPreviousMonth` fires the batched version across 40 categories per use. Decision P3 deliberately kept the code rather than ripping out eight call sites inside the PR that was split to bound its blast radius, and because PR3's fund work may legitimately want a real cache, in which case deleting the column now becomes a migration to add it back. What this entry exists to prevent: B5 hid for five releases because nobody wrote down that a column had no writers. This is the same shape read backwards — writers, no readers — and it needs the same explicit record. Task T10 rewrites the JSDoc to say the read branch is unreachable rather than adding a fourth trigger to a contract for a no-op. Trigger to act: PR3, or any decision to give funds real carry-forward behavior. Blocked by: PR3 fund semantics, which itself waits on the integration checkpoint above. (`src/lib/budget.ts`, `src/lib/budget/upsertAllocation.ts`, `src/lib/categorize/`, `src/db/schema.ts`)
+- [x] **P3 — DONE (2026-09-08, migration `0021_drop_rollover_cache`; see the round-5 section at the end of this file).** **PR3: drop `effective_allocation_cents` and the whole `invalidateForwardRollover` mechanism.** After PR1a this is a column that eight code paths write NULL into and nothing can read. Task T8 replaces the per-leaf rollover recursion with a set-based clamped prefix scan, removing the column's last reader-that-could-hit; decision TS1 then deletes `getEffectiveAllocation`'s `persist` option, removing the last writer of a non-NULL value. So `budget.ts:60`'s cache-hit branch becomes unreachable while `upsertAllocation`, `categorizeTransaction`, `bulkCategorize`, the three undo paths, `setCarryoverPolicy` and `setCategoryKind` all keep faithfully clearing it — PR2a's `copyPreviousMonth` fires the batched version across 40 categories per use. Decision P3 deliberately kept the code rather than ripping out eight call sites inside the PR that was split to bound its blast radius, and because PR3's fund work may legitimately want a real cache, in which case deleting the column now becomes a migration to add it back. What this entry exists to prevent: B5 hid for five releases because nobody wrote down that a column had no writers. This is the same shape read backwards — writers, no readers — and it needs the same explicit record. Task T10 rewrites the JSDoc to say the read branch is unreachable rather than adding a fourth trigger to a contract for a no-op. Trigger to act: PR3, or any decision to give funds real carry-forward behavior. Blocked by: PR3 fund semantics, which itself waits on the integration checkpoint above. (`src/lib/budget.ts`, `src/lib/budget/upsertAllocation.ts`, `src/lib/categorize/`, `src/db/schema.ts`)
 
 - [ ] **P3** — **Delete `classifyCategory` and its `LeafLookup` type, or give them a caller.** `src/lib/categories.ts:61` exports `classifyCategory`, and `grep -rn 'classifyCategory' src/ | grep -v test` returns only the definition — zero non-test callers. Its `LeafLookup` type (`categories.ts:50-52`) also exposes `isSavingsGoal`, which makes it an eighth surface reading the boolean that decision A2 is retiring; PR3's "drop the column, no behavior change" would silently break it. This is the third instance of the same pattern in this codebase (`applyRuleAtImport` shipped in v0.3.0 with no callers and produced a 498-row backlog; `effective_allocation_cents` had no writers for five releases), which is worth noticing as a pattern rather than three coincidences. Deliberately not folded into A2's seven-site sweep: deleting a function that has tests deserves its own look rather than riding along in a mechanical repoint, because the tests are the reason it reads as intentional. Start by checking whether it was written for a caller that never landed. Depends on: nothing; could ride with PR1a's T5 if you decide quickly. (`src/lib/categories.ts`)
 
@@ -1178,7 +1186,7 @@ Landing PR2a (client-owned budget editor) and PR2b (category CRUD/archive/reclas
 
 - [ ] **P3** — **`createCategory` (`src/lib/budget/manageCategories.ts:72`) doesn't check that `parentId` is unarchived, or that it has no activity of its own.** It only checks the parent exists. Not reachable from the shipped UI — `NewCategoryRow` only ever passes an already-established group's id (see the empty-group fix in this same round: a group only becomes "established" once it has its first child) — but `createCategoryAction` is a plain callable Server Action, and this app's own no-auth threat model (`categoryErrors.ts`'s `CategoryArchivedError` doc comment reasons about exactly this) treats every Server Action as a network-reachable endpoint regardless of what the UI does. Two distinct gaps worth closing together: (a) passing an archived category's id as `parentId` would un-hide it as a group header while it's still flagged archived; (b) passing a category with its own real transaction/allocation history would retroactively turn it into a parent, silently dropping its own activity out of `expenseLeavesAll`/`summarize()` (`loadMonthView.ts`) — a wrong-number bug, not a crash. Found by Red Team during `/ship` 2026-09-04. (`src/lib/budget/manageCategories.ts`)
 
-- [ ] **P4** — **The "invalidate forward from the earliest `budget_periods` row" block is duplicated, not shared, between `setCategoryKind.ts:199` and `manageCategories.ts:134` (`setCarryoverPolicy`).** Both docstrings assert they're carrying out the *same* rule (a `kind` change and a `carryoverPolicy` change both re-key every downstream month's effective allocation), which is true today, but there is no shared function enforcing that — just two copies making the same claim. This branch already produced one real example of exactly this failure mode elsewhere (the X1 reclassify-candidates/enforcement split had drifted before this same `/ship` run caught and fixed it), so it's worth naming as a pattern rather than waiting for a third copy to disagree. Extract a shared `invalidateForwardFromEarliestPeriod(tx, categoryId)` when a third caller needs the same block, or sooner if either copy needs to change. Found by the Maintainability specialist during `/ship` 2026-09-04. (`src/lib/budget/setCategoryKind.ts`, `src/lib/budget/manageCategories.ts`)
+- [x] **DONE (v0.24.0 — resolved by deletion, not by extraction)** — **The "invalidate forward from the earliest `budget_periods` row" block is duplicated, not shared, between `setCategoryKind.ts` and `manageCategories.ts` (`setCarryoverPolicy`).** Both copies are gone with migration 0021: the cache they invalidated (`budget_periods.effective_allocation_cents`) had had no writer for four releases, so the two `earliestPeriod` SELECTs and both `invalidateForwardRollover` calls were deleted rather than merged into the shared `invalidateForwardFromEarliestPeriod` this entry proposed. The pattern the entry named was real and did recur — it just recurred somewhere else (rule 8, fixed the same release by `categoryKindLock.ts`). Originally found by the Maintainability specialist during `/ship` 2026-09-04.
 
 ## Follow-ups from the `/plan-eng-review` pass (2026-09-06, liability-accounts-and-budget-signals plan)
 
@@ -1412,7 +1420,7 @@ the guard's scope from two bad keys to two key CLASSES, which is what shipped.
 
 - [x] **P2 — DISPROVEN, do not build as scoped** — **merchant-normalization T6 ("re-run auto-categorization over the backlog") is worth 6.6%, not the sweep it reads like.** `TODOS.md:22` parks T3/T5/T6 together on the note that T3 measured out at ~5 groups; T6 was never measured at all. It is now: replaying every existing rule over the 437-row backlog matches **29 rows** (22 by `exact`, 7 by `contains`) across 6 groups — `AUDIBLE` 7, `SAFEWAY` 6, `BLOCK 21 WINERY` 4, `WALMART` 3, `COSTCO GAS` 1, `JACK IN THE BOX` 1. T3's alias table measures no better on current data: exactly **1** uncategorized group is a ≥9-char prefix of an already-filed key. The one real fragmentation case is Save Mart, split across five keys (`SAVEMART` 13, `SAVEMART MANTEC` 9, `SAVE MART MANTE` 9, `SAVE MART RIPO` 1, `SAVE MART CENTER F` 3) because the bank truncates the store-name field at different widths — a normalizer cannot fix truncation, which is the argument FOR an alias table, but one merchant is not a business case. Re-measure before building either; do not treat the ~5-group figure in `TODOS.md:22` as covering T6.
 
-- [ ] **P2** — **`PLAN.md`'s 1.0.0 gate condition #3 is underspecified, and the obvious way to close it does not close it.** The gate says "a second budgeted month" because "carryover and rollover have therefore never actually run against real data." Copying September into October exercises `copyPreviousMonth` and carryover; it does NOT exercise rollover. Measured 2026-09-08: **all 63 live categories have `carryover_policy = 'none'`** and all 20 `budget_periods` rows have `effective_allocation_cents = NULL`. `getEffectiveAllocation` (`src/lib/budget.ts:70`) only computes a non-zero `rolloverCents` when `carryoverPolicy === "rollover"`, so the whole rollover subsystem — the migration column, the lazy cache, and the `invalidateForwardRollover` contract fired from four call sites — has never produced a non-zero value in production. Corroborates `TODOS.md:1133` (drop `effective_allocation_cents`) with the evidence that entry lacked, and forces a real fork: switch at least one category to `rollover` and use it for a month, or delete the machinery. Do not close #3 on `budget_periods` row count alone. Codex reached the same conclusion independently from `TODOS.md:1143`. (`PLAN.md`, `src/lib/budget.ts`)
+- [x] **P2 — DONE (2026-09-08).** Gate #3 was specified (a second budgeted month AND a category actually on `rollover`), then closed by use: 2026-10 exists with 24 rows and `Emergency Fund` carries $250 forward. The evidence the entry disputed was itself corrected — the all-NULL cache column proved nothing, and that column is now gone (migration 0021). **`PLAN.md`'s 1.0.0 gate condition #3 is underspecified, and the obvious way to close it does not close it.** The gate says "a second budgeted month" because "carryover and rollover have therefore never actually run against real data." Copying September into October exercises `copyPreviousMonth` and carryover; it does NOT exercise rollover. Measured 2026-09-08: **all 63 live categories have `carryover_policy = 'none'`** and all 20 `budget_periods` rows have `effective_allocation_cents = NULL`. `getEffectiveAllocation` (`src/lib/budget.ts:70`) only computes a non-zero `rolloverCents` when `carryoverPolicy === "rollover"`, so the whole rollover subsystem — the migration column, the lazy cache, and the `invalidateForwardRollover` contract fired from four call sites — has never produced a non-zero value in production. Corroborates `TODOS.md:1133` (drop `effective_allocation_cents`) with the evidence that entry lacked, and forces a real fork: switch at least one category to `rollover` and use it for a month, or delete the machinery. Do not close #3 on `budget_periods` row count alone. Codex reached the same conclusion independently from `TODOS.md:1143`. (`PLAN.md`, `src/lib/budget.ts`)
 
 - [ ] **P3 — superseded, see the `/pr-review-toolkit` section below (now P2)** — **`/transactions` cannot disable the Remember checkbox the way `/categorize` does, so it warns after the fact.** The original analysis stands and is worth keeping: `loadMerchantGroups` gained a `filedCategoryIds` follow-up query, which is cheap because that page is already grouped by merchant, while `loadTransactions` returns up to `MAX_PAGE_SIZE` individual rows, so the equivalent is a grouped query over the page's distinct merchants on every render. The server enforces the guard either way. Fix by adding the same `inArray` aggregate over the page's merchant set to `loadTransactions` and passing a verdict per row. Blocked by: nothing; it is a cost question, not a design one. (`src/lib/categorize/loadTransactions.ts`, `src/app/transactions/_transaction-row.tsx`)
 
@@ -2031,13 +2039,28 @@ conditions are both met by the measurements above.
       steady state. Nor is the invalidation contract "fired from four call
       sites" idle: `invalidateForwardRollover`/`Many` runs from **13 sites
       across 11 files** on every categorize, allocate, retarget, undo,
-      copy-month, kind change and archive — it executes constantly and does
+      copy-month, kind change and carryover-policy change — it executes constantly and does
       nothing. `src/lib/budget.ts`'s own docstring says so and names fund work
       as its removal trigger.
 
 ### Still open
 
-- [ ] **P2** — **Delete the dead `effective_allocation_cents` cache, or give it
+- [x] **P2 — DONE (2026-09-08, migration `0021_drop_rollover_cache`).** Deleted:
+      the column, the unreachable cache-read branch in `getEffectiveAllocation`,
+      both `invalidateForwardRollover` functions, all 13 call sites, the two
+      orphaned `earliestPeriod` SELECTs and six dead `parseIsoMonth` locals they
+      fed, `src/lib/test/primeCache.ts`, and 36 tests. Verified against a copy
+      of the real ledger first (both indexes survive, `integrity_check` ok,
+      `foreign_key_check` clean, unique constraint still enforced, all rows
+      preserved) — note the rehearsal copy was the pre-usage-pass export, so it
+      held 23 `budget_periods` rows where the live ledger by then held 48 across
+      two months; the migration is a bare `DROP COLUMN` and is row-count
+      independent, but the rehearsal was not against the identical state. Then
+      applied to the live volume through the container entrypoint's pre-migrate
+      snapshot, which verified 48 rows and 1,562 transactions intact afterwards. `/budget/2026/10` renders
+      `+$250.00 rollover → $500.00` byte-identically before and after, which is
+      the proof the cache was doing nothing. Original entry:
+      **Delete the dead `effective_allocation_cents` cache, or give it
       a real writer.** 13 call sites across 11 files maintain an invalidation
       contract for a column no production code ever writes non-NULL; every new
       write path has to remember to call it (`bulkRetarget` added two more in
@@ -2080,3 +2103,53 @@ conditions are both met by the measurements above.
       keep only what blocks the next narrow script or can corrupt money, and
       treat the rest as parking lot rather than as a queue. Named explicitly so
       the next reader does not mistake the file's length for a plan.
+
+## Follow-ups from deleting the dead rollover cache (2026-09-08, migration 0021)
+
+- [ ] **P3** — **`earliestDate` is now produced, validated and round-tripped, but
+      READ BY NOTHING.** Every consumer was an `invalidateForwardRollover` call.
+      `bulkRetarget` still returns it, `runBulkRetarget` still passes it to the
+      client, both snapshot validators still enforce it (`z.iso.date()`,
+      non-nullable on the retarget side), and `undoBulkRetarget`/
+      `undoBulkCategorize` now ignore it. Same for `earliestApplyToPastDate` on
+      the single-row path.
+      **Deliberately NOT removed in the same change, and the reason is not
+      timidity:** it is carried in the Undo snapshot, so dropping it changes the
+      undo WIRE FORMAT while a 10-second toast may be holding a payload that
+      still has it. That is a different class of risk from deleting a cache, and
+      bundling the two would have made one PR do two things — the same mistake
+      this deletion was split out of the fund work to avoid. The validators keep
+      it because a field the client can hand back is part of the schema's
+      contract whether or not today's code reads it, and a schema that accepts
+      `2026-13-01` for a field it carries is a trap for the next reader.
+      Removing it means: drop it from `BulkRetargetResult`/`BulkCategorizeResult`,
+      both snapshot schemas and their tests, and confirm the parse is tolerant of
+      an in-flight payload that still carries it.
+      (`src/lib/categorize/bulkRetarget.ts`, `bulkCategorize.ts`,
+      `validateBulkRetargetSnapshot.ts`, `validateBulkCategorizeSnapshot.ts`,
+      `runBulkRetarget.ts`)
+
+- [ ] **P3** — **The 36 deleted tests exercised a mechanism against a state only a
+      test helper could produce, and six were vacuous outright.** Stated carefully,
+      because the first draft of this entry got it backwards and claimed all 36
+      "asserted NULL was NULL": most of them PRIMED a non-NULL value through
+      `primeCache` (a `src/lib/test/` helper — the only non-NULL writer that ever
+      existed) and then asserted the transition back to NULL. That does exercise
+      the clearing. What it cannot exercise is the CACHE, because no production
+      state could reach the starting condition.
+      The genuinely vacuous six are the ones worth remembering — the sole assertion
+      in `it("does not persist effective_allocation_cents")` was
+      `rows.every((r) => r.effectiveAllocationCents === null)` with nothing primed,
+      which no code change could ever have falsified. Several sweeping
+      `every(... === null)` checks also ranged over months that were never primed,
+      so they were already passing for rows that could not have held a value.
+      Dropping the COLUMN is what surfaced all of it: TypeScript flagged every
+      reference. Had the machinery been deleted while leaving the column, the six
+      would have kept passing as pure noise.
+      **Two rules worth applying beyond this cache.** An assertion that a thing is
+      absent is only coverage if something in the codebase can make it present —
+      grep for the writer before trusting an `expect(...).toBeNull()`. And a test
+      whose setup can only be reached through a test-only helper is testing the
+      helper's premise as much as the code.
+      (`src/lib/budget.test.ts`, `src/lib/budget/loadMonthView.test.ts`,
+      `src/app/budget/actions.test.ts`)

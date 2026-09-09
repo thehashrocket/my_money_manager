@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import { countRevertibleCategorizations, undoImportCategorization } from "./undoImportCategorization";
 
 let handle: TestDbHandle;
@@ -55,10 +54,6 @@ function seedCategory(
     .returning()
     .all();
   return row;
-}
-
-function primeCache(categoryId: number, year: number, month: number) {
-  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 /** A rule-categorized row, as `commitImport`/`syncSimpleFin` write it: the
@@ -268,152 +263,6 @@ describe("undoImportCategorization — transactions", () => {
       .where(eq(schema.transactions.id, other.id))
       .get();
     expect(afterOther?.categoryId).toBe(groceries.id);
-  });
-});
-
-describe("undoImportCategorization — invalidation", () => {
-  it("invalidates each category's rollover cache independently when a batch spans multiple categories", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    const gas = seedCategory("Gas", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([
-        { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
-        { categoryId: gas.id, year: 2026, month: 4, allocatedCents: 1000 },
-      ])
-      .run();
-
-    seedCategorizedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      categoryId: groceries.id,
-      merchant: "SAFEWAY",
-      date: "2026-02-10",
-    });
-    seedCategorizedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      categoryId: gas.id,
-      merchant: "SHELL",
-      date: "2026-03-10",
-    });
-
-    primeCache(groceries.id, 2026, 4);
-    primeCache(gas.id, 2026, 4);
-
-    undoImportCategorization(handle.db, b.id);
-
-    const groceriesPeriod = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(eq(schema.budgetPeriods.categoryId, groceries.id), eq(schema.budgetPeriods.month, 4)),
-      )
-      .get();
-    const gasPeriod = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(and(eq(schema.budgetPeriods.categoryId, gas.id), eq(schema.budgetPeriods.month, 4)))
-      .get();
-    expect(groceriesPeriod?.effectiveAllocationCents).toBeNull();
-    expect(gasPeriod?.effectiveAllocationCents).toBeNull();
-  });
-
-  it("clears cached effective_allocation_cents from the earliest reverted month onward, per category", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([
-        { categoryId: groceries.id, year: 2026, month: 2, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 3, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
-      ])
-      .run();
-
-    seedCategorizedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      categoryId: groceries.id,
-      date: "2026-02-10",
-    });
-
-    primeCache(groceries.id, 2026, 4);
-    const beforeApril = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, groceries.id),
-          eq(schema.budgetPeriods.month, 4),
-        ),
-      )
-      .get();
-    expect(beforeApril?.effectiveAllocationCents).not.toBeNull();
-
-    undoImportCategorization(handle.db, b.id);
-
-    const after = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, groceries.id))
-      .all();
-    expect(after.every((r) => r.effectiveAllocationCents === null)).toBe(true);
-  });
-
-  it("does not invalidate a category with no actually-reverted rows (all stale)", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    const household = seedCategory("Household");
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([{ categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 }])
-      .run();
-
-    const t1 = seedCategorizedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      categoryId: groceries.id,
-      date: "2026-02-10",
-    });
-    handle.db
-      .update(schema.transactions)
-      .set({ categoryId: household.id })
-      .where(eq(schema.transactions.id, t1.id))
-      .run();
-
-    primeCache(groceries.id, 2026, 4);
-    const before = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, groceries.id),
-          eq(schema.budgetPeriods.month, 4),
-        ),
-      )
-      .get();
-    expect(before?.effectiveAllocationCents).not.toBeNull();
-
-    undoImportCategorization(handle.db, b.id);
-
-    const after = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, groceries.id),
-          eq(schema.budgetPeriods.month, 4),
-        ),
-      )
-      .get();
-    // The Groceries row was skipped as stale (now Household), so nothing
-    // actually reverted for Groceries — its cache must stay intact.
-    expect(after?.effectiveAllocationCents).not.toBeNull();
   });
 });
 

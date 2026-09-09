@@ -1,7 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRolloverMany } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import type { BulkRetargetSnapshot } from "./bulkRetarget";
 import { restorePriorRule } from "./restorePriorRule";
 import type { RuleUndoAction } from "./undoBulkCategorize";
@@ -37,10 +35,9 @@ export type UndoBulkRetargetResult = {
  * else got there first), prior → `restorePriorRule` verbatim, untouched →
  * no-op.
  *
- * Invalidation: BOTH categories again, from the same earliest month. Spend is
- * moving back across the same boundary it crossed, so the same two rollover
- * chains must recompute — invalidating only the one we are restoring TO would
- * leave the category we are taking the rows off still carrying them.
+ * Rollover: spend moves back across the same boundary it crossed, so the same
+ * two chains recompute on their next read. Migration 0021 removed the cache
+ * this used to invalidate for both.
  *
  * Not idempotent in the "run it twice" sense, and it does not need to be: the
  * second run finds no row still at `snapshot.categoryId`, reverts 0, and the
@@ -100,16 +97,6 @@ export function undoBulkRetarget(
         ruleAction = "restored";
       }
     }
-
-    const { year, month } = parseIsoMonth(snapshot.earliestDate);
-    // One UPDATE across both categories, not one per category — D8A is why
-    // the `Many` form exists (`copyMonth.ts` calls it the same way).
-    invalidateForwardRolloverMany(
-      tx,
-      [snapshot.categoryId, snapshot.fromCategoryId],
-      year,
-      month,
-    );
 
     return { revertedCount, ruleAction };
   });

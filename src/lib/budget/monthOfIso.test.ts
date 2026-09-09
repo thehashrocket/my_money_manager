@@ -5,7 +5,6 @@ import {
   monthPhase,
   nextMonthOf,
   nMonthsBack,
-  parseIsoMonth,
   previousMonth,
 } from "./monthOfIso";
 
@@ -18,12 +17,6 @@ function setTz(tz: string) {
 afterEach(() => {
   if (ORIGINAL_TZ === undefined) delete process.env.TZ;
   else process.env.TZ = ORIGINAL_TZ;
-});
-
-describe("parseIsoMonth", () => {
-  it("extracts numeric year and month from an ISO date string", () => {
-    expect(parseIsoMonth("2026-09-04")).toEqual({ year: 2026, month: 9 });
-  });
 });
 
 describe("previousMonth", () => {

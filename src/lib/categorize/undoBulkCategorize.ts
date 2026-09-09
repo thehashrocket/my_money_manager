@@ -1,6 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
 import type { BulkCategorizeSnapshot } from "./bulkCategorize";
 import { restorePriorRule } from "./restorePriorRule";
 
@@ -40,10 +39,10 @@ export type UndoResult = {
  *   be gone: overwritten by the upsert, or deleted by a trainability refusal.
  * - `ruleTouched = false` → no-op on rules.
  *
- * Invalidation: the same earliest-month invalidation that `bulkCategorize`
- * wrote is re-run against `snapshot.categoryId`. Spend just changed back, so
- * every downstream rollover row for that category must recompute. We do not
- * need to invalidate a second category because the pre-bulk state was NULL.
+ * Rollover: spend just changed back, so every downstream row for
+ * `snapshot.categoryId` recomputes on its next read. Only one category is
+ * involved, because the pre-bulk state was NULL. Migration 0021 removed the
+ * cache this used to invalidate.
  */
 export function undoBulkCategorize(
   db: Db,
@@ -83,12 +82,6 @@ export function undoBulkCategorize(
         restorePriorRule(tx, snapshot.priorRule);
         ruleAction = "restored";
       }
-    }
-
-    if (snapshot.earliestDate) {
-      const year = Number(snapshot.earliestDate.slice(0, 4));
-      const month = Number(snapshot.earliestDate.slice(5, 7));
-      invalidateForwardRollover(tx, snapshot.categoryId, year, month);
     }
 
     return { revertedCount, ruleAction };

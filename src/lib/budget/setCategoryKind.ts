@@ -1,6 +1,5 @@
-import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
 import { assignableKinds, type CategoryKind } from "@/lib/budget/categoryKindLock";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 
@@ -268,20 +267,10 @@ export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKin
       .run();
 
     // Kind decides rollover eligibility (T2's income guard) and Left to
-    // Budget's math, so every cached `effective_allocation_cents` for this
-    // category is stale the moment `kind` changes. Invalidate from its
-    // earliest budget_periods row forward — there is nothing to invalidate
-    // for a category that was genuinely unused (no rows exist).
-    const earliestPeriod = tx
-      .select({ year: schema.budgetPeriods.year, month: schema.budgetPeriods.month })
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, categoryId))
-      .orderBy(asc(schema.budgetPeriods.year), asc(schema.budgetPeriods.month))
-      .limit(1)
-      .get();
-    if (earliestPeriod) {
-      invalidateForwardRollover(tx, categoryId, earliestPeriod.year, earliestPeriod.month);
-    }
+    // Budget's math. That used to require invalidating a cached
+    // `effective_allocation_cents` forward from this category's earliest
+    // `budget_periods` row; the cache is gone and every reader recomputes,
+    // so the change takes effect on the next read with nothing to clear.
 
     return { categoryId, previousKind, newKind };
   });

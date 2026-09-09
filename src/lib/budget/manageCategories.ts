@@ -1,6 +1,5 @@
 import { eq, isNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema, type AnyDb } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
 import { CategoryNameTakenError, CategoryNotFoundError } from "@/lib/categoryErrors";
 
 type Db = typeof defaultDb;
@@ -127,10 +126,11 @@ export function renameCategory(db: Db, categoryId: number, name: string): Rename
 export type CarryoverPolicyResult = { categoryId: number; carryoverPolicy: CarryoverPolicy };
 
 /**
- * §7.1: "already a documented invalidation trigger" — flipping
- * rollover↔reset re-keys every downstream month's effective allocation the
- * same way a `kind` change does (`setCategoryKind`), so this invalidates
- * forward from the category's earliest `budget_periods` row.
+ * Flipping rollover↔reset re-keys every downstream month's effective
+ * allocation, the same way a `kind` change does (`setCategoryKind`). Those
+ * months recompute on their next read, so the write is just the policy
+ * column — this used to also invalidate forward from the category's earliest
+ * `budget_periods` row, until migration 0021 removed the cache.
  */
 export function setCarryoverPolicy(db: Db, categoryId: number, carryoverPolicy: CarryoverPolicy): CarryoverPolicyResult {
   return db.transaction((tx) => {
@@ -138,17 +138,6 @@ export function setCarryoverPolicy(db: Db, categoryId: number, carryoverPolicy: 
     if (!category) throw new CategoryNotFoundError(categoryId);
 
     tx.update(schema.categories).set({ carryoverPolicy }).where(eq(schema.categories.id, categoryId)).run();
-
-    const earliestPeriod = tx
-      .select({ year: schema.budgetPeriods.year, month: schema.budgetPeriods.month })
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, categoryId))
-      .orderBy(schema.budgetPeriods.year, schema.budgetPeriods.month)
-      .limit(1)
-      .get();
-    if (earliestPeriod) {
-      invalidateForwardRollover(tx, categoryId, earliestPeriod.year, earliestPeriod.month);
-    }
 
     return { categoryId, carryoverPolicy };
   });

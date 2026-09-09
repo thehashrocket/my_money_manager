@@ -100,7 +100,8 @@ export type IncomeLeafRow = {
 export type FundRow = {
   categoryId: number;
   name: string;
-  /** `budget_periods.allocated_cents`, never `effective_allocation_cents` (D3A). */
+  /** `budget_periods.allocated_cents`, never the rollover-inflated effective
+   *  figure (D3A) — same rule as `leftToBudgetCents` below. */
   plannedCents: number;
   /**
    * Whether a `budget_periods` row exists for this fund this month (DS14,
@@ -221,8 +222,11 @@ export type MonthViewSummary = {
   receivedIncomeCents: number;
   plannedFundCents: number;
   /** `plannedIncome - allocated - plannedFund` (D3A). Uses `allocated_cents`,
-   * never `effective_allocation_cents` — rollover money was already budgeted
-   * in a prior month, counting it again would manufacture capacity. */
+   * never the rollover-inflated EFFECTIVE figure — rollover money was already
+   * budgeted in a prior month, so counting it again would manufacture
+   * capacity. (It said "never `effective_allocation_cents`" until migration
+   * 0021 removed that column; the rule is about the effective FIGURE, which
+   * `allocation.effectiveCents` still carries, not about where it was stored.) */
   leftToBudgetCents: number;
   /** A6: the FUNDS band renders only when this is > 0. */
   fundCount: number;

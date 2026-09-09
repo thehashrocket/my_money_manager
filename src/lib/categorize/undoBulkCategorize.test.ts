@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { primeCache } from "@/lib/test/primeCache";
 import { bulkCategorize } from "./bulkCategorize";
 import { undoBulkCategorize } from "./undoBulkCategorize";
 
@@ -311,55 +310,3 @@ describe("undoBulkCategorize — rule rollback (3 cases)", () => {
   });
 });
 
-describe("undoBulkCategorize — invalidation", () => {
-  it("clears cached effective_allocation_cents from the earliest month onward", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([
-        { categoryId: groceries.id, year: 2026, month: 2, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 3, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
-      ])
-      .run();
-
-    seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "SAFEWAY",
-      amountCents: -5000,
-      date: "2026-02-10",
-    });
-
-    const snap = bulkCategorize(handle.db, {
-      normalizedMerchant: "SAFEWAY",
-      categoryId: groceries.id,
-      rememberMerchant: false,
-    });
-
-    // Re-prime the cache so we can observe the invalidation from the undo.
-    primeCache(handle.db, groceries.id, 2026, 4);
-    const beforeApril = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, groceries.id),
-          eq(schema.budgetPeriods.month, 4),
-        ),
-      )
-      .get();
-    expect(beforeApril?.effectiveAllocationCents).not.toBeNull();
-
-    undoBulkCategorize(handle.db, snap);
-
-    const after = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, groceries.id))
-      .all();
-    expect(after.every((r) => r.effectiveAllocationCents === null)).toBe(true);
-  });
-});

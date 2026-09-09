@@ -3,19 +3,6 @@ import { currentMonth } from "@/lib/now";
 export type YearMonth = { year: number; month: number };
 
 /**
- * Parse an ISO `YYYY-MM-DD` date string into numeric year and month.
- *
- * Dates are stored as ISO text throughout the app (see CLAUDE.md). Several
- * categorize flows need (year, month) to call `invalidateForwardRollover`.
- * Centralized here so bulk + single-row callers stay in sync.
- */
-export function parseIsoMonth(date: string): YearMonth {
-  const year = Number(date.slice(0, 4));
-  const month = Number(date.slice(5, 7));
-  return { year, month };
-}
-
-/**
  * D4A: this file is the one home for month arithmetic. Before this, the
  * same handful of lines were copy-pasted verbatim across budget.ts,
  * loadMonthView.ts, loadMonthlyTrends.ts, loadTransactions.ts and (as

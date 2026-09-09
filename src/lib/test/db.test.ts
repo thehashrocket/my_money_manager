@@ -36,14 +36,18 @@ describe("migration parse (integration)", () => {
     );
   });
 
-  it("adds budget_periods.effective_allocation_cents (nullable integer)", () => {
+  /* Migration 0021 dropped the memoised rollover cache. Inverted rather than
+     deleted: this file's job is to prove the migration chain lands on the
+     schema the app expects, and "0001 added a column that 0021 removed" is a
+     round trip worth pinning — a re-added column would mean a resurrected
+     cache with no writer. */
+  it("(0021) budget_periods has no effective_allocation_cents column", () => {
     const cols = handle.sqlite
       .prepare(`PRAGMA table_info(budget_periods)`)
       .all() as { name: string; type: string; notnull: number }[];
-    const col = cols.find((c) => c.name === "effective_allocation_cents");
-    expect(col).toBeDefined();
-    expect(col!.type.toLowerCase()).toBe("integer");
-    expect(col!.notnull).toBe(0);
+    expect(cols.find((c) => c.name === "effective_allocation_cents")).toBeUndefined();
+    // The columns it sat between are untouched.
+    expect(cols.find((c) => c.name === "allocated_cents")).toBeDefined();
   });
 
   it("seeds Uncategorized + 5 default leaf categories + 43 expanded categories", () => {

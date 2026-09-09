@@ -1,7 +1,5 @@
 import { and, eq, isNull, inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRolloverMany } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
 import { assertAssignableCategory } from "./assertAssignableCategory";
@@ -131,12 +129,14 @@ export type BulkRetargetResult = BulkRetargetSnapshot & {
  * user could actually complete" that `TODOS.md` records as missing: move the
  * history, then let the rule follow it.
  *
- * ## Invalidation
+ * ## Rollover
  *
- * BOTH categories, from the earliest moved month. Spend left `fromCategoryId`
- * and arrived on `categoryId` starting that month, so every downstream
- * rollover row for either must recompute. `bulkCategorize` invalidates one
- * because its rows came from NULL; this one always has a real source.
+ * Spend leaves `fromCategoryId` and arrives on `categoryId` from the earliest
+ * moved month, so BOTH categories' downstream rollover rows recompute — on
+ * their next read. This used to invalidate a cache for both (where
+ * `bulkCategorize` invalidated one, its rows having come from NULL); migration
+ * 0021 removed that cache, and the two-category distinction survives only as a
+ * fact about which chains move, not as anything either function does.
  *
  * Throws rather than returning a no-op result when there is nothing to move
  * (`NoRowsToRetargetError`) or when source and destination match
@@ -219,11 +219,6 @@ export function bulkRetarget(
       .set({ categoryId, updatedAt: new Date() })
       .where(inArray(schema.transactions.id, txnIds))
       .run();
-
-    const { year, month } = parseIsoMonth(earliestDate);
-    // One UPDATE across both categories, not one per category — D8A is why
-    // the `Many` form exists (`copyMonth.ts` calls it the same way).
-    invalidateForwardRolloverMany(tx, [categoryId, fromCategoryId], year, month);
 
     return {
       normalizedMerchant,

@@ -10,10 +10,8 @@ import {
 } from "@/lib/budget/upsertAllocation";
 import {
   getEffectiveAllocation,
-  invalidateForwardRollover,
 } from "@/lib/budget";
 import { validateAllocateInput } from "@/lib/budget/validateAllocateInput";
-import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 
 /**
  * Integration tests for the `upsertBudgetAllocationAction` wrapper.
@@ -73,10 +71,6 @@ function seedAllocation(
     .run();
 }
 
-function primeCache(categoryId: number, year: number, month: number) {
-  return primeCacheOnDb(handle.db, categoryId, year, month);
-}
-
 function readAllocation(categoryId: number, year: number, month: number) {
   return handle.db
     .select()
@@ -104,7 +98,6 @@ describe("upsertAllocation — create", () => {
 
     const row = readAllocation(cat.id, 2026, 4);
     expect(row?.allocatedCents).toBe(40000);
-    expect(row?.effectiveAllocationCents).toBeNull();
   });
 
   it("preserves existing rows for other (category, year, month) tuples", () => {
@@ -137,24 +130,6 @@ describe("upsertAllocation — update", () => {
     });
 
     expect(readAllocation(cat.id, 2026, 4)?.allocatedCents).toBe(25000);
-  });
-
-  it("clears effective_allocation_cents on the edited row", () => {
-    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
-    seedAllocation(cat.id, 2026, 3, 5000);
-    seedAllocation(cat.id, 2026, 4, 1000);
-    // Prime the April cache.
-    primeCache(cat.id, 2026, 4);
-    expect(readAllocation(cat.id, 2026, 4)?.effectiveAllocationCents).toBe(6000);
-
-    upsertAllocation(handle.db, {
-      categoryId: cat.id,
-      year: 2026,
-      month: 4,
-      allocatedCents: 2000,
-    });
-
-    expect(readAllocation(cat.id, 2026, 4)?.effectiveAllocationCents).toBeNull();
   });
 
   it("bumps updated_at on UPDATE", async () => {
@@ -218,95 +193,6 @@ describe("upsertAllocation — reconciled return value (T18/P2)", () => {
     });
 
     expect(result).toEqual({ allocatedCents: 0, rolloverCents: 0, effectiveCents: 0 });
-  });
-});
-
-describe("upsertAllocation — forward invalidation", () => {
-  it("clears downstream cached effective_allocation_cents for the same category", () => {
-    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
-    seedAllocation(cat.id, 2026, 4, 1000);
-    seedAllocation(cat.id, 2026, 5, 1000);
-    seedAllocation(cat.id, 2026, 6, 1000);
-    primeCache(cat.id, 2026, 5);
-    primeCache(cat.id, 2026, 6);
-
-    expect(readAllocation(cat.id, 2026, 5)?.effectiveAllocationCents).not.toBeNull();
-    expect(readAllocation(cat.id, 2026, 6)?.effectiveAllocationCents).not.toBeNull();
-
-    upsertAllocation(handle.db, {
-      categoryId: cat.id,
-      year: 2026,
-      month: 4,
-      allocatedCents: 9999,
-    });
-
-    expect(readAllocation(cat.id, 2026, 4)?.effectiveAllocationCents).toBeNull();
-    expect(readAllocation(cat.id, 2026, 5)?.effectiveAllocationCents).toBeNull();
-    expect(readAllocation(cat.id, 2026, 6)?.effectiveAllocationCents).toBeNull();
-  });
-
-  it("does not clear prior months' cached values", () => {
-    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
-    seedAllocation(cat.id, 2026, 2, 2000);
-    seedAllocation(cat.id, 2026, 3, 2000);
-    seedAllocation(cat.id, 2026, 4, 1000);
-    primeCache(cat.id, 2026, 2);
-    primeCache(cat.id, 2026, 3);
-    primeCache(cat.id, 2026, 4);
-
-    upsertAllocation(handle.db, {
-      categoryId: cat.id,
-      year: 2026,
-      month: 4,
-      allocatedCents: 5000,
-    });
-
-    // Feb and March caches from the primeCache above survive.
-    expect(readAllocation(cat.id, 2026, 2)?.effectiveAllocationCents).toBe(2000);
-    expect(readAllocation(cat.id, 2026, 3)?.effectiveAllocationCents).toBe(4000);
-    // April was edited → its cache is cleared.
-    expect(readAllocation(cat.id, 2026, 4)?.effectiveAllocationCents).toBeNull();
-  });
-
-  it("only touches the target category", () => {
-    const a = seedCategory("A", { carryoverPolicy: "rollover" });
-    const b = seedCategory("B", { carryoverPolicy: "rollover" });
-    seedAllocation(a.id, 2026, 4, 1000);
-    seedAllocation(a.id, 2026, 5, 1000);
-    seedAllocation(b.id, 2026, 4, 2000);
-    seedAllocation(b.id, 2026, 5, 2000);
-    primeCache(a.id, 2026, 5);
-    primeCache(b.id, 2026, 5);
-
-    upsertAllocation(handle.db, {
-      categoryId: a.id,
-      year: 2026,
-      month: 4,
-      allocatedCents: 5000,
-    });
-
-    expect(readAllocation(a.id, 2026, 5)?.effectiveAllocationCents).toBeNull();
-    // b is rollover; April had $20 allocated, 0 spent → $20 rolls into May.
-    // May effective = 20 + 20 = 40 (primeCache cached this before the upsert).
-    expect(readAllocation(b.id, 2026, 5)?.effectiveAllocationCents).toBe(4000);
-  });
-
-  it("crosses the year boundary when invalidating forward", () => {
-    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
-    seedAllocation(cat.id, 2026, 12, 3000);
-    seedAllocation(cat.id, 2027, 1, 1000);
-    primeCache(cat.id, 2026, 12);
-    primeCache(cat.id, 2027, 1);
-
-    upsertAllocation(handle.db, {
-      categoryId: cat.id,
-      year: 2026,
-      month: 12,
-      allocatedCents: 5000,
-    });
-
-    expect(readAllocation(cat.id, 2026, 12)?.effectiveAllocationCents).toBeNull();
-    expect(readAllocation(cat.id, 2027, 1)?.effectiveAllocationCents).toBeNull();
   });
 });
 
@@ -412,22 +298,5 @@ describe("upsertAllocation — end-to-end chain (mirrors the Server Action)", ()
       .all();
     expect(rows).toHaveLength(1);
     expect(rows[0].allocatedCents).toBe(20000);
-  });
-});
-
-describe("upsertAllocation — interaction with prior external invalidation", () => {
-  it("leaves the row's newly-written allocated_cents intact if invalidate runs separately", () => {
-    // Sanity check: invalidateForwardRollover nulls effective_allocation_cents
-    // only; it does not touch allocated_cents. The upsert's own allocated_cents
-    // write is what survives.
-    const cat = seedCategory("Groceries");
-    upsertAllocation(handle.db, {
-      categoryId: cat.id,
-      year: 2026,
-      month: 4,
-      allocatedCents: 12345,
-    });
-    invalidateForwardRollover(handle.db, cat.id, 2026, 4);
-    expect(readAllocation(cat.id, 2026, 4)?.allocatedCents).toBe(12345);
   });
 });
