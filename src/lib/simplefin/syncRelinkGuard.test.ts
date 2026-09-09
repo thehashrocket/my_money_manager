@@ -6,6 +6,17 @@ import type { SimpleFinResponse, SimpleFinTransaction } from "./types";
 import { syncSimpleFin } from "./sync";
 import { undoSyncBatch } from "./undoSync";
 import { mapTransaction } from "./mapTransaction";
+import {
+  COFFEE_MEMO,
+  NOW,
+  SEP_1_NOON,
+  droppedOrThrow,
+  feedTxn,
+  resetFixtureSeq,
+  seedAccount as seedAccountIn,
+  syncedOrThrow,
+  warningsOf,
+} from "./test/syncFixtures";
 
 /**
  * The consequences of `verifyStagedLinks` that sit OUTSIDE the write loop.
@@ -61,16 +72,12 @@ vi.mock("../snapshot", async (importOriginal) => ({
   pruneSnapshots: pruneSnapshotsMock,
 }));
 
-const NOW = new Date("2026-09-02T17:00:00Z");
-/** 2026-09-01T12:00:00Z — Star One's noon-UTC posting convention. */
-const SEP_1_NOON = 1788264000;
-const COFFEE_MEMO = "STARBUCKS STORE 1234 MANTECA CA";
 
 let handle: TestDbHandle;
-let seq = 0;
 
 beforeEach(() => {
   handle = createTestDb();
+  resetFixtureSeq();
   fetchAccountsMock.mockReset();
   createSnapshotMock.mockClear();
 });
@@ -79,42 +86,7 @@ afterEach(() => {
   handle.close();
 });
 
-function seedAccount(
-  opts: {
-    simplefinAccountId?: string | null;
-    name?: string;
-    type?: "checking" | "savings" | "credit" | "loan";
-    startingBalanceCents?: number;
-    startingBalanceDate?: string;
-  } = {},
-) {
-  seq += 1;
-  const [row] = handle.db
-    .insert(schema.accounts)
-    .values({
-      name: opts.name ?? `Checking-${seq}`,
-      type: opts.type ?? "checking",
-      startingBalanceCents: opts.startingBalanceCents ?? 0,
-      startingBalanceDate: opts.startingBalanceDate ?? "2026-01-01",
-      simplefinAccountId: opts.simplefinAccountId ?? null,
-    })
-    .returning()
-    .all();
-  return row;
-}
-
-function feedTxn(id: string, amount: string, memo = COFFEE_MEMO): SimpleFinTransaction {
-  return {
-    id,
-    posted: SEP_1_NOON,
-    amount,
-    description: memo,
-    memo,
-    payee: "Starbucks",
-    transacted_at: SEP_1_NOON,
-    mcc: null,
-  };
-}
+const seedAccount = (opts: Parameters<typeof seedAccountIn>[1] = {}) => seedAccountIn(handle, opts);
 
 type FeedAccount = {
   id: string;
@@ -159,33 +131,13 @@ function relink(accountId: number, to: string | null): void {
  * transaction rolled back and no batch exists — the outcome is the same one a
  * quiet sync returns, carrying the drop warnings.
  */
-function droppedOrThrow(outcome: Awaited<ReturnType<typeof syncSimpleFin>>) {
-  if (outcome.status !== "up-to-date") {
-    throw new Error(`expected up-to-date (all dropped), got ${outcome.status}`);
-  }
-  return outcome;
-}
-
-function syncedOrThrow(outcome: Awaited<ReturnType<typeof syncSimpleFin>>) {
-  if (outcome.status !== "synced") throw new Error(`expected synced, got ${outcome.status}`);
-  return outcome;
-}
-
 /**
- * Every sentence `verifyStagedLinks` emits for a dropped account. Deliberately
- * the clause all three share rather than the verb: the drop reasons (repointed,
- * unlinked, deleted) carry DIFFERENT remedies, so they are different sentences
- * with different verbs and different tails, and a test keyed on one verb
- * silently stopped counting the unlink case the moment it got its own copy —
- * which is exactly what happened. The shared middle is the invariant: whatever
- * the reason, nothing was written and the sentence says so.
+ * The clause all three drop sentences share. Keyed on the shared middle rather
+ * than a verb: the reasons (repointed, unlinked, deleted) carry different
+ * remedies, so a matcher on one verb silently stopped counting the unlink case
+ * the moment it got its own copy — which is exactly what happened once.
  */
 const WAS_DROPPED = /while the sync was running, so its transactions were not imported/;
-
-/** Narrows away `no-linked-accounts`, which carries no warnings field. */
-function warningsOf(outcome: Awaited<ReturnType<typeof syncSimpleFin>>): string[] {
-  return outcome.status === "no-linked-accounts" ? [] : outcome.warnings;
-}
 
 /** The balance pass's own family of drop sentences (anchor, not rows). */
 const WAS_DROPPED_BALANCE = /while the sync was running, so its balance was not updated/;

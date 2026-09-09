@@ -22,6 +22,13 @@ import {
   recordPairRejection,
 } from "@/lib/transferRejections";
 import { mapTransaction } from "./mapTransaction";
+import {
+  COFFEE_MEMO,
+  NOW,
+  SEP_1_NOON,
+  resetFixtureSeq,
+  seedAccount as seedAccountIn,
+} from "./test/syncFixtures";
 
 /**
  * Reads the rejection store the way production does, rather than poking at a
@@ -80,16 +87,15 @@ vi.mock("../snapshot", async (importOriginal) => ({
 }));
 
 
-const NOW = new Date("2026-09-02T17:00:00Z");
-/** 2026-09-01T12:00:00Z — Star One's noon-UTC posting convention. */
-const SEP_1_NOON = 1788264000;
-const COFFEE_MEMO = "STARBUCKS STORE 1234 MANTECA CA";
 
 let handle: TestDbHandle;
+// Still local: the other seed helpers below key off it. seedAccount moved to
+// the shared fixtures and carries its own counter.
 let seq = 0;
 
 beforeEach(() => {
   handle = createTestDb();
+  resetFixtureSeq();
   fetchAccountsMock.mockReset();
   createSnapshotMock.mockClear();
 });
@@ -98,29 +104,9 @@ afterEach(() => {
   handle.close();
 });
 
-function seedAccount(
-  opts: {
-    simplefinAccountId?: string | null;
-    name?: string;
-    type?: "checking" | "savings" | "credit" | "loan";
-    startingBalanceCents?: number;
-    startingBalanceDate?: string;
-  } = {},
-) {
-  seq += 1;
-  const [row] = handle.db
-    .insert(schema.accounts)
-    .values({
-      name: opts.name ?? `Checking-${seq}`,
-      type: opts.type ?? "checking",
-      startingBalanceCents: opts.startingBalanceCents ?? 0,
-      startingBalanceDate: opts.startingBalanceDate ?? "2026-01-01",
-      simplefinAccountId: opts.simplefinAccountId ?? null,
-    })
-    .returning()
-    .all();
-  return row;
-}
+// Shared with syncRelinkGuard.test.ts — see ./test/syncFixtures for why the
+// vi.mock block above stays per-file while these do not.
+const seedAccount = (opts: Parameters<typeof seedAccountIn>[1] = {}) => seedAccountIn(handle, opts);
 
 function seedBatch(source: "csv" | "simplefin" | "manual") {
   const [row] = handle.db
