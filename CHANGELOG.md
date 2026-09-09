@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-09
+
+1.0.0 is a marker, not a feature release. Nothing in the app changed between 0.27.0 and this version; what changed is that the last open release condition was closed by making a decision rather than by writing code.
+
+### Decided
+- **Credit card spending stays outside your envelopes, and the card's balance keeps coming from your bank.** This was the one thing 1.0 was waiting on, and it turned out to be a choice rather than a bug. A credit card can either have its balance kept current automatically by your bank, or have its individual charges entered by hand so they count against your budget categories — it cannot do both, because the moment a card holds a charge you typed, the app stops reading that card's balance from the bank and hands it to you to keep up to date. The choice made here is the first one: the card shows what you owe, always current, and a purchase on it shows up as the balance moving rather than as spending in Groceries. This is what the app has actually been doing since the card was added, so nothing about your ledger changes.
+- **It is one row to change your mind.** Adding a single charge by hand switches that card over; removing it switches it back and the bank takes over the balance again on the next sync. Both directions shipped in 0.27.0, which is what made this a decision worth recording rather than a door closing.
+- **Card transactions still do not arrive through the bank connection, and are not going to in 1.0.** Syncing a credit card or a loan fetches its balance and none of its transactions. That is deliberate — importing a mortgage's interest and escrow rows would double-count a payment you already budget for on the checking side — and it is why the choice above exists at all.
+
+### Notes
+- This is not a claim that the app is finished. `TODOS.md` is longer today than it was when the release gate closed. What 1.0.0 marks is that the app has run a real ledger daily for eight months, and that what is still open is written down rather than unknown.
+
 ## [0.27.0] - 2026-09-09
 
 ### Fixed
