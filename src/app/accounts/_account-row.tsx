@@ -186,6 +186,11 @@ export function AccountRow({
           // only discover by triggering it is worse than an absent control.
           // Card DETAILS stays available either way — it has no date to refuse.
           canAddCharge={!longTerm && chargeableDateExists}
+          // NOT `canAddCharge`. Terms have no date to refuse, so the credit-limit
+          // repair form must stay reachable on a card anchored today — that is
+          // the half of the original deadlock that always mattered, and folding
+          // it into the charge flag took it away again for one review cycle.
+          canEditTerms={!longTerm}
           // DS55 IS INTACT: `action` still solely decides which balance control
           // renders, and it is relayed here rather than re-derived.
           //

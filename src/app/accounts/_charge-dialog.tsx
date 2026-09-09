@@ -158,7 +158,7 @@ export function ChargeDialog({
             one restores the feed refresh on the next sync. Before that existed
             this sentence would have had to say "permanently". */}
         {endsFeedRefresh ? (
-          <div className="rounded-md border border-[color-mix(in_oklch,var(--accent-amber)_35%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_12%,var(--background))] px-3 py-2 text-sm text-ink-1">
+          <div className="rounded-md border border-[color-mix(in_oklch,var(--accent-amber)_45%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_18%,var(--background))] px-3 py-2 text-sm text-ink-1">
             <p>
               {accountName}&apos;s balance updates from your bank right now. Adding activity by hand
               switches it to Reconcile, which you keep up to date yourself.

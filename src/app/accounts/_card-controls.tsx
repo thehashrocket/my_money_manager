@@ -28,6 +28,7 @@ export function CardControls({
   creditLimitCents,
   minimumPaymentCents,
   canAddCharge,
+  canEditTerms,
   showReconcile,
 }: {
   accountId: number;
@@ -44,6 +45,21 @@ export function CardControls({
    * that may need correcting, so Reconcile is NOT gated on this.
    */
   canAddCharge: boolean;
+  /**
+   * Whether this row may edit its card TERMS — credit limit and minimum
+   * payment. Card-only (D2=A), and deliberately SEPARATE from `canAddCharge`.
+   *
+   * They were one flag until the v0.27.0 cycle-3 review. Narrowing
+   * `canAddCharge` to "a legal charge date exists" then silently took the terms
+   * form with it, so on any card anchored TODAY — the ordinary state after a
+   * sync or a same-day reconcile — `Card details` vanished. That form is the
+   * only surface for the credit-limit repair rule 9 gives it, and the
+   * utilization bar is gated on `credit_limit_cents` being present, so a user
+   * who never set a limit had no way to set one and no bar telling them why.
+   *
+   * Terms have no date to refuse. Nothing about them should depend on one.
+   */
+  canEditTerms: boolean;
   /**
    * Whether `resolveBalanceAction` picked `reconcile` for this row. DS55's
    * "exactly one balance control" is still decided by that function ALONE —
@@ -64,11 +80,14 @@ export function CardControls({
 
   // A feed-linked LONG-TERM liability reaches here with nothing to render:
   // `showReconcile` is false (its balance control is Refresh, drawn by the row
-  // itself) and `canAddCharge` is false (a mortgage takes no hand-entered
-  // charges, D3=A). Before the un-nesting this component was not mounted at
-  // all in that state; now it is, so it has to say so rather than drawing an
-  // empty `mt-2 flex gap-2` and an 8px phantom gap under the row.
-  if (!showReconcile && !canAddCharge) return null;
+  // itself), and a mortgage takes neither hand-entered charges nor card terms
+  // (D3=A / D2=A). Before the un-nesting this component was not mounted at all
+  // in that state; now it is, so it has to say so rather than drawing an empty
+  // `mt-2 flex gap-2` and an 8px phantom gap under the row.
+  //
+  // ALL THREE, not two: gating this on `canAddCharge` alone made a CARD anchored
+  // today render nothing at all, terms form included.
+  if (!showReconcile && !canAddCharge && !canEditTerms) return null;
 
   return (
     <div className="mt-2 flex flex-col flex-wrap items-stretch gap-2 sm:flex-row sm:items-start">
@@ -104,7 +123,7 @@ export function CardControls({
       {/* D2=A — a credit limit and a minimum payment are card-only concepts,
           so this rides the same gate as the charge affordance rather than
           appearing on a mortgage row that draws neither. */}
-      {canAddCharge ? (
+      {canEditTerms ? (
         <CardTermsDisclosure
           accountId={accountId}
           accountName={accountName}
