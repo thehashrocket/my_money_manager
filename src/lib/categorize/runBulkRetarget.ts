@@ -1,6 +1,9 @@
 import { db as defaultDb } from "@/db";
 import { bulkRetarget, type BulkRetargetSnapshot } from "./bulkRetarget";
-import { describeRuleRefusal, type RuleRefusalNotice } from "./refusalNotice";
+import {
+  describeRuleRefusalPostCommit,
+  type RuleRefusalNotice,
+} from "./refusalNotice";
 import {
   undoBulkRetarget,
   type UndoBulkRetargetResult,
@@ -111,27 +114,18 @@ export function runBulkRetarget(
   };
 
   /* PAST THIS POINT THE WRITE HAS COMMITTED, so nothing below may turn into a
-     failure result. `describeRuleRefusal` performs its own DB read (it looks up
-     the removed rule's category name), and `SQLITE_BUSY` is a live class in
-     this app — WAL mode, `VACUUM INTO` snapshots and `db:export` all hold
-     readers. A throw here used to reject the whole action: the client showed
-     "Move failed." for a move that had succeeded, and because the snapshot
-     never reached the browser there was no Undo toast — discarding the only
-     copy of a deleted rule's `priorRule`. A refusal we cannot fully describe
-     degrades to the refusal's own sentence; the move is still reported as what
-     it is. */
-  let ruleRefusal: RuleRefusalNotice | null = null;
-  if (result.ruleRefusal !== null) {
-    try {
-      ruleRefusal = describeRuleRefusal(db, result.ruleRefusal);
-    } catch {
-      ruleRefusal = {
-        reason: result.ruleRefusal.reason,
-        message: result.ruleRefusal.message,
-        removedRule: result.ruleRefusal.removedRule !== null,
-      };
-    }
-  }
+     failure result — which is the whole reason the description goes through
+     `describeRuleRefusalPostCommit` rather than `describeRuleRefusal`. That
+     lookup reads the database, `SQLITE_BUSY` is live here, and a throw used to
+     reject the whole action: "Move failed." for a move that succeeded, with
+     the snapshot (and a deleted rule's only `priorRule` copy) never reaching
+     the browser. This block used to be spelled out inline HERE and nowhere
+     else, so the two other call sites went on throwing; see that function. */
+  const ruleRefusal: RuleRefusalNotice | null = describeRuleRefusalPostCommit(
+    db,
+    "/transactions",
+    result.ruleRefusal,
+  );
 
   return {
     status: "ok",

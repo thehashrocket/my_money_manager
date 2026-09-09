@@ -7,7 +7,8 @@ import {
   bulkCategorize,
   type BulkCategorizeSnapshot,
 } from "@/lib/categorize/bulkCategorize";
-import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
+import { guardPostCommitRead } from "@/lib/categorize/postCommitRead";
+import { describeRuleRefusalPostCommit } from "@/lib/categorize/refusalNotice";
 import { undoBulkCategorize } from "@/lib/categorize/undoBulkCategorize";
 import { validateBulkCategorizeInput } from "@/lib/categorize/validateBulkCategorizeInput";
 import { validateBulkCategorizeSnapshot } from "@/lib/categorize/validateBulkCategorizeSnapshot";
@@ -77,11 +78,24 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     earliestDate: result.earliestDate,
   };
 
-  const categoryRow = db
-    .select({ name: schema.categories.name })
-    .from(schema.categories)
-    .where(eq(schema.categories.id, result.categoryId))
-    .get();
+  /* A READ AFTER A COMMITTED WRITE. The "Category N" fallback below already
+     covers the row being MISSING; what it could not cover is the read
+     itself THROWING, which `SQLITE_BUSY` makes a live possibility here (WAL
+     mode, `VACUUM INTO` snapshots, `db:export`). That throw rejected the whole
+     action, so a name we only wanted for a toast cost the user the `snapshot`
+     returned below — the sole copy of a rule this write may have deleted
+     (rule 6). Degrading to the id is the correct trade; see
+     `guardPostCommitRead`. */
+  const categoryName = guardPostCommitRead(
+    "/categorize",
+    () =>
+      db
+        .select({ name: schema.categories.name })
+        .from(schema.categories)
+        .where(eq(schema.categories.id, result.categoryId))
+        .get()?.name ?? `Category ${result.categoryId}`,
+    `Category ${result.categoryId}`,
+  );
 
   const warning = revalidateAfterWrite();
 
@@ -92,7 +106,7 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     // toast that also carries the Undo.
     warning,
     updatedCount: result.updatedCount,
-    categoryName: categoryRow?.name ?? `Category ${result.categoryId}`,
+    categoryName,
     // `/categorize` disables the checkbox for an untrainable key, so this is
     // normally null. It is still returned because "disabled in the UI" is not
     // an enforcement boundary: a stale tab can post `rememberMerchant=true`,
@@ -100,11 +114,14 @@ export async function bulkCategorizeMerchantAction(formData: FormData) {
     //
     // Resolved to a finished sentence here rather than handed over raw — the
     // fact worth telling the user is the NAME of the category a removed rule
-    // pointed at, and only the server can look that up.
-    ruleRefusal:
-      result.ruleRefusal === null
-        ? null
-        : describeRuleRefusal(db, result.ruleRefusal),
+    // pointed at, and only the server can look that up. That lookup is the
+    // same post-commit read the `categoryName` above is, and degrades the same
+    // way rather than rejecting a write that landed.
+    ruleRefusal: describeRuleRefusalPostCommit(
+      db,
+      "/categorize",
+      result.ruleRefusal,
+    ),
   };
 }
 

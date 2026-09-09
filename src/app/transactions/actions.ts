@@ -6,7 +6,7 @@ import {
   categorizeTransaction,
   type CategorizeTransactionSnapshot,
 } from "@/lib/categorize/categorizeTransaction";
-import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
+import { describeRuleRefusalPostCommit } from "@/lib/categorize/refusalNotice";
 import {
   runBulkRetarget,
   runUndoBulkRetarget,
@@ -106,10 +106,17 @@ export async function categorizeTransactionAction(formData: FormData) {
     // so the row can say why the box it ticked did nothing, and what happened
     // to the rule that was there — resolved to a finished sentence server-side,
     // because naming the removed rule's category needs a lookup.
-    ruleRefusal:
-      result.ruleRefusal === null
-        ? null
-        : describeRuleRefusal(db, result.ruleRefusal),
+    //
+    // That lookup is a READ AFTER A COMMITTED WRITE, so it goes through the
+    // post-commit guard: a `SQLITE_BUSY` here rejected the whole action, and
+    // the `snapshot` above — the only copy of a rule this write may have
+    // deleted (rule 6) — went out with it. Same guard, same reason, as the
+    // refresh two lines up.
+    ruleRefusal: describeRuleRefusalPostCommit(
+      db,
+      "/transactions",
+      result.ruleRefusal,
+    ),
   };
 }
 

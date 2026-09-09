@@ -563,7 +563,24 @@ function RenameDialog({
           onSubmit={(e) => {
             e.preventDefault();
             startTransition(async () => {
-              const result = await renameCategoryAction(categoryId, name);
+              let result;
+              try {
+                result = await renameCategoryAction(categoryId, name);
+              } catch {
+                // `renameCategoryAction` returns only `CategoryNameTakenError` /
+                // `CategoryNotFoundError` as refusals and RETHROWS everything
+                // else, and an uncaught rejection inside a transition is
+                // silent. Worse here than in the menu's own handlers: this
+                // dialog closes ONLY on the success path, so a rethrow left it
+                // sitting open, un-pending, with no error — indistinguishable
+                // from a Save that was never pressed, and the obvious next move
+                // is to press it again. Inline like `SetKindDialog`'s, not a
+                // toast, because the dialog is still on screen.
+                setError(
+                  "Something went wrong. This rename may or may not have been saved — reload the page to see.",
+                );
+                return;
+              }
               if (result.status === "error") {
                 setError(result.message);
                 return;
@@ -642,7 +659,23 @@ function ArchiveDialog({
             disabled={isPending}
             onClick={() => {
               startTransition(async () => {
-                const result = await archiveCategoryAction(categoryId);
+                let result;
+                try {
+                  result = await archiveCategoryAction(categoryId);
+                } catch {
+                  // Same shape and same reason as `RenameDialog` above:
+                  // `archiveCategoryAction` maps four domain refusals and
+                  // rethrows the rest, the rejection is silent inside a
+                  // transition, and this dialog closes only on success — so a
+                  // rethrow leaves a destructive-styled button that looks
+                  // unpressed. Re-clicking it is safe (archive is idempotent
+                  // in effect) but the user cannot know that from here, which
+                  // is the point of saying it may already have landed.
+                  setError(
+                    "Something went wrong. This archive may or may not have been saved — reload the page to see.",
+                  );
+                  return;
+                }
                 if (result.status === "error") {
                   setError(result.message);
                   return;

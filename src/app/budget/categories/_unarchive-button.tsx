@@ -22,7 +22,22 @@ export function UnarchiveButton({ categoryId, categoryName }: { categoryId: numb
       disabled={isPending}
       onClick={() => {
         startTransition(async () => {
-          const result = await unarchiveCategoryAction(categoryId);
+          let result;
+          try {
+            result = await unarchiveCategoryAction(categoryId);
+          } catch {
+            // `unarchiveCategoryAction` returns only `CategoryNotFoundError` as
+            // a refusal and RETHROWS everything else — SQLITE_BUSY, a driver
+            // error, a dropped round trip — and an uncaught rejection inside a
+            // transition is silent, so the button just went un-pending with no
+            // toast of any kind. That is the same failure the sibling handlers
+            // in `_category-menu.tsx` were fixed for, and it lands hardest
+            // here: per the docblock above, this button is the ONLY way back
+            // from archive, so silence reads as "this category is
+            // unrecoverable" rather than "try again".
+            toast.error("Something went wrong. Reload the page to see whether it was unarchived.");
+            return;
+          }
           if (result.status === "error") toast.error(result.message);
           // The unarchive COMMITTED; only the refresh failed. A warning, not a
           // success — this page still lists the category as archived until the

@@ -92,7 +92,7 @@ export async function createGoalAction(
   try {
     assertNameAvailable(db, name);
   } catch (err) {
-    if (err instanceof CategoryNameTakenError) return { error: err.message };
+    if (err instanceof CategoryNameTakenError) return { status: "error", message: err.message };
     throw err;
   }
 
@@ -119,7 +119,9 @@ export async function createGoalAction(
   // `/budget` or `/budget/categories` is a different fact: those pages are
   // stale, but the one they are being sent to is not, and stranding them on a
   // form over it is a worse answer than a stale band they may never open.
-  if (destination !== undefined) return { warning: destination };
+  if (destination !== undefined) {
+    return { status: "ok", message: `${name} created.`, warning: destination };
+  }
   redirect("/goals");
 }
 
@@ -165,5 +167,9 @@ export async function updateGoalTargetAction(
   // No redirect on this path, so both halves are equally reportable — the user
   // stays on `/goals` either way and any stale surface is worth naming.
   const { destination, secondary } = revalidateAfterFundWrite();
-  return { warning: destination ?? secondary };
+  // A SUCCESS, not a bare warning. This used to return `{ warning: undefined }`
+  // on the happy path — structurally identical to `IDLE_GOALS` under the old
+  // shape — so the form said nothing at all when it worked, on the one route
+  // where every sibling surface announces its writes.
+  return { status: "ok", message: "Target updated.", warning: destination ?? secondary };
 }

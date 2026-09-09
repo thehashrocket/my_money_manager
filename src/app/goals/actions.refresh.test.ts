@@ -67,6 +67,7 @@ vi.mock("@/lib/budget/manageCategories", async (importOriginal) => ({
 }));
 
 const { revalidatePath } = await import("next/cache");
+const { IDLE_GOALS } = await import("./action-state");
 const { createGoalAction, updateGoalTargetAction } = await import("./actions");
 
 // Imported, never re-typed. Two hand-maintained copies of this sentence
@@ -118,7 +119,7 @@ describe("createGoalAction", () => {
     // Pins that the redirect is NOT inside the guard's callback: if it were,
     // `guardRefresh` would catch the throw and this would return a warning
     // instead of navigating.
-    await expect(createGoalAction({}, createForm())).rejects.toThrow("NEXT_REDIRECT");
+    await expect(createGoalAction(IDLE_GOALS, createForm())).rejects.toThrow("NEXT_REDIRECT");
     expect(insertRunMock).toHaveBeenCalled();
     expect(redirectMock).toHaveBeenCalledWith("/goals");
   });
@@ -128,10 +129,12 @@ describe("createGoalAction", () => {
 
     // Not a throw: `/goals/error.tsx` would claim the fund was not created,
     // and the retry that advice invites collides on the unique name.
-    const state = await createGoalAction({}, createForm());
+    const state = await createGoalAction(IDLE_GOALS, createForm());
     restore();
 
     expect(insertRunMock).toHaveBeenCalled();
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warning).toBe(REFRESH_FAILED_WARNING);
     // The redirect is skipped on purpose. It discards the returned state, so
     // navigating would land the user on a page whose cache we just failed to
@@ -145,7 +148,7 @@ describe("createGoalAction", () => {
       throw new Error("revalidatePath blew up");
     });
 
-    await createGoalAction({}, createForm());
+    await createGoalAction(IDLE_GOALS, createForm());
 
     expect(logged).toHaveBeenCalledWith(
       "[/goals] revalidation failed after a committed write",
@@ -157,19 +160,23 @@ describe("createGoalAction", () => {
 
 describe("updateGoalTargetAction", () => {
   it("carries no warning when the refresh succeeds", async () => {
-    const state = await updateGoalTargetAction({}, targetForm());
+    const state = await updateGoalTargetAction(IDLE_GOALS, targetForm());
 
     expect(updateRunMock).toHaveBeenCalled();
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warning).toBeUndefined();
   });
 
   it("reports a COMMITTED target change as saved when the refresh throws", async () => {
     const restore = makeRefreshThrow();
 
-    const state = await updateGoalTargetAction({}, targetForm());
+    const state = await updateGoalTargetAction(IDLE_GOALS, targetForm());
     restore();
 
     expect(updateRunMock).toHaveBeenCalled();
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warning).toBe(REFRESH_FAILED_WARNING);
   });
 
@@ -178,7 +185,7 @@ describe("updateGoalTargetAction", () => {
     // happen BEFORE any write, so they still throw.
     categoryRowMock.current = { id: 4, name: "Groceries", kind: "expense", archivedAt: null };
 
-    await expect(updateGoalTargetAction({}, targetForm())).rejects.toThrow();
+    await expect(updateGoalTargetAction(IDLE_GOALS, targetForm())).rejects.toThrow();
     expect(updateRunMock).not.toHaveBeenCalled();
   });
 });
@@ -206,10 +213,11 @@ describe("createGoalAction — a name collision is returned, not thrown", () => 
     fd.set("targetDollars", "500");
     fd.set("carryoverPolicy", "rollover");
 
-    const state = await createGoalAction({}, fd);
+    const state = await createGoalAction(IDLE_GOALS, fd);
 
-    expect(state.error).toBeDefined();
-    expect(state.warning).toBeUndefined();
+    expect(state.status).toBe("error");
+    if (state.status !== "error") throw new Error("unreachable");
+    expect(state.message).toBeTruthy();
     // The write never ran, so there is nothing to report as saved.
     expect(insertRunMock).not.toHaveBeenCalled();
     // And crucially it did NOT redirect or throw — the two shapes that lose the
@@ -243,7 +251,7 @@ describe("createGoalAction — which refresh failure holds the redirect", () => 
       if (path !== "/goals") throw new Error("revalidatePath blew up");
     });
 
-    await expect(createGoalAction({}, goodForm())).rejects.toThrow("NEXT_REDIRECT");
+    await expect(createGoalAction(IDLE_GOALS, goodForm())).rejects.toThrow("NEXT_REDIRECT");
 
     expect(insertRunMock).toHaveBeenCalled();
     expect(redirectMock).toHaveBeenCalledWith("/goals");
@@ -256,11 +264,60 @@ describe("createGoalAction — which refresh failure holds the redirect", () => 
       if (path === "/goals") throw new Error("revalidatePath blew up");
     });
 
-    const state = await createGoalAction({}, goodForm());
+    const state = await createGoalAction(IDLE_GOALS, goodForm());
 
     // No redirect: the page they would land on may not list the new fund, and
     // a redirect discards the state that would say so.
     expect(redirectMock).not.toHaveBeenCalled();
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
+    logged.mockRestore();
+  });
+});
+
+/**
+ * The update-target form reports its successes.
+ *
+ * It could not, under the old `{ warning?; error? }` shape: the happy path
+ * returned `{ warning: undefined }`, structurally identical to `IDLE_GOALS`,
+ * so the renderer could not tell a completed write from a form that had never
+ * run. The button went "Saving…" → "Save" and nothing else changed, on the one
+ * route where every sibling surface announces its writes. Found by the type
+ * review; the `status` discriminant is what makes it expressible.
+ */
+describe("updateGoalTargetAction — success is distinguishable from idle", () => {
+  function targetForm() {
+    const fd = new FormData();
+    fd.set("categoryId", "4");
+    fd.set("targetDollars", "750");
+    return fd;
+  }
+
+  it("returns an `ok` with a message, not an empty object", async () => {
+    vi.mocked(revalidatePath).mockImplementation(() => {});
+
+    const state = await updateGoalTargetAction(IDLE_GOALS, targetForm());
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toBeTruthy();
+    expect(state.warning).toBeUndefined();
+    // The distinction the old shape could not make.
+    expect(state).not.toEqual(IDLE_GOALS);
+    expect(updateRunMock).toHaveBeenCalled();
+  });
+
+  it("still carries the warning when the refresh throws", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(revalidatePath).mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await updateGoalTargetAction(IDLE_GOALS, targetForm());
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warning).toBe(REFRESH_FAILED_WARNING);
     logged.mockRestore();
   });

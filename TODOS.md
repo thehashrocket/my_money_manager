@@ -2507,35 +2507,17 @@ tests across 117 files.
       nothing. (`src/lib/accounts/manualTransaction.ts`,
       `src/app/accounts/_charge-dialog.tsx`, `src/app/transactions/_row-menu.tsx`)
 
-- [ ] **P3** — **`warning?: string` rides an INFERRED return type on several
-      route actions, so deleting it fails no `tsc` check.** The
-      revalidation-guard pass added `warning` to the outcome of most write
-      actions in the app, and the route modules disagree about whether that is
-      part of a declared contract. `/accounts` and `/budget` declare theirs
-      (`AccountsActionState`, `CardActivityState`,
-      `SetCategoryKindActionState`, `CreateCategoryActionResult` and
-      siblings), so dropping the field is a type error at every consumer.
-      `/categorize`, `/transactions` (the two single-row categorize actions),
-      `/goals` and `/subscriptions` do NOT: they return
-      `{ ...result, warning: revalidateAfterWrite() }` from a function with no
-      annotation, so the field exists only because the expression produces it.
-      Delete the spread and `tsc --noEmit` stays green; only the tests catch it,
-      and only the ones that assert on `warning` specifically.
-      **Why it matters more than a style point.** The whole reason `guardRefresh`
-      returns a string rather than throwing is that a caller which DROPS the
-      result makes a failed refresh silent again — CLAUDE.md says this in as
-      many words for `/sync`'s `revalidateAll()`. An inferred return type makes
-      "dropped it" and "never had it" indistinguishable to the compiler, which
-      is the same exposure `/sync` already carries and the same shape as
-      `_INTENT_IS_REQUIRED` and `NO_UNCARRIED_SCHEMA_KEYS` elsewhere in this
-      repo: a property defended by tests alone until someone writes the
-      assertion down. Fix: declare the result type beside each action the way
-      `/accounts` and `/budget` do — noting that a `"use server"` module may
-      export types (they are erased) but NOT values, which is the constraint
-      that put `action-state.ts` in its own file. Blocked by: nothing.
-      (`src/app/categorize/actions.ts`, `src/app/transactions/actions.ts`,
-      `src/app/goals/actions.ts`, `src/app/subscriptions/actions.ts`,
-      `src/app/accounts/action-state.ts`)
+- [x] **P3 — SUPERSEDED 2026-09-09 by the `/pr-review-toolkit` pass. The
+      diagnosis below is WRONG and the fix it prescribes does not work.**
+      It blames an INFERRED return type. Verified with a scratch `tsc --strict`:
+      the cause is OPTIONALITY, not inference. `warning?: string` makes omitting
+      the field legal on a DECLARED union exactly as much as on an inferred one,
+      so declaring the type — the fix below — changes nothing. The inventory is
+      also wrong: `/goals` and `/subscriptions` both declare theirs. The blast
+      radius is ~14 unions, not 4, and the one-character fix is
+      `warning: string | undefined`. See the P2 entry in the
+      `/pr-review-toolkit` section at the end of this file. Kept rather than
+      deleted because "we thought it was inference" is the useful part.
 
 - [ ] **P2** — **`/accounts` has ONE status line and `_charge-dialog.tsx`
       renders a second one by hand.** `src/app/accounts/_status.tsx` was
@@ -2605,3 +2587,97 @@ found was fixed except the four below, each deliberately left with its reason.
       Advisory from the simplification lens. Filed at P4 because the copies are
       currently identical and rule 6's constraint (one toast, never a success
       plus a warning) is what they encode — the risk is drift, not a live bug.
+
+## Follow-ups from the `/pr-review-toolkit` pass on PR #52 (2026-09-09)
+
+Five reviewers (comments, tests, silent-failure, types, code) over the v0.27.0
+branch. The five critical findings were fixed in-branch; these seven were
+deferred deliberately, each with the reason.
+
+- [ ] **P2** — **`warning?: string` is OPTIONAL on ~14 result unions, so
+      dropping it is invisible to `tsc`.** This supersedes the earlier entry in
+      this file that blamed *inference* — that diagnosis was wrong and its
+      prescribed fix (declare the return type) would not have worked. Verified
+      with a scratch `tsc --strict`: `warning?:` means omitting it is always
+      legal, declared or not, and the inventory in the old entry was also wrong
+      (`/goals` and `/subscriptions` DO declare theirs). The real fix is one
+      character per arm — `warning: string | undefined` — which forces an
+      explicit `undefined` at the handful of `ok` returns that legitimately skip
+      a refresh (e.g. `refreshLiabilityBalanceAction`'s "is unchanged" early
+      return), and that is a feature: it currently reads as an oversight and is
+      correct. `guardRefresh` returns a string for the sole purpose of not being
+      droppable, so the type should say so. `GoalsActionState` already did this
+      in v0.27.0; the other 13 did not. (`src/app/*/action-state.ts`,
+      `src/app/*/actions.ts`)
+
+- [ ] **P2** — **`describeRuleRefusal`'s degrade is now shared, but nothing
+      stops a fourth caller skipping it.** The v0.27.0 fix lifted
+      `runBulkRetarget`'s try/catch into one helper used by all three call
+      sites. The property "a post-commit read must not throw" is still defended
+      by the helper existing rather than by anything that fails when it is
+      bypassed. Rule 11's `SyncTx` idiom is the precedent for making this
+      structural. (`src/lib/categorize/refusalNotice.ts`)
+
+- [ ] **P2** — **`chargeableDateExists` is a second spelling of
+      `createCardActivity`'s date rule, inline in a `.tsx`.**
+      `_account-row.tsx:62` computes `startingBalanceDate < today`; the server
+      refuses `date <= startingBalanceDate` (`manualTransaction.ts:250`). They
+      must agree, and CLAUDE.md's V1 exclusion on UI-component tests means the
+      client half cannot be tested where it currently lives. Change the server's
+      comparison and the button hides on a day charges are legal, with `tsc`
+      silent and no test moving. Rule 8's lesson is that the pair belongs in ONE
+      shared module (`categoryKindLock.ts`, `kindsImplyUsed.ts` are the
+      precedents) — this branch adopted the behaviour and skipped the mechanism.
+      Extract `resolveCardAffordances({type, startingBalanceDate, balanceAction},
+      today) → {canAddCharge, canEditTerms, showReconcile}` into
+      `src/lib/accounts/`, beside `resolveBalanceAction` and
+      `resolveUtilizationDisplay`, which already establish exactly this shape.
+      That also covers the three-gate combination that regressed twice inside
+      this branch's own review cycles. Filed at P2 rather than P3 because the
+      drift is silent and the surface is money-entry.
+
+- [ ] **P2** — **`readPositiveIntField`'s absent-field case is untested, and two
+      of its three callers have no test at all.** One case exists (`"abc"` via
+      `removeCardActivityAction`). The case the function was WRITTEN for —
+      `formData.get()` returning `null`, where `Number(null)` is `0` and
+      `Number.isInteger(0)` passes — has none, nor do `"0"`, `"-1"`, `"0x10"`,
+      `"1e3"`, or an unsafe integer. Reverting the whole helper to bare
+      `Number()` leaves all tests green. `markAsCardPaymentAction` and
+      `unmarkCardPaymentAction` are referenced by no test in the repo, and
+      `cardAccountId`'s reader decides WHICH CARD a payment mirror lands on.
+      A table-driven case through all three actions closes it.
+      (`src/app/accounts/actions.ts`)
+
+- [ ] **P2** — **`refreshLiabilityBalanceAction` has zero action-level tests.**
+      Materially restructured in v0.27.0 (the refresh moved from one
+      unconditional call to three per-branch calls, `no-linked-accounts` now
+      returns before it, two branches gained `warning`). Only the lib half
+      (`refreshLiabilityBalancesOnly`) is covered. Four uncovered branches, all
+      reachable from one button, including the "two distinct warning channels in
+      one message" case where `outcome.warnings` and the refresh warning could
+      clobber each other. (`src/app/accounts/actions.ts`)
+
+- [ ] **P3** — **`/accounts`' `toMessage` renders raw driver text as a designed
+      refusal.** All eight actions end in `catch (err) { return fail(toMessage(err)) }`,
+      and because the catch is INSIDE the action, Next's production digest
+      substitution never applies — so `SQLITE_BUSY: database is locked` reaches
+      the browser in `text-redbrown`, styled identically to the hand-written
+      DS61 sentences beside it. Worst on `removeCardActivityAction`, where a
+      `FOREIGN KEY constraint failed` appears under a dialog that just said "This
+      cannot be undone", leaving the user unable to tell whether the row is gone.
+      A catch that separates "a refusal we wrote" from "an operational failure"
+      fixes all eight; `SetKindDialog`'s "may or may not have been saved" is the
+      house phrasing for the second. (`src/app/accounts/actions.ts`)
+
+- [ ] **P3** — **`undoImportCategorizationAction`'s refresh failure is invisible
+      AND it redirects onto the page that proves it.** The action revalidates
+      `/import/success/[batchId]` precisely because Next would otherwise serve
+      the stale pre-undo payload to the URL it then redirects to. When
+      `guardRefresh` swallows that throw, the undo has committed, the redirect
+      lands on that page, and it renders the pre-undo count with the Undo form
+      still armed — with no warning anywhere, because the action is
+      `Promise<void>`. Unlike `confirmImportAction`, there is no durable record
+      (rule 5's `snapshot_warning` covers the import, not this). It is a plain
+      `<form action>` in a server component; converting it to `useActionState` is
+      the change `createAccountAction` already made in this branch.
+      (`src/app/import/actions.ts`)

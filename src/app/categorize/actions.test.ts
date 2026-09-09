@@ -26,7 +26,13 @@ import { bulkCategorizeSnapshotSchema } from "@/lib/categorize/validateBulkCateg
  * The proxy mirrors `@/db`'s own: a plain `db: dbHolder.current` would capture
  * `undefined` at factory time, since the handle is created per-test.
  */
-const dbHolder = vi.hoisted(() => ({ current: null as unknown }));
+const dbHolder = vi.hoisted(() => ({
+  current: null as unknown,
+  /** Arm "the driver goes busy the moment this write commits". */
+  failReadsAfterCommit: false,
+  /** Set BY the proxy once the armed transaction has returned, i.e. committed. */
+  readsFail: false,
+}));
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
@@ -37,8 +43,33 @@ vi.mock("@/db", async (importOriginal) => ({
     {
       get(_t, prop) {
         const target = dbHolder.current as Record<string | symbol, unknown>;
+        /* `SQLITE_BUSY`, simulated where it actually bites: on a read the
+           action performs AFTER its write has committed. Failing every
+           `select` from the start would just break the write and prove
+           nothing, so the flag is flipped by the `transaction` wrapper below
+           — the instant the COMMIT lands. This is deliberately not a mock of
+           `describeRuleRefusal`: the guard has to survive the real function
+           doing its real (failing) lookup, and it covers a second post-commit
+           read (`/categorize`'s category-name select) that no such mock would
+           reach. */
+        if (dbHolder.readsFail && prop === "select") {
+          return () => {
+            throw new Error("SQLITE_BUSY: database is locked");
+          };
+        }
         const value = Reflect.get(target, prop);
-        return typeof value === "function" ? value.bind(target) : value;
+        if (typeof value !== "function") return value;
+        if (prop === "transaction" && dbHolder.failReadsAfterCommit) {
+          return (...args: unknown[]) => {
+            const out = (value as (...a: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
+            dbHolder.readsFail = true;
+            return out;
+          };
+        }
+        return value.bind(target);
       },
     },
   ),
@@ -65,6 +96,8 @@ let handle: TestDbHandle;
 beforeEach(() => {
   handle = createTestDb();
   dbHolder.current = handle.db;
+  dbHolder.failReadsAfterCommit = false;
+  dbHolder.readsFail = false;
   vi.mocked(revalidatePath).mockReset();
 });
 
@@ -442,5 +475,160 @@ describe("bulkCategorizeMerchantAction — a failed refresh keeps the undo snaps
       .where(eq(schema.transactions.id, txn.id))
       .get();
     expect(stored?.categoryId).toBeNull();
+  });
+});
+
+/**
+ * A COMMITTED write whose *description* then fails is still a COMMITTED write.
+ *
+ * `bulkCategorizeMerchantAction` performs TWO reads after its transaction has
+ * landed — the category's name for the toast, and `describeRuleRefusal`, which
+ * looks up the name of the category a REMOVED rule pointed at. `SQLITE_BUSY`
+ * is live in this app (WAL mode, `VACUUM INTO` snapshots, `pnpm db:export`,
+ * synchronous driver), so either can throw, and either throw used to reject
+ * the whole action. The client's `catch` then put the backlog counter back and
+ * said "Categorize failed." — for rows that were filed and, per rule 6, for a
+ * hand-trained rule that had just been DELETED. Its only surviving copy is
+ * `snapshot.priorRule`, in the value being thrown away, and there is no
+ * rules-management surface to rebuild it from.
+ *
+ * The failure is injected at the DRIVER rather than by mocking
+ * `describeRuleRefusal`, for two reasons: the guard has to hold with the real
+ * function doing its real lookup, and only a driver-level failure also reaches
+ * the second post-commit read (the category-name select) that no mock of that
+ * one function would touch.
+ */
+describe("bulkCategorizeMerchantAction — a post-commit read failure keeps the write", () => {
+  /** The rule-removing refusal: a key already filed under Dining, retargeted
+   *  to Groceries with Remember ticked, so the contradicted rule goes. */
+  function seedContradictedRule() {
+    const a = seedAccount();
+    const b = seedBatch();
+    const dining = seedCategory("Dining");
+    const groceries = seedCategory("Groceries");
+    const [rule] = handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: dining.id,
+        matchType: "exact",
+        matchValue: "COSTCO WHSE",
+        priority: 50,
+        source: "manual",
+      })
+      .returning()
+      .all();
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "COSTCO WHSE",
+      categoryId: dining.id,
+    });
+    const pending = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "COSTCO WHSE",
+    });
+    return { dining, groceries, rule, pending };
+  }
+
+  function form(categoryId: number) {
+    const fd = new FormData();
+    fd.set("normalizedMerchant", "COSTCO WHSE");
+    fd.set("categoryId", String(categoryId));
+    fd.set("rememberMerchant", "true");
+    return fd;
+  }
+
+  it("still returns the undo snapshot carrying the DELETED rule", async () => {
+    const { groceries, rule, pending } = seedContradictedRule();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbHolder.failReadsAfterCommit = true;
+
+    const result = await bulkCategorizeMerchantAction(form(groceries.id));
+    logged.mockRestore();
+
+    // Not a rejection (which the row's catch renders as "Categorize failed.").
+    expect(result.updatedCount).toBe(1);
+    expect(result.snapshot.txnIds).toEqual([pending.id]);
+    // THE POINT. The rule was deleted by this write and this object is the
+    // only copy of it left anywhere; losing it is unrecoverable.
+    expect(result.snapshot.ruleTouched).toBe(true);
+    expect(result.snapshot.priorRule?.id).toBe(rule.id);
+    expect(result.snapshot.priorRule?.categoryId).toBe(rule.categoryId);
+
+    // And the write really did land, which is what makes discarding the
+    // snapshot destructive rather than harmless.
+    expect(
+      handle.db
+        .select({ categoryId: schema.transactions.categoryId })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, pending.id))
+        .get()?.categoryId,
+    ).toBe(groceries.id);
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.id, rule.id))
+        .get(),
+    ).toBeUndefined();
+  });
+
+  it("degrades the refusal to its own sentence instead of losing it", async () => {
+    const { dining, groceries } = seedContradictedRule();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbHolder.failReadsAfterCommit = true;
+
+    const result = await bulkCategorizeMerchantAction(form(groceries.id));
+    logged.mockRestore();
+
+    expect(result.ruleRefusal).not.toBeNull();
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    // `removedRule` survives the degrade — it is what tells the user the Undo
+    // is worth pressing. Only the NAME, which needed the read, is gone.
+    expect(result.ruleRefusal?.removedRule).toBe(true);
+    expect(result.ruleRefusal?.message).toContain("COSTCO WHSE");
+    expect(result.ruleRefusal?.message).not.toContain(dining.name);
+  });
+
+  it("degrades the category NAME to its id rather than rejecting", async () => {
+    const { groceries } = seedContradictedRule();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbHolder.failReadsAfterCommit = true;
+
+    const result = await bulkCategorizeMerchantAction(form(groceries.id));
+    logged.mockRestore();
+
+    // The `?? \`Category N\`` fallback covered a MISSING row; it never covered
+    // the read itself throwing, which is the case this asserts.
+    expect(result.categoryName).toBe(`Category ${groceries.id}`);
+  });
+
+  it("does not fail silently — both degraded reads are logged", async () => {
+    const { groceries } = seedContradictedRule();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbHolder.failReadsAfterCommit = true;
+
+    await bulkCategorizeMerchantAction(form(groceries.id));
+
+    expect(logged).toHaveBeenCalledWith(
+      "[/categorize] a read after a committed write failed; degrading the message",
+      expect.any(Error),
+    );
+    // Twice: the category-name select AND `describeRuleRefusal`'s own lookup.
+    expect(logged.mock.calls.length).toBeGreaterThanOrEqual(2);
+    logged.mockRestore();
+  });
+
+  it("reports the full sentence, and the real name, when the reads work", async () => {
+    // The control. Without it these assertions could all be satisfied by an
+    // action that never described anything.
+    const { dining, groceries } = seedContradictedRule();
+
+    const result = await bulkCategorizeMerchantAction(form(groceries.id));
+
+    expect(result.categoryName).toBe(groceries.name);
+    expect(result.ruleRefusal?.message).toContain(dining.name);
+    expect(result.ruleRefusal?.message).toContain("Undo restores it");
   });
 });

@@ -2,8 +2,8 @@
 
 import { useActionState } from "react";
 import { createGoalAction, updateGoalTargetAction } from "./actions";
-import { IDLE_GOALS, type GoalsActionState } from "./action-state";
-import { StatusWarning } from "@/components/ledger/action-status";
+import { IDLE_GOALS } from "./action-state";
+import { ActionStatus } from "@/components/ledger/action-status";
 
 /**
  * The two write forms on `/goals`, as client islands.
@@ -20,43 +20,16 @@ import { StatusWarning } from "@/components/ledger/action-status";
  */
 
 /**
- * The one renderer for a refresh warning, so both forms say it the same way.
+ * `/goals`' outcome line — now just the shared component.
  *
- * `role="alert"`, not `status`: the same argument `/sync`'s `ActionStatus`
- * makes. A polite live region can be held until the reader goes idle, and the
- * whole content of this message is "what you are looking at may be out of
- * date" — which is worth nothing once they have already looked.
+ * It was a hand-rolled `RefreshWarning` that branched on two independent
+ * optionals, chose its own `role`, and rendered a refusal in one style and a
+ * warning in another. `GoalsActionState` gained a `status` discriminant in
+ * v0.27.0 and satisfies `ActionState`, so all three of those decisions come
+ * from `action-status.tsx` — which is where the repo keeps exactly one copy of
+ * them. It also means the update-target form finally reports its successes:
+ * the old shape could not tell a success from a form that had never run.
  */
-function RefreshWarning({ state }: { state: GoalsActionState }) {
-  // A REFUSAL first — a name collision is ordinary use (double-submit, stale
-  // tab), and it used to escape into `/goals/error.tsx` and take the page down.
-  if (state.error !== undefined) {
-    return (
-      <p role="alert" aria-live="assertive" className="text-sm text-money-neg">
-        {state.error}
-      </p>
-    );
-  }
-  if (state.warning === undefined) return null;
-  // `StatusWarning`, not a local `<p>`. `/goals`' state is the one shape that
-  // does NOT satisfy `ActionState` — it carries a warning and nothing else,
-  // because both actions still THROW on a validation failure — so it cannot
-  // render `<ActionStatus>` wholesale. It can still share the BLOCK, which is
-  // the part that has to look the same everywhere: this is the byte-identical
-  // sentence `/sync` and `/accounts` render, and a fifth visual language for
-  // it is how a design system stops being one.
-  // The LIVE REGION is the point, and it was lost for one review cycle when
-  // this switched to `StatusWarning`: on the create path a successful write
-  // normally redirects away, so this warning is the only signal the fund
-  // exists. Silent for assistive tech is the resubmit loop, not a cosmetic gap.
-  // `assertive`, per `action-status.tsx`'s rule — a warning about a committed
-  // write is one the user must hear BEFORE deciding to click again.
-  return (
-    <div role="alert" aria-live="assertive">
-      <StatusWarning warning={state.warning} />
-    </div>
-  );
-}
 
 export function CreateGoalForm() {
   const [state, formAction, pending] = useActionState(createGoalAction, IDLE_GOALS);
@@ -119,7 +92,7 @@ export function CreateGoalForm() {
       </button>
       {/* Only ever rendered when the refresh failed — the success path
           redirects, which discards this state entirely. */}
-      <RefreshWarning state={state} />
+      <ActionStatus state={state} />
     </form>
   );
 }
@@ -172,7 +145,7 @@ export function UpdateTargetForm({
             {pending ? "Saving…" : "Save"}
           </button>
         </div>
-        <RefreshWarning state={state} />
+        <ActionStatus state={state} />
       </form>
     </details>
   );

@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { bulkCategorize } from "@/lib/categorize/bulkCategorize";
-import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
+import { describeRuleRefusalPostCommit } from "@/lib/categorize/refusalNotice";
+import { guardPostCommitRead } from "@/lib/categorize/postCommitRead";
 import { loadSubscriptions } from "./loadSubscriptions";
 
 type Db = typeof defaultDb;
@@ -77,13 +78,20 @@ export function fileSubscription(
     categoryId,
     rememberMerchant: true,
   });
+  // EVERY READ BELOW FOLLOWS A COMMITTED WRITE, and this surface is the one
+  // where a throw costs most. `fileAllSubscriptions` catches a per-merchant
+  // throw into `failures`, so an unguarded read here reported the merchant as a
+  // FAILURE after `bulkCategorize` had already filed its rows and possibly
+  // repointed a hand-trained rule — and `/subscriptions` has no undo anywhere
+  // (rule 6), so `refusal`/`retargetedRule` are the only record that either
+  // thing happened. The fourth, fifth and sixth instances of the class
+  // `guardPostCommitRead` was written for; the first three were in the two
+  // categorize actions and `runBulkRetarget`.
+  const notice = describeRuleRefusalPostCommit(db, "/subscriptions", result.ruleRefusal);
   return {
     normalizedMerchant,
     filedCount: result.updatedCount,
-    refusal:
-      result.ruleRefusal === null
-        ? null
-        : describeRuleRefusal(db, result.ruleRefusal).message,
+    refusal: notice === null ? null : notice.message,
     retargetedRule:
       result.priorRule === null
         ? null
@@ -91,13 +99,28 @@ export function fileSubscription(
   };
 }
 
+/**
+ * Guarded, because both of its callers run AFTER the write has committed.
+ *
+ * The `?? \`category N\`` fallback covered a MISSING ROW; it never covered a
+ * THROWING read, which is the case `SQLITE_BUSY` produces (WAL mode,
+ * `VACUUM INTO` snapshots, `db:export` all hold readers). Degrading to the same
+ * id-shaped string is the right answer for both — the sentence is still true,
+ * just less specific — but only one of them used to reach it.
+ */
 function categoryName(db: Db, categoryId: number): string {
-  const row = db
-    .select({ name: schema.categories.name })
-    .from(schema.categories)
-    .where(eq(schema.categories.id, categoryId))
-    .get();
-  return row?.name ?? `category ${categoryId}`;
+  return guardPostCommitRead(
+    "/subscriptions",
+    () => {
+      const row = db
+        .select({ name: schema.categories.name })
+        .from(schema.categories)
+        .where(eq(schema.categories.id, categoryId))
+        .get();
+      return row?.name ?? `category ${categoryId}`;
+    },
+    `category ${categoryId}`,
+  );
 }
 
 /** {@link fileSubscription} over every active detection, reporting each outcome. */

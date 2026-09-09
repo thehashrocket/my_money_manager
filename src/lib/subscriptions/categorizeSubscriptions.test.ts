@@ -335,3 +335,89 @@ describe("fileAllSubscriptions", () => {
     ).toBe(true);
   });
 });
+
+/**
+ * A read that follows the committed write must not turn a filed merchant into
+ * a reported failure — and this is the surface where that costs most.
+ *
+ * `fileAllSubscriptions` catches a per-merchant throw into `failures` (rule 6:
+ * one transaction per merchant, so propagating would abandon every later one).
+ * So an unguarded post-commit read here reported the merchant as FAILED after
+ * `bulkCategorize` had already filed its rows and possibly repointed a
+ * hand-trained rule — and `/subscriptions` has no undo anywhere, which makes
+ * `refusal` / `retargetedRule` the only record either thing happened.
+ *
+ * Found by the review that fixed the same class in the two categorize actions;
+ * this file held the fourth, fifth and sixth instances.
+ */
+describe("fileSubscription — a post-commit read failure keeps the write", () => {
+  /** Fails every `select` from the moment the write's transaction commits,
+   *  which is what `SQLITE_BUSY` looks like to this code. */
+  function failReadsAfterCommit(): typeof handle.db {
+    let armed = false;
+    return new Proxy(handle.db, {
+      get(target, prop, receiver) {
+        if (prop === "select" && armed) {
+          return () => {
+            throw new Error("SQLITE_BUSY: database is locked");
+          };
+        }
+        if (prop === "transaction") {
+          const real = Reflect.get(target, prop, receiver) as typeof handle.db.transaction;
+          return (...args: Parameters<typeof real>) => {
+            const out = real.apply(target, args);
+            armed = true;
+            return out;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof handle.db;
+  }
+
+  it("still reports the merchant as FILED when the naming reads throw", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const books = seedCategory("Books");
+    const subs = seedCategory("Subscriptions");
+    handle.db
+      .insert(schema.categoryRules)
+      .values({
+        categoryId: books.id,
+        matchType: "exact",
+        matchValue: "AUDIBLE",
+        priority: 50,
+        source: "manual",
+      })
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AUDIBLE", date: "2026-02-01" });
+
+    const outcome = fileSubscription(failReadsAfterCommit(), "AUDIBLE", subs.id);
+
+    // The rows are filed. Reporting a throw here would have said otherwise.
+    expect(outcome.filedCount).toBeGreaterThan(0);
+    expect(outcome.normalizedMerchant).toBe("AUDIBLE");
+    // The rule WAS repointed, and the sentence saying so survives — degraded to
+    // ids rather than names, which is still true, just less specific.
+    expect(outcome.retargetedRule).not.toBeNull();
+    expect(outcome.retargetedRule).toContain("AUDIBLE");
+  });
+
+  it("leaves the ledger written even though the message degraded", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const subs = seedCategory("Subscriptions");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "NETFLIX", date: "2026-02-01" });
+
+    fileSubscription(failReadsAfterCommit(), "NETFLIX", subs.id);
+
+    // Read back through the REAL handle: the write is durable regardless of
+    // what the reporting reads did afterwards.
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.categoryId, subs.id))
+      .all();
+    expect(rows.length).toBeGreaterThan(0);
+  });
+});
