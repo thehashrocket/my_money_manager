@@ -78,7 +78,21 @@ export function TransactionRowMenu({
         if (result.status === "error") {
           toast.error(result.message);
         } else if (result.status === "ok") {
-          toast.success(result.message);
+          // THE WARNING IS NOT OPTIONAL TO READ. All three actions this drives
+          // now return one from `revalidateCardActivitySurfaces`, and
+          // `revalidateAfterWrite.ts` says in as many words that a caller which
+          // DISCARDS it makes a failed refresh silent again. It matters most on
+          // `removeCardActivityAction`: the delete has no undo, and a stale list
+          // still showing the row under a green "success" reads as the delete
+          // having failed — so the user's next move is to try again.
+          //
+          // ONE toast, never a success plus a warning (rule 6): the collapsed
+          // Sonner stack draws a non-newest toast's action button invisible.
+          if (result.warning === undefined) {
+            toast.success(result.message);
+          } else {
+            toast.warning(`${result.message} ${result.warning}`, { duration: 10_000 });
+          }
           onChanged();
         }
       } catch (err) {
@@ -106,6 +120,11 @@ export function TransactionRowMenu({
     run(() => {
       const fd = new FormData();
       fd.set("transactionId", String(transactionId));
+      // Sent ONLY from the confirm dialog's own button. `removeCardActivity`
+      // refuses without it, so the confirmation is a fact the server checks
+      // rather than one this component is trusted to have performed — rules 4
+      // and 8 both arrived at that after being burned by the opposite.
+      fd.set("confirmedIrreversible", "yes");
       return removeCardActivityAction({ status: "idle" }, fd);
     });
 
@@ -196,12 +215,17 @@ export function TransactionRowMenu({
           <p>The card&apos;s balance and this category&apos;s spend both change.</p>
           <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
         </div>
-        {/* Same footer treatment as the budget menu's dialogs: action on the
-            right visually, Cancel FIRST in DOM order and holding
-            `initialFocus`, because Base UI focuses the first tabbable element
-            and that would otherwise park the keyboard on a destructive commit
-            a second Enter fires. On mobile `flex-col-reverse` puts Cancel on
-            top and the destructive button under the thumb. */}
+        {/* Same footer treatment as the budget menu's dialogs: Cancel FIRST in
+            DOM order and holding `initialFocus`, because Base UI focuses the
+            first tabbable element and that would otherwise park the keyboard on
+            a destructive commit a second Enter fires.
+            
+            The MOBILE order is the opposite of what a copy of this comment in
+            `_category-menu.tsx` claims: `flex-col-reverse` puts the LAST DOM
+            child first, so "Remove charge" renders on top and Cancel sits
+            nearest the thumb. That is the safe arrangement — the thumb rests on
+            the way out, not on the destructive commit — but the note said the
+            reverse, and a wrong note is what drives the next change wrong. */}
         <DialogFooter className="sm:flex-row-reverse sm:justify-start">
           <Button ref={cancelRef} type="button" variant="ghost" onClick={() => setConfirmOpen(false)}>
             Cancel

@@ -27,6 +27,9 @@ import type { MonthPhase } from "@/lib/budget/monthOfIso";
 import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
+// Safe in a client component: `revalidateAfterWrite` has ZERO imports, so this
+// pulls nothing else into the route bundle (the +376 KB `limits.ts` shape).
+import { REFRESH_FAILED_WARNING } from "@/lib/revalidateAfterWrite";
 import { cn } from "@/lib/utils";
 import { LeftToBudget } from "@/components/ledger/left-to-budget";
 import { CurrencyInput, type CurrencyInputCommitResult } from "@/components/ledger/currency-input";
@@ -327,11 +330,26 @@ export function MonthEditor(props: MonthEditorProps) {
     // construction a throw after a durable write. `revalidateBudgetSurfacesAction`
     // catches it and hands back a warning; surfacing it is what keeps a user
     // who then navigates to `/goals` and sees the old total from concluding the
-    // allocation never saved. Unguarded, this `void` swallowed the rejection
-    // entirely.
-    void revalidateBudgetSurfacesAction().then((warning) => {
-      if (warning) toast.warning(warning);
-    });
+    // allocation never saved.
+    //
+    // The guard closes the `revalidatePath` throw INSIDE the action. It cannot
+    // close a failure of the CALL — the Server Action round trip itself can
+    // reject (the network drops, the RSC endpoint 500s), and that rejection
+    // arrives here, not there. A bare `void promise` does not swallow a
+    // rejection, it merely leaves it unhandled: no toast, and a console
+    // "unhandled promise rejection" as the only trace. Both halves therefore
+    // land on the same warning, because the user's situation is identical
+    // either way — the allocation is saved, this page is stale — and the
+    // difference between "the refresh threw" and "the refresh call never
+    // arrived" is not something they can act on.
+    void revalidateBudgetSurfacesAction()
+      .then((warning) => {
+        if (warning) toast.warning(warning);
+      })
+      .catch((err) => {
+        console.error("[/budget] the revalidation call itself failed after a committed write", err);
+        toast.warning(REFRESH_FAILED_WARNING);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
 

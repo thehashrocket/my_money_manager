@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// The sentence itself comes from the shared module rather than a local copy:
+// two hand-maintained copies of it had already diverged, which is why
+// `revalidateAfterWrite` exists. It has zero imports, so it is safe to pull in
+// ahead of the `vi.mock` factories below.
+import { REFRESH_FAILED_WARNING } from "@/lib/revalidateAfterWrite";
 
 /**
  * `/subscriptions`' actions revalidate AFTER a committed `bulkCategorize`.
@@ -71,9 +76,6 @@ const RETARGET_OUTCOME = {
     'The existing rule for "NETFLIX" now files it under Subscriptions instead of Entertainment.',
 };
 
-const REFRESH_WARNING =
-  "Your change was saved, but this page couldn't refresh — reload to see the current state.";
-
 function formData(merchant: string): FormData {
   const fd = new FormData();
   fd.set("normalizedMerchant", merchant);
@@ -123,7 +125,7 @@ describe("categorizeSubscriptionAction", () => {
     expect(outcome.filedCount).toBe(3);
     expect(outcome.refusal).toBe(RETARGET_OUTCOME.refusal);
     expect(outcome.retargetedRule).toBe(RETARGET_OUTCOME.retargetedRule);
-    expect(outcome.warning).toBe(REFRESH_WARNING);
+    expect(outcome.warning).toBe(REFRESH_FAILED_WARNING);
   });
 
   it("does not swallow the refresh failure silently", async () => {
@@ -166,7 +168,7 @@ describe("categorizeAllSubscriptionsAction", () => {
     expect(outcome.filedCount).toBe(9);
     expect(outcome.refusals).toEqual([RETARGET_OUTCOME]);
     expect(outcome.retargets).toEqual([RETARGET_OUTCOME]);
-    expect(outcome.warning).toBe(REFRESH_WARNING);
+    expect(outcome.warning).toBe(REFRESH_FAILED_WARNING);
   });
 });
 
@@ -179,7 +181,7 @@ describe("dismissSubscriptionAction", () => {
 
     // The row IS written; only the refresh failed.
     expect(insertRunMock).toHaveBeenCalled();
-    expect(outcome.warning).toBe(REFRESH_WARNING);
+    expect(outcome.warning).toBe(REFRESH_FAILED_WARNING);
   });
 });
 
@@ -207,6 +209,6 @@ describe("restoreSubscriptionAction", () => {
     // the row is still on the dismissed list either way, so the user's only
     // evidence agrees with the false message.
     expect(deleteRunMock).toHaveBeenCalled();
-    expect(outcome.warning).toBe(REFRESH_WARNING);
+    expect(outcome.warning).toBe(REFRESH_FAILED_WARNING);
   });
 });

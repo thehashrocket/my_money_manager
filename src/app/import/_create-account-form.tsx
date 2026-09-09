@@ -9,6 +9,7 @@ import { formatLongDate } from "@/lib/now";
 import { Button } from "@/components/ui/button";
 import { createAccountAction } from "./actions";
 import { IDLE_CREATE_ACCOUNT, type CreateAccountField } from "./action-state";
+import { ActionStatus } from "@/components/ledger/action-status";
 
 /**
  * DS64 — the account-creation form, and the one surface where the sign
@@ -276,32 +277,13 @@ export function CreateAccountForm({ today }: { today: string }) {
           A thrown action replaced this page with error.tsx's generic card and
           took every typed field with it, so the DS61 message the schema was
           written to produce never reached anyone. */}
-      {state.status !== "idle" ? (
-        (() => {
-          // A refresh warning means the account WAS created and the list behind
-          // this form is stale. `alert`, not `status`, for the reason
-          // `/accounts/_status.tsx` sets out: a polite region can be held until
-          // the user is idle, and the user who does not hear this one adds the
-          // account a second time.
-          const warning = state.status === "ok" ? state.warning : undefined;
-          const loud = state.status === "error" || warning !== undefined;
-          return (
-            <p
-              role={loud ? "alert" : "status"}
-              aria-live={loud ? "assertive" : "polite"}
-              className={`sm:col-span-2 text-base ${
-                state.status === "error"
-                  ? "text-redbrown"
-                  : warning !== undefined
-                    ? "text-ink-1"
-                    : "text-ledger"
-              }`}
-            >
-              {warning === undefined ? state.message : `${state.message} ${warning}`}
-            </p>
-          );
-        })()
-      ) : null}
+      {/* The shared component, not a local derivation. This block used to
+          re-implement `warningOf`, `statusRole`, `statusTone` and the
+          message/warning concatenation inline — a fourth spelling of one
+          decision, inside the change whose subject is that hand-maintained
+          copies drift. `CreateAccountState` satisfies `ActionState`
+          structurally; its `field` is read by the inputs above, not here. */}
+      <ActionStatus state={state} className="sm:col-span-2" />
     </form>
   );
 }

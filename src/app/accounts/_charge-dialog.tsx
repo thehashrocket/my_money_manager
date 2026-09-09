@@ -13,6 +13,7 @@ import {
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import type { LeafCategory } from "@/lib/categories";
 import { IDLE_ACTIVITY } from "./action-state";
+import { StatusWarning, statusRole, warningOf } from "@/components/ledger/action-status";
 import { addCardActivityAction } from "./actions";
 
 /**
@@ -104,7 +105,7 @@ export function ChargeDialog({
     // Staying open puts the message where they are already looking, and the
     // fields are cleared either way because the charge did save.
     if (state.status === "ok") {
-      if (state.warning === undefined) setOpen(false);
+      if (warningOf(state) === undefined) setOpen(false);
       // Now that the fields are controlled, React's own reset no longer clears
       // them — so clear them here, on SUCCESS only. Reopening the dialog after
       // a saved charge shows an empty form; reopening after a refusal shows
@@ -267,17 +268,24 @@ export function ChargeDialog({
             />
           </div>
 
-          {state.status === "ok" && state.warning !== undefined ? (
-            // `alert`, not `status`, and the reasoning is `_status.tsx`'s: the
-            // charge COMMITTED, so a message a polite region holds until idle
-            // is one the user acts against rather than on.
-            <p role="alert" aria-live="assertive" className="text-base text-ink-1">
-              {`${state.message} ${state.warning}`}
-            </p>
+          {warningOf(state) !== undefined ? (
+            // `alert`, not `status` — the charge COMMITTED, so a message a
+            // polite region holds until idle is one the user acts against
+            // rather than on. Role and the amber block both come from
+            // `action-status.tsx`; this surface renders the PARTS rather than
+            // `<ActionStatus>` because it also decides whether to close on the
+            // same state, and re-deriving them here is how the pair drifts.
+            <div role="alert" aria-live="assertive">
+              <p className="text-base text-ledger">{state.status === "ok" ? state.message : ""}</p>
+              <StatusWarning warning={warningOf(state)!} />
+            </div>
           ) : null}
 
           {state.status === "error" ? (
-            <div role="status" aria-live="polite" className="space-y-1">
+            // `alert` for a refusal too — `statusRole` is the one derivation,
+            // and it returns "alert" here. A refusal inside a modal that a
+            // polite region holds is one the user never hears at all.
+            <div role={statusRole(state)} aria-live="assertive" className="space-y-1">
               <p className="text-base text-redbrown">{state.message}</p>
               {/* DS56 — the refusal carries its own recovery, as an ACTION
                   rather than a sentence. D12 refuses correctly, but the user

@@ -42,6 +42,9 @@ export type ManualRefusalReason =
   /** `removeCardActivity` only: the row is a BANK row, so there is nothing to
    *  repair here — deleting it would destroy imported history. */
   | "not-manual"
+  /** `removeCardActivity` only: the caller did not confirm an irreversible
+   *  delete. Absence is a refusal, never an assumed yes (rules 4 and 8). */
+  | "unconfirmed"
   | "invalid";
 
 export type ManualWriteResult =
@@ -247,10 +250,25 @@ export function createCardActivity(
     if (input.date <= account.startingBalanceDate) {
       return refused(
         "before-anchor",
-        // DS61 #12. States the consequence, names no schema concept, and the
-        // caller pairs it with "Reconcile instead →" — which is genuinely the
-        // right fix, since a fresh reconcile already includes this charge.
-        `This is dated before your last reconcile (${formatMonthDay(account.startingBalanceDate)}), so it wouldn't count toward the balance.`,
+        // DS61 #12. States the consequence and names no schema concept.
+        //
+        // TWO WORDINGS, because there are two ways this account got its anchor
+        // and only one of them mentions something the user did. On a
+        // hand-reconciled card the caller pairs this with "Reconcile instead →"
+        // and that IS the right fix, since a fresh reconcile already includes
+        // the charge. On a FEED-refreshed card there is no reconcile to point
+        // at — the row renders Refresh instead (`resolveBalanceAction`), the
+        // anchor is the bank's own balance-date, and `refreshLiabilityBalances`
+        // moves it forward on every sync. Telling that user about "your last
+        // reconcile" names an act they never performed and a control they
+        // cannot see, so it says where the date came from and what would work.
+        //
+        // Found by the red team during /ship: the un-nesting that made this
+        // dialog reachable on a feed-refreshed card made this refusal its most
+        // likely outcome, since the anchor is frequently today.
+        account.balanceSource === "feed"
+          ? `${account.name}'s balance comes from your bank as of ${formatMonthDay(account.startingBalanceDate)}, so a charge has to be dated after that.`
+          : `This is dated before your last reconcile (${formatMonthDay(account.startingBalanceDate)}), so it wouldn't count toward the balance.`,
         input.accountId,
       );
     }
@@ -631,8 +649,18 @@ export function unmarkCardPayment(
  * picks the account up again on the next run, because both gates ask the same
  * question of the same table.
  *
- * FIVE GUARDS, and the first is the one that matters:
+ * FIVE GUARDS plus one cleanup. The first guard is the one that matters:
  *
+ *   confirmedIrreversible      REQUIRED, and absence is a REFUSAL. There is no
+ *                              undo and no snapshot for this delete, so the
+ *                              confirmation is a fact the SERVER checks rather
+ *                              than one the client is trusted to have
+ *                              performed. Same discipline rule 8 arrived at for
+ *                              `setCategoryKind`'s one-way branch and rule 4
+ *                              for the reversal form's `intent`, both written
+ *                              after being burned: never let ABSENCE be the
+ *                              affirmative signal for the destructive branch.
+ *   the row exists             a stale tab acting on a row another tab removed.
  *   import_source = 'manual'   never a bank row. CSV and feed rows are
  *                              imported history; `undoSyncBatch` reverts a
  *                              whole batch and there is deliberately no
@@ -648,18 +676,34 @@ export function unmarkCardPayment(
  *                              were somehow left unpaired.
  *   the account is a card      same predicate as every other manual write
  *                              (E17), via `requireCardAccount`.
- *   the batch goes too         E21 gives every manual operation its own batch,
- *                              so leaving it behind orphans a row claiming
- *                              `transaction_count: 1` against zero rows.
  *
- * Every one is reachable only from a stale tab or a crafted post — the menu
- * item that calls this is rendered only for rows that already satisfy them —
- * which is exactly the class of check that must not be allowed to drift.
+ *   (cleanup, not a guard)     the row's batch goes too. E21 gives every manual
+ *                              operation its own batch, so leaving it behind
+ *                              orphans a row claiming `transaction_count: 1`
+ *                              against zero rows.
+ *
+ * The row menu filters TWO of these — not a transfer, and `import_source`
+ * `manual` — and nothing more. The uncategorized-mirror and not-a-card cases
+ * are reachable from a rendered menu item, not merely from a stale tab, which
+ * is why their messages name the tool to use instead rather than assuming
+ * nobody will see them.
  */
 export function removeCardActivity(
   input: { transactionId: number },
   db: Db = defaultDb,
+  { confirmedIrreversible = false }: { confirmedIrreversible?: boolean } = {},
 ): ManualWriteResult {
+  // Checked before the transaction opens: it needs no ledger state, and a
+  // refusal here must not hold a write transaction open. Defaults to FALSE, so
+  // a caller that forgets it is refused rather than obeyed — the flag means
+  // nothing if it can be satisfied by omission.
+  if (!confirmedIrreversible) {
+    return refused(
+      "unconfirmed",
+      "Removing a charge can't be undone, so it needs to be confirmed first.",
+    );
+  }
+
   let cardAccountId: number | null = null;
 
   const result = db.transaction((tx): ManualWriteResult => {
@@ -693,6 +737,10 @@ export function removeCardActivity(
       // `unmarkCardPayment` would then refuse to clean up its partner.
       return refused(
         "invalid",
+        // Reachable from a RENDERED menu item, not just a stale tab: the menu
+        // filters on `!isTransfer && isManual` only, so an unpaired synthetic
+        // mirror still offers "Remove this charge…". Names the tool that owns
+        // it rather than reading as a dead end.
         "That row was created by a card payment. Use “Not a card payment” instead.",
       );
     }

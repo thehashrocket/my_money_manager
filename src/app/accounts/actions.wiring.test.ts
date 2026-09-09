@@ -53,6 +53,11 @@ const { updateLiabilityBalanceAction, addCardActivityAction, removeCardActivityA
   await import("./actions");
 const { IDLE, IDLE_ACTIVITY } = await import("./action-state");
 const { STARTING_BALANCE_DOLLARS_MAX } = await import("@/lib/import/accountAnchorFields");
+// Imported, never re-typed. Two hand-maintained copies of this sentence
+// already existed in this app and had already diverged in wording, which is
+// the whole reason the shared module exists. It has zero imports, so it is
+// safe in any mock graph.
+const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 
 beforeEach(() => {
   createCardActivityMock.mockReset();
@@ -281,10 +286,18 @@ describe("addCardActivityAction — guards that run before the write", () => {
  * write is mocked and `revalidatePath` is real-enough (a mock that throws), so
  * the thing under test is the wiring itself.
  *
- * Removing `guardRefresh` from `revalidateCardActivitySurfaces` /
- * `revalidateBalanceSurfaces` makes every case below fail: the throw reaches
- * each action's outer `catch`, which returns `{status:"error"}` for a charge
- * that is already in the ledger.
+ * Removing `guardRefresh` from `revalidateCardActivitySurfaces` makes every
+ * case below fail: the throw reaches each action's outer `catch`, which
+ * returns `{status:"error"}` for a charge that is already in the ledger.
+ *
+ * ONLY that helper. Every case here drives `addCardActivityAction` or
+ * `removeCardActivityAction`, and those are its only two callers — so nothing
+ * below can say anything about `revalidateBalanceSurfaces`, which guards the
+ * four anchor-moving actions. Deleting `guardRefresh` from THAT one leaves
+ * this suite green, which is exactly the false confidence a docblock naming
+ * both would buy. Its coverage lives in `actions.balance-refresh.test.ts`,
+ * separate because it needs a real-ish account row and `db: {}` above forbids
+ * one on purpose.
  */
 describe("a failed refresh never denies a committed write", () => {
   function throwingRevalidate() {
@@ -323,9 +336,7 @@ describe("a failed refresh never denies a committed write", () => {
     expect(state.status).toBe("ok");
     if (state.status !== "ok") throw new Error("unreachable");
     expect(state.message).toMatch(/Recorded/);
-    expect(state.warning).toBe(
-      "Your change was saved, but this page couldn't refresh — reload to see the current state.",
-    );
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
   });
 
   it("leaves `warning` undefined when the refresh works, so success stays plain", async () => {
@@ -379,12 +390,21 @@ describe("a failed refresh never denies a committed write", () => {
     const logged = throwingRevalidate();
 
     const state = await addCardActivityAction(IDLE_ACTIVITY, goodCharge());
-    logged.mockRestore();
 
     // Refused BEFORE the refresh runs, so no warning and no log — nothing was
     // written for a stale page to be stale about.
     expect(state).toMatchObject({ status: "error", reason: "before-anchor" });
+    // ASSERTED BEFORE `mockRestore`, and that ordering is the whole assertion.
+    // Vitest's `mockRestore` performs a `mockReset` first, which WIPES
+    // `mock.calls` — so this ran green unconditionally when it sat after the
+    // restore, pinning nothing at all.
     expect(logged).not.toHaveBeenCalled();
+    // The fact the comment above actually claims, which nothing asserted: the
+    // refusal returns before `revalidateCardActivitySurfaces` is reached. A
+    // revalidation here would re-render the form out from under the only
+    // rendering of `before-anchor`.
+    expect(revalidatePathMock).not.toHaveBeenCalled();
+    logged.mockRestore();
   });
 });
 
@@ -450,9 +470,7 @@ describe("removeCardActivityAction", () => {
     expect(state.status).toBe("ok");
     if (state.status !== "ok") throw new Error("unreachable");
     expect(state.message).toMatch(/Charge removed/);
-    expect(state.warning).toBe(
-      "Your change was saved, but this page couldn't refresh — reload to see the current state.",
-    );
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
   });
 
   it("revalidates the MONTH view too — a removed charge changes an envelope's spend", async () => {

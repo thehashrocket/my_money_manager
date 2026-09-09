@@ -19,6 +19,17 @@ const merchantSchema = z.object({
   normalizedMerchant: z.string().min(1).max(500),
 });
 
+/**
+ * Route tag for `guardRefresh`'s log line; not user-facing.
+ *
+ * Declared above its first use rather than at the foot of the file: every
+ * reference today sits in a deferred function body, so the old placement
+ * worked — but only for that reason, and the next module-level use above the
+ * declaration would be a TDZ `ReferenceError` at import time that `tsc` does
+ * not flag.
+ */
+const SCOPE = "/subscriptions";
+
 export async function dismissSubscriptionAction(
   formData: FormData,
 ): Promise<SubscriptionDismissResult> {
@@ -90,9 +101,6 @@ function subscriptionsCategoryId(): number {
   if (!row) throw new Error("Subscriptions category not found");
   return row.id;
 }
-
-/** Route tag for `guardRefresh`'s log line; not user-facing. */
-const SCOPE = "/subscriptions";
 
 /**
  * `/categorize` and `/budget` are in here as well as the two obvious pages:

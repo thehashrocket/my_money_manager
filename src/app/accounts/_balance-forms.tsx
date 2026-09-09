@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
 import { formatMonthDay } from "@/lib/now";
 import { IDLE } from "./action-state";
-import { Status } from "./_status";
+import { ActionStatus } from "@/components/ledger/action-status";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -189,7 +189,7 @@ export function ReconcileForm({
         {pending ? "Saving…" : "Save"}
       </Button>
       <div className="w-full">
-        <Status state={state} />
+        <ActionStatus state={state} />
       </div>
     </form>
   );
@@ -216,7 +216,7 @@ export function RefreshButton({
         {pending ? "Refreshing…" : "Refresh"}
       </Button>
       <span className="sr-only">{`Refresh ${accountName}'s balance from the bank`}</span>
-      <Status state={state} />
+      <ActionStatus state={state} />
     </form>
   );
 }
@@ -267,7 +267,7 @@ export function RevertBalanceButton({
       <span className="sr-only">
         {`Put ${accountName}'s balance back to what it was on ${asOf}`}
       </span>
-      <Status state={state} />
+      <ActionStatus state={state} />
     </form>
   );
 }

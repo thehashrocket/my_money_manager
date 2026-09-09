@@ -60,8 +60,12 @@ vi.mock("@/lib/budget/manageCategories", async (importOriginal) => ({
 const { revalidatePath } = await import("next/cache");
 const { createGoalAction, updateGoalTargetAction } = await import("./actions");
 
-const REFRESH_WARNING =
-  "Your change was saved, but this page couldn't refresh — reload to see the current state.";
+// Imported, never re-typed. Two hand-maintained copies of this sentence
+// already existed in this app and had already diverged in wording, which is
+// the whole reason the shared module exists — a local literal here re-creates
+// exactly the drift it was extracted to end. It has zero imports, so it is
+// safe in this mock graph.
+const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 
 function createForm(): FormData {
   const fd = new FormData();
@@ -117,7 +121,7 @@ describe("createGoalAction", () => {
     restore();
 
     expect(insertRunMock).toHaveBeenCalled();
-    expect(state.warning).toBe(REFRESH_WARNING);
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
     // The redirect is skipped on purpose. It discards the returned state, so
     // navigating would land the user on a page whose cache we just failed to
     // invalidate, with no message anywhere.
@@ -155,7 +159,7 @@ describe("updateGoalTargetAction", () => {
     restore();
 
     expect(updateRunMock).toHaveBeenCalled();
-    expect(state.warning).toBe(REFRESH_WARNING);
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
   });
 
   it("still refuses a non-fund category, refresh guard or not", async () => {

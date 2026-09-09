@@ -74,6 +74,11 @@ function seedCheckingDebit(accountId: number, date: string, amountCents: number)
   return row;
 }
 
+/** Every `removeCardActivity` call outside the confirmation suite is a
+ *  DELIBERATE removal. Spelled once, at module scope, so the cases that OMIT
+ *  it are visibly the ones testing the refusal. */
+const CONFIRMED = { confirmedIrreversible: true } as const;
+
 const balanceOf = (id: number) =>
   loadAccountBalances(handle.db).find((b) => b.id === id)!.balanceCents;
 
@@ -884,7 +889,7 @@ describe("removeCardActivity", () => {
     const { card, created } = seedCardWithCharge();
     expect(balanceOf(card.id)).toBe(-108025);
 
-    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db);
+    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
 
     expect(result.status).toBe("ok");
     if (result.status !== "ok") throw new Error("unreachable");
@@ -909,7 +914,7 @@ describe("removeCardActivity", () => {
       .where(eq(schema.transactions.id, created.transactionId))
       .get()!;
 
-    removeCardActivity({ transactionId: created.transactionId }, handle.db);
+    removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
 
     expect(
       handle.db
@@ -961,7 +966,7 @@ describe("removeCardActivity", () => {
     // One row is enough, and its date is irrelevant — that is E16.
     expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("reconcile");
 
-    removeCardActivity({ transactionId: created.transactionId }, handle.db);
+    removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
 
     expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
     expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("refresh");
@@ -978,7 +983,7 @@ describe("removeCardActivity", () => {
     });
     const bankRow = seedCheckingDebit(checking.id, "2026-01-05", -8025);
 
-    const result = removeCardActivity({ transactionId: bankRow.id }, handle.db);
+    const result = removeCardActivity({ transactionId: bankRow.id }, handle.db, CONFIRMED);
 
     expect(result).toMatchObject({ status: "refused", reason: "not-manual" });
     expect(
@@ -1012,7 +1017,7 @@ describe("removeCardActivity", () => {
 
     // From the MIRROR's own row — the manual, card-account leg, which is the
     // one that looks most like something this function should accept.
-    const result = removeCardActivity({ transactionId: mirror.id }, handle.db);
+    const result = removeCardActivity({ transactionId: mirror.id }, handle.db, CONFIRMED);
 
     expect(result).toMatchObject({ status: "refused", reason: "already-paired" });
     expect(result.status === "refused" && result.message).toContain("Not a card payment");
@@ -1043,13 +1048,13 @@ describe("removeCardActivity", () => {
       .where(eq(schema.accounts.id, card.id))
       .run();
 
-    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db);
+    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
 
     expect(result).toMatchObject({ status: "refused", reason: "not-a-card" });
   });
 
   it("refuses a transaction id that no longer exists", () => {
-    expect(removeCardActivity({ transactionId: 99999 }, handle.db)).toMatchObject({
+    expect(removeCardActivity({ transactionId: 99999 }, handle.db, CONFIRMED)).toMatchObject({
       status: "refused",
       reason: "not-found",
     });
@@ -1072,7 +1077,7 @@ describe("removeCardActivity", () => {
     if (created.status !== "ok") throw new Error("setup failed");
     expect(balanceOf(card.id)).toBe(-91975);
 
-    expect(removeCardActivity({ transactionId: created.transactionId }, handle.db).status).toBe("ok");
+    expect(removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED).status).toBe("ok");
     expect(balanceOf(card.id)).toBe(-100000);
   });
 });
@@ -1123,7 +1128,7 @@ describe("removeCardActivity — the mirror-shape guard", () => {
       .where(eq(schema.transactions.id, mirror.id))
       .run();
 
-    const result = removeCardActivity({ transactionId: mirror.id }, handle.db);
+    const result = removeCardActivity({ transactionId: mirror.id }, handle.db, CONFIRMED);
 
     expect(result).toMatchObject({ status: "refused", reason: "invalid" });
     expect(result.status === "refused" && result.message).toContain("Not a card payment");
@@ -1135,5 +1140,131 @@ describe("removeCardActivity — the mirror-shape guard", () => {
         .where(eq(schema.transactions.id, mirror.id))
         .get(),
     ).toBeDefined();
+  });
+});
+
+/**
+ * The confirmation is a fact the SERVER checks.
+ *
+ * `removeCardActivity` has no undo and takes no snapshot, so the dialog in
+ * `_row-menu.tsx` is the only thing between a click and a permanent delete —
+ * and a Server Action is a network endpoint regardless of what rendered. Rules
+ * 4 and 8 both arrived here after being burned by the opposite: never let
+ * ABSENCE be the affirmative signal for the destructive branch.
+ */
+describe("removeCardActivity — confirmedIrreversible", () => {
+  function seedCharge() {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    const created = createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        date: "2026-01-05",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+    if (created.status !== "ok") throw new Error("setup failed");
+    return { card, created };
+  }
+
+  it("REFUSES when the flag is omitted entirely", () => {
+    const { card, created } = seedCharge();
+
+    // No third argument at all — the shape a caller added later would have.
+    const result = removeCardActivity({ transactionId: created.transactionId }, handle.db);
+
+    expect(result).toMatchObject({ status: "refused", reason: "unconfirmed" });
+    // The row survives. This is the assertion that matters: the refusal is
+    // worthless if the delete happened anyway.
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, created.transactionId))
+        .get(),
+    ).toBeDefined();
+    expect(balanceOf(card.id)).toBe(-108025);
+  });
+
+  it("REFUSES an explicit false, so the default is not the only thing enforcing it", () => {
+    const { created } = seedCharge();
+    expect(
+      removeCardActivity({ transactionId: created.transactionId }, handle.db, {
+        confirmedIrreversible: false,
+      }),
+    ).toMatchObject({ status: "refused", reason: "unconfirmed" });
+  });
+
+  it("refuses BEFORE reading the row — an unconfirmed call on a missing id is still `unconfirmed`", () => {
+    // Ordering is the point: the check needs no ledger state, so it must not
+    // hold a write transaction open, and it must not leak whether the row
+    // exists to a caller that has not confirmed.
+    expect(removeCardActivity({ transactionId: 99999 }, handle.db)).toMatchObject({
+      status: "refused",
+      reason: "unconfirmed",
+    });
+  });
+});
+
+/**
+ * The before-anchor refusal has to name a recovery the row actually offers.
+ *
+ * Red team, /ship 2026-09-09. Un-nesting `CardControls` made the charge dialog
+ * reachable on a FEED-refreshed card, where `refreshLiabilityBalances` writes
+ * the anchor from the bank's own balance-date — frequently today. So the
+ * refusal became the likely outcome on exactly the card class the dialog was
+ * newly exposed for, while pointing at "Reconcile instead →", a control
+ * `resolveBalanceAction` does not render on that row.
+ */
+describe("createCardActivity — the before-anchor refusal knows where the anchor came from", () => {
+  function seedCardCharge(balanceSource: "feed" | "manual") {
+    const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-03-10" });
+    handle.db
+      .update(schema.accounts)
+      .set({ balanceSource })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+    return createCardActivity(
+      {
+        kind: "charge",
+        accountId: card.id,
+        // ON the anchor — the boundary, and the case a feed-refreshed card hits
+        // every time the bank's balance-date is today.
+        date: "2026-03-10",
+        amountCents: 8025,
+        merchant: "Costco",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+  }
+
+  it("names the BANK when the anchor came from the feed, not a reconcile the user never did", () => {
+    const result = seedCardCharge("feed");
+
+    expect(result).toMatchObject({ status: "refused", reason: "before-anchor" });
+    if (result.status !== "refused") throw new Error("unreachable");
+    expect(result.message).toContain("comes from your bank");
+    expect(result.message).toContain("Mar 10");
+    // The recovery it must NOT offer: that row renders Refresh, not Reconcile.
+    expect(result.message).not.toContain("reconcile");
+  });
+
+  it("still names the reconcile when the user is the one who set the anchor", () => {
+    const result = seedCardCharge("manual");
+
+    expect(result).toMatchObject({ status: "refused", reason: "before-anchor" });
+    if (result.status !== "refused") throw new Error("unreachable");
+    expect(result.message).toContain("your last reconcile");
+  });
+
+  it("keeps `before-anchor` as the reason on BOTH, so DS56's handoff still keys off it", () => {
+    // The reason is what `_charge-dialog.tsx` gates "Reconcile instead →" on.
+    // Changing the wording must not change the discriminant.
+    expect(seedCardCharge("feed")).toMatchObject({ reason: "before-anchor" });
+    expect(seedCardCharge("manual")).toMatchObject({ reason: "before-anchor" });
   });
 });

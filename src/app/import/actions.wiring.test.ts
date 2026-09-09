@@ -32,6 +32,8 @@ const commitImportMock = vi.hoisted(() => vi.fn());
 const readPendingImportMock = vi.hoisted(() => vi.fn());
 const deletePendingImportMock = vi.hoisted(() => vi.fn());
 const undoImportCategorizationMock = vi.hoisted(() => vi.fn());
+const checkAssetAccountMock = vi.hoisted(() => vi.fn());
+const anchorUpdateRunMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({ revalidatePath: revalidatePathMock }));
 
@@ -60,12 +62,30 @@ vi.mock("@/lib/pendingImport", async (importOriginal) => {
   };
 });
 
+// `updateAccountAnchorAction`'s only READ. Mocked rather than served from the
+// db stub below so the stub keeps its shape: the account lookup and the anchor
+// UPDATE are separate concerns, and the redirect case cares only about the
+// second one having committed.
+vi.mock("@/lib/import/assetAccountGuard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/import/assetAccountGuard")>();
+  return { ...actual, checkAssetAccount: checkAssetAccountMock };
+});
+
 vi.mock("@/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/db")>();
-  // `{}` on purpose: `confirmImportAction` reaches no query of its own — the
-  // one write it performs is `commitImport`, which is mocked. A query getting
-  // through would throw loudly rather than quietly proving nothing.
-  return { ...actual, db: {} };
+  // As close to `{}` as the file allows: `confirmImportAction` and
+  // `undoImportCategorizationAction` reach no query of their own — the one
+  // write each performs is mocked above. A query getting through would throw
+  // loudly rather than quietly proving nothing.
+  //
+  // `update` is the one exception, and it is not a loosening: it exists
+  // BECAUSE `updateAccountAnchorAction`'s redirect case is only meaningful
+  // once the anchor move has actually committed. Nothing else in this file
+  // touches it, so an unexpected query still fails the same way.
+  return {
+    ...actual,
+    db: { update: () => ({ set: () => ({ where: () => ({ run: anchorUpdateRunMock }) }) }) },
+  };
 });
 
 vi.mock("@/lib/categorize/undoImportCategorization", async (importOriginal) => {
@@ -75,7 +95,8 @@ vi.mock("@/lib/categorize/undoImportCategorization", async (importOriginal) => {
   return { ...actual, undoImportCategorization: undoImportCategorizationMock };
 });
 
-const { confirmImportAction, undoImportCategorizationAction } = await import("./actions");
+const { confirmImportAction, undoImportCategorizationAction, updateAccountAnchorAction } =
+  await import("./actions");
 
 /** A real 36-char UUID: `validateImportIdInput` requires one, and a short
  *  placeholder made every case here fail on validation before it reached the
@@ -96,6 +117,12 @@ beforeEach(() => {
   deletePendingImportMock.mockReset();
   undoImportCategorizationMock.mockReset();
   undoImportCategorizationMock.mockReturnValue({ revertedCount: 0, perCategory: [] });
+  checkAssetAccountMock.mockReset();
+  checkAssetAccountMock.mockReturnValue({ ok: true, name: "Star One Checking" });
+  anchorUpdateRunMock.mockReset();
+  // The UPDATE matched a row. `changes === 0` is the deleted-account refusal,
+  // which is a different case from the one below.
+  anchorUpdateRunMock.mockReturnValue({ changes: 1 });
 
   readPendingImportMock.mockReturnValue({
     id: PENDING_ID,
@@ -275,5 +302,84 @@ describe("undoImportCategorizationAction — the guard must not eat the redirect
     expect(revalidatePathMock).toHaveBeenCalledWith("/import/success/77");
     expect(revalidatePathMock).toHaveBeenCalledWith("/budget/[year]/[month]", "page");
     expect(url).toBe("/import/success/77");
+  });
+});
+
+/**
+ * The THIRD redirecting action in this file, and the last of the three
+ * `guardRefresh(...)` + `redirect(...)` pairs on this route to get a test.
+ *
+ * The shape is identical to the two above, and so is the edit that breaks it:
+ * folding the `redirect` into `guardRefresh`'s callback compiles, reads as
+ * tidier, and hands the navigation signal — which `redirect` raises by
+ * THROWING — straight to the guard, which converts it into a warning string.
+ * This action is `Promise<void>`, so there is no state channel and nothing
+ * anywhere reads that string.
+ *
+ * What the user sees then is worse here than on the other two. The anchor
+ * UPDATE has committed; `/import` never navigates, so the form sits there with
+ * the old figure still in it and no message. Rule 1 makes an anchor move
+ * forward-only, so the natural response — type it again — cannot walk it back,
+ * and this form is the only escape hatch there is.
+ */
+describe("updateAccountAnchorAction — the guard must not eat the redirect", () => {
+  function anchorForm(): FormData {
+    return formData({
+      accountId: "1",
+      startingBalance: "1250.75",
+      startingBalanceDate: "2026-01-01",
+    });
+  }
+
+  it("still redirects to /import when revalidatePath throws", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const url = await redirectedTo(updateAccountAnchorAction(anchorForm()));
+    logged.mockRestore();
+
+    // The anchor moved BEFORE the refresh, which is what makes swallowing the
+    // navigation a lie rather than a cosmetic loss.
+    expect(anchorUpdateRunMock).toHaveBeenCalled();
+    expect(url).toBe("/import");
+  });
+
+  it("records the failure, since `Promise<void>` leaves the log as the only channel", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    await redirectedTo(updateAccountAnchorAction(anchorForm()));
+
+    expect(logged).toHaveBeenCalledWith(
+      "[/import] revalidation failed after a committed write",
+      expect.any(Error),
+    );
+    logged.mockRestore();
+  });
+
+  it("refreshes then redirects on the ordinary path", async () => {
+    revalidatePathMock.mockImplementation(() => {});
+
+    const url = await redirectedTo(updateAccountAnchorAction(anchorForm()));
+
+    expect(url).toBe("/import");
+    expect(revalidatePathMock).toHaveBeenCalledWith("/import");
+    expect(revalidatePathMock).toHaveBeenCalledWith("/budget");
+  });
+
+  it("throws instead of redirecting when the account is a liability (E18)", async () => {
+    // The other direction: the guard must not have widened what this accepts.
+    // A liability reaching this raw signed form is rule 9's corruption path,
+    // and the refusal happens before any write, so there is nothing to be
+    // stale about and no redirect to protect.
+    checkAssetAccountMock.mockReturnValue({ ok: false, reason: "Citi Visa is a credit card" });
+
+    await expect(updateAccountAnchorAction(anchorForm())).rejects.toThrow(/credit card/);
+    expect(anchorUpdateRunMock).not.toHaveBeenCalled();
+    expect(revalidatePathMock).not.toHaveBeenCalled();
   });
 });

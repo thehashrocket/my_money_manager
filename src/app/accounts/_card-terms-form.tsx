@@ -4,7 +4,7 @@ import { useActionState, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
 import { IDLE } from "./action-state";
-import { Status } from "./_status";
+import { ActionStatus } from "@/components/ledger/action-status";
 import { updateCardTermsAction } from "./actions";
 
 /**
@@ -133,7 +133,7 @@ export function CardTermsDisclosure({
         Cancel
       </Button>
       <div className="w-full">
-        <Status state={state} />
+        <ActionStatus state={state} />
       </div>
     </form>
   );

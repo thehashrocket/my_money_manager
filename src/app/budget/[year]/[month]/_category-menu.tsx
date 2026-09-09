@@ -139,15 +139,40 @@ export function CategoryMenu({
 
   function moveTo(direction: "up" | "down") {
     startTransition(async () => {
-      const result = await moveCategoryAction(categoryId, direction);
+      let result;
+      try {
+        result = await moveCategoryAction(categoryId, direction);
+      } catch {
+        // Same shape (and same reason) as `setKind`'s catch below:
+        // `moveCategoryAction` returns only `CategoryNotFoundError` as a
+        // refusal and RETHROWS everything else — SQLITE_BUSY, a driver error,
+        // a failed action round trip — and an uncaught rejection inside a
+        // transition is silent, so the menu just closed and the row did not
+        // move with nothing said either way.
+        toast.error("Something went wrong. Reload the page to see the current order.");
+        return;
+      }
       if (result.status === "error") {
         toast.error(result.message);
         return;
       }
-      // The move COMMITTED; only the refresh failed, so the list the user is
-      // looking at still shows the old order. Announcing the new position on
-      // its own would then contradict the screen.
-      if (result.warning) toast.warning(result.warning);
+      if (result.warning) {
+        // The move COMMITTED; only the refresh failed, so the list the user is
+        // looking at still shows the OLD order. Announcing the new position on
+        // top of that would contradict the screen — a screen-reader user would
+        // hear "now position 3 of 5" about a list still rendering position 2 —
+        // and would do it from a SECOND live region firing in the same tick as
+        // the toast's own, which rule 6's one-message doctrine rules out.
+        //
+        // So the toast IS the announcement on this path, and the position is
+        // withheld rather than routed through the sr-only region: Sonner's
+        // toast region is itself `aria-live`, so the warning is spoken, and it
+        // is the only one of the two that is also VISIBLE — moving the warning
+        // into the sr-only region instead would leave a sighted user with a
+        // silently stale list and no message at all.
+        toast.warning(result.warning);
+        return;
+      }
       // DS16: "an aria-live announcement of the new position" — the
       // commit-only Left to Budget region (T23) covers allocation edits,
       // not reorder, so this is its own small live region rather than
@@ -206,7 +231,16 @@ export function CategoryMenu({
   function setPolicy(policy: CarryoverPolicy) {
     if (policy === carryoverPolicy) return;
     startTransition(async () => {
-      const result = await setCarryoverPolicyAction(categoryId, policy);
+      let result;
+      try {
+        result = await setCarryoverPolicyAction(categoryId, policy);
+      } catch {
+        // See `moveTo` above — a rethrow or a failed round trip is otherwise
+        // an unhandled rejection, and this is the one handler with no success
+        // toast, so silence is exactly what a SUCCESS looks like here.
+        toast.error("Something went wrong. Reload the page to see the current carryover policy.");
+        return;
+      }
       if (result.status === "error") toast.error(result.message);
       // No success toast on this path by design (the menu's own checked state
       // is the feedback), but a stale page needs saying: the policy changed
@@ -450,14 +484,18 @@ function SetKindDialog({
           <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
         </div>
         {error ? <p className="text-sm text-money-neg">{error}</p> : null}
-        {/* `flex-row-reverse` restores the sibling dialogs' visual order —
-            action on the right, Cancel to its left, and on mobile
-            (`flex-col-reverse`) Cancel on top with the destructive button
-            below, where the thumb rests. Cancel stays FIRST in DOM order, and
-            is the `initialFocus` target, because Base UI focuses the first
-            tabbable element in the popup and that would otherwise park the
-            keyboard on an irreversible commit a second Enter fires. Order and
-            focus are separable; this takes the safe answer to both. */}
+        {/* Cancel stays FIRST in DOM order, and is the `initialFocus` target,
+            because Base UI focuses the first tabbable element in the popup and
+            that would otherwise park the keyboard on an irreversible commit a
+            second Enter fires. Order and focus are separable; this takes the
+            safe answer to both.
+
+            Both reverses put the LAST DOM child first, so with Cancel first in
+            the DOM the destructive button renders leftmost on desktop and on
+            TOP on mobile — leaving Cancel nearest the thumb, which is the safe
+            arrangement. This note previously described the mobile order the
+            other way round; corrected 2026-09-09, because a wrong note is what
+            drives the next change wrong. */}
         <DialogFooter className="sm:flex-row-reverse sm:justify-start">
           <Button ref={closeRef} type="button" variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel

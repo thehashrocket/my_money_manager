@@ -62,6 +62,14 @@ export function CardControls({
   // silently relocates the user is worse than the refusal it fixes).
   const [handoff, setHandoff] = useState(0);
 
+  // A feed-linked LONG-TERM liability reaches here with nothing to render:
+  // `showReconcile` is false (its balance control is Refresh, drawn by the row
+  // itself) and `canAddCharge` is false (a mortgage takes no hand-entered
+  // charges, D3=A). Before the un-nesting this component was not mounted at
+  // all in that state; now it is, so it has to say so rather than drawing an
+  // empty `mt-2 flex gap-2` and an 8px phantom gap under the row.
+  if (!showReconcile && !canAddCharge) return null;
+
   return (
     <div className="mt-2 flex flex-col flex-wrap items-stretch gap-2 sm:flex-row sm:items-start">
       {showReconcile ? (
