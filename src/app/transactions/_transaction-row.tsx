@@ -9,6 +9,7 @@ import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
@@ -133,63 +134,44 @@ export function TransactionRowForm({
         setApplyToPast(false);
         onCategorized(priorCategoryId, result.updatedCount);
 
-        /* ONE toast, not a success plus a warning. `<Toaster>` runs Sonner's
-           default collapsed stack (`expand` unset — `layout.tsx`), and
-           `[data-front="false"] > *` is `opacity: 0` there: whichever toast is
-           not the newest has its contents, INCLUDING its action button, drawn
-           invisible until the stack is hovered. So two toasts forced a choice
-           between the warning being readable and the Undo being reachable —
-           and on this surface that Undo is the only way back, both for the rows
-           and for a rule the refusal removed, inside 10 seconds. Merging them
-           puts the notice and its remedy on the same front toast.
+        /* ONE toast, not a success plus a warning — rule 6. The
+           collapsed-stack argument for why two toasts cannot both be read, and
+           why `result.warning` (a `revalidatePath` that threw AFTER the write
+           committed) merges in rather than stacking behind, is in
+           `notifyWrite`'s docstring; this was one of the three hand-copies it
+           replaced.
 
-           This row cannot disable its checkbox up front the way `/categorize`
-           does, because the list carries no per-key filing history to check
-           against, so the toast is the only channel there is.
-
-           `result.warning` — a `revalidatePath` that threw AFTER the write
-           committed — is a second note about a write that SUCCEEDED, so it
-           merges into this same toast rather than stacking behind it. */
+           What is specific to THIS row: it cannot disable its Remember
+           checkbox up front the way `/categorize` does, because the list
+           carries no per-key filing history to check against — so the toast is
+           the only channel a refusal has here. */
         const filed = `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
-        const notes = [result.ruleRefusal?.message, result.warning].filter(
-          (n): n is string => n !== undefined && n !== null,
-        );
-        // A warning is not a success — the /sync doctrine. Either note demotes
-        // this from `toast.success`; the Undo rides on it either way.
-        const notify = notes.length === 0 ? toast.success : toast.warning;
-        notify([filed, ...notes].join(" "), {
-          duration: 10_000,
-          action: {
-            label: "Undo",
-            onClick: async () => {
-              try {
-                const undo = await undoCategorizeTransactionAction(
-                  result.snapshot,
-                );
-                const reverted =
-                  (undo.targetReverted ? 1 : 0) + undo.revertedApplyToPastCount;
-                setCurrentCategoryId(priorCategoryId);
-                setCurrentCategoryName(
-                  priorCategoryId === null
-                    ? null
-                    : (leafCategories.find((c) => c.id === priorCategoryId)
-                        ?.name ?? null),
-                );
-                setPickerValue(
-                  priorCategoryId !== null ? String(priorCategoryId) : "",
-                );
-                onUndone(priorCategoryId, reverted);
-                const message = `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`;
-                // The undo is a committed write too — it restores the rule the
-                // refusal removed — so its own failed refresh gets said.
-                if (undo.warning === undefined) toast(message);
-                else toast.warning(`${message} ${undo.warning}`);
-              } catch (err) {
-                toast.error(
-                  err instanceof Error ? err.message : "Undo failed.",
-                );
-              }
-            },
+        notifyWrite(filed, [result.ruleRefusal?.message, result.warning], {
+          onUndo: async () => {
+            try {
+              const undo = await undoCategorizeTransactionAction(
+                result.snapshot,
+              );
+              const reverted =
+                (undo.targetReverted ? 1 : 0) + undo.revertedApplyToPastCount;
+              setCurrentCategoryId(priorCategoryId);
+              setCurrentCategoryName(
+                priorCategoryId === null
+                  ? null
+                  : (leafCategories.find((c) => c.id === priorCategoryId)
+                      ?.name ?? null),
+              );
+              setPickerValue(
+                priorCategoryId !== null ? String(priorCategoryId) : "",
+              );
+              onUndone(priorCategoryId, reverted);
+              notifyUndo(
+                `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
+                undo.warning,
+              );
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Undo failed.");
+            }
           },
         });
       } catch (err) {

@@ -2579,14 +2579,16 @@ found was fixed except the four below, each deliberately left with its reason.
       of copy on the row rather than an absence. Found by Claude adversarial,
       classified INVESTIGATE.
 
-- [ ] **P4** — **The single-toast idiom is hand-copied in three client files.**
-      `_transaction-row.tsx`, `_merchant-row.tsx` and `_retarget-form.tsx` each
-      carry the same `notes` array → `notify` → one-toast block, and the
-      matching undo idiom beside it; ~22 lines removable by one
-      `notifyWrite(headline, notes)` / `notifyUndo(message, warning)` helper.
-      Advisory from the simplification lens. Filed at P4 because the copies are
-      currently identical and rule 6's constraint (one toast, never a success
-      plus a warning) is what they encode — the risk is drift, not a live bug.
+- [x] **P4 — DONE** — **The single-toast idiom is hand-copied in three client
+      files.** `_transaction-row.tsx`, `_merchant-row.tsx` and
+      `_retarget-form.tsx` each carried the same `notes` array → `notify` →
+      one-toast block and the matching undo idiom beside it. Now
+      `notifyWrite` / `notifyUndo` in `src/components/ledger/write-toast.ts`,
+      the toast twin of `action-status.tsx`. `/subscriptions` is deliberately
+      NOT a fourth caller: it has no Undo, so its plain-success toast takes
+      Sonner's default duration rather than the 10s Undo window, and folding
+      that in would have made the shared helper carry a conditional about a
+      window it does not have. `onUndo` is required for the same reason.
 
 ## Follow-ups from the `/pr-review-toolkit` pass on PR #52 (2026-09-09)
 

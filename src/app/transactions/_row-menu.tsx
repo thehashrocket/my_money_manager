@@ -70,6 +70,14 @@ export function TransactionRowMenu({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
+  /* The reachability of the delete, in ONE place because it is now read
+     twice — by the menu item and by the dialog that item opens. Two spellings
+     of it could drift into an item whose dialog never mounts, i.e. a control
+     that silently does nothing; inside the ternary below `isTransfer` is
+     already false, so this reads there exactly as the bare `isManual` it
+     replaced. The precedence itself is argued at the ternary. */
+  const canRemove = !isTransfer && isManual;
+
   // Base UI closes the menu itself on item activation, so nothing here has to.
   const run = (fn: () => Promise<CardActivityState>) => {
     startTransition(async () => {
@@ -185,7 +193,7 @@ export function TransactionRowMenu({
                 politely if this pair was not created here. */}
             <DropdownMenuItem onClick={unmark}>Not a card payment</DropdownMenuItem>
           </DropdownMenuGroup>
-        ) : isManual ? (
+        ) : canRemove ? (
           <DropdownMenuGroup>
             <DropdownMenuLabel>Hand-entered</DropdownMenuLabel>
             <DropdownMenuSeparator />
@@ -216,6 +224,12 @@ export function TransactionRowMenu({
       </DropdownMenuContent>
     </DropdownMenu>
 
+    {/* Mounted only where it can be opened. `setConfirmOpen(true)` lives in
+        the one menu branch `canRemove` gates, and roughly one row in two
+        hundred is hand-entered — so on every other row this was a `Dialog`
+        root whose `open` could never become true, one per row on a list of
+        fifty. It is the same condition, not a second reading of it. */}
+    {canRemove ? (
     <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
       <DialogContent className="sm:max-w-md" initialFocus={cancelRef}>
         <DialogHeader>
@@ -252,6 +266,17 @@ export function TransactionRowMenu({
           <Button ref={cancelRef} type="button" variant="ghost" onClick={() => setConfirmOpen(false)}>
             Cancel
           </Button>
+          {/* A STATIC label, not `isPending ? "Removing…" : …`. The click
+              closes the dialog before `remove()` starts the transition, so
+              `DialogContent` unmounts in the same commit that `isPending`
+              turns true and this button never renders in the pending state —
+              a label switching on it is a sentence nobody can ever read, and
+              a false claim about what the UI does is the class of comment
+              this branch spent a commit deleting. `disabled` stays: it costs
+              nothing and is the honest guard if the dialog is ever kept open
+              across the write. What actually blocks a second submit today is
+              the menu trigger's own `disabled={isPending}`, which stops the
+              menu reopening while one is in flight. */}
           <Button
             type="button"
             variant="destructive"
@@ -261,11 +286,12 @@ export function TransactionRowMenu({
               remove();
             }}
           >
-            {isPending ? "Removing…" : "Remove charge"}
+            Remove charge
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    ) : null}
     </>
   );
 }
