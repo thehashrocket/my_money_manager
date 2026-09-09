@@ -1,12 +1,14 @@
 import { and, eq, gte, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 import {
   createSnapshot,
   pruneSnapshots,
   type SnapshotResult,
 } from "../snapshot";
+import { unlinkSync } from "node:fs";
 import { dbPath, snapshotDir } from "../paths";
 import { readAccessUrl } from "./accessUrl";
+import { asFeedAccountId, type FeedAccountId } from "./feedAccountId";
 import { fetchAccounts } from "./client";
 import { contentSignature } from "../contentSignature";
 import { buildRuleMatcher } from "../rules";
@@ -35,6 +37,33 @@ import { toLocalIso, todayIso } from "@/lib/now";
 import type { SimpleFinAccount } from "./types";
 
 type Db = typeof defaultDb;
+
+/**
+ * The handle `db.transaction()` hands its callback — NOT `Db`, and not `AnyDb`.
+ *
+ * `verifyStagedLinks` exists for exactly one property: that the re-read happens
+ * INSIDE the write transaction. Typed as `AnyDb` that property was enforced by
+ * a comment and one call site, so a refactor hoisting the call out of the
+ * callback for readability would compile, pass every test (a same-tick relink
+ * does not interleave under test), and silently reinstate the race the function
+ * was written to close. Naming the transaction type makes that a build error.
+ */
+type SyncTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * `SyncTx`'s entire value is that `db` is NOT assignable to it — and that is a
+ * property of drizzle's class hierarchy (`SQLiteTransaction`'s `protected`
+ * members give it nominal-ish assignability), not of this file. A dependency
+ * bump that drops those modifiers takes the guarantee away with tsc green and
+ * every test passing, leaving the docblock above asserting something no longer
+ * true. Same idiom, and the same lesson, as `_INTENT_IS_REQUIRED`: an
+ * invariant defended only by runtime tests is one refactor from silent.
+ */
+type NotAssignable<A, B> = [A] extends [B] ? { ERROR: "A is assignable to B" } : true;
+const _DB_IS_NOT_A_TX: NotAssignable<Db, SyncTx> = true;
+const _ANYDB_IS_NOT_A_TX: NotAssignable<AnyDb, SyncTx> = true;
+void _DB_IS_NOT_A_TX;
+void _ANYDB_IS_NOT_A_TX;
 
 /**
  * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
@@ -89,7 +118,15 @@ export type AccountSyncSummary = AccountSyncCounts & {
   computedBalanceCents: number;
   /**
    * computed − reported. Non-zero means the ledger has drifted from the bank.
-   * NULL means only one thing now: the bank reported no balance.
+   *
+   * NULL means one of TWO things: the bank reported no balance, or the link
+   * re-check dropped this account mid-sync and its old feed's balance was
+   * discarded with the rest of its record. The second was added when
+   * `verifyStagedLinks` landed — without it, `finaliseBalances` subtracted the
+   * OLD feed's balance from a ledger deliberately missing the withheld rows
+   * and reported the difference as drift, i.e. rule 1's "a row is missing or
+   * duplicated" signal, manufactured. This field has no reader yet, so this
+   * docblock is its whole specification.
    */
   driftCents: number | null;
 };
@@ -118,6 +155,15 @@ export type SyncOutcome =
   | {
       status: "synced";
       batchId: number;
+      /**
+       * Rows actually written, which is NOT necessarily what was staged: a
+       * relink that commits during the feed round trip drops that account's
+       * rows inside the write transaction (`verifyStagedLinks`). It can
+       * therefore be 0 while `status` is still `synced` — the batch exists,
+       * it just holds nothing, and `warnings` says why. The `up-to-date`
+       * early return above only covers "the feed sent nothing new", which is
+       * a different fact and reads differently in the UI.
+       */
       insertedCount: number;
       pairsLinked: number;
       ambiguous: CrossAccountBucket<TransferRow>[];
@@ -260,6 +306,22 @@ export function partitionLinkedAccounts(linked: readonly LinkedAccount[]): {
  * import, and `undoSyncBatch` deletes rows only. The prior anchor goes onto
  * the account row itself (E19) — there is no batch to hang it on — which is
  * also the real mechanism `/accounts/error.tsx` reassures the user with.
+ *
+ * THE LINK IS RE-VERIFIED PER ACCOUNT, INSIDE A TRANSACTION, for the same
+ * reason `verifyStagedLinks` does it for the row insert — and with more force,
+ * not less. `balanceOnlyAccounts` is derived from the account list read BEFORE
+ * `await fetchAccounts`, so `account.simplefinAccountId` is a precondition
+ * carried across an await and `setAccountLink` can commit in that window from
+ * a second `/sync` tab. What this function writes is an ANCHOR: under rule 1
+ * that is the account's entire balance, not a batch of rows, and under rule 9
+ * `prior_starting_balance_*` holds exactly ONE prior value — so a wrong-feed
+ * write here is both larger and less recoverable than a misfiled row, which
+ * `undoSyncBatch` can delete.
+ *
+ * The re-read also supplies `prior_starting_balance_*` and the no-op check.
+ * Using the pre-await `account` for those would let a hand Reconcile that
+ * landed during the fetch be silently overwritten AND have its own prior
+ * clobbered with a value two writes stale.
  */
 function refreshLiabilityBalances(
   balanceOnlyAccounts: readonly LinkedAccount[],
@@ -271,20 +333,16 @@ function refreshLiabilityBalances(
   const warnings: string[] = [];
 
   for (const account of balanceOnlyAccounts) {
-    const remote = byExternalId.get(account.simplefinAccountId!);
+    // The feed this account was linked to when the account list was read,
+    // BEFORE the network round trip. The re-check below compares against it.
+    const stagedFeedId = asFeedAccountId(account.simplefinAccountId!);
+    const remote = byExternalId.get(stagedFeedId);
     if (!remote) {
       // The staging loop has its own version of this warning; a balance-only
       // account is not in that loop, so without this a mortgage the feed
       // stopped returning would go completely silent.
       warnings.push(
         `SimpleFIN returned nothing for "${account.name}" — its balance was not updated.`,
-      );
-      continue;
-    }
-
-    if (hasAnyTransactionRows(account.id, db)) {
-      warnings.push(
-        `"${account.name}" has transactions, so its balance was not refreshed from the feed. Update it from the Accounts page.`,
       );
       continue;
     }
@@ -356,44 +414,107 @@ function refreshLiabilityBalances(
       continue;
     }
 
-    if (
-      balanceCents === account.startingBalanceCents &&
-      asOfIso === account.startingBalanceDate
-    ) {
+    // Everything above judged the FEED's figure and needs no ledger state.
+    // Everything below reads or writes the account row, so it runs in one
+    // transaction that re-verifies the link first. `applied` is what the
+    // transaction actually did — never assumed from having reached here.
+    const applied = db.transaction((tx) => {
+      const current = tx
+        .select({
+          simplefinAccountId: schema.accounts.simplefinAccountId,
+          startingBalanceCents: schema.accounts.startingBalanceCents,
+          startingBalanceDate: schema.accounts.startingBalanceDate,
+        })
+        .from(schema.accounts)
+        .where(eq(schema.accounts.id, account.id))
+        .get();
+
+      if (current === undefined) {
+        return { kind: "deleted" as const };
+      }
+      if (current.simplefinAccountId !== stagedFeedId) {
+        return { kind: "relinked" as const, unlinked: current.simplefinAccountId === null };
+      }
+      // Re-checked here, not before the transaction: a row imported during the
+      // fetch window makes this account ineligible (D7/D15), and the pre-await
+      // answer could say otherwise.
+      if (hasAnyTransactionRows(account.id, tx)) {
+        return { kind: "has-rows" as const };
+      }
+      if (
+        balanceCents === current.startingBalanceCents &&
+        asOfIso === current.startingBalanceDate
+      ) {
+        return { kind: "no-op" as const };
+      }
+
+      tx.update(schema.accounts)
+        .set({
+          startingBalanceCents: balanceCents,
+          startingBalanceDate: asOfIso,
+          priorStartingBalanceCents: current.startingBalanceCents,
+          priorStartingBalanceDate: current.startingBalanceDate,
+          balanceAsOf: asOfDate,
+          balanceSource: "feed",
+          updatedAt: now,
+        })
+        .where(eq(schema.accounts.id, account.id))
+        .run();
+
+      return {
+        kind: "written" as const,
+        priorBalanceCents: current.startingBalanceCents,
+        priorAsOfIso: current.startingBalanceDate,
+      };
+    });
+
+    if (applied.kind === "deleted") {
+      warnings.push(
+        `"${account.name}" was deleted while the sync was running, so its balance was not updated.`,
+      );
+      continue;
+    }
+    if (applied.kind === "relinked") {
+      warnings.push(
+        applied.unlinked
+          ? `"${account.name}" was unlinked while the sync was running, so its balance was not updated.`
+          : `"${account.name}" was re-linked to a different bank account while the sync was running, so its balance was not updated — sync again to refresh it against the current link.`,
+      );
+      continue;
+    }
+    if (applied.kind === "has-rows") {
+      warnings.push(
+        `"${account.name}" has transactions, so its balance was not refreshed from the feed. Update it from the Accounts page.`,
+      );
+      continue;
+    }
+    if (applied.kind === "no-op") {
       continue; // Nothing moved; do not manufacture a report.
     }
 
-    // The card half only ANNOUNCES, so it belongs after the no-op check.
-    // Warning before it re-emitted on every single sync for an account that
-    // was perfectly healthy and hadn't changed — and since the action treats
-    // "no update + a warning" as a failure, a stable overpaid card rendered a
-    // red error under its Refresh button forever.
+    // The card half only ANNOUNCES, and belongs after the write succeeded —
+    // both because a no-op should stay silent (a stable overpaid card used to
+    // render a red error under its Refresh button forever, since the action
+    // treats "no update + a warning" as a failure) and because a refusal above
+    // must not be accompanied by a remark about a balance nothing accepted.
     if (balanceCents > 0) {
       warnings.push(
         `SimpleFIN reports "${account.name}" as ${formatCents(balanceCents)} — a credit balance. If that is wrong, set it with Reconcile on the Accounts page.`,
       );
     }
 
-    db.update(schema.accounts)
-      .set({
-        startingBalanceCents: balanceCents,
-        startingBalanceDate: asOfIso,
-        priorStartingBalanceCents: account.startingBalanceCents,
-        priorStartingBalanceDate: account.startingBalanceDate,
-        balanceAsOf: asOfDate,
-        balanceSource: "feed",
-        updatedAt: now,
-      })
-      .where(eq(schema.accounts.id, account.id))
-      .run();
-
+    // Reported ONLY on the written branch. Pushing this unconditionally made
+    // `describeBalanceUpdates` announce "Balance updated: X is now $Y" for an
+    // account whose UPDATE matched zero rows — a fabricated durable fact, and
+    // the `/sync` doctrine's "a no-op is never reported as a completed action"
+    // violated on the one write rule 9 calls silent and expensive.
     updates.push({
       accountId: account.id,
       name: account.name,
       balanceCents,
       asOfIso,
-      priorBalanceCents: account.startingBalanceCents,
-      priorAsOfIso: account.startingBalanceDate,
+      priorBalanceCents: applied.priorBalanceCents,
+      priorAsOfIso: applied.priorAsOfIso,
     });
   }
 
@@ -548,8 +669,10 @@ export async function syncSimpleFin(
   // value that decided a row was new is the value stored as its provenance.
   type Staged = {
     account: (typeof linked)[number];
-    feedId: string;
+    feedId: FeedAccountId;
     rows: MappedRow[];
+    /** Pending-skip and dead-connection notes, flushed only if this account survives the link re-check. */
+    accountWarnings: string[];
   };
   const staged: Staged[] = [];
   const counts: AccountSyncCounts[] = [];
@@ -559,10 +682,18 @@ export async function syncSimpleFin(
     // query. Named once because the id pass, the content pass and the insert
     // below all key off it, and `accounts.$inferSelect` types the column as
     // nullable.
-    const feedId = account.simplefinAccountId!;
+    // Minted once, here. Everything downstream — the dedup predicates, the
+    // provenance column, the link re-check — takes the branded type, so the
+    // transaction id or a bare name cannot reach any of them.
+    const feedId = asFeedAccountId(account.simplefinAccountId!);
     const remote = byExternalId.get(feedId);
+    // Buffered, not pushed. Every warning in this loop is a statement about an
+    // import that has not happened yet — `verifyStagedLinks` can still withhold
+    // this account entirely, and a retracted import must not leave behind a
+    // sentence promising rows will arrive. Flushed for survivors only, below.
+    const accountWarnings: string[] = [];
     if (!remote) {
-      warnings.push(
+      accountWarnings.push(
         `SimpleFIN returned nothing for "${account.name}" — the connection may need re-authorising.`,
       );
     }
@@ -697,14 +828,14 @@ export async function syncSimpleFin(
     }
 
     if (skippedPending > 0) {
-      warnings.push(
+      accountWarnings.push(
         `Skipped ${skippedPending} pending transaction${
           skippedPending === 1 ? "" : "s"
         } on "${account.name}" — they will import once the bank posts them.`,
       );
     }
 
-    staged.push({ account, feedId, rows: toInsert });
+    staged.push({ account, feedId, rows: toInsert, accountWarnings });
 
     const reported = remote?.balance ? parseAmountToCents(remote.balance) : null;
     const available = remote?.["available-balance"]
@@ -754,7 +885,74 @@ export async function syncSimpleFin(
     warnings.push(snapshotWarning);
   }
 
-  const batchId = db.transaction((tx) => {
+  let written: {
+    batchId: number;
+    insertedCount: number;
+    linkWarnings: string[];
+    droppedAccountIds: number[];
+  };
+  try {
+    written = db.transaction((tx) => {
+    // The links were read before the network round trip; re-check them here,
+    // inside the transaction that actually writes. See `verifyStagedLinks`.
+    const { verified: linkChecked, warnings: linkWarnings, droppedAccountIds } =
+      verifyStagedLinks(staged, tx);
+
+    // The link is not the only precondition carried across the `await`.
+    // `seenExternalIds` was read BEFORE the fetch, so a second sync (two /sync
+    // tabs, the same reachability bar the link guard is written for) can commit
+    // rows for the same feed in the window — and those rows are protected by
+    // the partial unique index on (simplefin_source_account_id, external_id),
+    // so the collision does not double-count. It does something else bad: it
+    // aborts the ENTIRE transaction, including good rows for accounts that were
+    // fine, and surfaces the driver's raw "UNIQUE constraint failed" text. The
+    // comment on `existingByContent` predicts exactly that outcome.
+    //
+    // So the id pass is re-run here, against the same handle that inserts.
+    // Rows another writer already landed are DROPPED, which is the correct
+    // reading of them — they are duplicates, and dedup is what this pass is
+    // for. One query for the batch, not one per row.
+    //
+    // Deliberately NOT the content pass: content dedup has no unique index
+    // behind it, so a concurrent CSV import racing this one produces a genuine
+    // duplicate row rather than an abort. That is a real residual and it is
+    // recorded in TODOS rather than fixed by widening this query, because the
+    // content budget is a multiset count (rule 3) and re-deriving it inside the
+    // transaction is a different and larger change.
+    const verified = linkChecked
+      .map((entry) => {
+        if (entry.rows.length === 0) return entry;
+        const landed = new Set(
+          tx
+            .select({ externalId: schema.transactions.externalId })
+            .from(schema.transactions)
+            .where(
+              and(
+                eq(schema.transactions.simplefinSourceAccountId, entry.feedId),
+                inArray(
+                  schema.transactions.externalId,
+                  entry.rows.map((r) => r.externalId),
+                ),
+              ),
+            )
+            .all()
+            .map((r) => r.externalId),
+        );
+        if (landed.size === 0) return entry;
+        return { ...entry, rows: entry.rows.filter((r) => !landed.has(r.externalId)) };
+      })
+      .filter((entry) => entry.rows.length > 0 || entry.accountWarnings.length > 0);
+
+    const raced = linkChecked.reduce((n, e) => n + e.rows.length, 0)
+      - verified.reduce((n, e) => n + e.rows.length, 0);
+    if (raced > 0) {
+      linkWarnings.push(
+        `${raced} transaction${raced === 1 ? "" : "s"} had already been imported by another sync running at the same time, so ${raced === 1 ? "it was" : "they were"} skipped.`,
+      );
+    }
+
+    const verifiedTotal = verified.reduce((n, s) => n + s.rows.length, 0);
+
     // Same contract as the CSV path: read the trained rules once for the batch
     // and resolve every row against them. Keyed on `normalized_merchant`, never
     // on MX's `payee` — see CLAUDE.md's SimpleFIN section.
@@ -771,7 +969,7 @@ export async function syncSimpleFin(
       .returning({ id: schema.importBatches.id })
       .all();
 
-    for (const { account, feedId, rows } of staged) {
+    for (const { account, feedId, rows } of verified) {
       for (const row of rows) {
         const match = matchRule(row.normalizedMerchant, row.amountCents);
 
@@ -824,13 +1022,116 @@ export async function syncSimpleFin(
       }
     }
 
+    // `verifiedTotal`, not `totalToInsert`: the batch must count what was
+    // actually written, or `undoSyncBatch` and `/import/success/[batchId]`
+    // both report rows that do not exist.
     tx.update(schema.importBatches)
-      .set({ transactionCount: totalToInsert })
+      .set({ transactionCount: verifiedTotal })
       .where(eq(schema.importBatches.id, batch.id))
       .run();
 
-    return batch.id;
+    if (verifiedTotal === 0) {
+      // Rolls back the batch row above. The warnings are rebuilt by the
+      // catch, because this transaction's work is about to be discarded.
+      throw new NothingVerifiedError();
+    }
+
+    // C2: the drop warnings are the ONLY record that rows were withheld, and
+    // until now they lived exclusively in one `useActionState` value — close
+    // the tab and 40 unimported bank rows left no trace anywhere. Rule 5 already
+    // settled this question for the snapshot warning ("not a redirect query
+    // param — it has to survive a later visit to the batch's success page"),
+    // and `snapshot_warning` is documented as a general per-batch channel that
+    // `anchorStartingBalance` already shares. A withheld import is at least as
+    // consequential as a degraded snapshot.
+    if (linkWarnings.length > 0) {
+      tx.update(schema.importBatches)
+        .set({
+          snapshotWarning: [snapshotWarning, ...linkWarnings].filter(Boolean).join(" "),
+        })
+        .where(eq(schema.importBatches.id, batch.id))
+        .run();
+    }
+
+    return { batchId: batch.id, insertedCount: verifiedTotal, linkWarnings, droppedAccountIds };
   });
+
+  } catch (err) {
+    if (!(err instanceof NothingVerifiedError)) throw err;
+    // Every staged account moved. Nothing was written, so there is no batch to
+    // hang a warning on and nothing for the retention pool to protect: drop the
+    // snapshot we took rather than let it evict a real one, re-run the check
+    // outside the (rolled-back) transaction purely to rebuild its sentences,
+    // and report the same shape a quiet sync uses. `ok()` promotes any
+    // warning-carrying outcome out of plain-success rendering.
+    try {
+      unlinkSync(snapshot.snapshotPath);
+    } catch {
+      // Best effort. A stray snapshot is harmless; failing the sync over one
+      // would be the tail wagging the dog.
+    }
+    const { warnings: linkWarnings } = verifyStagedLinksReadOnly(staged, db);
+    for (const w of linkWarnings) console.error(`sync: ${w}`);
+    warnings.push(...linkWarnings);
+    const finalised = finaliseBalances(
+      counts.map((c) => ({
+        ...c,
+        insertedCount: 0,
+        duplicateByExternalId: 0,
+        duplicateByContent: 0,
+        reportedBalanceCents: null,
+        availableBalanceCents: null,
+        balanceDate: null,
+      })),
+      db,
+    );
+    warnings.push(...missingAccountWarnings(finalised.missingAccounts));
+    return {
+      status: "up-to-date",
+      accounts: finalised.summaries,
+      balanceUpdates: balancePass.updates,
+      warnings,
+    };
+  }
+
+  const { batchId, insertedCount } = written;
+  // Durable-ish trace beside the persisted copy: the batch row survives a
+  // closed tab, this survives a lost batch.
+  for (const w of written.linkWarnings) console.error(`sync: ${w}`);
+  warnings.push(...written.linkWarnings);
+
+  // The PER-ACCOUNT summary has to agree with the aggregate. `counts` is built
+  // in the staging loop above, before the link re-check runs, so a dropped
+  // account would otherwise report the rows it ALMOST got — `insertedCount: 1`
+  // sitting beside an `outcome.insertedCount` and a `transaction_count` of 0.
+  // That is the same lie `verifiedTotal` exists to prevent, one layer up, and
+  // `AccountSyncSummary` is a public field even though only the aggregate is
+  // rendered today.
+  //
+  // EVERY field, not just `insertedCount`. The rest of the record was computed
+  // against a feed this account no longer holds, and each one is its own wrong
+  // statement: `duplicateBy*` counted matches against the OLD feed's ids and
+  // content budget, and `reportedBalanceCents`/`availableBalanceCents`/
+  // `balanceDate` are the old feed's balance — which `finaliseBalances` would
+  // then subtract from a ledger deliberately missing the withheld rows and
+  // report as `driftCents`, i.e. rule 1's "a row is missing or duplicated"
+  // signal, manufactured. Nulling the reported balance is what makes
+  // `driftCents` come back null instead of fabricated.
+  const dropped = new Set(written.droppedAccountIds);
+  for (const c of counts) {
+    if (!dropped.has(c.accountId)) continue;
+    c.insertedCount = 0;
+    c.duplicateByExternalId = 0;
+    c.duplicateByContent = 0;
+    // `skippedPending` is deliberately NOT zeroed. It counts rows the feed sent
+    // that this app refuses to write, decided before any dedup pass touches the
+    // ledger — a fact about the PAYLOAD, not about a join against the old feed.
+    // It was true when counted and stays true, and its warning is withheld with
+    // the rest of this account's staging notes, so the two agree.
+    c.reportedBalanceCents = null;
+    c.availableBalanceCents = null;
+    c.balanceDate = null;
+  }
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
@@ -850,7 +1151,7 @@ export async function syncSimpleFin(
   return {
     status: "synced",
     batchId,
-    insertedCount: totalToInsert,
+    insertedCount,
     pairsLinked,
     ambiguous,
     snapshot,
@@ -860,11 +1161,191 @@ export async function syncSimpleFin(
   };
 }
 
+/**
+ * Thrown inside the write transaction when the link re-check withheld EVERY
+ * staged account, purely to roll it back. Never escapes `syncSimpleFin`.
+ *
+ * Committing in that case minted an empty `import_batches` row, and an empty
+ * batch is not inert: `findLastSyncBatch` returns the NEWEST sync batch, so it
+ * became the undo target and the previous real sync's undo silently became
+ * unreachable — the user's rollback for the last import that actually wrote
+ * anything, gone, with nothing saying so. It also spent a slot in the
+ * retention-of-10 snapshot pool on a snapshot of a ledger the sync did not
+ * change, which is the exact harm rule 5's prune-after-commit ordering exists
+ * to prevent, reached through a door that ordering does not cover.
+ */
+class NothingVerifiedError extends Error {}
+
+/**
+ * `verifyStagedLinks` against the live handle, for the rolled-back path only.
+ *
+ * The transaction that produced the warnings was discarded, so its strings went
+ * with it. Re-deriving them outside is sound here precisely because nothing was
+ * written: there is no ordering guarantee left to protect, only copy to rebuild.
+ */
+function verifyStagedLinksReadOnly<
+  T extends {
+    account: { id: number; name: string };
+    feedId: FeedAccountId;
+    rows: readonly MappedRow[];
+    accountWarnings: readonly string[];
+  },
+>(staged: readonly T[], db: Db): { warnings: string[] } {
+  const warnings: string[] = [];
+  for (const entry of staged) {
+    const current = db
+      .select({ simplefinAccountId: schema.accounts.simplefinAccountId })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, entry.account.id))
+      .get();
+    if (current === undefined) {
+      warnings.push(`"${entry.account.name}" was deleted while the sync was running.`);
+    } else if (current.simplefinAccountId === null) {
+      warnings.push(
+        `"${entry.account.name}" was unlinked while the sync was running, so its transactions were not imported — link it again to import them.`,
+      );
+    } else if (current.simplefinAccountId !== entry.feedId) {
+      warnings.push(
+        `"${entry.account.name}" was re-linked to a different bank account while the sync was running, so its transactions were not imported — sync again to import them against the current link.`,
+      );
+    }
+  }
+  return { warnings };
+}
+
 function missingAccountWarnings(names: string[]): string[] {
   return names.map(
     (n) =>
       `"${n}" disappeared from the ledger while the sync was running, so its balance could not be checked.`,
   );
+}
+
+/**
+ * Re-checks, INSIDE the write transaction, that every staged account is still
+ * linked to the feed its rows were staged against.
+ *
+ * The account list is read before the SimpleFIN round trip and the insert
+ * happens after it, so `account.id` and `feedId` are a PRECONDITION carried
+ * across an `await` — and `setAccountLink` can commit in that window. Both
+ * controls live on the same `/sync` page, so it takes two tabs and no crafted
+ * input:
+ *
+ *   t0  syncSimpleFin reads accounts      account 1 -> feed A
+ *   t1  await fetchAccounts(...)  ────┐
+ *   t2                                │   setAccountLink(1, feed B) commits
+ *   t3  insert with account.id=1, ◄───┘   ...rows from feed A, on an account
+ *       feedId=feed A                     that is now feed B's
+ *
+ * The vulnerable window is t0 -> t3, NOT the fetch alone: it also spans the
+ * per-account staging loop and `createSnapshot`'s `VACUUM INTO`. Nor is it
+ * bounded by `SYNC_TIMEOUT_MS` — that only bounds the fetch, and only when the
+ * caller passes no signal of its own (`opts.signal ?? AbortSignal.timeout`).
+ *
+ * The result is not a duplicate but something the dedup passes cannot see at
+ * all: feed A's rows filed under an account the user has repointed, carrying
+ * feed A provenance. That is the misfiling class migration `0020` exists to
+ * prevent, reintroduced as a race rather than as a schema mistake.
+ *
+ * Same idiom as `undoSyncBatch`, which re-checks its own "still the newest
+ * batch" precondition inside its transaction rather than trusting the page's
+ * initial check (CLAUDE.md rule 5) — that reasoning applies here with more
+ * force, because this write is the one that moves money onto an account.
+ *
+ * DROPS the affected account's rows rather than failing the whole sync. Every
+ * other account's rows were staged against a link that did not move, so they
+ * are correct and refusing them would punish accounts that did nothing.
+ * Nothing is WRITTEN for a dropped account, so no dedup pass records the
+ * withheld rows and none of this is destructive — but "the next sync re-stages
+ * them" is true of only one of the three cases, so the three warnings carry
+ * three different remedies rather than one reassurance:
+ *
+ *   repointed  the next sync stages the NEW feed's rows. The withheld ones
+ *              come back only if that feed serves them too — which it does for
+ *              a re-minted feed id (same bank account, fresh id from
+ *              `simplefin:claim`) and does not for a genuine move to a
+ *              different bank account. "Sync again" is the right advice; it is
+ *              not a guarantee.
+ *   unlinked   the account is excluded from the next run's `linked` query
+ *              entirely, so syncing again imports nothing for it and says
+ *              nothing about it. The remedy is to LINK IT AGAIN.
+ *   deleted    unrecoverable, and the warning offers no remedy because there
+ *              is none.
+ *
+ * Three branches, not one, for exactly that reason — an earlier draft folded
+ * them together and told an unlinking user to "sync again to import them",
+ * which is a no-op that leaves the rows silently never arriving. The warning
+ * is what makes the drop non-silent, so a warning naming the wrong remedy is
+ * close to no guard at all. `/sync` never renders a warning-carrying sync as a
+ * plain success, and the warnings are persisted onto the batch (see below).
+ */
+function verifyStagedLinks<
+  T extends {
+    account: { id: number; name: string };
+    feedId: FeedAccountId;
+    rows: readonly MappedRow[];
+    accountWarnings: readonly string[];
+  },
+>(
+  staged: readonly T[],
+  tx: SyncTx,
+): { verified: T[]; warnings: string[]; droppedAccountIds: number[] } {
+  const verified: T[] = [];
+  const warnings: string[] = [];
+  const droppedAccountIds: number[] = [];
+
+  for (const entry of staged) {
+    const current = tx
+      .select({ simplefinAccountId: schema.accounts.simplefinAccountId })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, entry.account.id))
+      .get();
+
+    if (current === undefined) {
+      warnings.push(
+        entry.rows.length === 0
+          ? `"${entry.account.name}" was deleted while the sync was running.`
+          : `"${entry.account.name}" was deleted while the sync was running, so its transactions were not imported. Nothing was written for it.`,
+      );
+      droppedAccountIds.push(entry.account.id);
+      continue;
+    }
+    // Split from the repoint case deliberately. Both are "not the account
+    // these rows were staged for", but the REMEDIES are opposites and the
+    // warning is the entire mechanism that makes the drop non-silent. An
+    // unlinked account is excluded from the next run's `linked` query, so
+    // "sync again" imports nothing for it, says nothing about it, and the
+    // rows quietly never arrive — the docstring's "the next sync re-stages
+    // them" is true of a repoint and false of an unlink.
+    if (current.simplefinAccountId === null) {
+      warnings.push(
+        entry.rows.length === 0
+          ? `"${entry.account.name}" was unlinked while the sync was running. It had nothing new to import.`
+          : `"${entry.account.name}" was unlinked while the sync was running, so its transactions were not imported. Nothing was written for it — link it again to import them.`,
+      );
+      droppedAccountIds.push(entry.account.id);
+      continue;
+    }
+    // Reached only for a link that moved to ANOTHER feed — the NULL case
+    // `continue`s above. Written as `!==` rather than a positive test so the
+    // ordering is not load-bearing: remove the branch above and this still
+    // catches an unlink, just with the wrong remedy in its copy.
+    if (current.simplefinAccountId !== entry.feedId) {
+      warnings.push(
+        entry.rows.length === 0
+          ? `"${entry.account.name}" was re-linked to a different bank account while the sync was running. It had nothing new to import.`
+          : `"${entry.account.name}" was re-linked to a different bank account while the sync was running, so its transactions were not imported. Nothing was written for it — sync again to import them against the current link.`,
+      );
+      droppedAccountIds.push(entry.account.id);
+      continue;
+    }
+
+    verified.push(entry);
+    // This account is being written, so its staging notes are true statements
+    // about a real import and can go out.
+    warnings.push(...entry.accountWarnings);
+  }
+
+  return { verified, warnings, droppedAccountIds };
 }
 
 /**

@@ -5,6 +5,7 @@ import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import {
   CategoryKindChangeRefusedError,
   ProtectedCategoryKindError,
+  UnconfirmedIrreversibleKindChangeError,
   loadReclassifyCandidates,
   setCategoryKind,
 } from "./setCategoryKind";
@@ -78,14 +79,14 @@ describe("setCategoryKind — TC23 (D9A)", () => {
     const cat = seedCategory("Groceries");
     seedTxn(account.id, batch.id, cat.id, -4000);
 
-    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
+    expect(() => setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true })).toThrow(CategoryKindChangeRefusedError);
   });
 
   it("refuses a category with >=1 budget_periods row", () => {
     const cat = seedCategory("Groceries");
     handle.db.insert(schema.budgetPeriods).values({ categoryId: cat.id, year: 2026, month: 3, allocatedCents: 10000 }).run();
 
-    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
+    expect(() => setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true })).toThrow(CategoryKindChangeRefusedError);
   });
 
   it("succeeds on an unused category", () => {
@@ -155,6 +156,40 @@ describe("setCategoryKind — TC23 (D9A)", () => {
 });
 
 describe("setCategoryKind — TC23b (X1)", () => {
+  it("REFUSES an unconfirmed X1, because the client gate is decided from a stale prop", () => {
+    // `CategoryMenu` gates X1 behind a confirmation dialog, but that gate reads
+    // a server-rendered prop and `commitAllocationAction` deliberately does not
+    // revalidate. Concrete miss: a tab renders the category as UNUSED, another
+    // tab (or "Copy previous month") gives it a `budget_periods` row, and the
+    // stale tab offers the change with no dialog — while X1 accepts it, since
+    // `negativeTxnCount === 0` is vacuously true at zero rows. So the server
+    // checks the confirmation itself. Absence is a refusal, never a default.
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Paycheck", "expense");
+    seedTxn(account.id, batch.id, cat.id, 200000, "2026-03-01");
+
+    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(
+      UnconfirmedIrreversibleKindChangeError,
+    );
+    // And nothing moved.
+    const after = handle.db
+      .select()
+      .from(schema.categories)
+      .where(eq(schema.categories.id, cat.id))
+      .get();
+    expect(after?.kind).toBe("expense");
+  });
+
+  it("does NOT require confirmation for a reversible change on an UNUSED category", () => {
+    // The flag is required only on the one-way branch; demanding it everywhere
+    // would put a modal in front of ordinary setup and train people to click
+    // through the one dialog that matters.
+    const cat = seedCategory("Fresh", "expense");
+    expect(setCategoryKind(handle.db, cat.id, "income").newKind).toBe("income");
+    expect(setCategoryKind(handle.db, cat.id, "fund").newKind).toBe("fund");
+  });
+
   it("allows expense -> income on a used, all-positive category", () => {
     const account = seedAccount();
     const batch = seedBatch();
@@ -162,7 +197,7 @@ describe("setCategoryKind — TC23b (X1)", () => {
     seedTxn(account.id, batch.id, cat.id, 200000, "2026-03-01");
     seedTxn(account.id, batch.id, cat.id, 200000, "2026-04-01");
 
-    const result = setCategoryKind(handle.db, cat.id, "income");
+    const result = setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true });
     expect(result.newKind).toBe("income");
   });
 
@@ -173,7 +208,7 @@ describe("setCategoryKind — TC23b (X1)", () => {
     seedTxn(account.id, batch.id, cat.id, 200000, "2026-03-01");
     seedTxn(account.id, batch.id, cat.id, -5000, "2026-03-05"); // a clawback
 
-    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
+    expect(() => setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true })).toThrow(CategoryKindChangeRefusedError);
   });
 
   it("refuses income -> expense on a used category even if all-positive", () => {
@@ -209,7 +244,7 @@ describe("setCategoryKind — TC23b (X1)", () => {
     const cat = seedCategory("Savings", "fund");
     seedTxn(account.id, batch.id, cat.id, 20000, "2026-03-01");
 
-    expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
+    expect(() => setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true })).toThrow(CategoryKindChangeRefusedError);
   });
 
   it("still applies X1 when the category also has budget_periods rows — disclosure, not refusal", () => {
@@ -222,7 +257,7 @@ describe("setCategoryKind — TC23b (X1)", () => {
       .values({ categoryId: cat.id, year: 2026, month: 3, allocatedCents: 10000 })
       .run();
 
-    const result = setCategoryKind(handle.db, cat.id, "income");
+    const result = setCategoryKind(handle.db, cat.id, "income", { confirmedIrreversible: true });
     expect(result.newKind).toBe("income");
   });
 

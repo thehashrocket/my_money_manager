@@ -16,6 +16,7 @@ import { AmountParseError, parseAmountToCents } from "@/lib/money";
 import {
   CategoryKindChangeRefusedError,
   ProtectedCategoryKindError,
+  UnconfirmedIrreversibleKindChangeError,
   setCategoryKind,
 } from "@/lib/budget/setCategoryKind";
 import { copyPreviousMonth, type CopyPreviousMonthResult } from "@/lib/budget/copyMonth";
@@ -96,6 +97,15 @@ export async function upsertBudgetAllocationAction(
 const setCategoryKindInputSchema = z.object({
   categoryId: z.coerce.number().int().positive(),
   kind: z.enum(["income", "expense", "fund"]),
+  /**
+   * "The user was shown the irreversibility confirmation and accepted."
+   *
+   * Optional here and REQUIRED by `setCategoryKind` only on the X1 branch, so
+   * an unused category's reversible kind change needs no ceremony. A stale tab
+   * that never rendered the dialog omits it and is refused — see
+   * `UnconfirmedIrreversibleKindChangeError`.
+   */
+  confirmedIrreversible: z.literal("yes").optional(),
 });
 
 /**
@@ -107,8 +117,37 @@ const setCategoryKindInputSchema = z.object({
  */
 export type SetCategoryKindActionState =
   | { status: "idle" }
-  | { status: "ok"; categoryId: number }
+  | { status: "ok"; categoryId: number; warning?: string }
   | { status: "error"; message: string };
+
+/**
+ * Shown when the write landed but the page could not be refreshed.
+ *
+ * NOT exported, and that is a Next.js constraint rather than a style choice: a
+ * `"use server"` module may only export async functions, so adding an exported
+ * const here makes Turbopack report "the module has no exports at all" and
+ * every importer of every action in this file fails to resolve. `tsc` cannot
+ * see it — it is a bundler rule, not a type rule — and no unit test imports a
+ * route module, so it surfaces only by loading the page.
+ */
+const BUDGET_REFRESH_FAILED_WARNING =
+  "The change was saved, but this page could not be refreshed — reload to see it.";
+
+/**
+ * Runs a revalidation that follows an already-committed write and converts a
+ * failure into a warning rather than letting it escape as a throw. Same shape
+ * and same reasoning as `/sync`'s `guardRefresh`; the budget actions never got
+ * it, which left a committed one-way write able to surface as a load error.
+ */
+function guardBudgetRefresh(run: () => void): string | undefined {
+  try {
+    run();
+    return undefined;
+  } catch (err) {
+    console.error("[/budget] revalidation failed after a committed write", err);
+    return BUDGET_REFRESH_FAILED_WARNING;
+  }
+}
 
 export async function setCategoryKindAction(
   _prev: SetCategoryKindActionState,
@@ -120,7 +159,9 @@ export async function setCategoryKindAction(
   }
 
   try {
-    setCategoryKind(db, parsed.data.categoryId, parsed.data.kind);
+    setCategoryKind(db, parsed.data.categoryId, parsed.data.kind, {
+      confirmedIrreversible: parsed.data.confirmedIrreversible === "yes",
+    });
   } catch (err) {
     // Only the three failures reachable from ordinary use are downgraded to
     // state (DS32 wants the refusal inline, next to the category the user
@@ -129,7 +170,8 @@ export async function setCategoryKindAction(
     if (
       err instanceof CategoryKindChangeRefusedError ||
       err instanceof CategoryNotFoundError ||
-      err instanceof ProtectedCategoryKindError
+      err instanceof ProtectedCategoryKindError ||
+      err instanceof UnconfirmedIrreversibleKindChangeError
     ) {
       return { status: "error", message: err.message };
     }
@@ -141,12 +183,22 @@ export async function setCategoryKindAction(
   // only /budget left "/", "/goals", and "/categorize" free to keep serving
   // a stale RSC payload with the category's old kind until an unrelated
   // mutation or a hard refresh (caught by Codex adversarial review via /ship).
-  revalidatePath("/budget");
-  revalidatePath("/budget/[year]/[month]", "page");
-  revalidatePath("/");
-  revalidatePath("/goals");
-  revalidatePath("/categorize");
-  return { status: "ok", categoryId: parsed.data.categoryId };
+  // Guarded, and OUTSIDE the try above, for the reason `/sync` documents at
+  // length: these lines run AFTER `setCategoryKind` has committed, so a throw
+  // from `revalidatePath` reports an already-durable write as a failure. Worse
+  // here than on /sync, because the write this follows is one-way — the user
+  // would be told an irreversible change failed when it landed, and
+  // `error.tsx` would tell them "Nothing was written that you didn't already
+  // ask for". A stale page with an accurate message beats a crash with a false
+  // one, so a refresh failure comes back as a warning on a successful result.
+  const refreshWarning = guardBudgetRefresh(() => {
+    revalidatePath("/budget");
+    revalidatePath("/budget/[year]/[month]", "page");
+    revalidatePath("/");
+    revalidatePath("/goals");
+    revalidatePath("/categorize");
+  });
+  return { status: "ok", categoryId: parsed.data.categoryId, warning: refreshWarning };
 }
 
 export type CommitAllocationResult =

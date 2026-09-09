@@ -133,12 +133,16 @@ export function ActionStatus({ state }: { state: SyncActionState }) {
     // plain block below the row. Kept because any future form that does put a
     // row on the <form> itself gets the old behaviour for free.
     //
-    // `alert` for a refusal, `status` for the rest: a polite live region can be
-    // held until the user goes idle, and on a page of a dozen near-identical
-    // forms a silently-swallowed "already paired" refusal reads as the click
-    // having worked.
+    // `alert` for a refusal AND for a warning; `status` only for a plain
+    // success. A polite live region can be held until the user goes idle, and
+    // on a page of a dozen near-identical forms a silently-swallowed message
+    // reads as the click having worked. That argument was written for
+    // "already paired" refusals and applies with more force to a warning: the
+    // sync WARNINGS include "its transactions were not imported" for an
+    // account whose link moved mid-run — an entire account's import withheld,
+    // which is not something to mention when convenient.
     <div
-      role={state.status === "error" ? "alert" : "status"}
+      role={state.status === "ok" ? "status" : "alert"}
       className="mt-2 w-full space-y-1"
     >
       <p className={`text-sm ${tone}`}>{state.message}</p>

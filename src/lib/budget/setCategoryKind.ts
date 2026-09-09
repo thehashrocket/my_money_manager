@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { assignableKinds, type CategoryKind } from "@/lib/budget/categoryKindLock";
+import { assignableKinds, isCategoryUsed, type CategoryKind } from "@/lib/budget/categoryKindLock";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 
 type Db = typeof defaultDb;
@@ -154,6 +154,42 @@ export class CategoryKindChangeRefusedError extends Error {
  * unconditionally, at the actual write boundary, matching the same by-name
  * convention the `categories_uncategorized_no_delete` trigger already uses.
  */
+/**
+ * The change is legal (X1 admits it) but nothing confirmed it.
+ *
+ * X1 — expense → income on a USED category — is one-way: rule 8 refuses
+ * income → expense on a used category, so there is no path back in the app.
+ * `CategoryMenu` gates it behind a confirmation dialog, but that gate is
+ * decided from a SERVER-RENDERED prop and `commitAllocationAction`
+ * deliberately does not revalidate, so the prop is stale by design. Concrete
+ * miss: a tab renders a category as unused, "Copy previous month" creates a
+ * `budget_periods` row in another tab, and the stale tab now offers the change
+ * with no dialog, no ellipsis and no destructive styling — while X1 accepts it,
+ * because `negativeTxnCount === 0` is vacuously true at zero rows.
+ *
+ * So the confirmation is a fact the SERVER checks, not one the client is
+ * trusted to have performed. Absence is a refusal, which is the same shape
+ * rule 4 arrived at for the reversal form's `intent` after the mirror-image
+ * bug: never let absence be the affirmative signal for the irreversible branch.
+ *
+ * Note the threat model is a STALE TAB, not a crafted post — this app is
+ * single-user, local and unauthenticated, so a hand-built form could always
+ * set the flag. What it cannot do is set it by accident, which is the entire
+ * population of real occurrences.
+ */
+export class UnconfirmedIrreversibleKindChangeError extends Error {
+  constructor(
+    readonly categoryId: number,
+    readonly categoryName: string,
+  ) {
+    super(
+      `"${categoryName}" already has activity, so changing it to income cannot be undone in the app. ` +
+        `Reload the page and use the confirmation step — this tab's view of the category is out of date.`,
+    );
+    this.name = "UnconfirmedIrreversibleKindChangeError";
+  }
+}
+
 export class ProtectedCategoryKindError extends Error {
   constructor(readonly categoryId: number) {
     super(`"Uncategorized" is a protected category and its kind cannot be changed.`);
@@ -200,7 +236,21 @@ export type SetCategoryKindResult = {
  * function directly with such a category still gets the permissive
  * behavior described above.
  */
-export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKind): SetCategoryKindResult {
+export function setCategoryKind(
+  db: Db,
+  categoryId: number,
+  newKind: CategoryKind,
+  opts: {
+    /**
+     * The caller showed the user the irreversibility confirmation and they
+     * accepted. Required ONLY when the change takes the X1 branch; ignored
+     * otherwise, because every other permitted transition is on an unused
+     * category and freely reversible. See
+     * `UnconfirmedIrreversibleKindChangeError`.
+     */
+    confirmedIrreversible?: boolean;
+  } = {},
+): SetCategoryKindResult {
   return db.transaction((tx) => {
     const category = tx
       .select({ id: schema.categories.id, name: schema.categories.name, kind: schema.categories.kind })
@@ -252,6 +302,20 @@ export function setCategoryKind(db: Db, categoryId: number, newKind: CategoryKin
         txnStats.earliestDate,
         txnStats.latestDate,
       );
+    }
+
+    // The change is permitted. Is it the ONE-WAY one? `assignableKinds`
+    // returns all three kinds iff the category is unused, so a permitted
+    // change on a used category is X1 by construction — the same reading
+    // `kindsImplyUsed` gives the client, checked here where it cannot be
+    // stale.
+    const isIrreversible = isCategoryUsed({
+      txnCount: txnStats.count,
+      negativeTxnCount: txnStats.negativeCount,
+      periodCount,
+    });
+    if (isIrreversible && opts.confirmedIrreversible !== true) {
+      throw new UnconfirmedIrreversibleKindChangeError(category.id, category.name);
     }
 
     // Dual-write (T5, D1B/A2): `createGoalAction` already keeps
