@@ -482,6 +482,54 @@ that has not earned the layout.
 checking account it always was. `/goals` says so plainly and this page must not
 contradict it.
 
+### What a fund's progress means (1.0.0 gate #2, closed 2026-09-08)
+
+**A fund number is money PLANNED, not money moved.** Every figure this app
+shows for a fund — `Planned`, `Planned to date`, `Left to target`, and
+`/goals`' headline — is a sum of `budget_periods.allocated_cents`: what you
+said you intended, month by month. None of them claims a dollar changed
+accounts.
+
+PLAN.md's gate #2 expected using the app to *reveal* which of two quantities
+deserved the word "progress". It cannot, and that is worth writing down rather
+than rediscovering:
+
+- `GoalRow.totalContributedCents` is the gross sum of allocations.
+- `GoalRow.progressCents` is `allocated − withdrawn`, where `withdrawn` sums
+  transactions filed to the fund.
+
+**They are identical on any ledger this app can produce**, because nothing can
+file a transaction to a fund. `assertAssignableCategory` throws
+`SavingsGoalCategoryError` on `kind='fund'`, and all three categorize write
+paths route through it; `CategoryCombobox` filters funds out of the picker
+before that; and `src/lib/rules.ts` refuses to auto-file a *positive* row into
+a fund at import time, on the grounds that such a row "poisons" the category.
+So `withdrawn` is a sum over a set no ordinary path can populate, and funding a
+fund once shows you the same number twice. There was never an experiment to
+run — only this decision to record.
+
+Consequences that follow from it, so they are not re-litigated one at a time:
+
+- `loadGoals` keeps `withdrawn` **outflows-only** (`amount_cents < 0`), not the
+  signed sum rule 1 gave `computeMtdSpent` and `loadMonthlyTrends`. A net
+  figure would let a deposit into a fund raise progress on top of the
+  allocation already counting the same intention.
+- A **positive row filed to a rollover fund does not raise its carried
+  balance** (`loadRolloverEffectiveByCategory`). Funds only entered the
+  rollover path in v0.23.0 and the spend expression underneath had no kind
+  discipline, which meant an interest credit could carry more than was ever
+  allocated. The fund-scoped guard there is this same decision, applied in the
+  one subsystem that had not heard it.
+- On an **expense** envelope a refund still reduces spend and so increases what
+  carries forward. That is rule 1's v0.19.0 decision and it is untouched — the
+  fund guard is fund-scoped precisely so it does not quietly reverse it.
+
+What is deliberately still open is the *product* question underneath: whether
+money should be able to move into a fund at all (a real transfer-into-savings
+model), rather than a fund being a plan you keep in your head and your checking
+account. That is successor work to rule 1's `loadGoals` note, not a 1.0.0
+blocker — this section documents the model the code actually implements.
+
 **Bands are ordered INCOME → EXPENSES → FUNDS, and the help panel follows all
 three.** You cannot assign a dollar you have not planned, and a fund
 contribution is the last call you make, not the first. The panel used to render

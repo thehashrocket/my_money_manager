@@ -75,6 +75,32 @@ describe("createCategoryGroup (T25/DS20)", () => {
     createCategoryGroup(handle.db, "Zz Health");
     expect(() => createCategoryGroup(handle.db, "Zz Health")).toThrow(CategoryNameTakenError);
   });
+
+  /* An ARCHIVED category still holds its name in the unique index, and is
+     invisible on every surface that could explain the collision — out of every
+     picker (rule 8), out of `loadGoals` as of v0.24.0, and out of a month's
+     `/budget` rows unless it has activity there. So the message has to name
+     the archive and point at the one page that can unarchive it; "already
+     exists" alone sends the user looking for something they cannot find. */
+  it("says the colliding category is archived, and where to unarchive it", () => {
+    const group = createCategoryGroup(handle.db, "Zz Sabbatical");
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: new Date() })
+      .where(eq(schema.categories.id, group.id))
+      .run();
+
+    expect(() => createCategoryGroup(handle.db, "Zz Sabbatical")).toThrow(
+      /archived.*Budget → Categories/,
+    );
+  });
+
+  it("does not mention archiving when the collision is with a live category", () => {
+    createCategoryGroup(handle.db, "Zz Live");
+    expect(() => createCategoryGroup(handle.db, "Zz Live")).toThrow(
+      /^A category named "Zz Live" already exists\.$/,
+    );
+  });
 });
 
 describe("createCategory (T25/DS20)", () => {

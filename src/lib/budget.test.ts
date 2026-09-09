@@ -449,6 +449,100 @@ describe("getEffectiveAllocation", () => {
     });
   });
 
+  it("(round-5) a positive row on a rollover FUND does not inflate what carries forward", () => {
+    // The set-based twin of this rule lives in `loadRolloverEffectiveByCategory`
+    // and got the clamp first; this scalar spelling did not, so a fund's carried
+    // balance was right on page load and grew the instant the user typed into
+    // the Allocate cell (`commitAllocationAction` merges THIS triple into live
+    // client state). Both now route through `spendIgnoresPositiveRows`.
+    const account = seedAccount();
+    const batch = seedBatch();
+    const fund = seedCategory("Emergency", "rollover", "fund");
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-15",
+      amountCents: 5000, // an interest credit; without the clamp it ADDS 5000
+    });
+
+    const result = getEffectiveAllocation(handle.db, fund.id, 2026, 4);
+    expect(result).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 40000,
+      effectiveCents: 50000,
+    });
+  });
+
+  it("(round-5) a fund's positive row is dropped, not netted against a same-month withdrawal", () => {
+    // Why the clamp has to be inside the aggregate: $50 credit + $100
+    // withdrawal nets to $50 of spend once summed, and no clamp applied
+    // afterwards can recover the $100.
+    const account = seedAccount();
+    const batch = seedBatch();
+    const fund = seedCategory("Emergency", "rollover", "fund");
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-10",
+      amountCents: 5000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-20",
+      amountCents: -10000,
+    });
+
+    const result = getEffectiveAllocation(handle.db, fund.id, 2026, 4);
+    // 40000 carried − 10000 withdrawn = 30000. Netting would leave 35000.
+    expect(result).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 30000,
+      effectiveCents: 40000,
+    });
+  });
+
+  it("(round-5) a refund on a rollover EXPENSE envelope still increases what carries forward", () => {
+    // The guard above is fund-scoped on purpose. Rule 1's signed-spend
+    // convention (v0.19.0) says a refund restores buying capacity on an
+    // expense envelope, and this pins that the fund clamp did not quietly
+    // reverse it.
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Groceries", "rollover", "expense");
+    seedAllocation(cat.id, 2026, 3, 40000);
+    seedAllocation(cat.id, 2026, 4, 10000);
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-10",
+      amountCents: 5000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-03-20",
+      amountCents: -10000,
+    });
+
+    const result = getEffectiveAllocation(handle.db, cat.id, 2026, 4);
+    // Spent nets to 5000, so 35000 carries — the refund gave back $50.
+    expect(result).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 35000,
+      effectiveCents: 45000,
+    });
+  });
+
   it("contributes 0 rollover when no prior month row exists", () => {
     const cat = seedCategory("Gifts", "rollover");
     seedAllocation(cat.id, 2026, 4, 5000);

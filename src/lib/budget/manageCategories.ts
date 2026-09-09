@@ -25,13 +25,21 @@ function nextSortOrder(db: AnyDb, parentId: number | null): number {
   return (row?.max ?? 0) + 1;
 }
 
-function assertNameAvailable(db: AnyDb, name: string, excludingId?: number): void {
+/**
+ * The ONE spelling of "is this category name free?", exported because
+ * `createGoalAction` is a THIRD creation path and had no check at all — a
+ * collision there surfaced as a raw `UNIQUE constraint failed`, which the
+ * shipped build turns into a generic digest.
+ */
+export function assertNameAvailable(db: AnyDb, name: string, excludingId?: number): void {
   const existing = db
-    .select({ id: schema.categories.id })
+    .select({ id: schema.categories.id, archivedAt: schema.categories.archivedAt })
     .from(schema.categories)
     .where(eq(schema.categories.name, name))
     .get();
-  if (existing && existing.id !== excludingId) throw new CategoryNameTakenError(name);
+  if (existing && existing.id !== excludingId) {
+    throw new CategoryNameTakenError(name, existing.archivedAt !== null);
+  }
 }
 
 export type CreatedCategory = {

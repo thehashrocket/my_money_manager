@@ -14,10 +14,13 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { CategoryKind } from "@/lib/budget/categoryKindLock";
 import {
   archiveCategoryAction,
   moveCategoryAction,
@@ -26,7 +29,6 @@ import {
   setCategoryKindAction,
 } from "../../actions";
 
-type CategoryKind = "income" | "expense" | "fund";
 type CarryoverPolicy = "none" | "rollover" | "reset";
 
 export type CategoryMenuProps = {
@@ -34,6 +36,28 @@ export type CategoryMenuProps = {
   categoryName: string;
   kind: CategoryKind;
   carryoverPolicy: CarryoverPolicy;
+  /**
+   * Which kinds `setCategoryKind` will still accept (rule 8 + X1), from
+   * `loadMonthView`. Always includes the current kind.
+   *
+   * Server-computed on purpose: the answer depends on whether the category has
+   * ANY transaction or ANY month's `budget_periods` row, which is not
+   * derivable from anything else this menu is handed. Rendering all three
+   * unconditionally is what let a fund offer "Set kind: expense" that always
+   * refused — a fund acquires a `budget_periods` row from one keystroke in the
+   * FUNDS band (`$0` included) or one "Copy previous month", and rule 8's X1
+   * exception is expense→income only, so it never applies to a fund.
+   *
+   * A single-entry array is the normal state for a used category. The block
+   * then renders `kindLockReason` as a label instead of a row of dead items —
+   * see the comment at the render site for why it is not dropped outright.
+   */
+  assignableKinds: CategoryKind[];
+  /**
+   * Why the kind is locked, or null when it is not. Server-computed for the
+   * same reason `assignableKinds` is: it counts the WHOLE ledger.
+   */
+  kindLockReason?: string | null;
   /** DS16 — "disabled rather than hidden" at list ends, so the control
    * column never reflows depending on position. */
   canMoveUp: boolean;
@@ -71,6 +95,8 @@ export function CategoryMenu({
   categoryName,
   kind,
   carryoverPolicy,
+  assignableKinds,
+  kindLockReason = null,
   canMoveUp,
   canMoveDown,
   isGroup = false,
@@ -156,12 +182,35 @@ export function CategoryMenu({
           </DropdownMenuItem>
           {isGroup ? null : (
             <>
+              {/* Only the kinds the server will ACCEPT — offering one it will
+                  always refuse is the DS32 shape this fix is for.
+
+                  A locked category still renders a block, as a label stating
+                  the cause. Dropping it entirely was tried and is a different
+                  bug: this menu is the only surface in the app that reaches
+                  `setCategoryKindAction` (/budget/categories renders kind
+                  read-only), so hiding it made `setCategoryKind`'s evidence
+                  message unreachable and left "not allowed" and "this app has
+                  no kind control" looking identical. The label also means the
+                  section changes WORDING rather than vanishing mid-session
+                  when a first allocation locks the kind. */}
               <DropdownMenuSeparator />
-              {(["expense", "income", "fund"] as const).map((k) => (
-                <DropdownMenuItem key={k} disabled={k === kind} onClick={() => setKind(k)}>
-                  Set kind: {k}
-                </DropdownMenuItem>
-              ))}
+              {assignableKinds.length > 1 ? (
+                assignableKinds.map((k) => (
+                  <DropdownMenuItem key={k} disabled={k === kind} onClick={() => setKind(k)}>
+                    Set kind: {k}
+                  </DropdownMenuItem>
+                ))
+              ) : (
+                // DropdownMenuGroup is REQUIRED around a label — Base UI's
+                // GroupLabel throws without it and takes the route's error
+                // boundary with it.
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>
+                    Kind: {kind} · locked{kindLockReason ? ` — ${kindLockReason}` : ""}
+                  </DropdownMenuLabel>
+                </DropdownMenuGroup>
+              )}
               <DropdownMenuSeparator />
               {(["none", "rollover", "reset"] as const).map((p) => (
                 <DropdownMenuItem key={p} disabled={p === carryoverPolicy} onClick={() => setPolicy(p)}>

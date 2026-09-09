@@ -208,9 +208,18 @@ export async function commitAllocationAction(
  * payload on the way back. Same bug class `setCategoryKindAction` already
  * carries a comment about; the editable band reintroduced it for funds.
  */
-export async function revalidateBudgetSurfacesAction(year: number, month: number): Promise<void> {
+export async function revalidateBudgetSurfacesAction(): Promise<void> {
   revalidatePath("/budget");
-  revalidatePath(`/budget/${year}/${month}`);
+  // Pattern form, matching `upsertBudgetAllocationAction` above — which is
+  // also why this takes no arguments any more. The literal
+  // form was here and is wrong for the same reason it is wrong there: a
+  // rollover category's carried balance is derived from every prior month, so
+  // the allocations this island just committed change what every LATER month
+  // renders, and revalidating only the month just edited leaves those stale.
+  // It mattered more here than anywhere, because this is the path the inline
+  // editor takes and therefore the only way a fund can be funded at all — on
+  // the one band where rollover is a first-class choice.
+  revalidatePath("/budget/[year]/[month]", "page");
   revalidatePath("/goals");
 }
 
@@ -234,6 +243,15 @@ export async function copyPreviousMonthAction(year: number, month: number): Prom
   const result = copyPreviousMonth(db, parsed.data.year, parsed.data.month);
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
+  // `copyPreviousMonth` has NO kind filter, so it copies FUND allocations too
+  // — and a fund's `budget_periods.allocated_cents` is exactly the SUM
+  // `loadGoals` reads for `totalContributedCents`. Without this, the natural
+  // move (copy September into October, then open Funds to check the totals)
+  // serves a stale RSC payload on the one page the copy just changed.
+  // Fifth instance of the same shape v0.23.0 fixed four of: the write is in
+  // this file, the stale read is in `loadGoals.ts`, and neither is wrong on
+  // its own — see `setCategoryKindAction` below, which carries the same note.
+  revalidatePath("/goals");
   return result;
 }
 
