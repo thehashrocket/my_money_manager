@@ -148,12 +148,15 @@ export async function updateAccountAnchorAction(
   }
 
   // Guarded, and the `redirect` deliberately OUTSIDE it — `redirect` signals by
-  // throwing, so a call inside `run` would be swallowed into a warning string
-  // and the navigation silently dropped. This action is `Promise<void>` (a
-  // `<form action>`), so there is no state channel for the warning and
-  // `guardRefresh`'s `console.error` is the only record. Accepted: landing on a
-  // possibly-stale `/import` beats `import/error.tsx`, which tells the reader
-  // "Nothing was imported" about an anchor move that already committed.
+  // throwing, and `guardRefresh` calls `unstable_rethrow` before it decides
+  // anything, so a call inside `run` is re-thrown rather than swallowed into a
+  // warning string. Keeping it out here is clarity, not the only defence. This
+  // action is `Promise<void>` (a `<form action>`), so there is no state channel
+  // for the warning and `guardRefresh`'s `console.error` is the only record.
+  // Accepted: landing on a possibly-stale `/import` beats `import/error.tsx` —
+  // this form renders on `/import`, so that IS the boundary that would fire —
+  // telling the reader "Nothing was imported" about an anchor move that already
+  // committed.
   guardRefresh("/import", () => {
     for (const p of ["/import", "/sync", "/", "/transactions", "/categorize", "/budget"]) {
       revalidatePath(p);
@@ -212,11 +215,14 @@ export async function confirmImportAction(formData: FormData): Promise<void> {
   // `commitImport` above has already written the batch, every imported row, the
   // snapshot, and any anchor-move or snapshot-degraded warning meant for the
   // success page. An unguarded throw here never reaches the redirect, so a
-  // several-hundred-row CSV import renders `import/error.tsx` — whose copy
-  // reads "Nothing was imported. Every import snapshots the database before it
-  // writes, and commits happen in a single transaction." Every word of that is
-  // false once this line is reached, and the pending import is already deleted,
-  // so the user's only signal is a screen telling them to try again.
+  // several-hundred-row CSV import renders the boundary for the page this form
+  // is submitted from — `import/preview/[id]/error.tsx`, NOT `import/error.tsx`
+  // — whose copy reads "Nothing was written — a preview is read-only.
+  // Committing the import (a separate step) is the only action that writes
+  // rows, and it snapshots the database first." Every word of that is false
+  // once this line is reached (the commit is the step that already ran), and
+  // the pending import is already deleted, so the user's only signal is a
+  // screen telling them to try again.
   //
   // No state channel here either (`Promise<void>` + redirect), so the warning
   // is `console.error` only. That is the accepted cost: the batch id survives

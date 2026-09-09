@@ -1091,9 +1091,10 @@ describe("removeCardActivity", () => {
 });
 
 /**
- * The FIFTH guard, and the only one `removeCardActivity`'s own suite above
+ * The FIFTH guard, and one of the two `removeCardActivity`'s own suite above
  * leaves standing: the synthetic-mirror shape (`import_source = 'manual'` AND
- * `category_id IS NULL`).
+ * `category_id IS NULL`). The other is `confirmedIrreversible`, which has its
+ * own describe immediately below this one.
  *
  * Its docblock calls it belt-and-braces — unreachable while the
  * `transfer_pair_id` check holds — and that is exactly why it needs a test

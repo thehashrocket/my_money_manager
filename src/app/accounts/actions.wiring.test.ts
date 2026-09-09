@@ -55,8 +55,9 @@ const { IDLE, IDLE_ACTIVITY } = await import("./action-state");
 const { STARTING_BALANCE_DOLLARS_MAX } = await import("@/lib/import/accountAnchorFields");
 // Imported, never re-typed. Two hand-maintained copies of this sentence
 // already existed in this app and had already diverged in wording, which is
-// the whole reason the shared module exists. It has zero imports, so it is
-// safe in any mock graph.
+// the whole reason the shared module exists. The ZERO-import module is
+// `@/lib/refreshWarning`; this one re-exports the constant and pulls
+// `next/navigation` for `unstable_rethrow`, which is left real here.
 const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 
 beforeEach(() => {
@@ -290,14 +291,18 @@ describe("addCardActivityAction — guards that run before the write", () => {
  * case below fail: the throw reaches each action's outer `catch`, which
  * returns `{status:"error"}` for a charge that is already in the ledger.
  *
- * ONLY that helper. Every case here drives `addCardActivityAction` or
- * `removeCardActivityAction`, and those are its only two callers — so nothing
- * below can say anything about `revalidateBalanceSurfaces`, which guards the
- * four anchor-moving actions. Deleting `guardRefresh` from THAT one leaves
- * this suite green, which is exactly the false confidence a docblock naming
- * both would buy. Its coverage lives in `actions.balance-refresh.test.ts`,
- * separate because it needs a real-ish account row and `db: {}` above forbids
- * one on purpose.
+ * ONLY that helper, and only TWO of its FOUR callers. It also guards
+ * `markAsCardPaymentAction` and `unmarkCardPaymentAction`, which no test in
+ * this repo drives at all — so removing the helper's call from either of those
+ * is invisible to everything, and what the cases below actually pin is the
+ * helper's own body. Say the gap rather than round the count down.
+ *
+ * Nothing below can say anything about `revalidateBalanceSurfaces` either,
+ * which guards the four anchor-moving actions. Deleting `guardRefresh` from
+ * THAT one leaves this suite green, which is exactly the false confidence a
+ * docblock naming both would buy. Its coverage lives in
+ * `actions.balance-refresh.test.ts`, separate because it needs a real-ish
+ * account row and `db: {}` above forbids one on purpose.
  */
 describe("a failed refresh never denies a committed write", () => {
   function throwingRevalidate() {
@@ -331,8 +336,10 @@ describe("a failed refresh never denies a committed write", () => {
     logged.mockRestore();
 
     // NOT `error`. The row exists; saying otherwise sends the user round the
-    // loop again, and `createCardActivity` has no delete path to undo the
-    // duplicate they would create.
+    // loop again. `removeCardActivity` (v0.27.0, driven further down this same
+    // file) can take the duplicate back out, but only behind a confirmation
+    // for a delete that has no undo of its own — a real cost paid for a charge
+    // that was never wrong.
     expect(state.status).toBe("ok");
     if (state.status !== "ok") throw new Error("unreachable");
     expect(state.message).toMatch(/Recorded/);

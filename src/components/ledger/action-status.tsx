@@ -73,10 +73,12 @@ export function statusTone(state: ActionState): string {
   return state.status === "error" ? "text-redbrown" : "text-ledger";
 }
 
-/** The amber warning block. Exported for the one surface that cannot use
- *  `<ActionStatus>` wholesale — `_charge-dialog.tsx` also decides whether to
- *  close on the same state, so it renders the parts itself rather than
- *  re-deriving them. */
+/** The amber warning block. Exported for the one surface that renders it
+ *  without `<ActionStatus>` — `/budget`'s `_reclassify-income.tsx`, whose
+ *  refusal line and warning sit in different parts of a dialog rather than in
+ *  one live region, so it places the block itself rather than re-deriving it.
+ *  (`_charge-dialog.tsx` does not render it at all: it CLOSES on success, so it
+ *  imports `statusRole`/`warningOf` and sends the warning to a toast.) */
 export function StatusWarning({ warning }: { warning: string }) {
   return (
     <p

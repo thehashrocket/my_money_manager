@@ -103,9 +103,10 @@ export async function upsertBudgetAllocationAction(
     // would only ever revalidate the one month just submitted.
     revalidatePath("/budget/[year]/[month]", "page");
   });
-  // OUTSIDE the guard, and that placement is the whole point: `redirect`
-  // signals by THROWING, so a `redirect()` inside `run` would be caught and
-  // downgraded into a warning string — the navigation silently dropped.
+  // OUTSIDE the guard. `redirect` signals by THROWING, and `guardRefresh`
+  // calls `unstable_rethrow` before it decides anything — so a `redirect()`
+  // inside `run` is re-thrown rather than downgraded into a warning string.
+  // Keeping it out here is clarity now, not the only defence.
   redirect(`/budget/${year}/${month}`);
 }
 
@@ -149,7 +150,7 @@ export async function setCategoryKindAction(
       confirmedIrreversible: parsed.data.confirmedIrreversible === "yes",
     });
   } catch (err) {
-    // Only the three failures reachable from ordinary use are downgraded to
+    // Only the four failures reachable from ordinary use are downgraded to
     // state (DS32 wants the refusal inline, next to the category the user
     // was looking at). Anything else — a locked DB, a driver error — rethrows
     // to `error.tsx`, which is the actual backstop this comment promises.

@@ -159,9 +159,12 @@ export function AccountRow({
           `/import`'s repair form excludes every liability (E18) while
           pointing the user at this page.
           
-          `longTerm` gates only the CHARGE affordance, which is a genuinely
-          separate question — a mortgage takes no hand-entered charges (D3=A),
-          but it still has a balance somebody may need to correct. */}
+          `longTerm` gates the two CARD affordances instead — hand-entered
+          charges and the card-terms form — and neither of those is the balance
+          question: a mortgage takes no charges and has no credit limit (D3=A),
+          but it still has a balance somebody may need to correct. This
+          paragraph has now named the wrong number of gates twice — if a third
+          card-only affordance appears, name it here too. */}
       {isLiability ? (
         <CardControls
           accountId={account.id}
@@ -205,8 +208,8 @@ export function AccountRow({
           // limit cannot be repaired — which is the exact purpose rule 9 gives
           // that form — without unlinking the account from SimpleFIN first.
           //
-          // The two questions were always separate; the comment below has said
-          // so about `longTerm` since DS55. Only the nesting disagreed.
+          // The two questions were always separate; the DS55 block above has
+          // said so since it was written. Only the nesting disagreed.
           showReconcile={action === "reconcile"}
         />
       ) : null}

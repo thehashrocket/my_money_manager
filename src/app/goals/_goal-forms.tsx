@@ -90,8 +90,10 @@ export function CreateGoalForm() {
       >
         {pending ? "Creating…" : "Create fund"}
       </button>
-      {/* Only ever rendered when the refresh failed — the success path
-          redirects, which discards this state entirely. */}
+      {/* Two outcomes reach this, not one: a name collision, returned as state
+          since v0.27.0 because the obvious second click on a still-mounted form
+          used to take the page down; and a success whose `/goals` revalidation
+          threw. A clean success redirects, which discards this state entirely. */}
       <ActionStatus state={state} />
     </form>
   );

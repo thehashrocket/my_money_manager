@@ -241,12 +241,13 @@ export function TransactionRowMenu({
             first tabbable element and that would otherwise park the keyboard on
             a destructive commit a second Enter fires.
             
-            The MOBILE order is the opposite of what a copy of this comment in
-            `_category-menu.tsx` claims: `flex-col-reverse` puts the LAST DOM
-            child first, so "Remove charge" renders on top and Cancel sits
+            Both reverses put the LAST DOM child first, so "Remove charge"
+            renders leftmost on desktop and on TOP on mobile, leaving Cancel
             nearest the thumb. That is the safe arrangement — the thumb rests on
-            the way out, not on the destructive commit — but the note said the
-            reverse, and a wrong note is what drives the next change wrong. */}
+            the way out, not on the destructive commit. The sibling note in
+            `_category-menu.tsx` described the mobile order the other way round
+            until it was corrected on 2026-09-09; the two now agree, and a
+            wrong note is what drives the next change wrong. */}
         <DialogFooter className="sm:flex-row-reverse sm:justify-start">
           <Button ref={cancelRef} type="button" variant="ghost" onClick={() => setConfirmOpen(false)}>
             Cancel

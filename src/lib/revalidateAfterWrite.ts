@@ -9,8 +9,13 @@ import { REFRESH_FAILED_WARNING } from "./refreshWarning";
  * write is already durable, so every honest outcome is "it saved", but an
  * unguarded throw makes the action report either a refusal (when the call sits
  * inside the write's own `try`) or a route-level crash (when it sits outside).
- * Both are lies, and the second is the worse one, because every `error.tsx` in
- * this app reassures the reader that nothing was written.
+ * Both are lies, and the second is the worse one wherever a boundary makes the
+ * claim. Four of this app's eleven `error.tsx` files do — `/sync`, `/import`,
+ * `/import/preview/[id]` and `/budget/[year]/[month]` — which is not "every
+ * one", and the difference matters when picking which route to guard next.
+ * Five carry no reassurance at all, and `/accounts`' contemplates the write
+ * rather than denying it ("if a balance was being updated, the previous balance
+ * and date are kept").
  *
  *   commit ──▶ revalidatePath ──┬── ok ──▶ fresh page, plain success
  *                               │
@@ -27,10 +32,15 @@ import { REFRESH_FAILED_WARNING } from "./refreshWarning";
  * grew `guardRefresh` first; v0.26.0 grew a second, hand-maintained copy in
  * `src/app/budget/actions.ts` for the same reason, with its own warning string
  * that had already drifted. The other six route action files had none at all —
- * 49 unguarded calls, including `confirmImportAction`, where the failure mode
- * is a committed several-hundred-row CSV import rendering `/import/error.tsx`'s
- * "Nothing was imported." That is rule 11's own lesson in a different guise, so
- * the answer is one function rather than an eighth copy.
+ * 47 unguarded `revalidatePath` calls (accounts 4, categorize 6, goals 6,
+ * import 5, subscriptions 6, transactions 20), including `confirmImportAction`,
+ * where the failure mode is a committed several-hundred-row CSV import
+ * rendering the boundary for the page that form is ON:
+ * `/import/preview/[id]/error.tsx`'s "Nothing was written — a preview is
+ * read-only." Not `/import/error.tsx`, which this comment named for a release —
+ * and the preview's copy is the stronger false claim of the two. That is rule
+ * 11's own lesson in a different guise, so the answer is one function rather
+ * than an eighth copy.
  *
  * Deliberately NOT a `"use server"` module. Such a module may only export async
  * functions, so a guard living beside an action would make Turbopack report

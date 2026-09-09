@@ -295,11 +295,14 @@ export function CategoryMenu({
 
                   A locked category still renders a block, as a label stating
                   the cause. Dropping it entirely was tried and is a different
-                  bug: this menu is the only surface in the app that reaches
-                  `setCategoryKindAction` (/budget/categories renders kind
-                  read-only), so hiding it made `setCategoryKind`'s evidence
-                  message unreachable and left "not allowed" and "this app has
-                  no kind control" looking identical. The label also means the
+                  bug: this menu is the only surface that reaches
+                  `setCategoryKindAction` for an ARBITRARY kind — the other
+                  entry point, `_reclassify-income.tsx`, offers X1 alone and
+                  only for a candidate it has already loaded, and
+                  /budget/categories renders kind read-only — so hiding it made
+                  `setCategoryKind`'s evidence message unreachable and left
+                  "not allowed" and "this app has no kind control" looking
+                  identical. The label also means the
                   section changes WORDING rather than vanishing mid-session
                   when a first allocation locks the kind. */}
               <DropdownMenuSeparator />

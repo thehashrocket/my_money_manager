@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // The sentence itself comes from the shared module rather than a local copy:
 // two hand-maintained copies of it had already diverged, which is why
-// `revalidateAfterWrite` exists. It has zero imports, so it is safe to pull in
-// ahead of the `vi.mock` factories below.
+// `revalidateAfterWrite` exists. That module only RE-EXPORTS the constant — the
+// zero-import module is `@/lib/refreshWarning` — so this also pulls
+// `next/navigation`, which `guardRefresh` needs for `unstable_rethrow`. Safe
+// ahead of the factories below anyway: `vi.mock` is hoisted above every import,
+// and `next/navigation` is left real here.
 import { REFRESH_FAILED_WARNING } from "@/lib/revalidateAfterWrite";
 
 /**

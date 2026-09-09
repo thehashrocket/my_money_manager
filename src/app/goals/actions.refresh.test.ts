@@ -73,8 +73,10 @@ const { createGoalAction, updateGoalTargetAction } = await import("./actions");
 // Imported, never re-typed. Two hand-maintained copies of this sentence
 // already existed in this app and had already diverged in wording, which is
 // the whole reason the shared module exists — a local literal here re-creates
-// exactly the drift it was extracted to end. It has zero imports, so it is
-// safe in this mock graph.
+// exactly the drift it was extracted to end. The zero-import module is
+// `@/lib/refreshWarning`; this one re-exports the constant and pulls
+// `next/navigation` for `unstable_rethrow`, which is exactly why the mock above
+// spreads the real module instead of stubbing it.
 const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 
 function createForm(): FormData {

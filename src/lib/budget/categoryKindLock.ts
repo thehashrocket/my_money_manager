@@ -87,7 +87,8 @@ export function assignableKinds(previousKind: CategoryKind, usage: CategoryKindU
  * This exists because hiding the offer is only half of DS32. `setCategoryKind`
  * produces a refusal carrying real evidence (the transaction count and date
  * range, or "already has a budget planned"), and the `⋯` menu on `/budget` is
- * the ONLY surface in the app that can reach `setCategoryKindAction` —
+ * the ONLY surface that can reach `setCategoryKindAction` for an arbitrary kind
+ * — `_reclassify-income.tsx` is the other entry point and offers X1 alone, and
  * `/budget/categories` renders kind read-only. So dropping the menu block on a
  * locked category made that explanation unreachable and left the user unable to
  * tell "not allowed" from "this app has no kind control", which is a different

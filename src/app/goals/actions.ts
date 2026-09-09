@@ -19,17 +19,15 @@ import type { GoalsActionState } from "./action-state";
 const SCOPE = "/goals";
 
 /**
- * The three paths a fund write invalidates, in one place.
+ * The four paths a fund write invalidates, split in two — and the split decides
+ * whether `createGoalAction` redirects.
  *
- * Guarded, and returning `string | undefined` rather than `void`: these ran
- * bare after a COMMITTED insert/update, so a throw from `revalidatePath`
- * escaped into `/goals/error.tsx`, which affirmatively tells the reader the
- * write did not happen. Re-submitting on that advice creates a SECOND fund, or
- * — on the create path — collides with the name that now exists and produces a
- * second, unrelated-looking error.
- */
-/**
- * Split in two, and the split decides whether `createGoalAction` redirects.
+ * Guarded, and handing back strings rather than `void`: these ran bare after a
+ * COMMITTED insert/update, so a throw from `revalidatePath` escaped into
+ * `/goals/error.tsx`, whose title says the page failed to LOAD — a load failure
+ * reported for a write that landed. Re-submitting on that reading creates a
+ * SECOND fund, or — on the create path — collides with the name that now exists
+ * and produces a second, unrelated-looking error.
  *
  * `/goals` is the page the user is being sent BACK to; the budget surfaces are
  * secondary readers of the same row. Guarding them together meant a failure

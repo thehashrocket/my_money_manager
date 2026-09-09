@@ -14,14 +14,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *        ├── deletePendingImport()  ← the CSV is now gone
  *        │
  *        └── revalidatePath("/import")
- *              └── throws ──▶ redirect never runs ──▶ import/error.tsx:
- *                    "Nothing was imported. Every import snapshots the database
- *                     before it writes, and commits happen in a single
- *                     transaction."
+ *              └── throws ──▶ redirect never runs ──▶ the boundary for the page
+ *                    the form is ON — import/preview/[id]/error.tsx, not
+ *                    import/error.tsx:
+ *                    "Nothing was written — a preview is read-only. Committing
+ *                     the import (a separate step) is the only action that
+ *                     writes rows, and it snapshots the database first."
  *
- * Every word of that reassurance is false at that point, and the pending
- * import is already deleted, so the user's only signal is a screen telling
- * them to try again — after several hundred rows landed.
+ * Every word of that reassurance is false at that point — the separate step it
+ * points at is the one that already ran — and the pending import is already
+ * deleted, so the user's only signal is a screen telling them to try again
+ * after several hundred rows landed.
  *
  * Deleting `guardRefresh` from `confirmImportAction` makes these fail.
  */
@@ -195,7 +198,8 @@ describe("confirmImportAction — a failed refresh must not claim nothing was im
 
     // The direct statement of the bug. Unguarded, this rejects with
     // `revalidatePath blew up` — and a Server Action rejecting that way renders
-    // `import/error.tsx`, whose copy states the ledger is unchanged about a
+    // `import/preview/[id]/error.tsx` (the form lives on the preview page),
+    // whose copy states a preview is read-only and nothing was written, about a
     // commit that already happened. Guarded, the only thing that escapes is the
     // redirect signal, which is the framework working.
     await expect(

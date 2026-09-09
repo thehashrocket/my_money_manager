@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * `actions.wiring.test.ts` covers the sibling `revalidateCardActivitySurfaces`
  * thoroughly, and its docblock used to claim it covered this one too. It
  * cannot: every case there drives `addCardActivityAction` /
- * `removeCardActivityAction`, which are that helper's only two callers.
+ * `removeCardActivityAction`, two of that helper's four callers (the two
+ * card-payment actions are driven by no test in the repo).
  * Deleting `guardRefresh` from `revalidateBalanceSurfaces` left the whole
  * suite green while `updateLiabilityBalanceAction`,
  * `revertLiabilityBalanceAction`, `updateCardTermsAction` and
@@ -63,7 +64,9 @@ vi.mock("@/db", async () => ({
 const { updateLiabilityBalanceAction, revertLiabilityBalanceAction } = await import("./actions");
 const { IDLE } = await import("./action-state");
 // Imported, never re-typed: two hand-maintained copies of this sentence had
-// already diverged before it was extracted. Zero imports, so it is safe here.
+// already diverged before it was extracted. The zero-import module is
+// `@/lib/refreshWarning`; this one re-exports it and pulls `next/navigation`
+// for `unstable_rethrow`, which is left real here.
 const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 
 /** A card mid-history: an anchor to move, and no prior anchor yet. */

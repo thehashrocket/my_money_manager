@@ -50,7 +50,14 @@ export function CreateAccountForm({ today }: { today: string }) {
   // including a rejected one, which would have left this form clearing the
   // name on a validation error while pointing `aria-invalid` at the field it
   // had just emptied. `type`, `balance` and `asOf` already survived because
-  // they were state; `name` was the one that did not.
+  // they were state; `name` was the one that did not, and was fixed here.
+  //
+  // STILL TRUE OF TWO FIELDS. `creditLimit` and `minimumPayment` are
+  // uncontrolled, both carry `aria-invalid`, and `validateCreateAccountInput`
+  // emits issues on both paths (`optionalPositiveDollarsSchema`, plus the
+  // cards-only refinements) — so a rejected card create still blanks exactly
+  // the two fields it is pointing at. Unfixed — this comment read as though
+  // the whole class was closed.
   const [name, setName] = useState("");
   const [balance, setBalance] = useState("");
   const [asOf, setAsOf] = useState(today);
