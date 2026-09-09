@@ -24,8 +24,11 @@ import type { CategoryKind } from "./categoryKindLock";
  * import from it would pull better-sqlite3 into the browser bundle. Same
  * constraint, and same resolution, as `limits.ts`, `merchantLabel.ts` and
  * `keyTrainability.ts`. The `CategoryKind` import is `import type`, which the
- * compiler erases. `categoryKindLock.ts` re-exports this so the server side
- * still reads rule 8's vocabulary from one place.
+ * compiler erases. `categoryKindLock.ts` deliberately does NOT re-export this —
+ * a bridge back would re-open the exact bundle path this split closes, and it
+ * carries a comment saying so. The dependency runs the other way instead:
+ * `categoryKindLock.ts` imports `ALL_KINDS` from here, so rule 8's arity is
+ * still stated once.
  */
 /**
  * Every kind the schema enum admits — the ONE list, and the one
