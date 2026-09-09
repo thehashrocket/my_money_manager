@@ -7,6 +7,12 @@ import {
   type CategorizeTransactionSnapshot,
 } from "@/lib/categorize/categorizeTransaction";
 import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
+import {
+  runBulkRetarget,
+  runUndoBulkRetarget,
+  type BulkRetargetRunResult,
+  type UndoBulkRetargetRunResult,
+} from "@/lib/categorize/runBulkRetarget";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
 import { validateCategorizeTransactionSnapshot } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
@@ -50,9 +56,19 @@ export async function categorizeTransactionAction(formData: FormData) {
     insertedRuleId: result.insertedRuleId,
   };
 
+  /* `/goals` and `/` join the older three because every action in this
+     file moves rows BETWEEN categories. A fund's rows are `loadGoals`'
+     withdrawn term, and any expense→expense move redraws the dashboard's
+     6-month trend chart — `bulkRetarget` most of all, since it is the one
+     bulk path here and applies no check to the SOURCE category at all
+     ("a fund holding rows is a state this action should help drain").
+     Leaving either stale is the same freshness bug the editable FUNDS
+     band hit from the other side. */
   revalidatePath("/transactions");
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");
+  revalidatePath("/goals");
+  revalidatePath("/");
 
   return {
     snapshot,
@@ -90,5 +106,61 @@ export async function undoCategorizeTransactionAction(
   revalidatePath("/transactions");
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");
+  revalidatePath("/goals");
+  revalidatePath("/");
+  return result;
+}
+
+export type {
+  BulkRetargetRunResult as BulkRetargetActionResult,
+  UndoBulkRetargetRunResult as UndoBulkRetargetActionResult,
+} from "@/lib/categorize/runBulkRetarget";
+
+/**
+ * Move every non-transfer row for one merchant off the category it is filed
+ * under and onto another — the repair for a bulk categorize that went to the
+ * wrong place. Optional "Remember" retrains the merchant's exact rule to
+ * follow the rows.
+ *
+ * Reachable only from the merchant drilldown (`/transactions?merchant=…`),
+ * which is the surface that still lists a group after `/categorize` has
+ * stopped showing it: `loadMerchantGroups` filters on `category_id IS NULL`,
+ * so a fully-filed group disappears from the page you filed it on. That is
+ * why the repair could not live there.
+ *
+ * The pipeline itself is `runBulkRetarget`, which takes an explicit `db` so a
+ * test can drive it; only `revalidatePath` lives here, because it closes over
+ * the singleton DB and cannot run under `:memory:`. Outcomes are returned as
+ * STATE, never thrown — see that module for why.
+ */
+export async function bulkRetargetAction(
+  formData: FormData,
+): Promise<BulkRetargetRunResult> {
+  const result = runBulkRetarget(db, Object.fromEntries(formData));
+  if (result.status === "error") return result;
+
+  revalidatePath("/transactions");
+  revalidatePath("/categorize");
+  revalidatePath("/budget", "layout");
+  revalidatePath("/goals");
+  revalidatePath("/");
+  return result;
+}
+
+/**
+ * Reverse a prior {@link bulkRetargetAction}. Rows the user re-categorized
+ * inside the undo window are preserved.
+ */
+export async function undoBulkRetargetAction(
+  snapshot: unknown,
+): Promise<UndoBulkRetargetRunResult> {
+  const result = runUndoBulkRetarget(db, snapshot);
+  if (result.status === "error") return result;
+
+  revalidatePath("/transactions");
+  revalidatePath("/categorize");
+  revalidatePath("/budget", "layout");
+  revalidatePath("/goals");
+  revalidatePath("/");
   return result;
 }

@@ -340,7 +340,16 @@ export function CurrencyInput({ ariaLabel, committedCents, onCommit, readOnly, c
  */
 function advanceFocus(current: HTMLElement | null): void {
   if (!current) return;
-  const all = Array.from(document.querySelectorAll<HTMLElement>('[data-amount-input="true"]'));
+  // `offsetParent === null` means the element is not rendered — and BOTH
+  // layouts are always in the DOM (`hidden sm:block` / `sm:hidden`), so half
+  // of these are invisible at any viewport and `.focus()` on one silently
+  // no-ops. The ring then appeared to stop dead partway down a band. DS14
+  // advertises "wrapping across section boundaries"; that only holds if the
+  // stops are ones a person can actually reach. Pre-existing, and the FUNDS
+  // band (D3=C) added two more hidden stops to it.
+  const all = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-amount-input="true"]'),
+  ).filter((el) => el.offsetParent !== null);
   const idx = all.indexOf(current);
   if (idx === -1) return;
   const next = all[(idx + 1) % all.length];

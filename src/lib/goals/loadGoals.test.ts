@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq, ne } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
+import { upsertAllocation } from "@/lib/budget/upsertAllocation";
 import { loadGoals } from "./loadGoals";
 
 /**
@@ -113,7 +114,13 @@ function seedAllocation(categoryId: number, year: number, month: number, allocat
 describe("loadGoals (TC34a)", () => {
   it("returns an empty view when there are no fund categories", () => {
     const view = loadGoals(handle.db);
-    expect(view).toEqual({ goals: [], totalProgressCents: 0, totalTargetCents: 0 });
+    expect(view).toEqual({
+      goals: [],
+      totalProgressCents: 0,
+      totalTargetCents: 0,
+      totalTargetedContributedCents: 0,
+      untargetedGoalCount: 0,
+    });
   });
 
   it("computes contributed (from allocations), withdrawn (from negative txns), and progress", () => {
@@ -220,6 +227,56 @@ describe("loadGoals (TC34a)", () => {
   });
 });
 
+/*
+ * D3=C (2026-09-08) — the end-to-end statement of the fund fix.
+ *
+ * Every test above seeds `budget_periods` rows DIRECTLY, which is why this
+ * file was green for the whole time a fund was unfundable: `loadGoals`' math
+ * was always correct, and no UI could produce its input. `/budget`'s FUNDS
+ * band was links-only (DS19) and `/goals` exports only `createGoalAction`
+ * and `updateGoalTargetAction`, neither of which touches `budget_periods` —
+ * so `progressCents = allocated - withdrawn` was pinned at `0 - withdrawn`
+ * on the live ledger for the life of the app, and `PLAN.md`'s 1.0.0 gate #2
+ * ("what a fund's progress means") could not be answered by creating a fund.
+ *
+ * This joins the two halves through the REAL writer. It fails if anyone adds
+ * a `kind` guard to `upsertAllocation` — the natural-looking "funds are not
+ * expenses" tidy-up that would silently restore the dead end.
+ */
+describe("loadGoals — a fund funded through the real write path (D3=C)", () => {
+  it("progress moves from 0 once upsertAllocation writes a fund's contribution", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+
+    const before = loadGoals(handle.db);
+    expect(before.goals[0].progressCents).toBe(0);
+    expect(before.goals[0].progressPct).toBe(0);
+
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+
+    const after = loadGoals(handle.db);
+    expect(after.goals[0].progressCents).toBe(25000);
+    expect(after.totalProgressCents).toBe(25000);
+  });
+
+  it("accumulates across months, because a contribution is per-month by construction", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 5, allocatedCents: 30000 });
+
+    expect(loadGoals(handle.db).goals[0].progressCents).toBe(55000);
+  });
+
+  it("re-committing the same month REPLACES rather than adds (budget_periods is unique per category-month)", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 40000 });
+
+    // Editing a cell twice is the commonest possible interaction on the new
+    // control; an upsert that appended would double-count every correction.
+    expect(loadGoals(handle.db).goals[0].progressCents).toBe(40000);
+  });
+});
+
 describe("loadGoals — kind is authoritative, not is_savings_goal (E6 drift)", () => {
   it("includes a kind='fund' category even when isSavingsGoal=0 (TC22 direction)", () => {
     seedFundCategory("Drifted Fund", { isSavingsGoal: false, kind: "fund" });
@@ -262,7 +319,18 @@ describe("loadGoals — progressPct clamp boundaries", () => {
     expect(view.goals[0].progressPct).toBe(0);
   });
 
-  it("treats a null targetCents as 0 and reports progressPct 0 rather than dividing by zero", () => {
+  /* A NULL target is REPORTED AS NULL, never coerced to 0 — the same rule
+     `FundRow.targetCents` follows on `/budget`, where `fundTargetGap` renders
+     it as an em dash. It was `?? 0` until v0.23.0's review, so `/goals` said
+     "target $0.00" for a fund that has no target, which claims it is already
+     complete, and prefilled its Edit-target form with `0.00` — a value
+     `updateGoalTargetSchema`'s `.positive()` then refused, taking out the page.
+
+     Newly ORDINARY rather than exotic: the FUNDS band's "+ Add a line" goes
+     through `createCategory`, which does not write `target_cents`. Before that
+     existed, the only fund-creation path was `createGoalAction`, whose schema
+     is `.positive()`. */
+  it("reports a null targetCents as NULL, and progressPct 0 rather than dividing by zero", () => {
     const cat = seedFundCategory("No target set", { targetCents: undefined });
     handle.db
       .update(schema.categories)
@@ -272,7 +340,34 @@ describe("loadGoals — progressPct clamp boundaries", () => {
     seedAllocation(cat.id, 2026, 3, 5000);
 
     const view = loadGoals(handle.db);
-    expect(view.goals[0].targetCents).toBe(0);
+    expect(view.goals[0].targetCents).toBeNull();
     expect(view.goals[0].progressPct).toBe(0);
+  });
+
+  /* The headline ratio's two halves must cover the SAME funds. They did not:
+     the page summed contributions over every fund while `totalTargetCents`
+     summed targets, so one untargeted fund made the numerator describe a
+     larger set than the denominator — a ratio that looks fine and compares
+     different things. */
+  it("draws the headline ratio's numerator and denominator from the same fund set", () => {
+    const targeted = seedFundCategory("Vacation", { targetCents: 100000 });
+    seedAllocation(targeted.id, 2026, 3, 20000);
+
+    const untargeted = seedFundCategory("Rainy day", { targetCents: undefined });
+    handle.db
+      .update(schema.categories)
+      .set({ targetCents: null })
+      .where(eq(schema.categories.id, untargeted.id))
+      .run();
+    seedAllocation(untargeted.id, 2026, 3, 30000);
+
+    const view = loadGoals(handle.db);
+    // The untargeted fund's $300 is in neither half of the ratio…
+    expect(view.totalTargetCents).toBe(100000);
+    expect(view.totalTargetedContributedCents).toBe(20000);
+    // …and the page is told it exists so it can say so rather than drop it.
+    expect(view.untargetedGoalCount).toBe(1);
+    // It is still a fund, and still listed.
+    expect(view.goals).toHaveLength(2);
   });
 });

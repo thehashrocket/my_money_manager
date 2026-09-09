@@ -200,10 +200,18 @@ export async function commitAllocationAction(
  * FirstRunCard correct on the NEXT visit without racing 40 in-flight
  * `revalidatePath` calls against the client's own optimistic state during
  * the session (the out-of-order-arrival problem P2 documents in the plan).
+ *
+ * `/goals` is in the list because D3=C made the FUNDS band editable: an
+ * allocation to a fund IS the `budget_periods` sum `loadGoals` reads for
+ * `totalContributedCents`. Without it the one loop this feature exists to
+ * close — fund it on `/budget`, see it on `/goals` — serves a stale RSC
+ * payload on the way back. Same bug class `setCategoryKindAction` already
+ * carries a comment about; the editable band reintroduced it for funds.
  */
 export async function revalidateBudgetSurfacesAction(year: number, month: number): Promise<void> {
   revalidatePath("/budget");
   revalidatePath(`/budget/${year}/${month}`);
+  revalidatePath("/goals");
 }
 
 const copyPreviousMonthInputSchema = z.object({
@@ -241,13 +249,19 @@ export async function copyPreviousMonthAction(year: number, month: number): Prom
  * `setCategoryKindAction`, these change what category EXISTS or what its
  * NAME/archived state is, which both pages' pickers and label lookups read
  * (`listLeafCategories`). Allocating or reclassifying an existing category
- * doesn't need that — the category set itself didn't change. */
+ * doesn't need that — the category set itself didn't change.
+ *
+ * `/goals` joined the list with D3=C: the FUNDS band can now create,
+ * rename and archive a FUND from `/budget`, and `/goals` is the only
+ * surface that can set that fund's target. Without this, a fund born on
+ * `/budget` is invisible on the page you go to next. */
 function revalidateCategorySurfaces(): void {
   revalidatePath("/budget");
   revalidatePath("/budget/[year]/[month]", "page");
   revalidatePath("/budget/categories");
   revalidatePath("/transactions");
   revalidatePath("/categorize");
+  revalidatePath("/goals");
 }
 
 const categoryNameSchema = z

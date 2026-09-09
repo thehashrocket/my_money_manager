@@ -1,6 +1,14 @@
 # Plan — zero-based (EveryDollar-style) budgeting
 
-Status: **PR1 (PR1a+PR1b) and PR2 (PR2a+PR2b) shipped in v0.13.0. PR3 (fund unification) deferred — see TODOS.md.**
+Status: **PR1 (PR1a+PR1b) and PR2 (PR2a+PR2b) shipped in v0.13.0. PR3 (fund unification) partly closed in v0.23.0 — see TODOS.md.**
+PR3's first part shipped 2026-09-08: funds render as editable budget rows on
+`/budget/[year]/[month]` instead of living only on `/goals`, which means the
+"read-only FUNDS section" this document specifies (B9 / X5 / DS19 / DS26 / A6)
+describes v0.13.0, not the current page. The band's conditional rendering (A6)
+and its `Planned funding` stat are unchanged. Two parts of PR3 remain open and
+are the substance of the TODOS.md entry: what a fund's *progress* means when
+`loadGoals` counts money planned rather than money that moved (B2), and open
+question O2 (does an overspent fund carry forward or reset).
 Branch: `thehashrocket/envelope-budgeting-plan`
 Scope decided 2026-09-04 (decision `0e52e0af`): **PR1 + PR2 now, PR3 deferred.**
 Scope refined 2026-09-04 (eng review round 2, decisions `D1` and `X6`):

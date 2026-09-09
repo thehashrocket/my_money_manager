@@ -121,8 +121,10 @@ Fixed left rail, 240px. Main content: `pl-[290px]` (240 + 50 gutter). Below 820p
 │ ▣ Budget            │     surfaces before the three "what do I do" ones
 │ ≡ Transactions      │
 │ ! Categorize [12]   │  ← amber chip when backlog > 0
-│ ↻ Subscriptions     │  ← disabled, tooltip "Coming Weekend 4"
-│ ★ Goals             │  ← disabled, tooltip "Coming Weekend 5"
+│ ↻ Subscriptions     │  ← shipped W4; the "Coming Weekend 4" tooltip this
+│ ★ Funds             │     diagram described is long gone. Shipped W5 too,
+│                     │     and relabelled Goals → Funds (one noun; /goals
+│                     │     is still the route).
 │ ─────────           │
 │ ⟳ Sync              │
 │ ↥ Import            │
@@ -409,6 +411,144 @@ just a red page.
 
 ---
 
+## Budget month page (`/budget/[year]/[month]`)
+
+Added 2026-09-08. Until then this file documented the Spine, the Dashboard,
+Accounts, the utilization bar, money weight, the backlog banner, the focus
+ring and the state components — and had no entry for the densest interactive
+page in the app. The FUNDS band was consequently designed against its own
+siblings rather than against a spec, which is how a 2-column table ended up
+below two 5-column ones. This section exists so the next band has something
+to calibrate against.
+
+The page is one zero-based envelope form: plan income, assign every dollar,
+drive **Left to budget** to `$0.00`.
+
+```
+  Backlog banner (amber, only when count > 0)          ← shared component
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ ← August 2026        September 2026        October 2026 →        │  ← MonthNav + Copy
+  │                                        [ Copy previous month ]   │     (hidden first-run)
+  ├──────────────────────────────────────────────────────────────────┤
+  │  LEFT TO BUDGET                                                  │  ← the hero. sticky
+  │  $2,093.53                                                       │     top-0 on mobile,
+  │  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬░░░░░                                          │     static at sm+
+  ├──────────────────────────────────────────────────────────────────┤
+  │ Planned income  Received  Planned spending  Spent  [Planned      │  ← SummaryStrip,
+  │   $9,632.80    $9,632.80      $7,289.27   $6,102  funding] Rem.  │     paired cells
+  └──────────────────────────────────────────────────────────────────┘
+
+  INCOME                                       ← mono uppercase, --ink-3, --text-xs
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Received        │ Variance       │ Allocate │
+  EXPENSES
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Spent           │ Remaining      │ Allocate │
+  FUNDS                                       ← only when a fund exists (A6)
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Planned to date │ Left to target │ Allocate │
+  └───────────────┴─────────┴─────────────────┴────────────────┴──────────┘
+       40%            15%           15%             18%            12%      ← BandColumns
+                                     ↑ one line: TableHead is whitespace-nowrap,
+                                       so no band header ever wraps
+
+  ▸ How this page works                    ← help panel, AFTER all three bands
+```
+
+**One column geometry for all three bands (`BandColumns`).** Each band is its
+own `<Table>`. Under the browser's default auto layout every band sized its
+columns from its own content, so `Planned` sat at a different x in each one —
+worst on FUNDS (a 2-column table below two 5-column ones, ~450px off, landing
+on the x-position EXPENSES uses for `Remaining`: same screen position, different
+meaning, one scroll apart), but INCOME and EXPENSES already disagreed with each
+other by ~37px. `table-fixed` plus one shared `<colgroup>` makes the geometry a
+property of the page rather than of whatever text happens to be in each table.
+Measured identical afterwards at `936 / 1083 / 1260 / 1378`. The first column
+absorbs all the slack, because category names are the only variable-width
+content and the four money columns must not move. **A new band is 5 columns
+wide and uses `BandColumns`; it does not invent its own widths.**
+
+**The third column is the band's own evidence, and the fourth is its verdict.**
+INCOME answers "did it arrive" (`Received` / `Variance`), EXPENSES answers "how
+much is left this month" (`Spent` / `Remaining`), FUNDS answers "how far along"
+(`Planned to date` / `Left to target`). The pattern is what makes one geometry
+legitimate rather than merely tidy: the columns line up because they are asking
+the same question of three different kinds of envelope, not because they were
+padded to match. A band that has nothing to put in columns 3 and 4 is a band
+that has not earned the layout.
+
+**Column 3 is `Planned to date`, never "saved".** These are budget
+*intentions*, not a bank balance — the money may be sitting in the same
+checking account it always was. `/goals` says so plainly and this page must not
+contradict it.
+
+**Bands are ordered INCOME → EXPENSES → FUNDS, and the help panel follows all
+three.** You cannot assign a dollar you have not planned, and a fund
+contribution is the last call you make, not the first. The panel used to render
+between EXPENSES and FUNDS — an artifact of FUNDS being server-rendered outside
+the client island — which split the documented order and put a glossary in the
+middle of a form.
+
+**FUNDS is editable, which reverses DS19 (D3=C, 2026-09-08).** DS19 made the
+band read-only and put contributions on `/goals`; `/goals` never got the form,
+so across v0.18.0-v0.21.0 a fund could be created and never funded, with each
+page linking to the other. The contribution belongs here because
+`leftToBudget = plannedIncome − allocated − plannedFund` — it is a Left to
+Budget decision, and setting it anywhere else means doing the zero-based math
+blind. `/goals` keeps targets, history and the long-horizon view, and links back
+with "Fund this month →".
+
+**A6 — no fund, no band, and no `Planned funding` cell.** An empty FUNDS
+section has nothing to reconcile, and an always-present `$0.00` funding stat on
+the ~100% of months with no savings goals is an inert row. What it does NOT do is
+guarantee first-run never shows three peer input bands. `isFirstRun` is a
+per-MONTH predicate (`plannedIncomeCents === 0 && allocatedCents === 0 &&
+plannedFundCents === 0`) and the band gate is per-LEDGER
+(`fundRows.length > 0`), so a fund created on `/goals` and not yet allocated
+satisfies both, and `FirstRunCard` renders above all three bands. The real
+guarantee is narrower: a month with a nonzero fund allocation is never
+first-run, because `plannedFundCents` is the third clause.
+
+**DS27 — every term of the headline is derivable from something on screen.**
+`leftToBudgetCents` subtracts three quantities and the summary strip listed two,
+so editing a fund dropped the hero with nothing above it accounting for the
+difference. `Planned funding` joins the strip the moment a fund exists. This is
+a standing rule, not a one-time fix: a new term in the headline is a new cell in
+the strip, in the same commit.
+
+**Category names drill into their transactions — in all three bands.** The
+learned rule on this page is "click a category name to see its rows", and fund
+rows opted out of it while `/goals` counted fund *withdrawals* the band never
+showed. `tabIndex={-1}` keeps the link out of the keyboard path so it does not
+compete with the allocate field for the tab order.
+
+**Rollover captions render on first paint or not at all.** `loadMonthView`
+computed rollover for expense leaves only, so a rollover fund with a carried
+balance showed nothing on load and then `+$600.00 rollover` *appeared* after the
+first unrelated keystroke, when the commit merged the true triple in. Money
+materialising unexplained is the worst available surprise on a savings surface.
+Fund leaves are in `rolloverCategoryIds` now; the read model answers before the
+first render.
+
+**One noun: Funds.** Spine item, `/goals` h1, the band heading and the create
+form all say Funds. `/goals` is still the route (the schema calls them goals),
+and that is the only place the old word survives.
+
+**Mobile mirrors the desktop side, not the desktop markup.** Each band renders
+a `<Table>` and a separate mobile list. The allocate field sits on the same side
+of the row in all three — scrolling from EXPENSES into FUNDS on a phone must not
+move the field you type in across the width of the screen. Mobile subtotals go
+through `MobileSubtotal`; re-inlining its markup is how the three lists drift.
+
+**Server-rendered slots inside a client island.** `<MonthEditor>` is the client
+boundary and owns one `allocations` Map keyed by `categoryId` that backs all
+three bands, so Left to budget can move while you type across 40 rows.
+`headerTop`, `summaryStrip` and `firstRunCard` are server-rendered and handed in
+as slots — they deliberately lag live edits until the next revalidation. The
+island is scoped to the *numeral*, not the whole header.
+
+---
+
 ## Backlog banner
 
 `src/app/_components/BacklogBanner.tsx`. Two variants: `"budget"` (shows CTA link) and `"categorize"` (omits CTA, caller handles the counter). Uses `--accent-amber` via `color-mix`.
@@ -421,7 +561,7 @@ just a red page.
 
 `src/components/ledger/focus-ring.ts` exports `FOCUS_RING`, the one focus treatment for interactive elements **outside** `components/ui` — links, `<summary>` disclosures, and buttons written inline. The shadcn primitives carry their own `focus-visible:ring-*` and are not in scope for it.
 
-`outline`, not `ring`: an outline is drawn outside the border box and takes no part in layout, so `outline-offset` can push it clear of a control without displacing its neighbours in a dense ruled row — a `ring`'s box-shadow spread has to be budgeted against the row's own padding instead. It **does** follow `border-radius` (CSS UI 4, honoured by every browser this app targets), so it is not a way to get a rectangle around a rounded control — but it is also not a reason to expect a rounded one: of the 17 `${FOCUS_RING}` interpolations across six files, 7 carry `rounded-md` and get a rounded ring, and the other 10 are bare links and `<summary>` disclosures with no radius at all — the two classes the constant exists for — so they get a rectangle, because that is the shape of their border box. No consumer carries `rounded-[999px]`; the one pill control that does (the merchant chip's `×`) deliberately opts out of `FOCUS_RING` for a paper-coloured ring against the terracotta fill. It is also not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a box-shadow. The choice buys layout independence, not shape and not clipping.
+`outline`, not `ring`: an outline is drawn outside the border box and takes no part in layout, so `outline-offset` can push it clear of a control without displacing its neighbours in a dense ruled row — a `ring`'s box-shadow spread has to be budgeted against the row's own padding instead. It **does** follow `border-radius` (CSS UI 4, honoured by every browser this app targets), so it is not a way to get a rectangle around a rounded control — but it is also not a reason to expect a rounded one: of the 21 `${FOCUS_RING}` interpolations across eight files, 9 carry `rounded-md` and get a rounded ring, and the other 12 are bare links and `<summary>` disclosures with no radius at all — the two classes the constant exists for — so they get a rectangle, because that is the shape of their border box. No consumer carries `rounded-[999px]`; the one pill control that does (the merchant chip's `×`) deliberately opts out of `FOCUS_RING` for a paper-coloured ring against the terracotta fill. It is also not immune to an ancestor's `overflow-hidden` — that clips an outline exactly as it clips a box-shadow. The choice buys layout independence, not shape and not clipping.
 
 Known divergence: `FOCUS_RING` uses `--accent-terracotta` at full strength while `globals.css` defines `--ring` as the same accent at 55%, which is what every shadcn control uses. Two treatments, not one. Tracked in `TODOS.md`; changing it makes the hand-rolled ring visibly softer, so it wants both seen side by side first.
 

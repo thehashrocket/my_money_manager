@@ -12,7 +12,20 @@ export type MonthlyContribution = {
 export type GoalRow = {
   categoryId: number;
   name: string;
-  targetCents: number;
+  /**
+   * `categories.target_cents`. NULL means "no target recorded", which is NOT
+   * the same fact as `0` — the same distinction `FundRow.targetCents` draws,
+   * and for the same reason: rendering "no target" as `$0.00` claims the fund
+   * is already complete.
+   *
+   * This was `number` with a `?? 0` at the mapping site until v0.23.0, when
+   * `/budget`'s FUNDS band gained "+ Add a line". `createCategory` does not
+   * write `target_cents`, so a fund born there has NULL — previously
+   * unreachable, because `createGoalAction` is `.positive()`. The two
+   * surfaces then disagreed about one column, and this one was the wrong
+   * half: `/budget` rendered an em dash while `/goals` rendered `$0.00`.
+   */
+  targetCents: number | null;
   carryoverPolicy: "none" | "rollover" | "reset";
   totalContributedCents: number;
   totalWithdrawnCents: number;
@@ -31,7 +44,24 @@ export type GoalRow = {
 export type GoalsView = {
   goals: GoalRow[];
   totalProgressCents: number;
+  /** Sum of `targetCents` over funds that HAVE one. A NULL target contributes
+   *  nothing rather than a phantom `0` (see `GoalRow.targetCents`). */
   totalTargetCents: number;
+  /**
+   * `totalContributedCents` summed over the SAME funds `totalTargetCents`
+   * covers — the numerator of the headline ratio.
+   *
+   * It exists because the two halves used to be drawn from different sets:
+   * the page summed contributions across every fund while the denominator
+   * summed targets, so one untargeted fund made the ratio compare quantities
+   * about different things. A ratio whose halves disagree about their
+   * denominator's membership is the "plausible but wrong" shape rule 1 is
+   * organised against, and it is invisible — both numbers look fine alone.
+   */
+  totalTargetedContributedCents: number;
+  /** Funds with no target recorded. The page names them rather than letting
+   *  them silently drop out of the ratio above. */
+  untargetedGoalCount: number;
 };
 
 /**
@@ -62,7 +92,13 @@ export function loadGoals(db: Db): GoalsView {
     .all();
 
   if (goalCategories.length === 0) {
-    return { goals: [], totalProgressCents: 0, totalTargetCents: 0 };
+    return {
+      goals: [],
+      totalProgressCents: 0,
+      totalTargetCents: 0,
+      totalTargetedContributedCents: 0,
+      untargetedGoalCount: 0,
+    };
   }
 
   const goalIds = goalCategories.map((g) => g.id);
@@ -135,11 +171,16 @@ export function loadGoals(db: Db): GoalsView {
   }
 
   const goals: GoalRow[] = goalCategories.map((g) => {
-    const target = g.targetCents ?? 0;
+    const target = g.targetCents;
     const contributed = g.totalContributed;
     const withdrawn = withdrawalMap.get(g.id) ?? 0;
     const progress = contributed - withdrawn;
-    const pct = target > 0 ? Math.min(100, Math.max(0, (progress / target) * 100)) : 0;
+    // `null` and `0` both yield 0 here, but for different reasons — no target
+    // to measure against, versus a target of nothing. Neither divides.
+    const pct =
+      target !== null && target > 0
+        ? Math.min(100, Math.max(0, (progress / target) * 100))
+        : 0;
     return {
       categoryId: g.id,
       name: g.name,
@@ -154,7 +195,18 @@ export function loadGoals(db: Db): GoalsView {
   });
 
   const totalProgressCents = goals.reduce((s, g) => s + g.progressCents, 0);
-  const totalTargetCents = goals.reduce((s, g) => s + g.targetCents, 0);
+  const targeted = goals.filter((g) => g.targetCents !== null);
+  const totalTargetCents = targeted.reduce((s, g) => s + (g.targetCents ?? 0), 0);
+  const totalTargetedContributedCents = targeted.reduce(
+    (s, g) => s + g.totalContributedCents,
+    0,
+  );
 
-  return { goals, totalProgressCents, totalTargetCents };
+  return {
+    goals,
+    totalProgressCents,
+    totalTargetCents,
+    totalTargetedContributedCents,
+    untargetedGoalCount: goals.length - targeted.length,
+  };
 }

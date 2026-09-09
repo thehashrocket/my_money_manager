@@ -12,7 +12,7 @@ export default function GoalsError({
 }) {
   return (
     <main className="mx-auto max-w-3xl p-5">
-      <RouteErrorCard title="Something went wrong loading your goals" error={error} reset={reset} />
+      <RouteErrorCard title="Something went wrong loading your funds" error={error} reset={reset} />
     </main>
   );
 }

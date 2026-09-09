@@ -2,13 +2,8 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
 import { parseIsoMonth } from "@/lib/budget/monthOfIso";
-import {
-  CategoryArchivedError,
-  CategoryNotFoundError,
-  ParentAllocationError,
-  SavingsGoalCategoryError,
-} from "@/lib/categoryErrors";
 import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
+import { assertAssignableCategory } from "./assertAssignableCategory";
 import type { PriorRuleSnapshot } from "./priorRuleSnapshot";
 import type { BulkCategorizeInput } from "./validateBulkCategorizeInput";
 
@@ -94,11 +89,9 @@ export type BulkCategorizeResult = BulkCategorizeSnapshot & {
  * month, so every downstream rollover row for that category must recompute.
  * (The old category for these rows was NULL → no prior attribution to clear.)
  *
- * Defensive DB-bound rejects (pure Zod validator already covered shape):
- * - category not found → `CategoryNotFoundError`
- * - parent category → `ParentAllocationError` (dropdown filters leaves, but a
- *   tampered form could still submit one)
- * - savings goal → `SavingsGoalCategoryError`
+ * Defensive DB-bound rejects (the pure Zod validator already covered shape)
+ * live in `assertAssignableCategory`, shared with `categorizeTransaction` and
+ * `bulkRetarget`: not found, savings goal, archived, parent.
  */
 export function bulkCategorize(
   db: Db,
@@ -107,32 +100,7 @@ export function bulkCategorize(
 ): BulkCategorizeResult {
   const { normalizedMerchant, categoryId, rememberMerchant } = input;
 
-  const category = db
-    .select({
-      id: schema.categories.id,
-      name: schema.categories.name,
-      kind: schema.categories.kind,
-      archivedAt: schema.categories.archivedAt,
-    })
-    .from(schema.categories)
-    .where(eq(schema.categories.id, categoryId))
-    .get();
-  if (!category) throw new CategoryNotFoundError(categoryId);
-  // A2: kind is authoritative, not is_savings_goal (T5).
-  if (category.kind === "fund") {
-    throw new SavingsGoalCategoryError(category.id, category.name);
-  }
-  if (category.archivedAt !== null) {
-    throw new CategoryArchivedError(category.id, category.name);
-  }
-
-  const firstChild = db
-    .select({ id: schema.categories.id })
-    .from(schema.categories)
-    .where(eq(schema.categories.parentId, categoryId))
-    .limit(1)
-    .get();
-  if (firstChild) throw new ParentAllocationError(category.id, category.name);
+  assertAssignableCategory(db, categoryId);
 
   return db.transaction((tx) => {
     const matchingRows = tx

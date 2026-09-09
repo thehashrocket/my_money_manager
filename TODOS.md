@@ -1120,7 +1120,7 @@ Surfaced while reviewing [docs/plans/envelope-budgeting.md](./docs/plans/envelop
 
 - [x] **P2 — DONE v0.19.0 (2026-09-08)** — **"Spent" means two different things depending on which page you are on.** `computeMtdSpent` (`src/lib/budget.ts`) returned a signed sum so a refund reduced category spend on `/budget`, while `loadMonthlyTrends` filtered `amount_cents < 0` so the same refund was invisible on the dashboard chart. **Not hypothetical when it was finally measured**: September 2026 showed Misc at `$10.00` on `/budget` and `$295.00` on the dashboard, and Groceries differed by `$23.75`. Convention picked: **signed everywhere** (decision D2=A) — an envelope model means a refund restores spending capacity, and it aligns the chart to what `/budget` already rendered rather than introducing a second convention. (`leftToBudgetCents` is untouched either way — it is `plannedIncome − allocated − plannedFunds` and carries no spend term at all; an earlier version of this entry gave that as the *reason* for the choice, which was wrong.) `loadMonthlyTrends` now uses the same signed sum. The `amount_cents < 0` filter could NOT simply be deleted: it was silently doing a second job, excluding income (which is positive), and removing it alone would have pulled 43 paycheck/interest rows worth +$52,131.17 into the six-month window as ~$52k of negative spend — replaced by an explicit `kind = 'expense'` subquery, which is what "spending" actually means. `loadGoals` was deliberately NOT converted; see the P3 below and the analysis in the comment above `loadGoals`' `withdrawalRows` query. (`src/lib/trends/loadMonthlyTrends.ts`, `src/components/ledger/trend-chart.tsx`)
 
-- [ ] **P2** — **PR3: fund behavior unification.** The `kind='fund'` *column value* ships in PR1 (decision D1B, backfilled from `is_savings_goal`), so this item is behavior only, not a data migration. Three things are still open: (a) funds should render as budget rows the way EveryDollar's Funds do, instead of living exclusively on `/goals`; (b) `loadGoals` (`src/lib/goals/loadGoals.ts:37`) computes progress from `SUM(budget_periods.allocated_cents)` — money *planned*, not money that moved — so a goal reads $1,200 saved after six months of $200 allocations you then spent on groceries. PR1's D11A only *hides* the progress bar and percent-complete rather than fixing the math, so the false number is off-screen, not gone; (c) open question O2 — when you overspend a Fund, does the negative carry forward or reset? Deferred by scope decision `0e52e0af` specifically so it lands after the `TODOS.md` integration checkpoint (use the app on real data for a week), because it reinterprets goal data you already have. Blocked by: PR1 + PR2 shipped, plus one month of real fund use. (`src/lib/goals/loadGoals.ts`, `src/app/goals/page.tsx`, `src/lib/budget/loadMonthView.ts`)
+- [ ] **P2** — **PR3: fund behavior unification.** The `kind='fund'` *column value* ships in PR1 (decision D1B, backfilled from `is_savings_goal`), so this item is behavior only, not a data migration. Three things are still open — **(a) closed 2026-09-08 in v0.23.0**: (a) ~~funds should render as budget rows the way EveryDollar's Funds do, instead of living exclusively on `/goals`~~ — the FUNDS band on `/budget/[year]/[month]` is now editable and writes `budget_periods` through the same `upsertAllocation` the other two bands use; (b) and (c) below are untouched by that and remain the substance of this item; (b) `loadGoals` (`src/lib/goals/loadGoals.ts:37`) computes progress from `SUM(budget_periods.allocated_cents)` — money *planned*, not money that moved — so a goal reads $1,200 saved after six months of $200 allocations you then spent on groceries. PR1's D11A only *hides* the progress bar and percent-complete rather than fixing the math, so the false number is off-screen, not gone; (c) open question O2 — when you overspend a Fund, does the negative carry forward or reset? Deferred by scope decision `0e52e0af` specifically so it lands after the `TODOS.md` integration checkpoint (use the app on real data for a week), because it reinterprets goal data you already have. Blocked by: PR1 + PR2 shipped, plus one month of real fund use. (`src/lib/goals/loadGoals.ts`, `src/app/goals/page.tsx`, `src/lib/budget/loadMonthView.ts`)
 
 - [ ] **P3** — **Split transactions conflict with the V1 exclusion list; decide, do not drift.** `CLAUDE.md`'s "What's NOT in V1" section lists "Split transactions (one category per transaction; override wins)" as a deliberate exclusion. EveryDollar has them, and after PR1 + PR2 this is the largest remaining fidelity gap: a $180 Costco run that is half groceries and half household goods must pick one envelope, which is the most common real-world reason a zero-based budget drifts from what actually happened. This is the single biggest item on this list — it touches the transactions schema, every sum in `src/lib/budget.ts`, categorization and its undo paths, and the dedup invariants in `CLAUDE.md` rules 3 and 4. Captured here so it becomes an explicit decision later rather than something that gets silently added because it seemed necessary mid-implementation. Blocked by: PR1 + PR2. (`src/db/schema.ts`, `src/lib/budget.ts`, `src/lib/categorize/`)
 
@@ -1441,7 +1441,7 @@ and rule 6 carry the user-facing and design halves. What is left open is here.
 
 - [ ] **P2** — **`/transactions` still cannot disable the Remember checkbox the way `/categorize` does, so it warns after the fact.** `loadMerchantGroups` gained a `filedCategoryIds` follow-up query, which is cheap because that page is already grouped by merchant. `loadTransactions` is not grouped, so the equivalent is a per-key aggregate over the page's distinct merchants — worth measuring before building. Until then the toast is that surface's only channel, which is why the two toasts had to be merged into one (a non-front toast's action button is drawn at `opacity: 0` by Sonner's collapsed stack).
 
-- [ ] **P2** — **A rule with a lot of history behind it is still removed when one row is retargeted.** Move one of 50 rows filed by `K → Shopping` and the rule goes. `applyRuleWrite` documents why this is the better of two available wrongs (the alternative silently files every future row where the user has just said is not the only answer), and it is now visible and reversible rather than silent. But the underlying gap is real and is not a predicate problem: there is no way to bulk-RETARGET already-filed rows anywhere in the app — `applyToPast` only touches `category_id IS NULL`. With one, the whole situation would be a two-step the user could actually complete.
+- [ ] **P2** — **A rule with a lot of history behind it is still removed when one row is retargeted.** Move one of 50 rows filed by `K → Shopping` and the rule goes. `applyRuleWrite` documents why this is the better of two available wrongs (the alternative silently files every future row where the user has just said is not the only answer), and it is now visible and reversible rather than silent. But the underlying gap is real and is not a predicate problem: there is no way to bulk-RETARGET already-filed rows anywhere in the app — `applyToPast` only touches `category_id IS NULL`. With one, the whole situation would be a two-step the user could actually complete. **The two-step now exists (round-4 P2, below): `bulkRetarget` on `/transactions?merchant=…` moves every row filed under one category for a key, and passes the whole moved set as `excludeTxnIds`, so ticking Remember on a move that makes the key unanimous RETRAINS the rule instead of removing it.** What is still true is the single-row case this entry actually names — retarget ONE of 50 rows and the rule still goes, because one row does not make the key unanimous and intent is not in the data. That is `applyRuleWrite`'s documented better-of-two-wrongs and is unchanged; the difference is that the user now has an action that reaches the other 49.
 
 - [ ] **P3** — **`import_batch_categorizations.rule_id` does not survive a remove/restore cycle.** The FK is `onDelete: 'set null'`, so removing a rule nulls provenance on every row it ever auto-filed, and `restorePriorRule` re-inserting under the same id does not put those pointers back. No consequence today: that column has writers only (`importBatch.ts`, `simplefin/sync.ts`) and no readers. The first reader has to know, so it is written down in `restorePriorRule`'s docblock as well as here.
 
@@ -1498,14 +1498,42 @@ column).
       correct as spend. This is the same shape as the fund and rollover stories:
       the largest release in the repo (39 tasks) renders an anchor balance and
       nothing else. Do not read the liability surfaces as verified until the card
-      carries rows. Blocked by: getting the Citi feed to import transactions. That
-      used to be the action most likely to trigger the relink P1 above, so it had to
-      be sequenced after it; the P1 closed in v0.21.0 (feed provenance, migration
-      `0020`), so linking the card is now just a link. Watch for the new relink
-      warning instead: if the Citi feed's rows are already filed under another
-      account, sync will refuse to re-import them and this account's balance will
-      run short until they are moved. (`src/lib/accounts/paidDownCents.ts`,
-      `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`)
+      carries rows.
+      **CORRECTED 2026-09-08 (round-4 triage). This entry previously read
+      "Blocked by: getting the Citi feed to import transactions … the P1 closed
+      in v0.21.0, so linking the card is now just a link." Both halves were
+      false, and the second one sent the reader at an action with no effect.**
+      A credit card can be feed-linked and will still never import a
+      transaction row: `partitionLinkedAccounts` (`src/lib/simplefin/sync.ts`)
+      routes every account where `accountClass(type) === "liability"` to
+      `balanceOnlyAccounts` — **cards as well as the mortgage, not just the
+      mortgage** — and
+      `docs/plans/liability-accounts-and-budget-signals.md` lists "Importing
+      credit card transactions from any feed" as an explicit V1 exclusion.
+      Account 4 already HAS `simplefin_account_id` set and zero rows; that is
+      the design working, not a pending link. The relink P1 was never this
+      item's blocker.
+      Two paths actually put rows on a card, and they validate different
+      things:
+      (a) `createCardActivity` (`/accounts` → "Add a charge") — **refused on or
+      before the anchor** (D12), and Citi's anchor is `2026-09-08`, so no
+      historic card spending can be entered this way; only charges dated from
+      tomorrow forward. This is the path that exercises the balance math and
+      the utilization bar.
+      (b) `markAsCardPayment` (`/transactions` row menu) on the 4
+      `CITI CARD ONLINEPAYMENT` rows (2026-06-26, 07-20, 08-14, 08-27;
+      $1,120.00 total) — mints a synthetic manual mirror on the card. It
+      deliberately ACCEPTS a pre-anchor date and correctly leaves the balance
+      unmoved, because an anchor dated after the payment already includes it
+      (E5/F11, pinned by `manualTransaction.test.ts`). So (b) is cheap and
+      real — it writes the first `import_source='manual'` rows this ledger has
+      ever had and makes `paidDownCents` non-zero — but it validates the
+      pairing path only, NOT card spend, utilization, or the balance sum.
+      Blocked by: nothing. Do (b) now; (a) needs a real card charge to happen
+      after today. (`src/lib/accounts/paidDownCents.ts`,
+      `src/lib/accounts/resolveUtilizationDisplay.ts`, `src/app/accounts/`,
+      `src/lib/simplefin/sync.ts`, `src/lib/accounts/manualTransaction.ts`)
+
 
 ## Follow-ups from the `/plan-eng-review` pass (2026-09-08, sync pending-state plan)
 
@@ -1616,3 +1644,321 @@ are what was deliberately left.
       now the single place that fixes all five at once: fold it into the `cn(...)` there.
       Every caller already carries `rounded-md`. Do this with the P3 promotion above if that
       lands first. (`src/app/sync/_submit-button.tsx`, `src/components/ledger/focus-ring.ts`)
+
+## Follow-ups from the `/plan-eng-review` "what next" pass (2026-09-08, round 4)
+
+Fourth triage in one day, run against the live ledger inside the running
+container. It set out to confirm round 3's D1=A (the P1 shipped as v0.21.0, so
+do the usage pass next) and found that one leg of that pass is impossible:
+a fund can be created and never funded. Codex (gpt-5.4) ran as the outside
+voice and found it; this pass verified it independently and reversed its own
+recommendation on the strength of it. Decisions: **D1=B** (build the fund
+contribution control FIRST, then run the usage pass — the first "what next"
+deliverable in five releases whose consumer is named before it is built),
+**D2=A** (correct the false blocker at the liability entry above).
+
+Ledger state at the time of this pass, for the next person who measures:
+1,562 rows (1,316 checking / 246 savings / **0 on both liabilities**);
+382 uncategorized non-transfer rows across 166 merchant groups (was 437/180
+that morning); 61 expense + 3 income + **0 fund** categories; **all 64 on
+`carryover_policy='none'`**; 22 `budget_periods` rows, **all month 9**;
+**0 rows with `import_source='manual'`**; 172 rules.
+
+- [x] **P1** — **DONE (D3=C, 2026-09-08, uncommitted on this branch).** A
+      `kind='fund'` category could be CREATED and its monthly contribution
+      never WRITTEN, so fund progress was structurally pinned at $0.00 and
+      the two pages pointed at each other.
+      **What shipped:** the FUNDS band on `/budget/[year]/[month]` moved
+      INSIDE the `<MonthEditor>` client island and became editable — a fifth
+      peer column set (`Category │ Planned │ Planned to date │ Left to target
+      │ Allocate`) reusing the existing `AllocationCell`, `CategoryMenu` and
+      `NewCategoryRow`. **Zero server-side change to the write path**, which
+      is the whole point of the finding: `upsertAllocation` already accepted a
+      fund. `FundRow` gained `hasAllocation`, the real rollover triple (fund
+      leaves join `rolloverCategoryIds`, so a carried balance no longer pops
+      in after the first unrelated keystroke), `targetCents` and
+      `plannedToDateCents`. `/goals` leads with `totalContributedCents` rather
+      than `progressCents` so both pages show the SAME quantity under the word
+      "planned", with withdrawals on their own line instead of silently folded
+      in; it also gained "Fund this month →". A shared `<BandColumns>` colgroup
+      plus `table-fixed` makes column geometry a property of the page. The
+      noun is `Funds` everywhere (Spine, `/goals` h1, band, create form);
+      `/goals` remains the route. Documented in `DESIGN.md`'s new
+      `/budget` section — that file had no entry for this page at all.
+      **PLAN.md gate #2 is no longer blocked, and is now closable by USE**:
+      fund one goal for one month, then name which quantity is "progress".
+      Original finding, kept because the reasoning is still the argument
+      against reverting it:
+      `/budget/[year]/[month]`'s `FundsTable` renders every cell as a
+      `<Link href="/goals">` and `_help-panel.tsx` tells the user to "manage
+      targets and contributions on the Goals page"; `src/app/goals/actions.ts`
+      exports exactly two actions, `createGoalAction` (name, target,
+      carryover) and `updateGoalTargetAction` (target), and **neither writes
+      `budget_periods`**. `loadGoals`' `progressCents` is
+      `allocated − withdrawn` where `allocated` reads
+      `budget_periods.allocated_cents`, so it can only ever be `0 − withdrawn`.
+      This is why `PLAN.md`'s 1.0.0 gate #2 ("what a *fund's* progress means,
+      which is unanswerable until a fund exists") cannot be closed by creating
+      a fund — it is unanswerable because a fund cannot ACCUMULATE, not because
+      none exists. `TODOS.md`'s PR3 fund-behavior-unification entry covers this
+      area but frames it as behavior polish; it is a user-facing dead end.
+      **The server half already works and needs no change:** `upsertAllocation`
+      has NO `kind` restriction (it checks existence, `archived_at`, and
+      parent-header only) and `loadMonthView`'s `fundRows.plannedCents` already
+      reads the same `allocatedByCategoryId` map the expense band does. What is
+      missing is a control. Note this reverses design decision **DS19**
+      ("read-only FUNDS section", amended by A6) if the control goes on
+      `/budget` rather than on `/goals` — DS19's intent was that contributions
+      live on Goals, and the gap is that Goals never got the form. Blocked by:
+      nothing. **D3=C chose `/budget`, and the reason is not preference:**
+      `leftToBudgetCents` is `plannedIncome − allocated − plannedFund`, so the
+      contribution is a Left-to-Budget decision and setting it on a page with
+      no month and no headline means doing the zero-based math blind. DS19 is
+      reversed, deliberately, and `DESIGN.md` records that rather than leaving
+      it to be rediscovered. (`src/app/budget/[year]/[month]/page.tsx`,
+      `src/app/budget/[year]/[month]/_help-panel.tsx`,
+      `src/app/goals/page.tsx`, `src/app/goals/actions.ts`,
+      `src/lib/budget/upsertAllocation.ts`, `src/lib/goals/loadGoals.ts`)
+
+- [x] **P2 — DONE (2026-09-08, uncommitted on this branch).** The usage pass
+      this triage scheduled was production data entry with a 10-second undo and
+      no bulk repair behind it. `applyToPast` only touches
+      `category_id IS NULL` rows (`bulkCategorize.ts`,
+      `categorizeTransaction.ts`), so a merchant group filed to the wrong
+      category was repairable only row by row once the Sonner toast expired.
+      Raised by Codex as the strongest argument against a usage-first sequence,
+      deliberately deferred at D1, then built anyway when the fund branch was
+      finished and the categorize sitting was the next thing due.
+      **The structural fact that decided the design, and that neither the
+      triage nor Codex had:** `/categorize` cannot host the repair. Filing a
+      group is what makes it VANISH from that page — `loadMerchantGroups`
+      selects on `category_id IS NULL`, so a fully-filed group is no longer
+      listed there at all. The mis-filing is never visible on the page where it
+      happened. The repair therefore lives on the exact-merchant drilldown,
+      `/transactions?merchant=…`, which is not NULL-scoped, still lists every
+      row, and is already where `/categorize`'s own "See all N transactions →"
+      link lands.
+      **What shipped:** `bulkRetarget` + `undoBulkRetarget` (plus their input
+      and snapshot validators and `bulkRetargetErrors`), and a `RetargetForm`
+      disclosure under the merchant header reading
+      "Move [49 rows filed as Gas] to [category] [ ] Remember [Move 49]".
+      Row set is `(merchant, fromCategoryId)` and non-transfer, derived
+      server-side from the key — never from the page's live filters, so the
+      control is labelled from `summarizeByCategory(db, { merchant })` rather
+      than from the header's list-scoped breakdown. Snapshot stays as simple as
+      `bulkCategorize`'s because the row set is DEFINED by one source category,
+      so undo restores to a constant. Invalidates BOTH rollover chains, which
+      is the one thing `bulkCategorize` does not have to do (its rows came from
+      NULL). Refuses an empty row set and a same-category move rather than
+      no-op'ing, because `applyRuleWrite` keys off the merchant and not off the
+      rows — a zero-row "move" would otherwise be a live path to retraining or
+      DELETING a rule with nothing to show for it.
+      **It also closes the P2 at the top of this file** (a rule with a lot of
+      history behind it is removed when one row is retargeted): `excludeTxnIds`
+      is the whole moved set, so the verdict reads the ledger the action leaves
+      behind. Move all 50 `K → Shopping` rows to Groceries with Remember ticked
+      and the rule FOLLOWS them instead of being deleted — the "two-step the
+      user could actually complete" that entry describes.
+      **Two things came out of it that were not planned.**
+      `assertAssignableCategory` — the four-check destination guard
+      (`CategoryNotFoundError` / `SavingsGoalCategoryError` /
+      `CategoryArchivedError` / `ParentAllocationError`, in that order) was a
+      hand-maintained copy in `bulkCategorize` and `categorizeTransaction` and
+      would have become a third. Every one of those checks only fires on input
+      the picker cannot produce, which is exactly the class that must not be
+      allowed to drift between callers. And `_transaction-row.tsx` seeded its
+      badge and picker from `row` once at mount and never resynced, so after a
+      bulk move the header read "49 filed as Groceries" directly above 49 rows
+      each badged GAS — verified in the browser, then fixed with the same
+      "adjust state during render" pattern `_month-editor.tsx` uses, resyncing
+      the picker only while it is untouched so an unrelated revalidation cannot
+      discard a pick in progress.
+      (`src/lib/categorize/bulkRetarget.ts`,
+      `src/lib/categorize/undoBulkRetarget.ts`,
+      `src/lib/categorize/assertAssignableCategory.ts`,
+      `src/app/transactions/_retarget-form.tsx`,
+      `src/app/transactions/_transaction-row.tsx`,
+      `src/app/transactions/actions.ts`, `src/app/transactions/page.tsx`)
+
+## Follow-ups from the `/ship` pre-landing review + specialist army + Red Team (2026-09-08, funds-band + bulkRetarget)
+
+Six specialists plus a Red Team pass over the D3=C branch (funds band + `bulkRetarget`), 40 findings. Fifteen were auto-fixed on the branch and are not listed here; what follows is what was deliberately deferred, with the reasoning, so the next reader is not re-deriving it.
+
+The Red Team found a class the six per-file specialists structurally could not: **every one of the four `revalidatePath` gaps was invisible to a reviewer looking at one file.** The write is in `budget/actions.ts`, the stale read is in `loadGoals.ts`, and neither file is wrong on its own. Auto-fixed, but worth recording as a review-shape lesson: a freshness bug lives in the *edge* between two files, so a per-file lens cannot see it by construction.
+
+### P1 — behavior newly reachable because the FUNDS band became editable
+
+- [ ] **A `$0` allocation permanently locks a fund's `kind`, and the row's own menu still offers to change it.**
+      `setCategoryKind`'s `const isUsed = txnStats.count > 0 || periodCount > 0`
+      (`src/lib/budget/setCategoryKind.ts`) treats a single `budget_periods` row as
+      "used", and rule 8's X1 exception is `expense → income` only, so it never
+      applies to a fund. Before D3=C a fund could not acquire a `budget_periods`
+      row from anywhere; now typing any value into the new `AllocationCell` —
+      **including `$0`** — or one click of "Copy previous month" (`copyMonth` has no
+      kind filter) locks the category's kind forever. `CategoryMenu` on a fund row
+      still renders "Set kind: expense", which from that moment always refuses:
+      exactly the "discovered only after a refused submit" failure DS32 names.
+      Decide which it is — either a `budget_periods` row genuinely IS usage (then
+      hide/annotate the menu item on a fund that has one), or a zero-transaction
+      fund with only planned rows is safely reclassifiable (then relax `isUsed`
+      for that direction the way X1 relaxes expense→income).
+      (`src/lib/budget/setCategoryKind.ts`, `src/app/budget/[year]/[month]/_month-editor.tsx`)
+
+- [ ] **`loadGoals` has no `archivedAt` filter, so an archived fund advertises a link to a page that will not show it.**
+      `loadGoals` filters on `eq(categories.kind, "fund")` alone
+      (`src/lib/goals/loadGoals.ts:59`), so an archived fund still renders a card —
+      and D3=C gave every card a "Fund this month →" link into `#funds-band`.
+      `notHiddenByArchive` (`loadMonthView`) drops an archived fund from a month
+      where it has neither a nonzero allocation nor spend, so the destination row
+      does not exist; if it was the only fund the whole band is absent, because
+      `<MonthEditor>` gates the section on `fundRows.length > 0`. Even if the row
+      rendered, `upsertAllocation` throws `CategoryArchivedError` on commit. Three
+      ways to land nowhere. Either exclude archived funds from `loadGoals`, or mark
+      them on the card and suppress the link.
+      (`src/lib/goals/loadGoals.ts`, `src/app/goals/page.tsx`)
+
+- [ ] **"Planned to date" has no upper time bound, so a future month's allocation inflates this month's figure.**
+      `loadFundPlannedToDate` sums `budget_periods.allocated_cents` with
+      `inArray(categoryId, fundIds)` and no `(year, month) <=` clause. Its docstring
+      defends unboundedness backwards — "since the fund existed" — but
+      `/budget/[year]/[month]` is navigable and editable for future months and
+      nothing gates commit on `phase`, so allocating next month's contribution
+      immediately raises *this* month's "Planned to date" and shrinks "Left to
+      target". The column label and the number disagree. Bound the SUM, or rename
+      the column to admit it includes scheduled contributions.
+      (`src/lib/budget/loadMonthView.ts`)
+
+### P1 — a semantic disagreement this branch created
+
+- [ ] **A positive row filed to a fund inflates that fund's rollover; `loadGoals` deliberately refuses the same move.**
+      D3=C put fund leaves into `rolloverCategoryIds` for the first time, so
+      `rollover = max(0, prevEffective - spent)` now runs for funds — and `spent` is
+      `0 - SUM(amount_cents)` with no `kind` filter in
+      `loadRolloverEffectiveByCategory`. A positive unpaired row filed to a fund
+      (interest credit, an unmatched savings deposit) therefore *raises* the carried
+      balance above anything ever allocated. CLAUDE.md rule 1 records the opposite
+      stance three paragraphs from here, and records it as deliberate: `loadGoals`
+      stays outflows-only precisely so a deposit cannot increase progress on top of
+      the allocation already counting the same intention. Two subsystems, one
+      question, two answers. Pick one and pin it — the rollover half is currently
+      unpinned either way, because every new fund-rollover test seeds allocations
+      with zero transactions.
+      (`src/lib/budget/loadMonthView.ts`, `src/lib/goals/loadGoals.ts`, CLAUDE.md rule 1)
+
+### P2 — correctness-adjacent
+
+- [ ] **`RetargetForm` silently substitutes a different source group when the chosen one disappears.**
+      `const from = filed.find((f) => String(f.categoryId) === fromChoice) ?? filed[0]`
+      is "derived, not synced" — so when an unrelated revalidation changes `filed`
+      (categorizing a row on the same page, a second tab, an Undo landing) and the
+      user's chosen source drops out, `from` falls back to `filed[0]`: a category
+      they never selected. The hidden `fromCategoryId` input, the button label
+      (`Move ${from.count}`) and the prose all follow it, and `canSubmit` only
+      guards the case where the fallback happens to equal the destination. One
+      click then moves a different, possibly much larger group. Disable submit and
+      say "that group no longer exists — pick again" instead of substituting.
+      (`src/app/transactions/_retarget-form.tsx`)
+
+- [ ] **Thrown Server Action messages are dev-only, so `bulkRetargetErrors`' carefully-worded refusals never reach a user.**
+      `bulkRetargetErrors.ts`'s docstring says each error "carries the facts a
+      person needs instead of a generic failure", but both are thrown out of a
+      Server Action and rendered via `err.message`; Next.js replaces uncaught
+      Server Action error messages with a generic string plus a digest in
+      production builds, which is how this app ships (`output: "standalone"`).
+      Same pattern as the pre-existing `categorizeTransactionAction`. Either return
+      the refusal as action state — the shape `/sync`'s actions already use — or
+      say in the docstring that these strings are dev diagnostics.
+      (`src/lib/categorize/bulkRetargetErrors.ts`, `src/app/transactions/_retarget-form.tsx`)
+
+- [ ] **No parity test between the count the retarget control promises and the rows `bulkRetarget` actually moves.**
+      The control is labelled from `summarizeByCategory(db, { merchant })` while the
+      rows moved come from `bulkRetarget`'s own WHERE — two independently written
+      predicates, the same drift `loadMerchantGroups.totalRowCount` already has a
+      parity test for. They agree today only because `buildPredicates` defaults
+      `includeTransfers` false, and they **already diverge for the empty key**:
+      `buildPredicates` skips the merchant predicate entirely when
+      `filter.merchant === ""`, so the promised count would be ledger-wide while
+      `bulkRetarget` moves only empty-key rows.
+      (`src/lib/categorize/bulkRetarget.ts`, `src/lib/categorize/loadTransactions.ts`)
+
+- [ ] **`/budget`'s "Planned to date" and "Left to target" read the server prop while the cell beside them reads optimistic state.**
+      `formatCents(fund.plannedToDateCents)` and `fundTargetGap(fund)` come from the
+      RSC prop; the `AllocationCell` one cell to the left reads `getAllocation()`.
+      Since `plannedToDateCents` includes the current month, committing $200 into an
+      empty fund leaves the row reading "Planned $200.00 · Planned to date $0.00 ·
+      Left to target «unchanged»" until the island loses focus. This is the same
+      "money materializing after an unrelated keystroke" hazard the
+      `rolloverCategoryIds` comment was written to eliminate, reappearing two
+      columns to the right.
+      (`src/app/budget/[year]/[month]/_month-editor.tsx`)
+
+### P3 — product / design judgment
+
+- [ ] **With zero funds the FUNDS band does not render, so "+ Add a line" for a fund is unreachable from `/budget`.**
+      `{fundRows.length > 0 ? <BandSection heading="Funds"> … }` gates the whole
+      band including its `NewCategoryRow`. A6 says "no band at all when no fund
+      exists", and that is deliberate — but it means the create affordance lives
+      inside the thing it would create, so on the live ledger (0 funds, measured)
+      the band never renders and `/goals` stays the only entry point. Either render
+      a header-plus-create-row in the empty state, or accept `/goals` as the
+      bootstrap and say so in DESIGN.md.
+      (`src/app/budget/[year]/[month]/_month-editor.tsx`)
+
+- [ ] **"Planned to date" cannot wrap, and `scroll-mt-6` is too small to clear the sticky mobile hero.**
+      `BandColumns` pins column 3 to `w-[15%]` under `table-fixed` while shadcn's
+      `TableHead` carries `whitespace-nowrap`, so the header cannot wrap the way
+      DESIGN.md's own diagram draws it (`│ Planned │` over `│ to date │`); at the
+      narrowest width DESIGN.md records as measured, column 3 has ~67px of text room
+      for a ~100px label. Separately, `BandSection`'s `scroll-mt-6` (24px) is the
+      offset the new `#funds-band` deep link scrolls to, but the hero it must clear
+      is a `p-5` sticky card well over 120px tall on a phone — the only viewport
+      where it is sticky — so the link lands the heading underneath it. 24px is also
+      off DESIGN.md's stated 4/8/12/16/20/28/40/56 cadence.
+      (`src/app/budget/[year]/[month]/_month-editor.tsx`, `src/app/budget/[year]/[month]/_band-section.tsx`)
+
+### P3 — advisory (simplification lens; ~120 lines removable, none applied)
+
+- [ ] **Three verbatim copies each of `priorRuleSchema` and the rule-reversal block.**
+      `priorRuleSchema` is now byte-identical in `validateBulkRetargetSnapshot.ts`,
+      `validateBulkCategorizeSnapshot.ts` and `validateCategorizeTransactionSnapshot.ts`
+      — all three guarding the same crafted-Undo hole (`{matchType: "regex",
+      matchValue: ".*"}` as a catch-all rule), so a branch drifting out of one copy
+      is silent. Export one from `priorRuleSnapshot.ts`, which already owns
+      `PriorRuleSnapshot` and the narrowed `matchType`. Likewise the
+      `ruleTouched → deleted/already-gone/restored` block is a third transcription
+      across `undoBulkRetarget`, `undoBulkCategorize` and `undoCategorizeTransaction`;
+      extract `revertRuleWrite` beside `restorePriorRule`. Rule 6 records that the
+      equivalent *write*-side triplication had already drifted before `applyRuleWrite`
+      consolidated it — this is the same shape, at the same count.
+      (~84 lines)
+
+- [ ] **`fundAllocation` duplicates `leafRows`' inline allocation block; `FundRow.hasAllocation` has no consumer.**
+      `fundAllocation`'s own comment says it is "identical to `leafRows`' allocation
+      block above" while `leafRows` still carries the inlined original, so the
+      rollover triple has two spellings that must move together — hoist it and call
+      it from both. And `FundRow.hasAllocation` is exactly `allocation !== null`
+      (both written from the same `hasPeriodRow.has(leaf.id)`) with no production
+      reader: the fund rows go through `getAllocation()`. `IncomeLeafRow.hasAllocation`
+      is genuinely load-bearing and should stay.
+      (~17 lines)
+
+- [ ] **The zod-issue-to-throw block appears six times; the 10s undo duration is hardcoded at three call sites.**
+      `parsed.error.issues.map(...).join("; ")` + throw is copied verbatim across
+      `src/app/transactions/actions.ts` (×4) and `src/app/categorize/actions.ts` (×2),
+      varying only in a label. Separately `duration: 10_000` is repeated at three undo
+      surfaces while a dozen comments and CLAUDE.md call "the 10s Undo window" a
+      contract — and `/subscriptions` has already drifted to `15_000`.
+      (~18 lines)
+
+- [ ] **`seedAccount`/`seedBatch`/`seedCategory`/`seedTxn` are now hand-copied into 13 test files.**
+      This branch added copies 12 and 13 (`bulkRetarget.test.ts`,
+      `undoBulkRetarget.test.ts`, ~90 lines each). `src/lib/test/db.ts` already exists
+      as the shared test-infra home; move the four seeders into `src/lib/test/seed.ts`
+      parameterized on `TestDbHandle`.
+
+- [ ] **`/goals` hand-rolls a total the read model should own.**
+      `plannedCents={view.goals.reduce((sum, g) => sum + g.totalContributedCents, 0)}`
+      computes an aggregate in the view layer while `GoalsView.totalProgressCents`
+      is left with zero production consumers (referenced only from `loadGoals.test.ts`).
+      Add `totalContributedCents` to `GoalsView` and consume it, the way
+      `totalTargetCents` already is one line below.

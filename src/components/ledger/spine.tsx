@@ -69,7 +69,7 @@ export async function Spine() {
       backlog: true,
     },
     { label: "Subscriptions", href: "/subscriptions", icon: "↻", matchPrefix: "/subscriptions" },
-    { label: "Goals", href: "/goals", icon: "★", matchPrefix: "/goals" },
+    { label: "Funds", href: "/goals", icon: "★", matchPrefix: "/goals" },
     { label: "Sync", href: "/sync", icon: "⟳", matchPrefix: "/sync", divider: true },
     { label: "Import", href: "/import", icon: "↥", matchPrefix: "/import" },
   ];

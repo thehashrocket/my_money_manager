@@ -685,6 +685,225 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
       view.summary.plannedIncomeCents - view.summary.allocatedCents - view.summary.plannedFundCents,
     );
   });
+
+  /* D3=C — the FUNDS band became editable, so `hasAllocation` has to tell
+     "not decided yet" from "decided zero". `CurrencyInput` renders `null` as
+     an empty field and `0` as `$0.00`, and `plannedCents` alone collapses the
+     two: a fund with an explicit $0.00 contribution and a fund nobody has
+     touched both read 0. On a page whose entire model is that every dollar
+     gets a job, those are different statements. */
+  it("(D3=C) fundRows.hasAllocation is false when no budget_periods row exists", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund" });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    expect(view.fundRows).toEqual([
+      expect.objectContaining({ categoryId: fund.id, plannedCents: 0, hasAllocation: false }),
+    ]);
+  });
+
+  it("(D3=C) fundRows.hasAllocation is true for an EXPLICIT zero — distinct from no row at all", () => {
+    clearSeedCategories();
+    const untouched = seedCategory("AAA Untouched", { kind: "fund" });
+    const explicitZero = seedCategory("BBB Explicit", { kind: "fund" });
+    seedAllocation(explicitZero.id, 2026, 4, 0);
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    const byId = new Map(view.fundRows.map((r) => [r.categoryId, r]));
+    // Both report plannedCents 0 — hasAllocation is the ONLY thing that
+    // separates them, which is why it cannot be derived from plannedCents.
+    expect(byId.get(untouched.id)).toMatchObject({ plannedCents: 0, hasAllocation: false });
+    expect(byId.get(explicitZero.id)).toMatchObject({ plannedCents: 0, hasAllocation: true });
+  });
+
+  /* D3=C design review — the row's context columns. `plannedToDateCents` is
+     cumulative across every month UP TO AND INCLUDING the one being viewed,
+     and it is deliberately NOT `loadGoals`' `progressCents`
+     (`allocated − withdrawn`), whose `withdrawn` semantics this repo has
+     parked as an open question. Pinning it here so a later "align the two
+     figures" pass has to argue with a test. */
+  it("(D3=C) plannedToDateCents accumulates PRIOR months plus the one being viewed", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund" });
+    seedAllocation(fund.id, 2026, 3, 10000);
+    seedAllocation(fund.id, 2026, 4, 25000);
+    seedAllocation(fund.id, 2026, 5, 5000);
+
+    // Viewing April: plannedCents is April alone; plannedToDate is March +
+    // April, and NOT May.
+    const view = loadMonthView(handle.db, 2026, 4);
+    expect(view.fundRows[0]).toMatchObject({ plannedCents: 25000, plannedToDateCents: 35000 });
+
+    // March sees only March — the figure MOVES with the month being viewed.
+    // It was month-invariant before v0.23.0's review, which is what let a past
+    // month report money planned later.
+    expect(loadMonthView(handle.db, 2026, 3).fundRows[0]).toMatchObject({
+      plannedCents: 10000,
+      plannedToDateCents: 10000,
+    });
+
+    // May sees all three.
+    expect(loadMonthView(handle.db, 2026, 5).fundRows[0]).toMatchObject({
+      plannedCents: 5000,
+      plannedToDateCents: 40000,
+    });
+  });
+
+  /* The upper bound has to be a (year, month) PAIR, not a month comparison
+     that ignores the year. Viewing 2026-01 must not pick up 2025-12, and
+     viewing 2026-12 must pick up every earlier month of an earlier year — a
+     `month <= M` predicate alone gets both wrong. */
+  it("(D3=C) the planned-to-date bound compares year AND month, not month alone", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund" });
+    seedAllocation(fund.id, 2025, 12, 10000);
+    seedAllocation(fund.id, 2026, 1, 2000);
+
+    // January 2026: December 2025 is EARLIER, so it counts (month 12 > 1).
+    expect(loadMonthView(handle.db, 2026, 1).fundRows[0]).toMatchObject({
+      plannedToDateCents: 12000,
+    });
+    // December 2025: January 2026 is LATER, so it does not (month 1 < 12).
+    expect(loadMonthView(handle.db, 2025, 12).fundRows[0]).toMatchObject({
+      plannedToDateCents: 10000,
+    });
+  });
+
+  /* D3=C design review, finding 2. A rollover fund's carried balance has to
+     be on the row AT FIRST PAINT. It was not: fund leaves were excluded from
+     `rolloverCategoryIds`, `FundRow` had no triple, and the client seeded
+     `rolloverCents: 0` — so `AllocationCell`'s caption stayed hidden until
+     the first commit merged the server's real triple in, and money appeared
+     after an unrelated keystroke. */
+  it("(D3=C) a rollover fund carries its rollover on LOAD, not after the first commit", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund", carryoverPolicy: "rollover" });
+    // March budgeted $400 and nothing was withdrawn, so April carries it.
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+
+    const row = loadMonthView(handle.db, 2026, 4).fundRows[0];
+    expect(row.allocation).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 40000,
+      effectiveCents: 50000,
+    });
+  });
+
+  /* `plannedFundCents` is `allocated_cents`, NEVER `effective_allocation_cents`
+     (D3A) — and now that `FundRow` carries `allocation.effectiveCents` right
+     beside `plannedCents`, the "tidy-up" that swaps one for the other is one
+     keystroke away. Nothing pinned it: verified during v0.23.0's review by
+     changing `summarize()` to `fund.allocation?.effectiveCents ?? …`, which
+     left all 1,755 tests green.
+
+     Under that mutation a rollover fund's CARRIED balance is counted as newly
+     planned money, so `leftToBudgetCents` silently loses it every month for
+     the life of the fund — on the page whose entire model is that every dollar
+     gets a job, with a number that looks completely plausible. Hence a fixture
+     where the two readings differ ($100 allocated, $400 carried). */
+  it("(D3A) plannedFundCents and leftToBudget count ALLOCATED, not effective", () => {
+    clearSeedCategories();
+    const income = seedCategory("Salary", { kind: "income" });
+    const fund = seedCategory("Emergency", { kind: "fund", carryoverPolicy: "rollover" });
+    seedAllocation(income.id, 2026, 4, 300000);
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    // The row DOES carry the rollover — the two facts coexist.
+    expect(view.fundRows[0].allocation?.effectiveCents).toBe(50000);
+    // …and the summary counts only what was allocated THIS month.
+    expect(view.summary.plannedFundCents).toBe(10000);
+    // leftToBudget = plannedIncome − allocated − plannedFund, no spend term.
+    expect(view.summary.leftToBudgetCents).toBe(300000 - 0 - 10000);
+  });
+
+  it("(D3=C) a NON-rollover fund gets a zero rollover, not a carried one", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Vacation", { kind: "fund", carryoverPolicy: "none" });
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 10000);
+
+    expect(loadMonthView(handle.db, 2026, 4).fundRows[0].allocation).toEqual({
+      allocatedCents: 10000,
+      rolloverCents: 0,
+      effectiveCents: 10000,
+    });
+  });
+
+  it("(D3=C) a fund with no row this month has a null allocation, so the cell renders empty", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Untouched", { kind: "fund", carryoverPolicy: "rollover" });
+    seedAllocation(fund.id, 2026, 3, 40000);
+
+    expect(loadMonthView(handle.db, 2026, 4).fundRows[0].allocation).toBeNull();
+  });
+
+  it("(D3=C) a NULL target stays null and is never coerced to 0", () => {
+    clearSeedCategories();
+    // A fund created inline from /budget has no target until /goals sets one.
+    // Rendering null as $0.00 would claim the fund is already complete.
+    const fund = seedCategory("No Target", { kind: "fund" });
+    seedAllocation(fund.id, 2026, 4, 5000);
+
+    expect(loadMonthView(handle.db, 2026, 4).fundRows[0]).toMatchObject({
+      targetCents: null,
+      plannedToDateCents: 5000,
+    });
+  });
+
+  it("(D3=C) carryoverPolicy reaches the row, for the Rollover chip and the menu", () => {
+    clearSeedCategories();
+    seedCategory("Rolling", { kind: "fund", carryoverPolicy: "rollover" });
+
+    expect(loadMonthView(handle.db, 2026, 4).fundRows[0]).toMatchObject({
+      carryoverPolicy: "rollover",
+    });
+  });
+
+  it("(D3=C) plannedToDateCents counts only the fund's OWN rows", () => {
+    clearSeedCategories();
+    const fund = seedCategory("AAA Fund", { kind: "fund" });
+    const other = seedCategory("BBB Other Fund", { kind: "fund" });
+    const expense = seedCategory("CCC Groceries");
+    seedAllocation(fund.id, 2026, 4, 10000);
+    seedAllocation(other.id, 2026, 4, 70000);
+    seedAllocation(expense.id, 2026, 4, 90000);
+
+    const rows = loadMonthView(handle.db, 2026, 4).fundRows;
+    const byId = new Map(rows.map((r) => [r.categoryId, r]));
+    expect(byId.get(fund.id)?.plannedToDateCents).toBe(10000);
+    expect(byId.get(other.id)?.plannedToDateCents).toBe(70000);
+  });
+
+  /* THE REGRESSION THIS WHOLE CHANGE EXISTS FOR. Before D3=C a fund could be
+     created and never funded: /budget's FUNDS band was links-only and
+     /goals exports only createGoalAction + updateGoalTargetAction, neither of
+     which writes budget_periods. `upsertAllocation` was always capable of it
+     — no `kind` restriction — but nothing ever called it with a fund. This
+     asserts the write path end to end so a future `kind` guard added to
+     `upsertAllocation` (the natural-looking "funds aren't expenses" tidy-up)
+     fails here instead of silently re-breaking the band. */
+  it("(D3=C) upsertAllocation accepts a fund category and loadMonthView reads it back", () => {
+    clearSeedCategories();
+    const income = seedCategory("Paycheck", { kind: "income" });
+    seedAllocation(income.id, 2026, 4, 100000);
+    const fund = seedCategory("Car Repair", { kind: "fund" });
+
+    const before = loadMonthView(handle.db, 2026, 4);
+    expect(before.fundRows[0]).toMatchObject({ hasAllocation: false, plannedCents: 0 });
+    expect(before.summary.leftToBudgetCents).toBe(100000);
+
+    upsertAllocation(handle.db, { categoryId: fund.id, year: 2026, month: 4, allocatedCents: 25000 });
+
+    const after = loadMonthView(handle.db, 2026, 4);
+    expect(after.fundRows[0]).toMatchObject({ hasAllocation: true, plannedCents: 25000 });
+    expect(after.summary.plannedFundCents).toBe(25000);
+    // The contribution comes out of Left to Budget, which is the reason the
+    // control belongs on this page and not on /goals (D3=C).
+    expect(after.summary.leftToBudgetCents).toBe(75000);
+  });
 });
 
 it("(TC19, DS6') plannedIncomeCents is reported as 0 when nothing is planned, even though leftToBudget is also 0", () => {

@@ -46,10 +46,18 @@ export function BudgetHelpPanel() {
             <dd className="text-ink-2">Left to budget is exactly $0.00 — every dollar of planned income is assigned to a category. Spent can still be incomplete if you have uncategorized transactions.</dd>
           </div>
         </dl>
+        {/* D3=C (2026-09-08): this sentence used to read "they're read-only
+            here — manage targets and contributions on the Goals page." The
+            first half stopped being true when the FUNDS band became
+            editable, and the second half was never true: /goals has no
+            contribution form and never had one, so a fund could be created
+            and never funded. Correcting the copy is part of the same change
+            as the control, or the page keeps pointing at a page that cannot
+            do the thing. */}
         <p className="text-ink-2">
-          If you have{" "}
           <Link href="/goals" className="underline underline-offset-4 hover:no-underline">Funds</Link>{" "}
-          categories, they&apos;re read-only here — manage targets and contributions on the Goals page.
+          work like any other envelope here: what you put in a fund this month counts against Left to budget,
+          same as an expense. Set each fund&apos;s target and see its month-by-month history on the Funds page.
         </p>
         <p className="text-ink-2">
           If Spent looks wrong, you may have{" "}
