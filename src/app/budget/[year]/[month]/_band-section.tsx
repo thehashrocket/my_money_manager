@@ -1,9 +1,14 @@
 /**
- * Shared by `page.tsx` (the read-only FUNDS band, still server-rendered)
- * and `_month-editor.tsx` (the INCOME/EXPENSES bands, client-owned per
- * T18) — no `"use client"` directive of its own, so it compiles into
- * whichever boundary imports it (review decision D6A precedent: shared,
+ * Used by `_month-editor.tsx` for all three bands — INCOME, EXPENSES and,
+ * since D3=C, FUNDS. No `"use client"` directive of its own, so it compiles
+ * into whichever boundary imports it (review decision D6A precedent: shared,
  * not duplicated, once a helper has two real callers).
+ *
+ * It described itself as "shared by `page.tsx` (the read-only FUNDS band,
+ * still server-rendered)" until D3=C moved that band into the island and
+ * left this the only caller. Kept shared rather than inlined: the
+ * no-directive property is the point, and a future server-rendered band
+ * would want it back.
  */
 export function BandSection({
   heading,

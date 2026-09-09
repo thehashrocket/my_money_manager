@@ -1,22 +1,30 @@
 import { connection } from "next/server";
+import Link from "next/link";
 import { db } from "@/db";
 import { loadGoals, type GoalRow, type MonthlyContribution } from "@/lib/goals/loadGoals";
 import { formatCents } from "@/lib/money";
 import { StateCard } from "@/components/ledger/state-card";
+import { FOCUS_RING } from "@/components/ledger/focus-ring";
+import { currentMonth } from "@/lib/now";
 import { createGoalAction, updateGoalTargetAction } from "./actions";
 
 export default async function GoalsPage() {
   await connection();
   const view = loadGoals(db);
+  // The return path out of this page. D3=C made /budget the place a fund is
+  // funded, and this page had no link back — `createGoalAction` redirects
+  // here and then the trail goes cold, which is the same dead end in the
+  // other direction as the one that change fixed.
+  const { year, month } = currentMonth();
 
   return (
     <main className="mx-auto max-w-3xl p-5 space-y-7 [font-variant-numeric:tabular-nums]">
       <div className="space-y-1">
-        <h1 className="font-display text-xl font-semibold">Savings Goals</h1>
+        <h1 className="font-display text-xl font-semibold">Funds</h1>
         {/* DS11(i): the subhead used to be the exact claim ("track
             progress") this whole change exists to stop making. */}
         <p className="text-sm text-muted-foreground">
-          Planned contributions toward each target. These are amounts you budgeted, not transfers.
+          What you have budgeted toward each target, month by month. Amounts you planned, not transfers — fund them on the Budget page.
         </p>
       </div>
 
@@ -28,12 +36,12 @@ export default async function GoalsPage() {
       <StateCard
         variant="empty"
         title="Progress tracking is paused"
-        description="These are amounts you budgeted toward each goal, not confirmed transfers — the app can't tell whether the money actually moved, so there's no percent-complete bar until that's true."
+        description="These are amounts you budgeted toward each fund, not confirmed transfers — the app can't tell whether the money actually moved, so there's no percent-complete bar until that's true."
       />
 
       <section className="space-y-3">
         <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-          New goal
+          New fund
         </h2>
         <CreateGoalForm />
       </section>
@@ -43,14 +51,17 @@ export default async function GoalsPage() {
       ) : (
         <>
           {view.totalTargetCents > 0 && (
-            <PlannedTotalLine plannedCents={view.totalProgressCents} targetCents={view.totalTargetCents} />
+            <PlannedTotalLine
+              plannedCents={view.goals.reduce((sum, g) => sum + g.totalContributedCents, 0)}
+              targetCents={view.totalTargetCents}
+            />
           )}
           <section className="space-y-4">
             <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-              Goals · {view.goals.length}
+              Funds · {view.goals.length}
             </h2>
             {view.goals.map((goal) => (
-              <GoalCard key={goal.categoryId} goal={goal} />
+              <GoalCard key={goal.categoryId} goal={goal} year={year} month={month} />
             ))}
           </section>
         </>
@@ -113,7 +124,7 @@ function CreateGoalForm() {
         type="submit"
         className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 transition-opacity"
       >
-        Create goal
+        Create fund
       </button>
     </form>
   );
@@ -124,7 +135,7 @@ function PlannedTotalLine({ plannedCents, targetCents }: { plannedCents: number;
   return (
     <div className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 text-sm">
       <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-        Planned across all goals
+        Planned to date, all funds
       </span>
       <span className="font-mono text-sm">
         {formatCents(plannedCents)} / {formatCents(targetCents)}
@@ -133,7 +144,18 @@ function PlannedTotalLine({ plannedCents, targetCents }: { plannedCents: number;
   );
 }
 
-function GoalCard({ goal }: { goal: GoalRow }) {
+/**
+ * The headline figure is `totalContributedCents`, NOT `progressCents`.
+ *
+ * They are different quantities — `progressCents` is contributed MINUS
+ * withdrawals — and this card used to render the net one under the word
+ * "planned", while `/budget`'s FUNDS band renders the gross one under the
+ * same word. Two adjacent pages, one word, two numbers that only agree when
+ * nothing has ever been withdrawn. Now both pages show the same quantity
+ * under the same label, and the withdrawal, which is a real and separate
+ * fact, gets its own line instead of being silently folded into the total.
+ */
+function GoalCard({ goal, year, month }: { goal: GoalRow; year: number; month: number }) {
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-3">
       <div className="flex items-start justify-between gap-2">
@@ -147,13 +169,30 @@ function GoalCard({ goal }: { goal: GoalRow }) {
         </div>
         <div className="text-right shrink-0">
           <div className="font-mono text-sm font-medium">
-            {formatCents(goal.progressCents)}
+            {formatCents(goal.totalContributedCents)}
           </div>
           <div className="font-mono text-xs text-muted-foreground">
-            planned of {formatCents(goal.targetCents)}
+            planned to date, target {formatCents(goal.targetCents)}
           </div>
+          {goal.totalWithdrawnCents > 0 && (
+            <div className="font-mono text-xs text-muted-foreground">
+              less {formatCents(goal.totalWithdrawnCents)} withdrawn · {formatCents(goal.progressCents)} net
+            </div>
+          )}
         </div>
       </div>
+
+      {/* The established inline-link recipe: FOCUS_RING (DESIGN.md names it
+          "the one focus treatment for interactive elements outside
+          components/ui") plus `inline-flex min-h-11 items-center` for the
+          DS66 44px touch floor. At text-xs this link is ~15px tall without
+          it, and it is the whole return path into the FUNDS band. */}
+      <Link
+        href={`/budget/${year}/${month}#funds-band`}
+        className={`inline-flex min-h-11 items-center font-mono text-xs text-terracotta underline-offset-4 hover:underline ${FOCUS_RING}`}
+      >
+        Fund this month →
+      </Link>
 
       <UpdateTargetForm categoryId={goal.categoryId} currentTargetCents={goal.targetCents} />
 
@@ -235,8 +274,8 @@ function GoalsEmptyState() {
   return (
     <div className="rounded-lg border border-border bg-muted/40 px-8 py-10 text-center">
       <div className="mb-3 font-mono text-3xl text-muted-foreground">★</div>
-      <p className="mb-1 text-sm font-medium">No savings goals yet</p>
-      <p className="text-xs text-muted-foreground">Create your first goal above.</p>
+      <p className="mb-1 text-sm font-medium">No funds yet</p>
+      <p className="text-xs text-muted-foreground">Create your first fund above.</p>
     </div>
   );
 }

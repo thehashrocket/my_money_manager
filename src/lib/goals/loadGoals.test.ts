@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq, ne } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
+import { upsertAllocation } from "@/lib/budget/upsertAllocation";
 import { loadGoals } from "./loadGoals";
 
 /**
@@ -217,6 +218,56 @@ describe("loadGoals (TC34a)", () => {
     const view = loadGoals(handle.db);
     expect(view.totalTargetCents).toBe(30000);
     expect(view.totalProgressCents).toBe(13000);
+  });
+});
+
+/*
+ * D3=C (2026-09-08) — the end-to-end statement of the fund fix.
+ *
+ * Every test above seeds `budget_periods` rows DIRECTLY, which is why this
+ * file was green for the whole time a fund was unfundable: `loadGoals`' math
+ * was always correct, and no UI could produce its input. `/budget`'s FUNDS
+ * band was links-only (DS19) and `/goals` exports only `createGoalAction`
+ * and `updateGoalTargetAction`, neither of which touches `budget_periods` —
+ * so `progressCents = allocated - withdrawn` was pinned at `0 - withdrawn`
+ * on the live ledger for the life of the app, and `PLAN.md`'s 1.0.0 gate #2
+ * ("what a fund's progress means") could not be answered by creating a fund.
+ *
+ * This joins the two halves through the REAL writer. It fails if anyone adds
+ * a `kind` guard to `upsertAllocation` — the natural-looking "funds are not
+ * expenses" tidy-up that would silently restore the dead end.
+ */
+describe("loadGoals — a fund funded through the real write path (D3=C)", () => {
+  it("progress moves from 0 once upsertAllocation writes a fund's contribution", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+
+    const before = loadGoals(handle.db);
+    expect(before.goals[0].progressCents).toBe(0);
+    expect(before.goals[0].progressPct).toBe(0);
+
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+
+    const after = loadGoals(handle.db);
+    expect(after.goals[0].progressCents).toBe(25000);
+    expect(after.totalProgressCents).toBe(25000);
+  });
+
+  it("accumulates across months, because a contribution is per-month by construction", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 5, allocatedCents: 30000 });
+
+    expect(loadGoals(handle.db).goals[0].progressCents).toBe(55000);
+  });
+
+  it("re-committing the same month REPLACES rather than adds (budget_periods is unique per category-month)", () => {
+    const cat = seedFundCategory("Emergency", { targetCents: 100000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 25000 });
+    upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 40000 });
+
+    // Editing a cell twice is the commonest possible interaction on the new
+    // control; an upsert that appended would double-count every correction.
+    expect(loadGoals(handle.db).goals[0].progressCents).toBe(40000);
   });
 });
 

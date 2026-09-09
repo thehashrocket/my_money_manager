@@ -22,7 +22,14 @@ export async function createGoalAction(formData: FormData): Promise<void> {
     .values({ name, isSavingsGoal: true, kind: "fund", targetCents, carryoverPolicy })
     .run();
 
+  // `/budget` too, since D3=C: the FUNDS band renders this fund's row and
+  // its `targetCents` ("Left to target"). A fund created here and not
+  // revalidated there is missing from the band — and when it is the FIRST
+  // fund, the band itself does not render, because `<MonthEditor>` gates
+  // the whole section on `fundRows.length > 0`.
   revalidatePath("/goals");
+  revalidatePath("/budget");
+  revalidatePath("/budget/[year]/[month]", "page");
   redirect("/goals");
 }
 
@@ -49,5 +56,10 @@ export async function updateGoalTargetAction(formData: FormData): Promise<void> 
     .where(eq(schema.categories.id, categoryId))
     .run();
 
+  // `/budget` reads this same target for the band's "Left to target"
+  // column (`fundTargetGap`), so a target changed here has to invalidate
+  // there or the gap keeps reporting against the old number.
   revalidatePath("/goals");
+  revalidatePath("/budget");
+  revalidatePath("/budget/[year]/[month]", "page");
 }

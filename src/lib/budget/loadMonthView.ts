@@ -50,12 +50,68 @@ export type IncomeLeafRow = {
   hasAllocation: boolean;
 };
 
-/** A `kind='fund'` category's row on the FUNDS band (A6), read-only. */
+/**
+ * A `kind='fund'` category's row on the FUNDS band (A6).
+ *
+ * EDITABLE as of D3=C (2026-09-08) — DS19 made this band read-only and sent
+ * contributions to `/goals`, but `/goals` only ever grew `createGoalAction`
+ * and `updateGoalTargetAction`, neither of which writes `budget_periods`. So
+ * a fund could be created and never funded, and `loadGoals`' `progressCents`
+ * (`allocated − withdrawn`) was pinned at `0 − withdrawn` for the life of the
+ * app. `budget_periods` is keyed `(category_id, year, month)`, so a
+ * contribution is inherently a per-MONTH number, and
+ * `leftToBudgetCents = plannedIncome − allocated − plannedFund` means it is
+ * also a Left-to-Budget decision — both of which only exist on this page.
+ * `/goals` keeps targets and long-horizon progress and reads the same
+ * `budget_periods` rows, so the two surfaces cannot disagree.
+ */
 export type FundRow = {
   categoryId: number;
   name: string;
   /** `budget_periods.allocated_cents`, never `effective_allocation_cents` (D3A). */
   plannedCents: number;
+  /**
+   * Whether a `budget_periods` row exists for this fund this month (DS14,
+   * mirroring `IncomeLeafRow`). Load-bearing now that the band is editable:
+   * `CurrencyInput` renders `null` as an empty field and `0` as `$0.00`, and
+   * "I have not decided yet" is a different statement from "I decided zero"
+   * on a page whose whole model is that every dollar gets a job.
+   */
+  hasAllocation: boolean;
+  /** Drives the `Rollover` chip and the row's `CategoryMenu`, exactly as
+   *  `LeafRow.carryoverPolicy` does for an expense leaf. Before the band was
+   *  editable a fund's policy was settable ONLY at creation time on `/goals`. */
+  carryoverPolicy: "none" | "rollover" | "reset";
+  /**
+   * `categories.target_cents`. NULL means "no target recorded", which is NOT
+   * the same fact as `0` — a fund created inline from this page has no target
+   * until one is set on `/goals`, and rendering that as `$0.00` would claim
+   * the fund is already complete.
+   */
+  targetCents: number | null;
+  /**
+   * The same `{allocated, rollover, effective}` triple `LeafRow` carries, or
+   * `null` when this month has no `budget_periods` row. Seeds the client's
+   * allocation map, so a rollover fund's carried balance is on screen at
+   * first paint rather than appearing after the first commit.
+   */
+  allocation: LeafAllocation | null;
+  /**
+   * SUM(`budget_periods.allocated_cents`) across EVERY month for this fund,
+   * this month included.
+   *
+   * This is deliberately NOT `loadGoals`' `progressCents`. That figure is
+   * `allocated − withdrawn`, and what `withdrawn` should mean is an open
+   * question this repo has explicitly parked (a net figure would let a
+   * deposit into a fund increase progress on top of the allocation already
+   * counting the same intention). `allocated` alone carries no such dispute:
+   * it is the sum of what the user typed, which is exactly the quantity the
+   * cell beside it is editing. `/goals` already frames its own number this
+   * way ("$X planned of $Y", and its card says progress tracking is paused
+   * because the app cannot confirm money moved), so this row says "planned"
+   * too rather than inventing a progress claim the app declines to make.
+   */
+  plannedToDateCents: number;
 };
 
 /**
@@ -215,7 +271,19 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   const incomeLeaves = incomeLeavesAll.filter(notHiddenByArchive);
   const fundLeaves = fundLeavesAll.filter(notHiddenByArchive);
 
-  const rolloverCategoryIds = expenseLeaves
+  // FUND leaves join this list as of the D3=C design review. They were
+  // excluded while the band was read-only, which was harmless then and a
+  // real defect once it was editable: `FundRow` carried no rollover figure,
+  // the client seeded `rolloverCents: 0`, and `AllocationCell` renders its
+  // "+$X rollover" caption only on a non-zero value — so a fund with a
+  // carried balance showed NOTHING on load, and the caption then appeared
+  // the instant the user committed any value, because `upsertAllocation` →
+  // `getEffectiveAllocation` returns the real triple and `commit()` merges
+  // it. Money materializing after an unrelated keystroke is the worst
+  // surprise available on a savings surface. Rollover is a first-class
+  // choice for a fund (`/goals`' create form offers it), so this is not an
+  // edge case.
+  const rolloverCategoryIds = [...expenseLeaves, ...fundLeaves]
     .filter((c) => c.carryoverPolicy === "rollover")
     .map((c) => c.id);
   const effectiveByCategoryId =
@@ -270,11 +338,36 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
     };
   });
 
+  /** Identical to `leafRows`' allocation block above — same triple, same
+   *  `null`-when-no-row rule, same rollover lookup. */
+  const fundAllocation = (leaf: { id: number; carryoverPolicy: "none" | "rollover" | "reset" }) => {
+    if (!hasPeriodRow.has(leaf.id)) return null;
+    const allocatedCents = allocatedByCategoryId.get(leaf.id) ?? 0;
+    const effectiveCents =
+      leaf.carryoverPolicy === "rollover"
+        ? (effectiveByCategoryId.get(leaf.id)?.get(targetKey) ?? allocatedCents)
+        : allocatedCents;
+    return { allocatedCents, rolloverCents: effectiveCents - allocatedCents, effectiveCents };
+  };
+
+  // Query #6, funds only and skipped entirely when there are none — same
+  // shape as the rollover-range queries, which only run when a rollover
+  // expense category exists.
+  const plannedToDateByFundId = loadFundPlannedToDate(
+    db,
+    fundLeaves.map((f) => f.id),
+  );
+
   const fundRows: FundRow[] = fundLeaves
     .map((leaf) => ({
       categoryId: leaf.id,
       name: leaf.name,
       plannedCents: allocatedByCategoryId.get(leaf.id) ?? 0,
+      hasAllocation: hasPeriodRow.has(leaf.id),
+      allocation: fundAllocation(leaf),
+      carryoverPolicy: leaf.carryoverPolicy,
+      targetCents: leaf.targetCents,
+      plannedToDateCents: plannedToDateByFundId.get(leaf.id) ?? 0,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -339,6 +432,33 @@ function loadAllocationsForMonth(
     hasPeriodRow.add(row.categoryId);
   }
   return { allocatedByCategoryId, hasPeriodRow };
+}
+
+/**
+ * Query #6: cumulative `allocated_cents` per FUND across every month.
+ *
+ * Unbounded in time on purpose — "planned to date" means since the fund
+ * existed, not since some window. Scoped to the fund ids rather than
+ * grouping the whole table, and skipped altogether when there are no funds
+ * (the common case: the live ledger has none), so an app with no savings
+ * goals pays nothing for this.
+ */
+function loadFundPlannedToDate(db: Db, fundIds: number[]): Map<number, number> {
+  const byId = new Map<number, number>();
+  if (fundIds.length === 0) return byId;
+
+  const rows = db
+    .select({
+      categoryId: schema.budgetPeriods.categoryId,
+      plannedToDate: sql<number>`COALESCE(SUM(${schema.budgetPeriods.allocatedCents}), 0)`,
+    })
+    .from(schema.budgetPeriods)
+    .where(inArray(schema.budgetPeriods.categoryId, fundIds))
+    .groupBy(schema.budgetPeriods.categoryId)
+    .all();
+
+  for (const row of rows) byId.set(row.categoryId, row.plannedToDate);
+  return byId;
 }
 
 /**

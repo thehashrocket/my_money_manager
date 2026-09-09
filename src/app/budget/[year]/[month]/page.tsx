@@ -3,30 +3,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { db } from "@/db";
-import { loadMonthView, type FundRow, type IncomeLeafRow, type MonthViewSummary } from "@/lib/budget/loadMonthView";
+import { loadMonthView, type IncomeLeafRow, type MonthViewSummary } from "@/lib/budget/loadMonthView";
 import { monthPhase, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
-import { formatCents } from "@/lib/money";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { SummaryStrip, type SummaryStripCell } from "@/components/ledger/summary-strip";
 import { StateCard } from "@/components/ledger/state-card";
 import { Button } from "@/components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCaption,
-  TableCell,
-  TableFooter,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { loadReclassifyCandidates } from "@/lib/budget/setCategoryKind";
 import { hasAnyAllocations } from "@/lib/budget/copyMonth";
 import { AllocateFormTrigger } from "./_allocate-form";
 import { ReclassifyIncomeBanner } from "./_reclassify-income";
 import { CopyPreviousMonthButton } from "./_copy-month";
-import { BandSection } from "./_band-section";
 import { MonthEditor } from "./_month-editor";
 import { BudgetHelpPanel } from "./_help-panel";
 
@@ -189,7 +177,17 @@ export default async function BudgetMonthPage({
   // Stricter than Left to Budget's own `plannedIncome === 0` state: a month
   // with expense allocations already set but no income yet does not get
   // this card, only the hero's own message.
-  const isFirstRun = view.summary.plannedIncomeCents === 0 && view.summary.allocatedCents === 0;
+  // `allocatedCents` is EXPENSE-KIND ONLY, so the fund term has to be its own
+  // clause. Without it, funding a goal in a fresh month — the exact thing
+  // D3=C exists to enable, and the "pay yourself first" order a person might
+  // reasonably take — renders FirstRunCard's "Nothing is planned for
+  // September yet" directly above a Funds band showing $500, and suppresses
+  // the help panel too. Unreachable while the band was read-only; reachable
+  // the moment it was not.
+  const isFirstRun =
+    view.summary.plannedIncomeCents === 0 &&
+    view.summary.allocatedCents === 0 &&
+    view.summary.plannedFundCents === 0;
 
   const prior = previousMonth(year, month);
   const priorMonthLabel = monthLabel(prior.year, prior.month);
@@ -215,7 +213,7 @@ export default async function BudgetMonthPage({
         month={month}
         phase={phase}
         railTotalCents={railTotalCents}
-        plannedFundCents={view.summary.plannedFundCents}
+        fundRows={view.fundRows}
         incomeSections={view.incomeSections}
         expenseSections={view.sections}
         uncategorizedRow={view.uncategorizedRow}
@@ -261,17 +259,13 @@ export default async function BudgetMonthPage({
       {/* Eng review Issue 4 + design review (2026-09-05): hidden on
           first-run so it never stacks with FirstRunCard's onboarding above,
           and placed after the hero/bands (not before) so a top-to-bottom
-          scan hits the real budget numbers first. */}
-      {!isFirstRun ? <BudgetHelpPanel /> : null}
+          scan hits the real budget numbers first.
 
-      {/* A6: FUNDS renders only when a fund category exists — nothing to
-          reconcile with an empty section. */}
-      {view.summary.fundCount > 0 ? (
-        <BandSection heading="Funds">
-          <FundsTable fundRows={view.fundRows} plannedFundCents={view.summary.plannedFundCents} year={year} month={month} />
-          <MobileFundsList fundRows={view.fundRows} plannedFundCents={view.summary.plannedFundCents} />
-        </BandSection>
-      ) : null}
+          D3=C moved the FUNDS band into `<MonthEditor>` (it needs live
+          editor state now that it is editable), which is what finally makes
+          "after the bands" literally true — this panel used to sit BETWEEN
+          Expenses and Funds. */}
+      {!isFirstRun ? <BudgetHelpPanel /> : null}
     </main>
   );
 }
@@ -301,12 +295,32 @@ function MonthNav({ year, month }: { year: number; month: number }) {
 }
 
 /** DS2: five paired stat cells — `SummaryStrip` (T13) renders them. */
+/**
+ * DS27 — every term of the headline must be derivable from something on
+ * screen. `leftToBudgetCents` is `plannedIncome − allocated − plannedFund`,
+ * and this strip listed only the first two: edit a fund, watch Left to
+ * budget drop, and nothing above it accounts for the difference. That was
+ * unreachable while the FUNDS band was read-only and the ledger had no funds
+ * (`plannedFundCents` was always 0), and D3=C made it reachable — so the
+ * third term joins the strip the moment a fund exists.
+ *
+ * Gated on `fundCount`, matching A6: no funds, no cell. An always-present
+ * `$0.00` funding stat on the ~100% of months with no savings goals is the
+ * inert row A6 exists to prevent.
+ *
+ * Like every other cell here it is server-rendered and lags live edits until
+ * the next revalidation — the same deliberate staleness `Planned spending`
+ * already has, not a new inconsistency.
+ */
 function summaryStripCells(summary: MonthViewSummary): SummaryStripCell[] {
   return [
     { label: "Planned income", cents: summary.plannedIncomeCents },
     { label: "Received", cents: summary.receivedIncomeCents },
     { label: "Planned spending", cents: summary.allocatedCents },
     { label: "Spent", cents: summary.spentCents },
+    ...(summary.fundCount > 0
+      ? [{ label: "Planned funding", cents: summary.plannedFundCents } satisfies SummaryStripCell]
+      : []),
     {
       label: "Remaining",
       cents: summary.remainingCents,
@@ -315,80 +329,3 @@ function summaryStripCells(summary: MonthViewSummary): SummaryStripCell[] {
   ];
 }
 
-/* ── FUNDS — desktop table (read-only, A6/D3A). Stays server-rendered:
-   PR2a's inline editing is expense/income only (§6.1's diagram never lists
-   a Funds editor), so this band has no live state to read. ────────────── */
-
-function FundsTable({
-  fundRows,
-  plannedFundCents,
-  year,
-  month,
-}: {
-  fundRows: FundRow[];
-  plannedFundCents: number;
-  year: number;
-  month: number;
-}) {
-  return (
-    <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
-      <Table className="border-collapse">
-        <TableCaption className="sr-only">Funds for {monthLabel(year, month)}</TableCaption>
-        <TableHeader className="bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
-          <TableRow>
-            <TableHead className="px-3">Category</TableHead>
-            <TableHead className="px-3 text-right">Planned</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {fundRows.map((fund) => (
-            <TableRow key={fund.categoryId}>
-              <TableHead scope="row" className="px-3 py-2 font-normal">
-                <Link href="/goals" className="font-display text-ink-1 underline-offset-4 hover:underline">
-                  {fund.name}
-                </Link>
-              </TableHead>
-              <TableCell className="px-3 py-2 text-right">
-                <Link href="/goals" className="text-ink-1 underline-offset-4 hover:underline">
-                  {formatCents(fund.plannedCents)} →
-                </Link>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-        <TableFooter className="bg-transparent">
-          <TableRow className="hover:bg-transparent">
-            <TableHead scope="row" className="px-3 py-2 font-mono text-sm font-normal text-ink-2">
-              Σ planned funding
-            </TableHead>
-            <TableCell className="px-3 py-2 text-right font-mono text-sm text-ink-2">{formatCents(plannedFundCents)}</TableCell>
-          </TableRow>
-        </TableFooter>
-      </Table>
-    </div>
-  );
-}
-
-function MobileFundsList({ fundRows, plannedFundCents }: { fundRows: FundRow[]; plannedFundCents: number }) {
-  return (
-    <div className="space-y-2 sm:hidden">
-      <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft">
-        {fundRows.map((fund) => (
-          <li key={fund.categoryId}>
-            <Link href="/goals" className="flex items-center justify-between gap-2 px-3 py-2.5">
-              <span className="font-display text-ink-1">{fund.name}</span>
-              <span className="font-mono text-sm text-ink-1">{formatCents(fund.plannedCents)} →</span>
-            </Link>
-          </li>
-        ))}
-      </ul>
-      {/* Mirrors the desktop table's `TableFooter` subtotal row — without
-          it, the band-level "what did I plan here" figure was only
-          recoverable from `SummaryStrip`, which doesn't break out funding. */}
-      <div className="flex items-center justify-between border-t-2 border-[var(--rule-strong)] px-1 pt-2 font-mono text-sm text-ink-2">
-        <span>Σ planned funding</span>
-        <span>{formatCents(plannedFundCents)}</span>
-      </div>
-    </div>
-  );
-}

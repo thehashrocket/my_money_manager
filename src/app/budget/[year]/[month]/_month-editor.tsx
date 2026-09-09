@@ -13,13 +13,14 @@ import {
 } from "react";
 import type { EffectiveAllocation } from "@/lib/budget";
 import type {
+  FundRow,
   IncomeLeafRow,
   LeafRow,
   SectionGroup,
   UncategorizedRow,
 } from "@/lib/budget/loadMonthView";
 import type { MonthPhase } from "@/lib/budget/monthOfIso";
-import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge } from "@/lib/budget/resolveRowDisplay";
+import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,35 @@ import { BandSection } from "./_band-section";
 import { CategoryMenu } from "./_category-menu";
 import { NewCategoryRow, NewGroupRow } from "./_create-category";
 
+/**
+ * One column geometry for all three bands.
+ *
+ * Each band is its own `<Table>`, so with the browser's default auto layout
+ * every band sized its columns from its OWN content — `Planned` sat at a
+ * different x in each one, and the Ledger Paper idiom reads three stacked
+ * ruled tables as a single sheet. It was worst on FUNDS (a 2-column table
+ * between two 5-column ones, ~450px off and landing on the x-position
+ * Expenses uses for `Remaining`), but Income and Expenses already disagreed
+ * with each other by ~37px before any of this.
+ *
+ * `table-fixed` plus this shared `<colgroup>` makes the geometry a property
+ * of the page rather than of whatever text happens to be in each table. All
+ * three bands are 5 columns wide, so one spec covers them; the first column
+ * absorbs the slack because category names are the only variable-width
+ * content and the four money columns must not move.
+ */
+function BandColumns() {
+  return (
+    <colgroup>
+      <col className="w-[40%]" />
+      <col className="w-[15%]" />
+      <col className="w-[15%]" />
+      <col className="w-[18%]" />
+      <col className="w-[12%]" />
+    </colgroup>
+  );
+}
+
 const BAR_CLASS: Record<BarTone, string> = {
   ledger: "bg-ledger",
   amber: "bg-amber-accent",
@@ -53,11 +83,20 @@ const BAR_CLASS: Record<BarTone, string> = {
 
      <MonthEditor>            "use client" — owns the month's allocation state
          ├── <LeftToBudget>      reads the running total from editor state
+         │        = plannedIncome − allocated − plannedFund
+         │          ▲               ▲            ▲
+         │          └── income      └── expense  └── funds  (all three live)
          ├── income <BandSection>  rows bind to editor state
-         └── expense <BandSection> rows bind to editor state
+         ├── expense <BandSection> rows bind to editor state
+         └── funds  <BandSection> rows bind to editor state  (D3=C; was a
+                 │                 read-only server table under DS19, which
+                 │                 is why a fund could never be funded)
                  └── each row: onBlur / Enter → commitAllocationAction
                                → action RETURNS the reconciled row (P2)
                                → client merges by categoryId
+
+   One `allocations` Map keyed by categoryId backs all three bands; the
+   commit path is kind-agnostic because `upsertAllocation` is too.
    ────────────────────────────────────────────────────────────────────── */
 
 type EditorContextValue = {
@@ -95,6 +134,43 @@ function useHydrated(): boolean {
   );
 }
 
+/**
+ * Scroll to `location.hash` once this island has mounted.
+ *
+ * `/goals`' "Fund this month →" links at `#funds-band`, and on a COLD load
+ * that anchor is not in the document when the browser goes looking for it.
+ * This route is dynamic and `loadMonthView` is the app's heaviest read, so
+ * `loading.tsx`'s `<StateCard variant="loading">` is what streams first
+ * (DS34) — the browser's automatic hash scroll runs against that shell,
+ * finds nothing, and never retries once the real bands arrive. The link
+ * navigated to the right page and the right month and landed at the top,
+ * which reads as the link being broken rather than as a timing artifact.
+ *
+ * Deliberately generic rather than `#funds-band`-specific: `#income-band`
+ * carries an id for the same reason, and a band added later gets this for
+ * free. `BandSection`'s `scroll-mt-6` supplies the offset — `scrollIntoView`
+ * honours `scroll-margin`, so the anchor does not sit flush against the
+ * sticky Left to Budget header.
+ *
+ * It lives here rather than in `BandSection`, which owns the ids, because
+ * that component deliberately carries no `"use client"` directive of its own
+ * (it compiles into whichever boundary imports it, and a future
+ * server-rendered band would want that back). An effect would pin it to the
+ * client permanently.
+ *
+ * Mount-only on purpose. A client-side navigation that lands on a hash is
+ * already handled by the router against a document that HAS the element —
+ * the streamed-shell race is the only case where nobody scrolls.
+ */
+function useHashScroll(): void {
+  useEffect(() => {
+    // `getElementById`, not `querySelector("#" + id)`: a hash is
+    // user-controllable text and need not be a valid CSS selector.
+    const id = window.location.hash.slice(1);
+    if (id) document.getElementById(id)?.scrollIntoView();
+  }, []);
+}
+
 function monthLabel(year: number, month: number): string {
   return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
     month: "long",
@@ -108,9 +184,18 @@ export type MonthEditorProps = {
   month: number;
   phase: MonthPhase;
   railTotalCents: number;
-  /** A6/D3A: FUNDS stays read-only in PR2a — a fixed number from the
-   * server, not tracked state, folded into `leftToBudgetCents` below. */
-  plannedFundCents: number;
+  /**
+   * D3=C (2026-09-08): FUNDS is tracked editor state, not a fixed server
+   * number. It used to be `plannedFundCents: number` — read-only per
+   * DS19/A6, folded into `leftToBudgetCents` and unreachable by any writer,
+   * which is what left a fund permanently unfundable (see `FundRow`'s
+   * docstring in `loadMonthView.ts`). It has to be STATE rather than a prop
+   * because `leftToBudgetCents` subtracts it: a contribution that did not
+   * move the headline in the same keystroke as an expense allocation does
+   * would make the one number this page exists for wrong until the next
+   * navigation.
+   */
+  fundRows: FundRow[];
   incomeSections: SectionGroup<IncomeLeafRow>[];
   expenseSections: SectionGroup<LeafRow>[];
   uncategorizedRow: UncategorizedRow | null;
@@ -132,7 +217,7 @@ export function MonthEditor(props: MonthEditorProps) {
     month,
     phase,
     railTotalCents,
-    plannedFundCents,
+    fundRows,
     incomeSections,
     expenseSections,
     uncategorizedRow,
@@ -143,6 +228,7 @@ export function MonthEditor(props: MonthEditorProps) {
   } = props;
 
   const hydrated = useHydrated();
+  useHashScroll();
 
   function buildAllocations() {
     const map = new Map<number, EffectiveAllocation | null>();
@@ -160,6 +246,21 @@ export function MonthEditor(props: MonthEditorProps) {
       for (const leaf of section.categories) {
         map.set(leaf.categoryId, leaf.allocation);
       }
+    }
+    // Funds seed the same map the other two bands do, so `commit` needs no
+    // per-kind branch — `upsertAllocation` has no `kind` restriction either
+    // (it checks existence, `archived_at` and parent-header only), which is
+    // why this whole change is a control and not a write path.
+    //
+    // Seeded from the SERVER's triple, exactly like `expenseSections` above.
+    // This block used to hardcode `rolloverCents: 0` and defend it with "the
+    // server never agreed to a rollover caption" — but the real problem was
+    // that nobody had ASKED the server: `loadMonthView` computed rollover for
+    // expense leaves only. A fund with a carried balance therefore showed no
+    // caption until the first commit merged the true triple in, at which
+    // point money appeared out of nowhere. The read model answers now.
+    for (const fund of fundRows) {
+      map.set(fund.categoryId, fund.allocation);
     }
     return map;
   }
@@ -188,9 +289,18 @@ export function MonthEditor(props: MonthEditorProps) {
   // already refuses to stomp a field the user is actively typing in.
   const [prevIncomeSections, setPrevIncomeSections] = useState(incomeSections);
   const [prevExpenseSections, setPrevExpenseSections] = useState(expenseSections);
-  if (prevIncomeSections !== incomeSections || prevExpenseSections !== expenseSections) {
+  // `fundRows` joins the resync triple for the same reason the other two are
+  // here: without it, a fund absent at mount stays absent from `allocations`
+  // and renders blank-and-uneditable. Reached by `createCategoryAction` from
+  // this band's own "+ Add a line", and by any navigation back to this route.
+  // (An earlier version credited `createGoalAction`'s revalidation, which at
+  // the time only touched `/goals`. It now revalidates `/budget` too, so that
+  // path reaches here as well — but the guard is what makes either safe.)
+  const [prevFundRows, setPrevFundRows] = useState(fundRows);
+  if (prevIncomeSections !== incomeSections || prevExpenseSections !== expenseSections || prevFundRows !== fundRows) {
     setPrevIncomeSections(incomeSections);
     setPrevExpenseSections(expenseSections);
+    setPrevFundRows(fundRows);
     setAllocations(buildAllocations());
   }
 
@@ -244,7 +354,7 @@ export function MonthEditor(props: MonthEditorProps) {
   // `allocatedCents` sums the EXPLICIT `allocated_cents` per leaf, never
   // `effectiveCents` — rollover money was already budgeted in a prior
   // month, counting it again here would manufacture capacity.
-  const { plannedIncomeCents, allocatedCents } = useMemo(() => {
+  const { plannedIncomeCents, allocatedCents, plannedFundCents } = useMemo(() => {
     let planned = 0;
     for (const section of incomeSections) {
       for (const income of section.categories) {
@@ -257,8 +367,15 @@ export function MonthEditor(props: MonthEditorProps) {
         allocated += allocations.get(leaf.categoryId)?.allocatedCents ?? 0;
       }
     }
-    return { plannedIncomeCents: planned, allocatedCents: allocated };
-  }, [allocations, incomeSections, expenseSections]);
+    // Same `allocatedCents`-not-`effectiveCents` rule as the two bands above:
+    // rollover money into a fund was budgeted in a prior month, and counting
+    // it again here would manufacture capacity.
+    let fund = 0;
+    for (const row of fundRows) {
+      fund += allocations.get(row.categoryId)?.allocatedCents ?? 0;
+    }
+    return { plannedIncomeCents: planned, allocatedCents: allocated, plannedFundCents: fund };
+  }, [allocations, incomeSections, expenseSections, fundRows]);
 
   const leftToBudgetCents = plannedIncomeCents - allocatedCents - plannedFundCents;
 
@@ -294,7 +411,7 @@ export function MonthEditor(props: MonthEditorProps) {
           <MobileIncomeList sections={incomeSections} plannedIncomeCents={plannedIncomeCents} year={year} month={month} />
         </BandSection>
 
-        <BandSection heading="Expenses">
+        <BandSection heading="Expenses" id="expenses-band">
           <ExpenseTable
             sections={expenseSections}
             uncategorizedRow={uncategorizedRow}
@@ -311,6 +428,22 @@ export function MonthEditor(props: MonthEditorProps) {
           />
           <NewGroupRow />
         </BandSection>
+
+        {/* A6 still holds: no band at all when no fund exists — an empty
+            FUNDS section has nothing to reconcile.
+
+            This band moved INSIDE the island with D3=C. It used to render in
+            `page.tsx` AFTER `<BudgetHelpPanel />`, which put the help panel
+            between Expenses and Funds and split §3's documented
+            INCOME → EXPENSES → FUNDS order; the panel now follows all three
+            bands, which is where its own placement comment always said it
+            belonged ("after the hero/bands"). */}
+        {fundRows.length > 0 ? (
+          <BandSection heading="Funds" id="funds-band">
+            <FundsTable fundRows={fundRows} plannedFundCents={plannedFundCents} year={year} month={month} />
+            <MobileFundsList fundRows={fundRows} plannedFundCents={plannedFundCents} year={year} month={month} />
+          </BandSection>
+        ) : null}
       </div>
     </EditorContext.Provider>
   );
@@ -447,7 +580,8 @@ function ExpenseTable({
 
   return (
     <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
-      <Table className="border-collapse">
+      <Table className="table-fixed border-collapse">
+        <BandColumns />
         <TableCaption className="sr-only">Expenses for {monthLabel(year, month)}</TableCaption>
         <TableHeader className="bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
           <TableRow>
@@ -653,7 +787,8 @@ function IncomeTable({
 }) {
   return (
     <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
-      <Table className="border-collapse">
+      <Table className="table-fixed border-collapse">
+        <BandColumns />
         <TableCaption className="sr-only">Income for {monthLabel(year, month)}</TableCaption>
         <TableHeader className="border-b-2 border-[var(--rule-strong)] bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
           <TableRow>
@@ -988,6 +1123,255 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
           categoryName={income.name}
           kind="income"
           carryoverPolicy="none"
+          canMoveUp={false}
+          canMoveDown={false}
+        />
+      </div>
+    </li>
+  );
+}
+
+/* ── FUNDS — desktop table (D3=C: editable, was read-only under DS19) ──────
+
+   FIVE columns, matching Income and Expenses exactly. That is a layout
+   decision with a reason, not symmetry for its own sake: as a 2-column table
+   between two 5-column ones, the Planned money column landed ~450px to the
+   right of its siblings and squarely on the x-position the Expenses band
+   uses for REMAINING. Same screen position, different meaning, one scroll
+   apart. The column count IS the fix.
+
+   The middle pair mirrors what its siblings do with theirs — an accumulated
+   fact, then the gap it leaves:
+
+     Expenses   Category │ Planned │ Spent     │ Remaining        │ ⋯
+     Income     Category │ Planned │ Received  │ Variance         │ ⋯
+     Funds      Category │ Planned │ Planned   │ Left to target   │ ⋯
+                                     to date
+
+   "Planned to date", never "saved": `/goals` states plainly that these are
+   budgeted amounts and not confirmed transfers, and its own card says
+   progress tracking is paused for exactly that reason. The band that edits
+   the number must not make a stronger claim than the page that reports it.
+   ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The gap between a fund's target and what has been planned toward it.
+ *
+ * `null` target is NOT zero — it means no target recorded, which is the
+ * state of every fund created inline from this page — so the cell renders an
+ * em dash rather than claiming the fund is complete. Reaching the target is
+ * the one genuinely good outcome on this band, so it takes `positive`; every
+ * other state is `neutral`. Tones come from `TONE_CLASS`, the map
+ * `resolveRowDisplay` owns, rather than a fourth local copy.
+ */
+function fundTargetGap(fund: FundRow): { label: string; tone: RowTone } {
+  if (fund.targetCents === null) return { label: "—", tone: "neutral" };
+  const remaining = fund.targetCents - fund.plannedToDateCents;
+  if (remaining <= 0) return { label: "Funded", tone: "positive" };
+  return { label: formatCents(remaining), tone: "neutral" };
+}
+
+/** DS-parity with `ExpenseDesktopRow`'s inline chip and `/goals`' ROLLOVER
+ *  badge — the same fact was already badged on two surfaces and dropped on
+ *  this one. `text-ink-2` matches the expense chip it sits one band above;
+ *  it read `text-ink-3` first, which put the same badge at two strengths in
+ *  two ruled tables one scroll apart. */
+function RolloverChip({ policy }: { policy: FundRow["carryoverPolicy"] }) {
+  if (policy !== "rollover") return null;
+  return (
+    <span className="rounded-xs bg-[var(--bg-inset)] px-1 font-mono text-[10px] uppercase tracking-wide text-ink-2">
+      Rollover
+    </span>
+  );
+}
+
+function FundsTable({
+  fundRows,
+  plannedFundCents,
+  year,
+  month,
+}: {
+  fundRows: FundRow[];
+  plannedFundCents: number;
+  year: number;
+  month: number;
+}) {
+  return (
+    <div className="hidden overflow-hidden rounded-lg shadow-soft sm:block">
+      <Table className="table-fixed border-collapse">
+        <BandColumns />
+        <TableCaption className="sr-only">Funds for {monthLabel(year, month)}</TableCaption>
+        <TableHeader className="border-b-2 border-[var(--rule-strong)] bg-[var(--bg-inset)] font-mono text-xs uppercase tracking-wide text-ink-2">
+          <TableRow>
+            <TableHead className="px-3">Category</TableHead>
+            <TableHead className="px-3 text-right">Planned</TableHead>
+            <TableHead className="px-3 text-right">Planned to date</TableHead>
+            <TableHead className="px-3 text-right">Left to target</TableHead>
+            <TableHead className="px-3 text-right">Allocate</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {fundRows.map((fund) => (
+            <FundDesktopRow key={fund.categoryId} fund={fund} year={year} month={month} />
+          ))}
+          {/* Parity with "+ Add a line" on the other two bands. `kind="fund"`
+              was already supported by this component; the band just never
+              offered it, so a fund could only be born on /goals. A fund made
+              here has no target until one is set there, which is exactly the
+              NULL case `fundTargetGap` renders as an em dash. */}
+          <NewCategoryRow parentId={null} parentName={null} kind="fund" colSpan={5} />
+        </TableBody>
+        <TableFooter className="bg-transparent">
+          <TableRow className="hover:bg-transparent">
+            <TableHead scope="row" className="px-3 py-2 font-mono text-sm font-normal text-ink-2">
+              Σ planned funding
+            </TableHead>
+            <TableCell className="px-3 py-2 text-right font-mono text-sm text-ink-2">{formatCents(plannedFundCents)}</TableCell>
+            <TableCell colSpan={3} />
+          </TableRow>
+        </TableFooter>
+      </Table>
+    </div>
+  );
+}
+
+function FundDesktopRow({
+  fund,
+  year,
+  month,
+}: {
+  fund: FundRow;
+  year: number;
+  month: number;
+}) {
+  const { hydrated, getAllocation, commit } = useEditor();
+  const allocation = getAllocation(fund.categoryId);
+  const gap = fundTargetGap(fund);
+  return (
+    <TableRow>
+      <TableHead scope="row" className="px-3 py-2 font-normal">
+        {/* The name drills into this fund's transactions, the same as an
+            expense or income leaf. It is NOT the old link to `/goals`: that
+            one made the row two things at once, an inline budgeting control
+            and a page-hop for the meaning of the number beside it, and the
+            two columns to the right now answer "how much toward what?" in
+            place. This is the other question — "which rows?" — which the
+            band cannot answer and which every other band answers this way.
+            `tabIndex={-1}` keeps it out of the keyboard path so it does not
+            compete with the allocate field for the tab order, exactly as the
+            sibling bands do. */}
+        <div className="flex items-center gap-2">
+          <Link
+            href={transactionsDrilldownHref(fund.categoryId, year, month)}
+            tabIndex={-1}
+            className="font-display text-ink-1 underline-offset-4 hover:underline"
+          >
+            {fund.name}
+          </Link>
+          <RolloverChip policy={fund.carryoverPolicy} />
+        </div>
+      </TableHead>
+      <TableCell className="px-3 py-2 text-right text-ink-1">
+        <AllocationCell
+          categoryId={fund.categoryId}
+          name={fund.name}
+          allocation={allocation}
+          commit={commit}
+          hydrated={hydrated}
+        />
+      </TableCell>
+      <TableCell className="px-3 py-2 text-right text-ink-1">{formatCents(fund.plannedToDateCents)}</TableCell>
+      <TableCell className={cn("px-3 py-2 text-right", TONE_CLASS[gap.tone])}>{gap.label}</TableCell>
+      <TableCell className="px-3 py-2 text-right">
+        <CategoryMenu
+          categoryId={fund.categoryId}
+          categoryName={fund.name}
+          kind="fund"
+          carryoverPolicy={fund.carryoverPolicy}
+          // Funds sort by name, never `sort_order` (`fundRows`' own sort in
+          // loadMonthView.ts) — same reasoning as income rows: reordering
+          // would swap a column nothing on this band reads.
+          canMoveUp={false}
+          canMoveDown={false}
+        />
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function MobileFundsList({
+  fundRows,
+  plannedFundCents,
+  year,
+  month,
+}: {
+  fundRows: FundRow[];
+  plannedFundCents: number;
+  year: number;
+  month: number;
+}) {
+  return (
+    <div className="space-y-2 sm:hidden">
+      <ul className="divide-y divide-[var(--rule-faint)] overflow-hidden rounded-lg bg-[var(--bg-raised)] shadow-soft">
+        {fundRows.map((fund) => (
+          <MobileFundRow key={fund.categoryId} fund={fund} year={year} month={month} />
+        ))}
+        <NewCategoryRow parentId={null} parentName={null} kind="fund" mobile />
+      </ul>
+      <MobileSubtotal label="Σ planned funding" cents={plannedFundCents} />
+    </div>
+  );
+}
+
+/**
+ * Three stacked lines, same skeleton as `MobileExpenseRow`.
+ *
+ * The input is the FIRST child of the bottom row, which puts it on the LEFT —
+ * matching both sibling bands. It was on the right in the first cut, so
+ * scrolling from Expenses into Funds moved the field you type in across the
+ * full width of the phone. That is a thumb-reach cost, not a visual one.
+ */
+function MobileFundRow({
+  fund,
+  year,
+  month,
+}: {
+  fund: FundRow;
+  year: number;
+  month: number;
+}) {
+  const { hydrated, getAllocation, commit } = useEditor();
+  const allocation = getAllocation(fund.categoryId);
+  const gap = fundTargetGap(fund);
+  return (
+    <li className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <Link
+          href={transactionsDrilldownHref(fund.categoryId, year, month)}
+          tabIndex={-1}
+          className="min-w-0 truncate font-display text-ink-1 underline-offset-4 hover:underline"
+        >
+          {fund.name}
+        </Link>
+        <span className={cn("shrink-0 font-mono text-sm", TONE_CLASS[gap.tone])}>{gap.label}</span>
+      </div>
+      <div className="mt-1 flex items-center gap-1 font-mono text-xs text-ink-3">
+        <span>{formatCents(fund.plannedToDateCents)} planned to date</span>
+        <RolloverChip policy={fund.carryoverPolicy} />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <AllocationCell
+          categoryId={fund.categoryId}
+          name={fund.name}
+          allocation={allocation}
+          commit={commit}
+          hydrated={hydrated}
+        />
+        <CategoryMenu
+          categoryId={fund.categoryId}
+          categoryName={fund.name}
+          kind="fund"
+          carryoverPolicy={fund.carryoverPolicy}
           canMoveUp={false}
           canMoveDown={false}
         />
