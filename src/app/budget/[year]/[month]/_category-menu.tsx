@@ -101,9 +101,28 @@ export function CategoryMenu({
   canMoveDown,
   isGroup = false,
 }: CategoryMenuProps) {
-  const [activeDialog, setActiveDialog] = useState<"rename" | "archive" | null>(null);
+  const [activeDialog, setActiveDialog] = useState<"rename" | "archive" | "kind" | null>(null);
+  const [pendingKind, setPendingKind] = useState<CategoryKind | null>(null);
   const [moveAnnouncement, setMoveAnnouncement] = useState("");
   const [isPending, startTransition] = useTransition();
+
+  /**
+   * Whether a kind change from this menu is the IRREVERSIBLE one.
+   *
+   * `assignableKinds` returns all three kinds if and only if the category is
+   * UNUSED (`categoryKindLock.ts` — `isCategoryUsed` is the first branch), and
+   * an unused category's kind is free to change back and forth: nothing has
+   * been calculated from it yet. Fewer than three means the category is used,
+   * and rule 8 refuses every transition on a used category except X1
+   * (expense → income, all rows positive). So on a used category the only
+   * change this menu can offer IS X1 — and X1 is one-way, because
+   * income → expense on a used category is refused outright. There is no undo.
+   *
+   * That is the same `< 3` reading `_month-editor`'s `liveAssignableKinds`
+   * keys off, and it is reading the live prop, so an allocation committed in
+   * this session narrows it here too.
+   */
+  const kindChangeIsIrreversible = assignableKinds.length < 3;
 
   function moveTo(direction: "up" | "down") {
     startTransition(async () => {
@@ -119,6 +138,31 @@ export function CategoryMenu({
       const { newPosition, siblingCount } = result.result;
       setMoveAnnouncement(`${categoryName} is now position ${newPosition + 1} of ${siblingCount}.`);
     });
+  }
+
+  /**
+   * The menu item's handler. Confirms first when the change cannot be undone,
+   * applies immediately when it can.
+   *
+   * The banner flow (`_reclassify-income.tsx`) has always gated this exact
+   * write behind a dialog that says in as many words that it cannot be undone.
+   * This menu reached the same server action straight from a dropdown click,
+   * and v0.24.0's `assignableKinds` work made the item appear exactly when the
+   * server WILL accept it — so the unguarded path became the more discoverable
+   * of the two, not the less.
+   *
+   * Deliberately NOT a confirm on every kind change: on an unused category
+   * this is ordinary setup and reversible, and a modal there is friction that
+   * teaches people to click through modals.
+   */
+  function requestKind(newKind: CategoryKind) {
+    if (newKind === kind) return;
+    if (kindChangeIsIrreversible) {
+      setPendingKind(newKind);
+      setActiveDialog("kind");
+      return;
+    }
+    setKind(newKind);
   }
 
   function setKind(newKind: CategoryKind) {
@@ -197,8 +241,9 @@ export function CategoryMenu({
               <DropdownMenuSeparator />
               {assignableKinds.length > 1 ? (
                 assignableKinds.map((k) => (
-                  <DropdownMenuItem key={k} disabled={k === kind} onClick={() => setKind(k)}>
+                  <DropdownMenuItem key={k} disabled={k === kind} onClick={() => requestKind(k)}>
                     Set kind: {k}
+                    {k !== kind && kindChangeIsIrreversible ? "…" : ""}
                   </DropdownMenuItem>
                 ))
               ) : (
@@ -242,7 +287,87 @@ export function CategoryMenu({
         categoryId={categoryId}
         categoryName={categoryName}
       />
+      <SetKindDialog
+        open={activeDialog === "kind"}
+        onOpenChange={(open) => {
+          setActiveDialog(open ? "kind" : null);
+          if (!open) setPendingKind(null);
+        }}
+        categoryName={categoryName}
+        currentKind={kind}
+        newKind={pendingKind}
+        pending={isPending}
+        onConfirm={() => {
+          if (pendingKind === null) return;
+          setKind(pendingKind);
+          setActiveDialog(null);
+          setPendingKind(null);
+        }}
+      />
     </>
+  );
+}
+
+/**
+ * The confirm step for an irreversible kind change, deliberately carrying the
+ * same three claims `_reclassify-income.tsx` makes rather than a generic "are
+ * you sure": WHAT is recalculated, that it reaches PRIOR months and not just
+ * this one, and that the app has no way back.
+ *
+ * Copy is duplicated rather than shared with the banner, and that is a real
+ * trade rather than an oversight. The two surfaces differ in what the user has
+ * already told the app: the banner is a picker, so it names the row count and
+ * date range it just loaded as evidence for WHICH category to convert; here
+ * the category is already chosen and the only open question is whether to go
+ * through with it. Extracting one component would mean either loading
+ * evidence this menu does not have or dropping it from the banner, and the
+ * banner's evidence is the more load-bearing of the two. If a third surface
+ * ever reaches `setCategoryKindAction`, extract then — with three call sites
+ * the shared shape is knowable rather than guessed.
+ */
+function SetKindDialog({
+  open,
+  onOpenChange,
+  categoryName,
+  currentKind,
+  newKind,
+  pending,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  categoryName: string;
+  currentKind: CategoryKind;
+  newKind: CategoryKind | null;
+  pending: boolean;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Change “{categoryName}” from {currentKind} to {newKind ?? ""}?
+          </DialogTitle>
+          <DialogDescription>
+            This category already has activity, so the change is not a setting — it rewrites how the
+            months it appears in are calculated.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="rounded-md bg-[var(--bg-inset)] px-3 py-2 text-sm text-ink-1">
+          <p>
+            This month&apos;s summary, every prior month, the spending trend chart, and whether this
+            category can receive transactions all change.
+          </p>
+          <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
+        </div>
+        <DialogFooter showCloseButton>
+          <Button type="button" variant="primary" disabled={pending || newKind === null} onClick={onConfirm}>
+            {newKind ? `Change to ${newKind}` : "Change"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
