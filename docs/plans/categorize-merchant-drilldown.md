@@ -2,6 +2,14 @@
 
 **Status:** IMPLEMENTED (2026-09-07) — T1-T16 all landed. Reviewed via
 `/plan-eng-review` + `/plan-design-review` before implementation.
+**Extended in v0.23.0 (2026-09-08):** the drilldown gained a WRITE path it did
+not have here — `RetargetForm` (`src/app/transactions/_retarget-form.tsx` →
+`bulkRetarget`), which moves every row filed under one category for the pinned
+key onto another. It lives on this page for the reason this plan already
+identifies: `loadMerchantGroups` filters on `category_id IS NULL`, so a
+fully-filed group vanishes from `/categorize` and the repair could not live
+where the mistake was made. Nothing in this plan's "NOT in scope" list was
+reversed by it.
 **Branch:** `thehashrocket/categorize-name-to-transactions`
 **Ask:** on `/categorize`, clicking the name on a row lands on `/transactions`
 showing just that name's transactions.

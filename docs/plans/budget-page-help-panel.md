@@ -2,6 +2,14 @@
 
 Locked via `/plan-eng-review` 2026-09-05.
 
+**Superseded in one place (v0.23.0, 2026-09-08):** the Funds paragraph below
+("Why Funds is read-only here") described the panel as shipped, and the FUNDS
+band is now editable. The panel's copy was rewritten in the same change — funds
+now read as ordinary envelopes that count against Left to budget, with `/goals`
+framed as targets and history rather than as where contributions happen (it
+never had a contribution form). Everything else in this plan still describes
+what shipped.
+
 ## Why
 
 `/budget/[year]/[month]` shows Left to Budget, Income/Expense bands, and Funds
