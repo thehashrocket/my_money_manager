@@ -1,12 +1,43 @@
 import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import { monthBoundary, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
+// Typed on the derived union, never `string`: this predicate exists so the
+// fund rule cannot drift, and a `string` parameter would let a schema enum
+// rename slip through as "always false" — silently reinstating the exact
+// rollover inflation it was written to stop, at BOTH call sites at once.
+import type { CategoryKind } from "@/lib/budget/categoryKindLock";
 
 export type EffectiveAllocation = {
   allocatedCents: number;
   rolloverCents: number;
   effectiveCents: number;
 };
+
+/**
+ * The ONE spelling of "does this category's spend read drop positive rows?"
+ *
+ * Spend is `0 - SUM(amount_cents)` (rule 1's signed convention), so a positive
+ * unpaired row makes `spent` NEGATIVE and `max(0, prevEffective - spent)` then
+ * carries a balance LARGER than anything ever allocated. On an expense envelope
+ * that is correct and deliberate — a refund restores buying capacity. On a fund
+ * it is money appearing from nowhere, and every other subsystem already refuses
+ * it: `rules.ts` will not auto-file a positive row into a fund at import,
+ * `assertAssignableCategory` refuses a fund on all three categorize paths, and
+ * `loadGoals` keeps `withdrawn` outflows-only for this exact reason.
+ *
+ * There are TWO rollover spellings and they cannot share the SQL — this one is
+ * a per-category scalar read, `loadRolloverEffectiveByCategory` is a grouped
+ * set-based scan whose clamp has to be inside the aggregate. They share this
+ * DECISION instead. They were allowed to disagree for one release: the
+ * set-based path got the clamp and this one did not, so a rollover fund's
+ * carried balance was correct on load and inflated the moment the user typed
+ * into the Allocate cell, because `commitAllocationAction` merges the triple
+ * `getEffectiveAllocation` returns into live client state. Do not re-derive
+ * `kind === "fund"` inline in a third place.
+ */
+export function spendIgnoresPositiveRows(kind: CategoryKind | null | undefined): boolean {
+  return kind === "fund";
+}
 
 /**
  * Return the effective allocation for a category in a given month, or `null`
@@ -80,7 +111,9 @@ export function getEffectiveAllocation(
     // question (TODOS.md) rather than decided here — answer after real
     // fund usage, at PR3.
     if (prior) {
-      const priorSpent = computeMtdSpent(db, categoryId, priorYear, priorMonth);
+      const priorSpent = computeMtdSpent(db, categoryId, priorYear, priorMonth, {
+        ignorePositiveRows: spendIgnoresPositiveRows(category?.kind),
+      });
       // B3: overspending a rollover envelope forgives the overage rather
       // than carrying a negative balance forward — a defensible product
       // call (EveryDollar's Funds go negative, YNAB makes you cover the
@@ -263,16 +296,26 @@ function categoryMonthPredicate(categoryId: number, year: number, month: number)
  * Month-to-date spend in positive cents for the given category + month.
  * Pending rows are included — they count toward spent until they post.
  * Refunds (positive amount_cents on a spend category) net against debits.
+ *
+ * `ignorePositiveRows` drops positive rows from the sum instead of letting
+ * them net debits down — see {@link spendIgnoresPositiveRows} for which
+ * categories need it and why. It has to be applied INSIDE the aggregate, not
+ * to the result: a month holding both a $50 credit and a $100 withdrawal nets
+ * to $50 once summed, and no clamp applied afterwards can recover the $100.
  */
 export function computeMtdSpent(
   db: AnyDb,
   categoryId: number,
   year: number,
   month: number,
+  options: { ignorePositiveRows?: boolean } = {},
 ): number {
+  const amount = schema.transactions.amountCents;
   const row = db
     .select({
-      total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)`,
+      total: options.ignorePositiveRows
+        ? sql<number>`COALESCE(SUM(CASE WHEN ${amount} > 0 THEN 0 ELSE ${amount} END), 0)`
+        : sql<number>`COALESCE(SUM(${amount}), 0)`,
     })
     .from(schema.transactions)
     .where(categoryMonthPredicate(categoryId, year, month))

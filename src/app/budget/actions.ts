@@ -208,9 +208,18 @@ export async function commitAllocationAction(
  * payload on the way back. Same bug class `setCategoryKindAction` already
  * carries a comment about; the editable band reintroduced it for funds.
  */
-export async function revalidateBudgetSurfacesAction(year: number, month: number): Promise<void> {
+export async function revalidateBudgetSurfacesAction(): Promise<void> {
   revalidatePath("/budget");
-  revalidatePath(`/budget/${year}/${month}`);
+  // Pattern form, matching `upsertBudgetAllocationAction` above — which is
+  // also why this takes no arguments any more. The literal
+  // form was here and is wrong for the same reason it is wrong there: a
+  // rollover category's carried balance is derived from every prior month, so
+  // the allocations this island just committed change what every LATER month
+  // renders, and revalidating only the month just edited leaves those stale.
+  // It mattered more here than anywhere, because this is the path the inline
+  // editor takes and therefore the only way a fund can be funded at all — on
+  // the one band where rollover is a first-class choice.
+  revalidatePath("/budget/[year]/[month]", "page");
   revalidatePath("/goals");
 }
 

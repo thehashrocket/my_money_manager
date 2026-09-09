@@ -860,14 +860,27 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
 
   /* The guard is fund-scoped, NOT a blanket "ignore positive rows". An
      expense envelope's refund still restores buying capacity — rule 1 settled
-     that in v0.19.0 and this fix must not quietly reverse it. */
+     that in v0.19.0 and this fix must not quietly reverse it.
+
+     A rollover FUND is seeded alongside deliberately, and it is what makes
+     this test able to fail. `loadRolloverEffectiveByCategory` only builds the
+     `CASE WHEN amount_cents > 0 AND category_id IN (…)` expression at all when
+     `fundCategoryIds` is non-empty; with an expense category alone the query
+     takes the plain `SUM(amount_cents)` fallback and the fund branch this test
+     exists to constrain is never compiled. Dropping the `inArray(…)` scoping
+     from that CASE — turning the clamp into a blanket "ignore every positive
+     row" and silently reversing rule 1 for every rollover envelope — left the
+     single-category version of this test green. */
   it("(round-5) a refund on a rollover EXPENSE envelope still increases what carries forward", () => {
     clearSeedCategories();
     const account = seedAccount();
     const batch = seedBatch();
     const cat = seedCategory("Groceries", { kind: "expense", carryoverPolicy: "rollover" });
+    const fund = seedCategory("Emergency", { kind: "fund", carryoverPolicy: "rollover" });
     seedAllocation(cat.id, 2026, 3, 40000);
     seedAllocation(cat.id, 2026, 4, 0);
+    seedAllocation(fund.id, 2026, 3, 40000);
+    seedAllocation(fund.id, 2026, 4, 0);
     seedTxn({
       accountId: account.id,
       batchId: batch.id,
@@ -882,10 +895,31 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
       date: "2026-03-20",
       amountCents: 5000,
     });
+    // Same shape on the fund, so both branches of the CASE are exercised by
+    // one query and the two readings are asserted against each other.
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-10",
+      amountCents: -10000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: fund.id,
+      date: "2026-03-20",
+      amountCents: 5000,
+    });
 
-    const leaf = loadMonthView(handle.db, 2026, 4).sections.flatMap((s) => s.categories).find((c) => c.categoryId === cat.id);
+    const view = loadMonthView(handle.db, 2026, 4);
+    const leaf = view.sections.flatMap((s) => s.categories).find((c) => c.categoryId === cat.id);
     // $400 allocated − ($100 spent − $50 refunded) = $350 carried.
     expect(leaf?.allocation?.rolloverCents).toBe(35000);
+    // Identical rows on the fund: the $50 credit is dropped, not netted, so
+    // $400 − $100 = $300 carries.
+    const fundRow = view.fundRows.find((f) => f.categoryId === fund.id);
+    expect(fundRow?.allocation?.rolloverCents).toBe(30000);
   });
 
   /* `plannedFundCents` is `allocated_cents`, NEVER `effective_allocation_cents`
@@ -1471,5 +1505,208 @@ describe("loadMonthView — archived-category visibility (X3/§7.2)", () => {
     const view = loadMonthView(handle.db, 2026, 4);
     const names = view.sections.flatMap((s) => s.categories).map((c) => c.name);
     expect(names).toContain(cat.name);
+  });
+});
+
+/* T1's SECOND caller. `assignableKinds` is pinned as a pure function in
+   categoryKindLock.test.ts and enforced by `setCategoryKind`, but the wiring
+   that carries it onto the rendered rows — query #7, `loadCategoryKindUsage`,
+   and the `assignableKindsFor` closure that supplies each band's kind — had
+   no assertion anywhere: not one existing test reads the field. That is the
+   half the DS32 fix actually shipped, since `CategoryMenu` renders this prop
+   and nothing else. */
+describe("loadMonthView — assignableKinds on the rendered rows (T1, DS32)", () => {
+  function expenseLeaf(view: ReturnType<typeof loadMonthView>, categoryId: number) {
+    return view.sections.flatMap((s) => s.categories).find((c) => c.categoryId === categoryId);
+  }
+
+  it("offers every kind on an expense leaf with no transactions and no budget_periods row", () => {
+    clearSeedCategories();
+    const cat = seedCategory("Someday");
+
+    const row = expenseLeaf(loadMonthView(handle.db, 2026, 4), cat.id);
+    expect(row?.assignableKinds.slice().sort()).toEqual(["expense", "fund", "income"]);
+  });
+
+  /* The case the whole change exists for: one keystroke in the FUNDS band —
+     `$0` included — writes the `budget_periods` row that makes rule 8's
+     `isUsed` true, after which the menu must stop offering a kind change the
+     server always refuses. */
+  it("locks a FUND to its own kind once it has a budget_periods row, including a $0 one", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund" });
+    seedAllocation(fund.id, 2026, 4, 0);
+
+    const row = loadMonthView(handle.db, 2026, 4).fundRows.find((f) => f.categoryId === fund.id);
+    expect(row?.allocation?.allocatedCents).toBe(0);
+    expect(row?.assignableKinds).toEqual(["fund"]);
+  });
+
+  it("offers every kind to a fund that has no budget_periods row anywhere", () => {
+    clearSeedCategories();
+    const funded = seedCategory("Emergency", { kind: "fund" });
+    seedAllocation(funded.id, 2026, 4, 1000);
+    const untouched = seedCategory("Someday fund", { kind: "fund" });
+
+    const rows = loadMonthView(handle.db, 2026, 4).fundRows;
+    expect(rows.find((f) => f.categoryId === untouched.id)?.assignableKinds.slice().sort()).toEqual([
+      "expense",
+      "fund",
+      "income",
+    ]);
+    expect(rows.find((f) => f.categoryId === funded.id)?.assignableKinds).toEqual(["fund"]);
+  });
+
+  /* The usage read spans the WHOLE ledger, not the month on screen. Its own
+     comment says `hasAllocation` (a this-month fact) is not a substitute, and
+     this is the case that separates them: allocate in March, look at April.
+     A month-scoped query would report the fund as unused and re-offer the
+     kinds `setCategoryKind` refuses. */
+  it("locks a fund allocated in a DIFFERENT month than the one being viewed", () => {
+    clearSeedCategories();
+    const fund = seedCategory("Emergency", { kind: "fund" });
+    seedAllocation(fund.id, 2026, 3, 25000);
+    seedAllocation(fund.id, 2026, 4, 0);
+
+    const row = loadMonthView(handle.db, 2026, 4).fundRows.find((f) => f.categoryId === fund.id);
+    // April's own row is $0 and March's is what locks it.
+    expect(row?.assignableKinds).toEqual(["fund"]);
+  });
+
+  it("locks an expense leaf whose only transaction is in a different month", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Groceries");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-01-10",
+      amountCents: -2500,
+    });
+
+    const row = expenseLeaf(loadMonthView(handle.db, 2026, 4), cat.id);
+    expect(row?.assignableKinds).toEqual(["expense"]);
+  });
+
+  /* X1 (rule 8) has to survive the trip through the read model, not just the
+     writer — it is the one repair path for a category that was always income
+     but got seeded as an expense, and a menu that hides it withdraws the fix. */
+  it("(X1) surfaces expense -> income on a used, all-positive expense leaf", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Freelance");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: 50000,
+    });
+
+    const row = expenseLeaf(loadMonthView(handle.db, 2026, 4), cat.id);
+    expect(row?.assignableKinds.slice().sort()).toEqual(["expense", "income"]);
+  });
+
+  it("(X1) withdraws the offer the moment one negative row exists for that leaf", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Freelance");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-10",
+      amountCents: 50000,
+    });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: cat.id,
+      date: "2026-04-11",
+      amountCents: -100,
+    });
+
+    const row = expenseLeaf(loadMonthView(handle.db, 2026, 4), cat.id);
+    expect(row?.assignableKinds).toEqual(["expense"]);
+  });
+
+  /* Each band passes its OWN kind into the shared closure. A copy-paste that
+     hands the expense literal to the income band is invisible until a used
+     income leaf starts claiming it can still become an expense. */
+  it("carries the row's own kind on the INCOME band, and locks a used one to it", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const unused = seedCategory("Bonus", { kind: "income" });
+    const used = seedCategory("Paycheck", { kind: "income" });
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: used.id,
+      date: "2026-04-10",
+      amountCents: 100000,
+    });
+
+    const rows = loadMonthView(handle.db, 2026, 4).incomeSections.flatMap((s) => s.categories);
+    expect(rows.find((r) => r.categoryId === used.id)?.assignableKinds).toEqual(["income"]);
+    expect(rows.find((r) => r.categoryId === unused.id)?.assignableKinds.slice().sort()).toEqual([
+      "expense",
+      "fund",
+      "income",
+    ]);
+  });
+
+  /* A category absent from BOTH grouped queries is absent from the usage map,
+     and the caller reads that miss as NO_USAGE rather than as an error. With
+     several leaves on the page, only the used ones may be locked. */
+  it("does not leak one leaf's usage onto another", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const used = seedCategory("Groceries");
+    const unused = seedCategory("Gifts");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: used.id,
+      date: "2026-04-10",
+      amountCents: -2500,
+    });
+
+    const view = loadMonthView(handle.db, 2026, 4);
+    expect(expenseLeaf(view, used.id)?.assignableKinds).toEqual(["expense"]);
+    expect(expenseLeaf(view, unused.id)?.assignableKinds.slice().sort()).toEqual([
+      "expense",
+      "fund",
+      "income",
+    ]);
+  });
+
+  /* An UNCATEGORIZED row carries `category_id IS NULL` and must not be read as
+     usage for anything. What actually excludes it is the WHERE clause:
+     `inArray(categoryId, categoryIds)` compiles to `category_id IN (…)`, which
+     SQLite evaluates to NULL — not true — for a NULL `category_id`, so the row
+     never reaches the GROUP BY. This does NOT pin the `row.categoryId === null`
+     skip inside `loadCategoryKindUsage`; that branch is unreachable from this
+     query and is kept only as a type narrowing. Deleting it leaves this green. */
+  it("ignores uncategorized rows when deciding whether a leaf is used", () => {
+    clearSeedCategories();
+    const account = seedAccount();
+    const batch = seedBatch();
+    const cat = seedCategory("Gifts");
+    seedTxn({
+      accountId: account.id,
+      batchId: batch.id,
+      categoryId: null,
+      date: "2026-04-10",
+      amountCents: -2500,
+    });
+
+    const row = expenseLeaf(loadMonthView(handle.db, 2026, 4), cat.id);
+    expect(row?.assignableKinds.slice().sort()).toEqual(["expense", "fund", "income"]);
   });
 });

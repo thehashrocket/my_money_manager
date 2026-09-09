@@ -1,7 +1,11 @@
 import { inArray, sql } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 
-export type CategoryKind = "income" | "expense" | "fund";
+// Derived, not retyped: a hand-duplicated union would silently drift the
+// moment the schema's enum gains or loses a kind. This is the copy that
+// propagates — `loadMonthView` re-exports it onto LeafRow, IncomeLeafRow and
+// FundRow, and `_month-editor.tsx` imports it from there.
+export type CategoryKind = (typeof schema.categories.$inferSelect)["kind"];
 
 /**
  * The three counts rule 8's "is this category used?" test reads, and nothing
@@ -63,6 +67,34 @@ export function assignableKinds(previousKind: CategoryKind, usage: CategoryKindU
   const isX1Eligible = previousKind === "expense" && usage.txnCount > 0 && usage.negativeTxnCount === 0;
   if (isX1Eligible) kinds.push("income");
   return kinds;
+}
+
+/**
+ * Why this category's kind is locked, in the fewest words that still name the
+ * cause — or `null` when it is not locked.
+ *
+ * This exists because hiding the offer is only half of DS32. `setCategoryKind`
+ * produces a refusal carrying real evidence (the transaction count and date
+ * range, or "already has a budget planned"), and the `⋯` menu on `/budget` is
+ * the ONLY surface in the app that can reach `setCategoryKindAction` —
+ * `/budget/categories` renders kind read-only. So dropping the menu block on a
+ * locked category made that explanation unreachable and left the user unable to
+ * tell "not allowed" from "this app has no kind control", which is a different
+ * failure from the one the fix was for and not obviously a smaller one.
+ *
+ * Deliberately NOT the writer's full sentence: the menu has room for a label,
+ * not a paragraph, and the date range the writer quotes is not loaded here.
+ * Transactions are named before planned months because a transaction is the
+ * harder fact to argue with — and because the planned-row case is the one a
+ * user can reach by accident, so it is worth saying plainly that a `$0` entry
+ * counts.
+ */
+export function kindLockReason(usage: CategoryKindUsage): string | null {
+  if (!isCategoryUsed(usage)) return null;
+  if (usage.txnCount > 0) {
+    return `${usage.txnCount} transaction${usage.txnCount === 1 ? "" : "s"} filed here`;
+  }
+  return "a month is already budgeted here";
 }
 
 /**

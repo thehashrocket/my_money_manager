@@ -83,8 +83,21 @@ export class UncategorizedArchiveError extends Error {
  * checking it first turns a raw SQLite constraint violation into a message
  * naming the actual collision, for create and rename alike. */
 export class CategoryNameTakenError extends Error {
-  constructor(readonly name: string) {
-    super(`A category named "${name}" already exists.`);
+  /**
+   * `archived` is worth its own sentence because an archived category is
+   * invisible on every surface that could otherwise explain the collision: it
+   * is out of every picker (rule 8), out of `loadGoals` as of v0.24.0, and out
+   * of a month's `/budget` rows unless it has activity there. Without it the
+   * user is told a name is taken by something they cannot find, and
+   * `/budget/categories` — the one page that lists and unarchives it — is not
+   * a place they would think to look.
+   */
+  constructor(readonly name: string, readonly archived = false) {
+    super(
+      archived
+        ? `A category named "${name}" already exists but is archived. Unarchive it from Budget → Categories, or pick a different name.`
+        : `A category named "${name}" already exists.`,
+    );
     this.name = "CategoryNameTakenError";
   }
 }

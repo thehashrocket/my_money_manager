@@ -4,7 +4,12 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db, schema } from "@/db";
-import { CategoryNotFoundError, NotASavingsGoalError } from "@/lib/categoryErrors";
+import {
+  CategoryArchivedError,
+  CategoryNotFoundError,
+  NotASavingsGoalError,
+} from "@/lib/categoryErrors";
+import { assertNameAvailable } from "@/lib/budget/manageCategories";
 import { validateCreateGoal, validateUpdateGoalTarget } from "@/lib/goals/validateGoalInput";
 
 export async function createGoalAction(formData: FormData): Promise<void> {
@@ -14,6 +19,18 @@ export async function createGoalAction(formData: FormData): Promise<void> {
 
   const { name, targetDollars, carryoverPolicy } = result.data;
   const targetCents = Math.round(targetDollars * 100);
+
+  // `categories.name` is globally unique, and this action used to insert with
+  // no check at all — so a collision surfaced as a raw
+  // `UNIQUE constraint failed: categories.name`, which the shipped build
+  // replaces with a generic digest. `createCategory` (the other fund-creation
+  // path, /budget's "+ Add a line") has always checked, so the two surfaces
+  // disagreed about the same collision; they now share one function rather
+  // than each carrying their own copy of the query. The archived case is why
+  // this became worth fixing now: v0.24.0 filters archived funds out of
+  // `loadGoals`, so the colliding category is no longer visible on the page
+  // the user is standing on.
+  assertNameAvailable(db, name);
 
   // Dual-write (T5, D1B/A2): kind is authoritative everywhere else in the
   // app now, but isSavingsGoal keeps being written so it stays truthful for
@@ -50,6 +67,16 @@ export async function updateGoalTargetAction(formData: FormData): Promise<void> 
   if (!category) throw new CategoryNotFoundError(categoryId);
   // A2: kind is authoritative, not is_savings_goal (T5).
   if (category.kind !== "fund") throw new NotASavingsGoalError(categoryId);
+  // v0.24.0 dropped archived funds from `loadGoals`, which turned an already
+  // odd write into an invisible one: a tab opened before the fund was archived
+  // still renders its "Edit target" form, and submitting it used to succeed
+  // against a fund the page can no longer show. `upsertAllocation` already
+  // refuses an archived category for the same reason (a write whose result is
+  // unreadable is worse than a refusal); this is the matching guard on the
+  // other quantity `/budget`'s FUNDS band reads from this row.
+  if (category.archivedAt !== null) {
+    throw new CategoryArchivedError(categoryId, category.name);
+  }
 
   db.update(schema.categories)
     .set({ targetCents, updatedAt: new Date() })

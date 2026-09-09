@@ -1,9 +1,15 @@
 import { and, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { computeEffectiveAllocationsForRollover, periodKey, type RolloverPeriod } from "@/lib/budget";
+import {
+  computeEffectiveAllocationsForRollover,
+  periodKey,
+  spendIgnoresPositiveRows,
+  type RolloverPeriod,
+} from "@/lib/budget";
 import { monthBoundary, nextMonthOf } from "@/lib/budget/monthOfIso";
 import {
   assignableKinds,
+  kindLockReason,
   loadCategoryKindUsage,
   NO_USAGE,
   type CategoryKind,
@@ -45,6 +51,8 @@ export type LeafRow = {
    * moment a fund could acquire a `budget_periods` row.
    */
   assignableKinds: CategoryKind[];
+  /** Why the kind is locked, or null when it is not. See `kindLockReason`. */
+  kindLockReason: string | null;
 };
 
 /** A `kind='income'` leaf's row on the INCOME band (A1). */
@@ -70,6 +78,8 @@ export type IncomeLeafRow = {
    * moment a fund could acquire a `budget_periods` row.
    */
   assignableKinds: CategoryKind[];
+  /** Why the kind is locked, or null when it is not. See `kindLockReason`. */
+  kindLockReason: string | null;
 };
 
 /**
@@ -153,7 +163,26 @@ export type FundRow = {
    * moment a fund could acquire a `budget_periods` row.
    */
   assignableKinds: CategoryKind[];
+  /** Why the kind is locked, or null when it is not. See `kindLockReason`. */
+  kindLockReason: string | null;
 };
+
+/*
+ * A FUND ROW HAS NO SPEND FIELD, AND THAT IS DELIBERATE — but it has one
+ * visible consequence worth knowing before you treat it as a bug.
+ *
+ * `FundRow` carries no `spentCents`/`remainingCents`, and `plannedToDateCents`
+ * is allocated-only by design (see its own note above). Fund spend is still
+ * real, though: `buildRuleMatcher` refuses only POSITIVE rows on a fund
+ * (`rules.ts` — a positive row poisons the category), so a NEGATIVE row can
+ * auto-file into one at import, and the clamped prefix scan then subtracts it
+ * from next month's carried balance.
+ *
+ * So a fund's `+$X rollover → $Y` caption can shrink between months with no
+ * spend figure anywhere on the band to account for it. `spendIgnoresPositiveRows`
+ * makes fund spend ONE-DIRECTIONAL; it does not make it visible. The row name
+ * links to the transaction list, which is where the explanation actually lives.
+ */
 
 /**
  * The `Uncategorized` category's own row (X5). Not a leaf in `sections` — the
@@ -329,8 +358,12 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   const rolloverCategoryIds = [...expenseLeaves, ...fundLeaves]
     .filter((c) => c.carryoverPolicy === "rollover")
     .map((c) => c.id);
+  // Same DECISION as `getEffectiveAllocation`'s scalar read, through the same
+  // predicate — the two spellings cannot share the SQL (grouped aggregate vs
+  // single row) and they drifted apart the one release they were allowed to
+  // derive it independently. See `spendIgnoresPositiveRows`.
   const rolloverFundCategoryIds = fundLeaves
-    .filter((c) => c.carryoverPolicy === "rollover")
+    .filter((c) => c.carryoverPolicy === "rollover" && spendIgnoresPositiveRows(c.kind))
     .map((c) => c.id);
   const effectiveByCategoryId =
     rolloverCategoryIds.length > 0
@@ -352,6 +385,8 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
   // partition — so the current kind is passed in rather than re-selected.
   const assignableKindsFor = (categoryId: number, kind: "income" | "expense" | "fund") =>
     assignableKinds(kind, kindUsageByCategoryId.get(categoryId) ?? NO_USAGE);
+  const kindLockReasonFor = (categoryId: number) =>
+    kindLockReason(kindUsageByCategoryId.get(categoryId) ?? NO_USAGE);
 
   /**
    * The `{allocated, rollover, effective}` triple for one leaf, or `null` when
@@ -398,6 +433,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       remainingCents,
       isOverspent: remainingCents < 0,
       assignableKinds: assignableKindsFor(leaf.id, "expense"),
+      kindLockReason: kindLockReasonFor(leaf.id),
     };
   });
 
@@ -416,6 +452,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       pendingCents,
       hasAllocation: hasPeriodRow.has(leaf.id),
       assignableKinds: assignableKindsFor(leaf.id, "income"),
+      kindLockReason: kindLockReasonFor(leaf.id),
     };
   });
 
@@ -441,6 +478,7 @@ export function loadMonthView(db: Db, year: number, month: number): MonthView {
       targetCents: leaf.targetCents,
       plannedToDateCents: plannedToDateByFundId.get(leaf.id) ?? 0,
       assignableKinds: assignableKindsFor(leaf.id, "fund"),
+      kindLockReason: kindLockReasonFor(leaf.id),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 

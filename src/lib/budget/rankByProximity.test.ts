@@ -25,6 +25,7 @@ function leaf(
     // Inert here — `rankByProximity` ranks on the money columns and never
     // reads the row's menu affordances.
     assignableKinds: ["expense"],
+    kindLockReason: null,
   };
 }
 

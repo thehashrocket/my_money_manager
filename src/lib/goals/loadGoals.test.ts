@@ -371,3 +371,171 @@ describe("loadGoals — progressPct clamp boundaries", () => {
     expect(view.goals).toHaveLength(2);
   });
 });
+
+/* T5 (round-5): an archived fund is excluded outright rather than marked.
+   The filter shipped with no test at all — `loadGoals`' WHERE went from
+   `eq(kind, 'fund')` to `and(eq(kind, 'fund'), isNull(archivedAt))` and every
+   existing case in this file seeds a live fund, so none of them can see the
+   difference. Rule 8 keeps the row itself (archiving never deletes), and
+   `/budget/categories` stays the one surface that lists and unarchives it. */
+describe("loadGoals — archived funds (T5)", () => {
+  function archive(categoryId: number) {
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: new Date() })
+      .where(eq(schema.categories.id, categoryId))
+      .run();
+  }
+
+  it("drops an archived fund from the list entirely", () => {
+    const live = seedFundCategory("Vacation", { targetCents: 100000 });
+    const gone = seedFundCategory("Old plan", { targetCents: 100000 });
+    seedAllocation(live.id, 2026, 3, 20000);
+    seedAllocation(gone.id, 2026, 3, 50000);
+
+    archive(gone.id);
+
+    const view = loadGoals(handle.db);
+    expect(view.goals).toHaveLength(1);
+    expect(view.goals[0].categoryId).toBe(live.id);
+  });
+
+  /* The archived fund's money must leave every headline figure too, not just
+     the list — a total that still counts a fund the page no longer shows is
+     the "two surfaces disagree" shape this branch exists to close. */
+  it("removes an archived fund's contributions and target from every total", () => {
+    const live = seedFundCategory("Vacation", { targetCents: 100000 });
+    const gone = seedFundCategory("Old plan", { targetCents: 400000 });
+    seedAllocation(live.id, 2026, 3, 20000);
+    seedAllocation(gone.id, 2026, 3, 50000);
+
+    archive(gone.id);
+
+    const view = loadGoals(handle.db);
+    expect(view.totalTargetCents).toBe(100000);
+    expect(view.totalProgressCents).toBe(20000);
+    expect(view.totalTargetedContributedCents).toBe(20000);
+  });
+
+  /* An archived fund with no target used to inflate `untargetedGoalCount`,
+     which is the count the page renders as "N funds have no target yet" — a
+     prompt to go fix funds that are not on the page. */
+  it("does not count an archived untargeted fund in untargetedGoalCount", () => {
+    const gone = seedFundCategory("Rainy day", { targetCents: undefined });
+    handle.db
+      .update(schema.categories)
+      .set({ targetCents: null })
+      .where(eq(schema.categories.id, gone.id))
+      .run();
+    seedAllocation(gone.id, 2026, 3, 30000);
+
+    expect(loadGoals(handle.db).untargetedGoalCount).toBe(1);
+    archive(gone.id);
+    expect(loadGoals(handle.db).untargetedGoalCount).toBe(0);
+  });
+
+  it("returns the empty view when the only fund is archived", () => {
+    const gone = seedFundCategory("Only one", { targetCents: 100000 });
+    seedAllocation(gone.id, 2026, 3, 5000);
+    archive(gone.id);
+
+    expect(loadGoals(handle.db)).toEqual({
+      goals: [],
+      totalProgressCents: 0,
+      totalTargetCents: 0,
+      totalTargetedContributedCents: 0,
+      untargetedGoalCount: 0,
+    });
+  });
+
+  /* Archiving is reversible by rule 8's contract, so the exclusion has to be
+     a live read of `archived_at` and not a one-way write anywhere. */
+  it("brings the fund back once it is unarchived", () => {
+    const cat = seedFundCategory("Vacation", { targetCents: 100000 });
+    seedAllocation(cat.id, 2026, 3, 20000);
+    archive(cat.id);
+    expect(loadGoals(handle.db).goals).toHaveLength(0);
+
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: null })
+      .where(eq(schema.categories.id, cat.id))
+      .run();
+
+    const view = loadGoals(handle.db);
+    expect(view.goals).toHaveLength(1);
+    expect(view.goals[0].progressCents).toBe(20000);
+  });
+});
+
+/* `/goals` labels its headline "Planned to date" and `/budget`'s FUNDS band
+   labels its column the same words. `loadFundPlannedToDate` was given a hard
+   upper bound in v0.23.0 for exactly this; `loadGoals` never got one, so the
+   two pages disagreed about the same phrase. /budget is editable for FUTURE
+   months and nothing gates a commit on phase, so "every allocation ever
+   entered" is reachable by ordinary use, not by a crafted fixture. */
+describe("loadGoals — planned-to-date is bounded at asOf (round-5 /ship)", () => {
+  it("excludes an allocation planned for a LATER month", () => {
+    const fund = seedFundCategory("Emergency", { targetCents: 100000 });
+    seedAllocation(fund.id, 2026, 8, 20000);
+    seedAllocation(fund.id, 2026, 9, 30000);
+    seedAllocation(fund.id, 2026, 12, 50000); // planned, not yet "to date"
+
+    const view = loadGoals(handle.db, { year: 2026, month: 9 });
+    expect(view.goals[0].totalContributedCents).toBe(50000);
+    expect(view.totalTargetedContributedCents).toBe(50000);
+  });
+
+  /* A (year, month) PAIR comparison, never month alone: December 2025 is
+     BEFORE January 2026 even though 12 > 1. Both directions pinned. */
+  it("counts a prior YEAR's later month, and excludes the same month next year", () => {
+    const fund = seedFundCategory("Emergency", { targetCents: 100000 });
+    seedAllocation(fund.id, 2025, 12, 20000);
+    seedAllocation(fund.id, 2026, 1, 10000);
+    seedAllocation(fund.id, 2027, 1, 90000);
+
+    const view = loadGoals(handle.db, { year: 2026, month: 1 });
+    expect(view.goals[0].totalContributedCents).toBe(30000);
+  });
+
+  /* The LEFT join makes the bound's NULL escape load-bearing: without it a
+     fund whose only allocation is in a future month vanishes from the page
+     instead of reporting $0, and so does a fund with no allocation at all. */
+  it("still lists a fund whose only allocation is in the future, at zero", () => {
+    const fund = seedFundCategory("Sabbatical", { targetCents: 100000 });
+    seedAllocation(fund.id, 2027, 3, 40000);
+
+    const view = loadGoals(handle.db, { year: 2026, month: 9 });
+    expect(view.goals).toHaveLength(1);
+    expect(view.goals[0].totalContributedCents).toBe(0);
+  });
+
+  it("still lists a fund with no allocation at all", () => {
+    seedFundCategory("Untouched", { targetCents: 100000 });
+
+    const view = loadGoals(handle.db, { year: 2026, month: 9 });
+    expect(view.goals).toHaveLength(1);
+    expect(view.goals[0].totalContributedCents).toBe(0);
+  });
+
+  /* The breakdown table is the explanation OF the headline, so it takes the
+     SAME bound — an unbounded list would show rows that do not add up to the
+     number above them. */
+  it("bounds the monthly breakdown identically, so its rows sum to the total", () => {
+    const fund = seedFundCategory("Emergency", { targetCents: 100000 });
+    seedAllocation(fund.id, 2026, 8, 20000);
+    seedAllocation(fund.id, 2026, 9, 30000);
+    seedAllocation(fund.id, 2026, 12, 50000);
+
+    const view = loadGoals(handle.db, { year: 2026, month: 9 });
+    const breakdown = view.goals[0].monthlyBreakdown;
+    expect(breakdown.map((m) => [m.year, m.month])).toEqual([
+      [2026, 8],
+      [2026, 9],
+    ]);
+    expect(breakdown.reduce((n, m) => n + m.allocatedCents, 0)).toBe(
+      view.goals[0].totalContributedCents,
+    );
+  });
+});
+

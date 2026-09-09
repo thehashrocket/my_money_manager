@@ -1,13 +1,13 @@
 import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { invalidateForwardRollover } from "@/lib/budget";
-import { assignableKinds } from "@/lib/budget/categoryKindLock";
+import { assignableKinds, type CategoryKind } from "@/lib/budget/categoryKindLock";
 import { CategoryNotFoundError } from "@/lib/categoryErrors";
 
 type Db = typeof defaultDb;
-// Derived, not retyped: a hand-duplicated union would silently drift the
-// moment the schema's enum gains or loses a kind.
-export type CategoryKind = (typeof schema.categories.$inferSelect)["kind"];
+// Re-exported, not re-declared: `categoryKindLock` owns rule 8 and the type
+// it is stated in, so the two cannot drift apart.
+export type { CategoryKind };
 
 /**
  * Candidates for the F1 banner's reclassify picker: leaf, expense-kind,

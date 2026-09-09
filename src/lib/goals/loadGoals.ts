@@ -1,5 +1,6 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { currentMonth, type YearMonth } from "@/lib/now";
 
 type Db = typeof defaultDb;
 
@@ -71,7 +72,23 @@ export type GoalsView = {
  * unchanged by DS11; only `/goals`' rendering of it changed (the progress
  * bar and percent-complete UI are gone, per `DESIGN.md`).
  */
-export function loadGoals(db: Db): GoalsView {
+/**
+ * `asOf` bounds the contributions sum at the END of that month, defaulting to
+ * the current one. It is not optional and it is not a convenience.
+ *
+ * `/budget` is editable for FUTURE months and nothing gates an allocate commit
+ * on phase, so without an upper bound this sum is "every allocation ever
+ * entered" while the page labels it "Planned to date". Allocate $500 to a fund
+ * in December, and in September `/goals` reports $500 already planned and moves
+ * the headline ratio toward a target that has not been funded yet.
+ *
+ * This is the same defect `loadFundPlannedToDate` was given a hard upper bound
+ * for in v0.23.0, on the same words, one page over — `/budget`'s FUNDS band and
+ * `/goals` both render "Planned to date" and they disagreed. Bounded here the
+ * same way: a (year, month) PAIR comparison, never month alone, or 2026-01
+ * picks up 2025-12. No lower bound: a fund's whole history counts.
+ */
+export function loadGoals(db: Db, asOf: YearMonth = currentMonth()): GoalsView {
   const goalCategories = db
     .select({
       id: schema.categories.id,
@@ -83,7 +100,23 @@ export function loadGoals(db: Db): GoalsView {
     .from(schema.categories)
     .leftJoin(
       schema.budgetPeriods,
-      eq(schema.budgetPeriods.categoryId, schema.categories.id),
+      // The `asOf` bound lives in the JOIN condition, not the WHERE, and that
+      // is the whole difference between "excluded from the sum" and "excluded
+      // from the page". A LEFT JOIN row that fails a WHERE predicate takes its
+      // category with it, so a fund whose ONLY allocation is a future month
+      // disappeared from /goals entirely instead of reporting $0 — caught by
+      // its own regression test, not by reasoning. In the ON clause the row is
+      // simply not joined and the fund survives as a NULL group.
+      and(
+        eq(schema.budgetPeriods.categoryId, schema.categories.id),
+        or(
+          lt(schema.budgetPeriods.year, asOf.year),
+          and(
+            eq(schema.budgetPeriods.year, asOf.year),
+            lte(schema.budgetPeriods.month, asOf.month),
+          ),
+        ),
+      ),
     )
     // A2: kind is authoritative, not is_savings_goal (T5).
     //
@@ -170,7 +203,21 @@ export function loadGoals(db: Db): GoalsView {
     })
     .from(schema.budgetPeriods)
     .where(
-      sql`${schema.budgetPeriods.categoryId} IN (${sql.join(goalIds.map((id) => sql`${id}`), sql`, `)})`,
+      and(
+        sql`${schema.budgetPeriods.categoryId} IN (${sql.join(goalIds.map((id) => sql`${id}`), sql`, `)})`,
+        // Bounded at `asOf` for the same reason the total above is, and it has
+        // to be the SAME bound: this table is the breakdown OF that total, so
+        // an unbounded list would show rows that do not add up to the figure
+        // they explain. A future allocation is simply not "to date" yet; it
+        // appears here the month it becomes so.
+        or(
+          lt(schema.budgetPeriods.year, asOf.year),
+          and(
+            eq(schema.budgetPeriods.year, asOf.year),
+            lte(schema.budgetPeriods.month, asOf.month),
+          ),
+        ),
+      ),
     )
     .orderBy(schema.budgetPeriods.categoryId, schema.budgetPeriods.year, schema.budgetPeriods.month)
     .all();
