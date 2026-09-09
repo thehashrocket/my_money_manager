@@ -217,3 +217,51 @@ describe("createGoalAction — a name collision is returned, not thrown", () => 
     expect(redirectMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Only the DESTINATION's own failure holds the user on the form.
+ *
+ * `revalidateAfterFundWrite` invalidates `/goals` first, then `/budget`,
+ * `/budget/[year]/[month]` and `/budget/categories`. Guarding them as one call
+ * meant a failure on any secondary surface suppressed the redirect — stranding
+ * the user on the create form over staleness on a page they were not going to.
+ * Found by the Codex structured review.
+ */
+describe("createGoalAction — which refresh failure holds the redirect", () => {
+  function goodForm() {
+    const fd = new FormData();
+    fd.set("name", "Vacation");
+    fd.set("targetDollars", "500");
+    fd.set("carryoverPolicy", "rollover");
+    return fd;
+  }
+
+  it("STILL redirects when only a secondary surface fails to refresh", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(revalidatePath).mockImplementation((path: string) => {
+      // `/goals` is fine; the budget surfaces are not.
+      if (path !== "/goals") throw new Error("revalidatePath blew up");
+    });
+
+    await expect(createGoalAction({}, goodForm())).rejects.toThrow("NEXT_REDIRECT");
+
+    expect(insertRunMock).toHaveBeenCalled();
+    expect(redirectMock).toHaveBeenCalledWith("/goals");
+    logged.mockRestore();
+  });
+
+  it("holds the user on the form when /goals ITSELF fails to refresh", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(revalidatePath).mockImplementation((path: string) => {
+      if (path === "/goals") throw new Error("revalidatePath blew up");
+    });
+
+    const state = await createGoalAction({}, goodForm());
+
+    // No redirect: the page they would land on may not list the new fund, and
+    // a redirect discards the state that would say so.
+    expect(redirectMock).not.toHaveBeenCalled();
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
+    logged.mockRestore();
+  });
+});

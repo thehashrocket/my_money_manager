@@ -372,6 +372,21 @@ export function MonthEditor(props: MonthEditorProps) {
       dirtyRef.current = true;
       const result = await commitAllocationAction(categoryId, year, month, cents);
       if (result.status === "error") {
+        // NOTHING WAS COMMITTED, so the dirty flag must not survive. It is set
+        // before the await (see above) and was never cleared on the refusal
+        // path — so a rejected commit (a stale tab editing a category archived
+        // in another tab) left the flag standing, and the next blur ran the
+        // refresh anyway. Any failure there then reported "your change was
+        // saved, but this page couldn't refresh" and logged "after a committed
+        // write" about a write that never happened. Reporting a save that did
+        // not occur is the mirror image of the defect this whole branch closes,
+        // and it is the worse direction: the user stops trying.
+        //
+        // Only cleared when no OTHER edit is in flight would be more precise,
+        // but there is no such state here — `revalidate()` is idempotent and
+        // cheap, so a spurious extra refresh is harmless where a spurious
+        // warning is not.
+        dirtyRef.current = false;
         return { ok: false, message: result.message };
       }
       setAllocations((prev) => {

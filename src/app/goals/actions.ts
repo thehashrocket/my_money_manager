@@ -28,14 +28,29 @@ const SCOPE = "/goals";
  * — on the create path — collides with the name that now exists and produces a
  * second, unrelated-looking error.
  */
-function revalidateAfterFundWrite(): string | undefined {
-  return guardRefresh(SCOPE, () => {
+/**
+ * Split in two, and the split decides whether `createGoalAction` redirects.
+ *
+ * `/goals` is the page the user is being sent BACK to; the budget surfaces are
+ * secondary readers of the same row. Guarding them together meant a failure
+ * invalidating `/budget/categories` suppressed the redirect and stranded the
+ * user on the create form — for a staleness on a page they were not going to.
+ * Found by the Codex structured review.
+ *
+ * Returns both halves so the caller can act on the one that concerns it and
+ * still REPORT the other; a secondary failure is real, it just is not a reason
+ * to hold someone on a form.
+ */
+function revalidateAfterFundWrite(): { destination?: string; secondary?: string } {
+  const destination = guardRefresh(SCOPE, () => {
+    revalidatePath("/goals");
+  });
+  const secondary = guardRefresh(SCOPE, () => {
     // `/budget` too, since D3=C: the FUNDS band renders this fund's row and
     // its `targetCents` ("Left to target"). A fund created here and not
     // revalidated there is missing from the band — and when it is the FIRST
     // fund, the band itself does not render, because `<MonthEditor>` gates
     // the whole section on `fundRows.length > 0`.
-    revalidatePath("/goals");
     revalidatePath("/budget");
     revalidatePath("/budget/[year]/[month]", "page");
     // The write is a new row in `categories`, and `/budget/categories` is the
@@ -45,6 +60,7 @@ function revalidateAfterFundWrite(): string | undefined {
     // records v0.23.0 getting wrong four times.
     revalidatePath("/budget/categories");
   });
+  return { destination, secondary };
 }
 
 export async function createGoalAction(
@@ -87,18 +103,23 @@ export async function createGoalAction(
     .values({ name, isSavingsGoal: true, kind: "fund", targetCents, carryoverPolicy })
     .run();
 
-  const warning = revalidateAfterFundWrite();
+  // `secondary` is deliberately not read here: this path redirects, which
+  // discards returned state anyway, and `guardRefresh` has already logged it.
+  const { destination } = revalidateAfterFundWrite();
 
   // `redirect` STAYS OUTSIDE the guard: it signals by throwing, so running it
   // inside `guardRefresh`'s callback would catch the navigation and report it
-  // as a failed refresh.
+  // as a failed refresh. (`unstable_rethrow` now makes that structural, but
+  // keeping it out here is still clearer.)
   //
-  // And it is skipped when the refresh failed. Navigating to a route whose
-  // cache we just failed to invalidate lands the user on a page that may not
-  // list the fund they created, with no message anywhere — the exact silence
-  // this guard exists to break, since a redirect discards the returned state.
-  // Staying put costs a click and says what happened.
-  if (warning !== undefined) return { warning };
+  // ONLY the destination's own failure holds the user here. Landing on `/goals`
+  // when THAT cache could not be invalidated shows a page that may not list the
+  // fund they just created, with no message anywhere — a redirect discards the
+  // returned state, so staying put is the only way to say so. A failure on
+  // `/budget` or `/budget/categories` is a different fact: those pages are
+  // stale, but the one they are being sent to is not, and stranding them on a
+  // form over it is a worse answer than a stale band they may never open.
+  if (destination !== undefined) return { warning: destination };
   redirect("/goals");
 }
 
@@ -141,5 +162,8 @@ export async function updateGoalTargetAction(
   // `/budget` reads this same target for the band's "Left to target"
   // column (`fundTargetGap`), so a target changed here has to invalidate
   // there or the gap keeps reporting against the old number.
-  return { warning: revalidateAfterFundWrite() };
+  // No redirect on this path, so both halves are equally reportable — the user
+  // stays on `/goals` either way and any stale surface is worth naming.
+  const { destination, secondary } = revalidateAfterFundWrite();
+  return { warning: destination ?? secondary };
 }

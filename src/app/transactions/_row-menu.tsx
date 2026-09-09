@@ -88,10 +88,23 @@ export function TransactionRowMenu({
           //
           // ONE toast, never a success plus a warning (rule 6): the collapsed
           // Sonner stack draws a non-newest toast's action button invisible.
+          // `onChanged()` is `router.refresh()` in `TransactionsUi`, so THIS
+          // list updates on the client regardless of whether the server-side
+          // revalidation threw. Repeating the shared "reload to see the current
+          // state" sentence here would tell the user to reload a page that just
+          // refreshed itself — a false warning, which is the same class of
+          // wrongness this branch exists to remove, pointed the other way.
+          //
+          // The staleness is real, it is just elsewhere: `/accounts` (this card's
+          // balance), `/budget` and the dashboard all read what these actions
+          // wrote. So the toast names those instead.
           if (result.warning === undefined) {
             toast.success(result.message);
           } else {
-            toast.warning(`${result.message} ${result.warning}`, { duration: 10_000 });
+            toast.warning(
+              `${result.message} Other pages may still show the old figures — reload them to catch up.`,
+              { duration: 10_000 },
+            );
           }
           onChanged();
         }
