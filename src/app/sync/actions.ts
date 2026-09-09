@@ -8,10 +8,12 @@ import {
   linkTransferPairManually,
   rejectTransferPairManually,
   unlinkTransferPair,
+  type RejectOutcome,
 } from "@/lib/simplefin/sync";
 import { undoSyncBatch } from "@/lib/simplefin/undoSync";
 import { setAccountLink } from "@/lib/simplefin/link";
 import {
+  REJECT_INTENT,
   validateLinkAccountInput,
   validateResolveTransferInput,
   validateResolveReversalInput,
@@ -152,11 +154,17 @@ export async function undoSyncAction(
     return fail(toMessage(err));
   }
 
-  revalidateAll();
-
   // Discarding this result made a no-op undo indistinguishable from a
   // successful one: the page revalidated, nothing was deleted, and the user was
   // told nothing either way. Reachable by double-clicking or from a second tab.
+  //
+  // These two checks run BEFORE `revalidateAll()`, and the order is the whole
+  // point. Both are paths that wrote nothing, so revalidating is not merely
+  // wasted — it re-renders `page.tsx`'s `{lastBatch && …}` section out from
+  // under the form whose inline `role="alert"` is the only place this refusal
+  // is ever shown. `ActionForm`'s "a failure skips revalidateAll(), so the form
+  // is still on screen" is the contract; this used to be one of exactly two
+  // places that broke it.
   if (result.status === "nothing-to-undo") {
     return fail(
       "That sync has already been undone, or is no longer the batch shown here — reload the page.",
@@ -165,6 +173,8 @@ export async function undoSyncAction(
   if (result.status === "stale") {
     return fail(result.reason);
   }
+
+  revalidateAll();
   return ok(
     `Undid the sync — removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}.`,
   );
@@ -248,23 +258,32 @@ export async function resolveSameAccountReversalAction(
   }
   const { aId, bId, intent } = parsed.data;
 
+  // Only the DB call is inside the `try`. `revalidateAll()` used to sit inside
+  // it on the reject branch, so a throw from `revalidatePath` reported an
+  // already-committed `transfer_pair_rejections` row as a refusal — and a
+  // rejection permanently suppresses both automatic matchers for that pair,
+  // with no "Linked pairs" list to undo it from. Same shape as the two no-op
+  // refusals below, which is why both branches now revalidate in one place.
+  let rejected: RejectOutcome | null = null;
   try {
-    if (intent === "reject") {
-      const outcome = rejectTransferPairManually(aId, bId);
-      revalidateAll();
-      return ok(
-        outcome === "recorded"
-          ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
-          : "You had already marked these two as not a reversal — nothing changed.",
-      );
+    if (intent === REJECT_INTENT) {
+      rejected = rejectTransferPairManually(aId, bId);
+    } else {
+      linkTransferPairManually(aId, bId, undefined, {
+        allowSameAccountReversal: true,
+      });
     }
-    linkTransferPairManually(aId, bId, undefined, {
-      allowSameAccountReversal: true,
-    });
   } catch (err) {
     return fail(toMessage(err));
   }
   revalidateAll();
+  if (rejected !== null) {
+    return ok(
+      rejected === "recorded"
+        ? "Marked as not a reversal — these two stay in your spending, and this pairing won't be suggested again."
+        : "You had already marked these two as not a reversal — nothing changed.",
+    );
+  }
   return ok("Linked as a reversal — both rows are now excluded from spending.");
 }
 
@@ -282,16 +301,20 @@ export async function unlinkTransferAction(
   } catch (err) {
     return fail(toMessage(err));
   }
-  revalidateAll();
   // A no-op is NOT reported as a completed correction. `unlinkTransferPair`
   // returns early when the row is already unpaired, and that path records no
   // rejection — so the ordinary success message would be claiming a durable
   // "not a transfer" that was never written. Same reasoning as
-  // `undoSyncAction`'s `nothing-to-undo` branch above.
+  // `undoSyncAction`'s `nothing-to-undo` branch above, including the ordering:
+  // this refusal is checked BEFORE `revalidateAll()`, because revalidating
+  // drops this pair's `<li>` out of `linkedPairs` and takes the form — and so
+  // the only rendering of this message — with it.
   if (outcome === "already-unpaired") {
     return fail(
       "These rows were already unpaired — nothing was changed, and no “not a transfer” was recorded. Reload the page to see the current state.",
     );
   }
+
+  revalidateAll();
   return ok("Unpaired — both rows count towards spending again.");
 }

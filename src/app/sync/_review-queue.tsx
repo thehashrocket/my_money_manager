@@ -5,7 +5,9 @@ import type {
 } from "@/lib/simplefin/matchTransfers";
 import type { TransferRow } from "@/lib/simplefin/sync";
 import { formatCents } from "@/lib/money";
+import { LINK_INTENT, REJECT_INTENT } from "@/lib/simplefin/validateSyncInputs";
 import { ActionForm } from "./ActionForm";
+import { PendingFieldset, SubmitButton } from "./_submit-button";
 import { resolveSameAccountReversalAction, resolveTransferAction } from "./actions";
 
 /**
@@ -118,102 +120,123 @@ export function ReviewQueue({
             announceSuccess
             className="space-y-3 rounded-md border border-border p-4"
           >
-            <p
-              id={bucketLabelId}
-              className="font-mono text-sm font-medium [font-variant-numeric:tabular-nums]"
-            >
-              {bucket.date} · {formatCents(bucket.absAmountCents)}
-              {bucket.reason === "same-account" && (
-                <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">
-                  {accountsById.get(bucket.accountId)?.name ?? bucket.accountId}
-                </span>
-              )}
-            </p>
-            <p className="max-w-prose text-sm text-muted-foreground">
-              {explain(bucket.reason)}
-            </p>
-            {overlaps && (
+            {/*
+              Everything the form SUBMITS lives inside the fieldset, so one
+              `disabled` freezes the two selects along with both buttons while
+              the action is in flight. `ActionStatus` stays outside it (it is
+              `ActionForm`'s own last child) — greying out the message that
+              explains a refusal would be the opposite of the point.
+            */}
+            <PendingFieldset className="space-y-3">
               <p
-                className="max-w-prose rounded-md border p-2 text-sm"
-                style={{
-                  background:
-                    "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
-                  borderColor:
-                    "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
-                }}
+                id={bucketLabelId}
+                className="font-mono text-sm font-medium [font-variant-numeric:tabular-nums]"
               >
-                Also listed under <strong>{QUEUES[other].title}</strong>. Same
-                rows, two readings — the money can only be paired once, so{" "}
-                <strong>linking</strong> it in either place removes it from
-                both. Saying it is <em>not</em> a pair only answers this
-                reading; the other one stays. Check there before deciding here.
+                {bucket.date} · {formatCents(bucket.absAmountCents)}
+                {bucket.reason === "same-account" && (
+                  <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">
+                    {accountsById.get(bucket.accountId)?.name ?? bucket.accountId}
+                  </span>
+                )}
               </p>
-            )}
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="block text-sm">
-                <span className={LABEL}>{sideLabel(bucket.reason, "positive")}</span>
-                <select
-                  name="aId"
-                  required
-                  defaultValue={bucket.positives.length > 1 ? "" : undefined}
-                  className={SELECT}
+              <p className="max-w-prose text-sm text-muted-foreground">
+                {explain(bucket.reason)}
+              </p>
+              {overlaps && (
+                <p
+                  className="max-w-prose rounded-md border p-2 text-sm"
+                  style={{
+                    background:
+                      "color-mix(in oklch, var(--accent-amber) 18%, var(--background))",
+                    borderColor:
+                      "color-mix(in oklch, var(--accent-amber) 45%, transparent)",
+                  }}
                 >
-                  {bucket.positives.length > 1 && <option value="">Choose…</option>}
-                  {bucket.positives.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {optionLabel(bucket.reason, p, accountsById)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-sm">
-                <span className={LABEL}>{sideLabel(bucket.reason, "negative")}</span>
-                <select
-                  name="bId"
-                  required
-                  defaultValue={bucket.negatives.length > 1 ? "" : undefined}
-                  className={SELECT}
-                >
-                  {bucket.negatives.length > 1 && <option value="">Choose…</option>}
-                  {bucket.negatives.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {optionLabel(bucket.reason, n, accountsById)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="submit"
-                className="min-h-11 rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
-              >
-                {submitLabel(bucket.reason)}
-              </button>
-              {/*
-                A review queue has to be able to say no. Without this the only
-                route to a durable rejection was to CREATE the link you were
-                rejecting and then undo it — and between those two clicks both
-                rows leave every spending surface. `name`/`value` on the button
-                means the intent only rides along when this button is the one
-                that submitted, so the default path stays "link".
-
-                Same-account only for now: the cross-account queue's buckets are
-                resolved by linking the right pair rather than by dismissing the
-                bucket, and a "rejected" bucket there already has its own
-                "Link as transfer anyway" affordance.
-              */}
-              {bucket.reason === "same-account" && (
-                <button
-                  type="submit"
-                  name="intent"
-                  value="reject"
-                  className="min-h-11 rounded-md px-3 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  Not a reversal
-                </button>
+                  Also listed under <strong>{QUEUES[other].title}</strong>. Same
+                  rows, two readings — the money can only be paired once, so{" "}
+                  <strong>linking</strong> it in either place removes it from
+                  both. Saying it is <em>not</em> a pair only answers this
+                  reading; the other one stays. Check there before deciding here.
+                </p>
               )}
-            </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block text-sm">
+                  <span className={LABEL}>{sideLabel(bucket.reason, "positive")}</span>
+                  <select
+                    name="aId"
+                    required
+                    defaultValue={bucket.positives.length > 1 ? "" : undefined}
+                    className={SELECT}
+                  >
+                    {bucket.positives.length > 1 && <option value="">Choose…</option>}
+                    {bucket.positives.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {optionLabel(bucket.reason, p, accountsById)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className={LABEL}>{sideLabel(bucket.reason, "negative")}</span>
+                  <select
+                    name="bId"
+                    required
+                    defaultValue={bucket.negatives.length > 1 ? "" : undefined}
+                    className={SELECT}
+                  >
+                    {bucket.negatives.length > 1 && <option value="">Choose…</option>}
+                    {bucket.negatives.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {optionLabel(bucket.reason, n, accountsById)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <SubmitButton
+                  label={SUBMIT[bucket.reason].idle}
+                  busyLabel={SUBMIT[bucket.reason].busy}
+                  // Names itself even though it is the DEFAULT submitter, so
+                  // that "the user pressed Link" and "the submitter's field
+                  // was lost" stop being the same bytes on the wire. The
+                  // reversal schema requires `intent`, so a dropped field is
+                  // a refusal rather than a silent link — see
+                  // `resolveReversalInputSchema`. The cross-account queue
+                  // posts to an action whose schema has no `intent`, and a
+                  // non-strict `z.object` drops the extra key.
+                  intent={LINK_INTENT}
+                  className="min-h-11 rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+                />
+                {/*
+                  A review queue has to be able to say no. Without this the only
+                  route to a durable rejection was to CREATE the link you were
+                  rejecting and then undo it — and between those two clicks both
+                  rows leave every spending surface. `name`/`value` on the button
+                  means the intent rides along only when this button is the one
+                  that submitted; the primary carries `LINK_INTENT` for the same
+                  reason, so neither branch is reachable by omission.
+
+                  Same-account only for now: the cross-account queue's buckets are
+                  resolved by linking the right pair rather than by dismissing the
+                  bucket, and a "rejected" bucket there already has its own
+                  "Link as transfer anyway" affordance.
+                */}
+                {bucket.reason === "same-account" && (
+                  <SubmitButton
+                    label="Not a reversal"
+                    // "Recording…", not "Rejecting…": the durable thing being
+                    // written is a `transfer_pair_rejections` row, and the copy
+                    // has to differ from the link button's "Linking…" or the two
+                    // buttons read identically at the one moment they most need
+                    // to be told apart.
+                    busyLabel="Recording…"
+                    intent={REJECT_INTENT}
+                    className="min-h-11 rounded-md px-3 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                  />
+                )}
+              </div>
+            </PendingFieldset>
           </ActionForm>
         );
       })}
@@ -313,8 +336,24 @@ function optionLabel(
   return `${account} — ${label}`;
 }
 
-function submitLabel(reason: AmbiguousBucket<TransferRow>["reason"]): string {
-  if (reason === "rejected") return "Link as transfer anyway";
-  if (reason === "same-account") return "Link as reversal";
-  return "Link as transfer";
-}
+/**
+ * The primary button's copy, idle and in flight, per bucket reason.
+ *
+ * A `Record` over the closed union rather than the if-chain with a `default`
+ * this replaces: the fallback made a MISSING case indistinguishable from a
+ * deliberate one, so a sixth `reason` would have shipped reading "Link as
+ * transfer" — and, once the busy half existed, with no busy label at all.
+ * Written out per reason, including the three that share a string, because the
+ * point is that tsc forces a decision for each rather than letting one slip
+ * through the bottom.
+ */
+const SUBMIT: Record<
+  AmbiguousBucket<TransferRow>["reason"],
+  { idle: string; busy: string }
+> = {
+  contested: { idle: "Link as transfer", busy: "Linking…" },
+  unbalanced: { idle: "Link as transfer", busy: "Linking…" },
+  "cross-source": { idle: "Link as transfer", busy: "Linking…" },
+  rejected: { idle: "Link as transfer anyway", busy: "Linking…" },
+  "same-account": { idle: "Link as reversal", busy: "Linking…" },
+};

@@ -7,12 +7,15 @@ import type { SyncActionState } from "./actions";
 /**
  * A status region that OUTLIVES the form that produced it.
  *
- * Every mutating form on this page renders its outcome inline, via
- * `useActionState`. That works for the forms that stay put (linking an
- * account, undoing a batch). It silently fails for the review queues: a
- * successful resolve calls `revalidateAll()`, the resolved bucket leaves
- * `buckets`, and the keyed `<ActionForm>` unmounts — taking the `ok(...)`
- * message with it before it can paint. The card just vanishes.
+ * Forms that stay put render their outcome inline, via `useActionState` — the
+ * account-link form is the only one left in that case. Inline silently fails
+ * for the review queues: a successful resolve calls `revalidateAll()`, the
+ * resolved bucket leaves `buckets`, and the keyed `<ActionForm>` unmounts —
+ * taking the `ok(...)` message with it before it can paint. The card just
+ * vanishes. The unlink and undo forms have the same problem, so all three set
+ * `announceSuccess` and route ok/warning here instead. ERRORS stay inline
+ * everywhere: a failure skips `revalidateAll()`, so the form is still on
+ * screen and the refusal belongs beside the controls that caused it.
  *
  * That was survivable while "resolve" meant one thing. It stopped being
  * survivable when the reversal queue grew a second button: "Link as reversal"
@@ -34,8 +37,11 @@ export function useActionFeedback(): Publish | null {
 
 export function ActionFeedbackProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<SyncActionState>({ status: "idle" });
-  // Stable identity: `ActionForm` publishes from an effect keyed on this, and
-  // a new function every render would re-fire it on every parent re-render.
+  // Stable identity: this is the context value every `ActionForm` on the page
+  // subscribes to, so a new function each render would re-render all of them.
+  // `ActionForm` calls it from inside its action, not from an effect — an
+  // effect never ran, because the revalidation that removes the form and the
+  // state update that would have triggered the effect land in one commit.
   const publish = useCallback<Publish>((next) => setState(next), []);
 
   return (

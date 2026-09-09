@@ -33,6 +33,14 @@ vi.mock("@/lib/simplefin/link", () => ({
 const linkTransferPairManuallyMock = vi.hoisted(() => vi.fn());
 const rejectTransferPairManuallyMock = vi.hoisted(() => vi.fn());
 const unlinkTransferPairMock = vi.hoisted(() => vi.fn());
+const undoSyncBatchMock = vi.hoisted(() => vi.fn());
+
+// Spread the real module for the same reason the sync mock below does: a
+// hand-listed factory silently omits whatever gets added next.
+vi.mock("@/lib/simplefin/undoSync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/simplefin/undoSync")>()),
+  undoSyncBatch: undoSyncBatchMock,
+}));
 
 // Spreads the REAL module rather than hand-listing its exports. The hand-listed
 // version silently omitted `rejectTransferPairManually` when it was added, so
@@ -55,6 +63,7 @@ const {
   resolveTransferAction,
   resolveSameAccountReversalAction,
   unlinkTransferAction,
+  undoSyncAction,
 } = await import("./actions");
 
 beforeEach(() => {
@@ -64,6 +73,8 @@ beforeEach(() => {
   rejectTransferPairManuallyMock.mockReturnValue("recorded");
   unlinkTransferPairMock.mockReset();
   unlinkTransferPairMock.mockReturnValue("unlinked");
+  undoSyncBatchMock.mockReset();
+  undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2 });
   vi.mocked(revalidatePath).mockClear();
 });
 
@@ -113,7 +124,7 @@ describe("resolve actions — the same-account opt-in is carried by WHICH action
 
     return resolveSameAccountReversalAction(
       { status: "idle" },
-      formData({ aId: "1299", bId: "1300" }),
+      formData({ aId: "1299", bId: "1300", intent: "link" }),
     ).then((state) => {
       expect(state.status).toBe("ok");
       expect(linkTransferPairManuallyMock).toHaveBeenCalledWith(1299, 1300, undefined, {
@@ -166,7 +177,7 @@ describe("resolveSameAccountReversalAction — failures come back as state, neve
 
     const state = await resolveSameAccountReversalAction(
       { status: "idle" },
-      formData({ aId: "1299", bId: "1300" }),
+      formData({ aId: "1299", bId: "1300", intent: "link" }),
     );
 
     expect(state.status).toBe("error");
@@ -183,7 +194,7 @@ describe("resolveSameAccountReversalAction — failures come back as state, neve
 
     const state = await resolveSameAccountReversalAction(
       { status: "idle" },
-      formData({ aId: "1", bId: "2" }),
+      formData({ aId: "1", bId: "2", intent: "link" }),
     );
 
     expect(state.status).toBe("error");
@@ -223,7 +234,7 @@ describe("resolveSameAccountReversalAction — failures come back as state, neve
 
     const state = await resolveSameAccountReversalAction(
       { status: "idle" },
-      formData({ aId: "1299", bId: "1300" }),
+      formData({ aId: "1299", bId: "1300", intent: "link" }),
     );
 
     expect(state.status).toBe("ok");
@@ -286,39 +297,71 @@ describe("resolveSameAccountReversalAction — the reject branch", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  // The fail-safe direction, stated in `resolveReversalInputSchema` and
-  // previously asserted nowhere. Anything that is not exactly "reject" LINKS,
-  // because linking carries the stricter guards and is the reversible one.
-  it.each([["rejec"], [""], ["REJECT"], ["link"]])(
-    "treats intent=%p as link, not reject",
+  // An out-of-enum intent lands in NEITHER branch. Asserted unconditionally:
+  // an earlier version let `state.status === "error"` short-circuit the
+  // assertions, so it passed whether the schema refused the value or silently
+  // defaulted it — it could not have caught the defaulting it was written for.
+  it.each(["rejec", "", "REJECT", "Link", "delete"])(
+    "refuses intent=%p outright rather than falling into either branch",
     async (intent) => {
       const state = await resolveSameAccountReversalAction(
         { status: "idle" },
         formData({ aId: "7", bId: "9", intent }),
       );
 
-      // A value outside the enum is a validation failure, not a silent reject.
-      if (state.status === "error") {
-        expect(rejectTransferPairManuallyMock).not.toHaveBeenCalled();
-        return;
-      }
-      expect(linkTransferPairManuallyMock).toHaveBeenCalledWith(7, 9, undefined, {
-        allowSameAccountReversal: true,
-      });
+      expect(state.status).toBe("error");
+      expect(linkTransferPairManuallyMock).not.toHaveBeenCalled();
       expect(rejectTransferPairManuallyMock).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
     },
   );
 
-  it("links when intent is absent entirely", async () => {
+  it("links on an explicit intent=link", async () => {
     await resolveSameAccountReversalAction(
       { status: "idle" },
-      formData({ aId: "7", bId: "9" }),
+      formData({ aId: "7", bId: "9", intent: "link" }),
     );
 
     expect(linkTransferPairManuallyMock).toHaveBeenCalledWith(7, 9, undefined, {
       allowSameAccountReversal: true,
     });
     expect(rejectTransferPairManuallyMock).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES when intent is absent entirely — it does not fall back to link", async () => {
+    // The regression this pins is a money one. While the schema defaulted a
+    // missing `intent` to "link", any submit path that lost the clicked
+    // submitter's field ran `linkTransferPairManually` with the same-account
+    // opt-in — removing both rows from every spending surface and reporting
+    // success, which is exactly what CLAUDE.md rule 4 forbids. Absence is now
+    // a refusal.
+    const state = await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9" }),
+    );
+
+    expect(state.status).toBe("error");
+    expect(linkTransferPairManuallyMock).not.toHaveBeenCalled();
+    expect(rejectTransferPairManuallyMock).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the reject branch OUTSIDE its own try, so a commit is never reported as a refusal", async () => {
+    // `revalidateAll()` used to sit inside the `try` on this branch only. A
+    // throw from `revalidatePath` there reported an already-committed
+    // `transfer_pair_rejections` row as a failure — and a rejection is durable,
+    // with no UI to undo it.
+    rejectTransferPairManuallyMock.mockReturnValue("recorded");
+
+    const state = await resolveSameAccountReversalAction(
+      { status: "idle" },
+      formData({ aId: "7", bId: "9", intent: "reject" }),
+    );
+
+    expect(state.status).toBe("ok");
+    // The write happened, so the refresh must follow it — not be skipped, and
+    // not be able to turn it into an error.
+    expect(revalidatePath).toHaveBeenCalledWith("/sync");
   });
 });
 
@@ -339,5 +382,106 @@ describe("unlinkTransferAction — a no-op is not a success", () => {
 
     expect(state.status).toBe("error");
     expect(state.status !== "idle" && state.message).toMatch(/already unpaired/i);
+  });
+
+  it("does NOT revalidate on the no-op refusal — that would unmount the message", async () => {
+    // The refusal used to be checked AFTER `revalidateAll()`. Revalidating
+    // re-renders `page.tsx`'s "Linked pairs" list, this pair's `<li>` is the
+    // only thing rendering `ActionForm`'s inline `role="alert"`, and
+    // `unlinkTransferAction` is not an `announceSuccess` failure path — so the
+    // one place this sentence is ever shown was being destroyed by the same
+    // call that failed. `ActionForm`'s contract is "a failure skips
+    // revalidateAll(), so the form is still on screen"; this used to be one of
+    // exactly two places that broke it, and nothing asserted the ordering.
+    unlinkTransferPairMock.mockReturnValue("already-unpaired");
+
+    await unlinkTransferAction({ status: "idle" }, formData({ id: "4" }));
+
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("still revalidates when the unlink actually happened", async () => {
+    // The other half of the reorder: moving the guard above `revalidateAll()`
+    // must not cost the success path its refresh, or two rows would silently
+    // stay out of every spending total until the user reloaded.
+    await unlinkTransferAction({ status: "idle" }, formData({ id: "4" }));
+
+    const paths = vi.mocked(revalidatePath).mock.calls.map((c) => c[0]);
+    expect(paths).toEqual(
+      expect.arrayContaining(["/sync", "/", "/transactions", "/categorize", "/budget"]),
+    );
+  });
+});
+
+/**
+ * `undoSyncAction` had no action-layer coverage at all until the ordering fix
+ * below needed pinning. `undoSyncBatch`'s own behaviour (the newest-batch
+ * staleness re-check, the row deletion) is covered against a real schema in
+ * src/lib/simplefin/undoSync.test.ts; what is only observable HERE is which of
+ * its three outcomes revalidates.
+ */
+describe("undoSyncAction — a refusal must not revalidate the form away", () => {
+  it("reports a successful undo and revalidates every affected page", async () => {
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(undoSyncBatchMock).toHaveBeenCalledWith(3);
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(/removed 2 transactions/);
+    const paths = vi.mocked(revalidatePath).mock.calls.map((c) => c[0]);
+    expect(paths).toEqual(
+      expect.arrayContaining(["/sync", "/", "/transactions", "/categorize", "/budget"]),
+    );
+  });
+
+  it("does NOT revalidate a nothing-to-undo refusal", async () => {
+    // Reachable by double-clicking, or from a second tab that undid it first.
+    // The undo form is gated on `lastBatch`, so revalidating on a path that
+    // deleted NOTHING re-renders that section out from under the alert — and
+    // when an older batch remains, the unkeyed form is REUSED and the message
+    // reappears under a different batch's description, which reads as true.
+    undoSyncBatchMock.mockReturnValue({ status: "nothing-to-undo" });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("error");
+    expect(state.status !== "idle" && state.message).toMatch(/already been undone/i);
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("does NOT revalidate a stale refusal, and surfaces the store's own reason", async () => {
+    // Rule 5: the undo is only offered while the sync batch is still the newest
+    // import_batches row of any source, because a later CSV import can
+    // content-match against a row this batch inserted. Nothing was deleted, so
+    // nothing should be refreshed.
+    undoSyncBatchMock.mockReturnValue({
+      status: "stale",
+      reason: "A CSV import has happened since this sync — undo is no longer safe.",
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("error");
+    expect(state.status !== "idle" && state.message).toMatch(/no longer safe/);
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed batch id without touching the store", async () => {
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "0" }));
+
+    expect(state.status).toBe("error");
+    expect(undoSyncBatchMock).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("returns a throw from the store as state rather than crashing the page", async () => {
+    undoSyncBatchMock.mockImplementation(() => {
+      throw new Error("database is locked");
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("error");
+    expect(state.status !== "idle" && state.message).toMatch(/database is locked/);
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 });
