@@ -442,11 +442,15 @@ function SetKindDialog({
           <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
         </div>
         {error ? <p className="text-sm text-money-neg">{error}</p> : null}
-        <DialogFooter>
-          {/* Close first in DOM order AND the initialFocus target: Base UI
-              focuses the first tabbable element in the popup, which would
-              otherwise park the keyboard on an irreversible commit that a
-              second Enter fires. */}
+        {/* `flex-row-reverse` restores the sibling dialogs' visual order —
+            action on the right, Cancel to its left, and on mobile
+            (`flex-col-reverse`) Cancel on top with the destructive button
+            below, where the thumb rests. Cancel stays FIRST in DOM order, and
+            is the `initialFocus` target, because Base UI focuses the first
+            tabbable element in the popup and that would otherwise park the
+            keyboard on an irreversible commit a second Enter fires. Order and
+            focus are separable; this takes the safe answer to both. */}
+        <DialogFooter className="sm:flex-row-reverse sm:justify-start">
           <Button ref={closeRef} type="button" variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>

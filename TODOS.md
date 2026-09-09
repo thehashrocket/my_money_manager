@@ -2219,7 +2219,7 @@ transactions; uncategorized non-transfer backlog **236 → 188**, still moving
 purely by clicking; `import_source='manual'` rows **still 0**; credit card and
 mortgage **still 0 rows each**; funds 1; budgeted months 2; rollover categories
 1; 177 rules. `integrity_check` ok, `foreign_key_check` clean, 0 rows in the
-residual-duplication class, 0 legacy orphans. 1,802 → **1,807 tests**.
+residual-duplication class, 0 legacy orphans. **1,802 → 1,836 tests** across 110 → 113 files.
 
 **The backlog residue is harder than what has been cleared, and the number
 alone hides it.** Of the remaining 188, `ONLINE` (19) and `MOBILE` (15) are
@@ -2248,8 +2248,10 @@ burn-down rate forward.
       that did not move; nothing is written for a dropped account, so the next
       sync re-stages it. `insertedCount` and `import_batches.transaction_count`
       now report what was WRITTEN, not what was staged, which means a `synced`
-      outcome can carry `insertedCount: 0`. Four of the five new tests fail
-      without the guard; the fifth is the ordinary-case control.
+      outcome can carry `insertedCount: 0`. Four of the five tests added to `sync.test.ts`
+      fail without the guard; the fifth is the ordinary-case control. (The
+      branch grew to 34 new tests across three further files — see the
+      /ship section below.)
       **The idiom already existed and had not been applied here:**
       `undoSyncBatch` re-checks its own precondition inside its transaction
       rather than trusting the page's check (rule 5) — reasoning that applies
@@ -2335,3 +2337,85 @@ burn-down rate forward.
       boot-time `VACUUM INTO` is a full ledger copy that also grows linearly
       forever.
       (`src/db/schema.ts`, `src/lib/budget/categoryKindLock.ts`)
+
+## Follow-ups from the `/pr-review-toolkit:review-pr` pass (2026-09-09, sync-relink-guard branch)
+
+Five analyzers (code, tests, comments, silent failures, types) over the branch
+that shipped `verifyStagedLinks`. Four CRITICAL and ten important findings; all
+were fixed on the branch rather than deferred, so this section is the record of
+WHAT was wrong rather than a queue. The three that are worth remembering:
+
+- **A guard that closes half a class reads as closing the class.** Six
+  independent reviewers, across two separate passes, found that
+  `refreshLiabilityBalances` carried the identical read-before-await
+  precondition on a bigger write — and the first pass's own docstring said
+  "this write is the one that moves money onto an account", which was the
+  comparative superlative that stopped anyone looking. An anchor is the whole
+  balance (rule 1) with one undo slot (rule 9); a misfiled row is deletable.
+  The bigger one was the unguarded one.
+- **A warning is only non-silent if it survives the tab.** The drop warnings
+  were the entire mechanism making a withheld import visible and lived only in
+  `useActionState`. Rule 5 had already settled this exact question for the
+  snapshot warning and the reasoning was not carried across.
+- **An exported const in a `"use server"` module breaks every export in it.**
+  Turbopack reports "the module has no exports at all"; `tsc` is silent and no
+  unit test imports a route module. Only loading the page finds it.
+
+### Still open
+
+- [ ] **P3** — **The dedup preconditions are still read before the `await`.**
+      `seenExternalIds` and `existingByContent` are computed pre-fetch and the
+      insert happens in a later transaction, so a CSV `commitImport` or a second
+      sync committing in that window makes rows that are now duplicates pass the
+      in-memory content budget. The id pass is protected by the partial unique
+      index, but a collision there aborts the WHOLE batch and surfaces the raw
+      SQLite constraint text — the `existingByContent` comment predicts this
+      outcome in as many words. The convergent fix is to re-read both inside the
+      write transaction alongside `verifyStagedLinks`, so a concurrent writer
+      degrades to zero new rows rather than aborting. Deliberately not bundled:
+      this branch already reworked that transaction twice, and the failure needs
+      genuine simultaneity where the link race needed only a slow round trip.
+      (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P3** — **`verifyStagedLinks` proves *a* transaction, not *the* one.**
+      `SyncTx` makes passing `db` a build error (pinned by `_DB_IS_NOT_A_TX`),
+      but `db.transaction((tx) => verifyStagedLinks(staged, tx))` followed by a
+      SEPARATE `db.transaction` for the insert compiles, passes every test, and
+      fully reinstates the race — and it is the more likely refactor, since
+      someone wanting the verify step testable in isolation would write exactly
+      that. A branded `WriteTx` minted by one cast at the single write site
+      would close it; judged not worth one cast for one property while the
+      function is module-private and has one caller.
+      (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P4** — **`feedId` is a bare `string` in a codebase that spent a release
+      on the distinction.** Rule 3 makes "which feed produced this row" a
+      different fact from "which account holds it", and migration `0020` exists
+      because `account_id` was a wrong proxy for it. `verifyStagedLinks(staged
+      .map(s => ({...s, feedId: s.rows[0].externalId})), tx)` typechecks —
+      `externalId` is the TRANSACTION id, unique only within the feed — and so
+      does `feedId: ""`, which drops every account with a plausible warning. A
+      branded `FeedAccountId` minted once off `account.simplefinAccountId` and
+      once off `response.accounts[].id` would make both a type error.
+      (`src/lib/simplefin/sync.ts`, `src/lib/simplefin/mapTransaction.ts`)
+
+- [ ] **P4** — **~140 lines of duplicated test harness.**
+      `syncRelinkGuard.test.ts` re-declares the `syncSimpleFin` harness
+      `sync.test.ts` owns — the `vi.hoisted` mock trio, all three `vi.mock`
+      factories, the date constants, and a 21st hand-copy of `seedAccount` —
+      and the branch grew two spellings of the same mid-fetch mutation idiom
+      (`relinkDuringFetch` and `respondAfter`). CLAUDE.md already tracks the
+      `seedAccount`/`seedBatch`/`seedCategory`/`seedTxn` duplication across 13+
+      files as a known item; this is the same problem, and the fix is one
+      shared `src/lib/simplefin/test/` module rather than another local copy.
+      (`src/lib/simplefin/syncRelinkGuard.test.ts`, `sync.test.ts`)
+
+- [ ] **P4** — **`verifyStagedLinks` returns three parallel collections.**
+      `{ verified, warnings, droppedAccountIds }` leaves the caller correlating
+      a `number[]` against `counts[].accountId` through a Set, and throws away
+      the drop REASON that the reconciliation would like in order to explain a
+      zeroed record. A 1:1 `LinkCheck[]` (`{ outcome: "verified" | "dropped",
+      staged, reason, warning }`) built with `.map` would make the partition
+      structural and carry the warning with its account. Worth doing if that
+      function grows a fourth branch.
+      (`src/lib/simplefin/sync.ts`)

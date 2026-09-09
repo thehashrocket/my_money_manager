@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNull, isNotNull, ne, or, sql } from "drizzle-orm";
-import { db as defaultDb, schema } from "@/db";
+import { db as defaultDb, schema, type AnyDb } from "@/db";
 import {
   createSnapshot,
   pruneSnapshots,
@@ -48,6 +48,21 @@ type Db = typeof defaultDb;
  * was written to close. Naming the transaction type makes that a build error.
  */
 type SyncTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * `SyncTx`'s entire value is that `db` is NOT assignable to it — and that is a
+ * property of drizzle's class hierarchy (`SQLiteTransaction`'s `protected`
+ * members give it nominal-ish assignability), not of this file. A dependency
+ * bump that drops those modifiers takes the guarantee away with tsc green and
+ * every test passing, leaving the docblock above asserting something no longer
+ * true. Same idiom, and the same lesson, as `_INTENT_IS_REQUIRED`: an
+ * invariant defended only by runtime tests is one refactor from silent.
+ */
+type NotAssignable<A, B> = [A] extends [B] ? { ERROR: "A is assignable to B" } : true;
+const _DB_IS_NOT_A_TX: NotAssignable<Db, SyncTx> = true;
+const _ANYDB_IS_NOT_A_TX: NotAssignable<AnyDb, SyncTx> = true;
+void _DB_IS_NOT_A_TX;
+void _ANYDB_IS_NOT_A_TX;
 
 /**
  * SimpleFIN hard-caps the window at 90 days. That cap is corroborated directly by
@@ -102,7 +117,15 @@ export type AccountSyncSummary = AccountSyncCounts & {
   computedBalanceCents: number;
   /**
    * computed − reported. Non-zero means the ledger has drifted from the bank.
-   * NULL means only one thing now: the bank reported no balance.
+   *
+   * NULL means one of TWO things: the bank reported no balance, or the link
+   * re-check dropped this account mid-sync and its old feed's balance was
+   * discarded with the rest of its record. The second was added when
+   * `verifyStagedLinks` landed — without it, `finaliseBalances` subtracted the
+   * OLD feed's balance from a ledger deliberately missing the withheld rows
+   * and reported the difference as drift, i.e. rule 1's "a row is missing or
+   * duplicated" signal, manufactured. This field has no reader yet, so this
+   * docblock is its whole specification.
    */
   driftCents: number | null;
 };
@@ -1148,11 +1171,16 @@ function missingAccountWarnings(names: string[]): string[] {
  * controls live on the same `/sync` page, so it takes two tabs and no crafted
  * input:
  *
- *   t0  syncSimpleFin reads accounts   account 1 -> feed A
- *   t1  await fetchAccounts(...)  ─────┐  (seconds; SYNC_TIMEOUT_MS bounds it)
- *   t2                                │  setAccountLink(1, feed B) commits
- *   t3  insert with account.id=1, ◄───┘  ...rows from feed A, on an account
+ *   t0  syncSimpleFin reads accounts      account 1 -> feed A
+ *   t1  await fetchAccounts(...)  ────┐
+ *   t2                                │   setAccountLink(1, feed B) commits
+ *   t3  insert with account.id=1, ◄───┘   ...rows from feed A, on an account
  *       feedId=feed A                     that is now feed B's
+ *
+ * The vulnerable window is t0 -> t3, NOT the fetch alone: it also spans the
+ * per-account staging loop and `createSnapshot`'s `VACUUM INTO`. Nor is it
+ * bounded by `SYNC_TIMEOUT_MS` — that only bounds the fetch, and only when the
+ * caller passes no signal of its own (`opts.signal ?? AbortSignal.timeout`).
  *
  * The result is not a duplicate but something the dedup passes cannot see at
  * all: feed A's rows filed under an account the user has repointed, carrying
@@ -1166,16 +1194,30 @@ function missingAccountWarnings(names: string[]): string[] {
  *
  * DROPS the affected account's rows rather than failing the whole sync. Every
  * other account's rows were staged against a link that did not move, so they
- * are correct and refusing them would punish accounts that did nothing. The
- * dropped rows are not lost: nothing was written for them, so the next sync
- * re-stages them against whatever the link says then. The warning is what
- * makes it non-silent, and `/sync` never renders a warning-carrying sync as a
- * plain success.
+ * are correct and refusing them would punish accounts that did nothing.
+ * Nothing is WRITTEN for a dropped account, so no dedup pass records the
+ * withheld rows and none of this is destructive — but "the next sync re-stages
+ * them" is true of only one of the three cases, so the three warnings carry
+ * three different remedies rather than one reassurance:
  *
- * Covers three ways a link stops matching, deliberately as one test rather
- * than three: repointed to a different feed, unlinked entirely (NULL), and
- * the account row deleted outright. All three mean the same thing here — the
- * account this row set was staged for is not the account now in the ledger.
+ *   repointed  the next sync stages the NEW feed's rows. The withheld ones
+ *              come back only if that feed serves them too — which it does for
+ *              a re-minted feed id (same bank account, fresh id from
+ *              `simplefin:claim`) and does not for a genuine move to a
+ *              different bank account. "Sync again" is the right advice; it is
+ *              not a guarantee.
+ *   unlinked   the account is excluded from the next run's `linked` query
+ *              entirely, so syncing again imports nothing for it and says
+ *              nothing about it. The remedy is to LINK IT AGAIN.
+ *   deleted    unrecoverable, and the warning offers no remedy because there
+ *              is none.
+ *
+ * Three branches, not one, for exactly that reason — an earlier draft folded
+ * them together and told an unlinking user to "sync again to import them",
+ * which is a no-op that leaves the rows silently never arriving. The warning
+ * is what makes the drop non-silent, so a warning naming the wrong remedy is
+ * close to no guard at all. `/sync` never renders a warning-carrying sync as a
+ * plain success, and the warnings are persisted onto the batch (see below).
  */
 function verifyStagedLinks<
   T extends {
@@ -1224,9 +1266,10 @@ function verifyStagedLinks<
       droppedAccountIds.push(entry.account.id);
       continue;
     }
-    // `!==` covers a repoint AND an unlink: NULL is not the staged feed id
-    // either, and an unlinked account must not receive rows from the feed it
-    // no longer claims.
+    // Reached only for a link that moved to ANOTHER feed — the NULL case
+    // `continue`s above. Written as `!==` rather than a positive test so the
+    // ordering is not load-bearing: remove the branch above and this still
+    // catches an unlink, just with the wrong remedy in its copy.
     if (current.simplefinAccountId !== entry.feedId) {
       warnings.push(
         entry.rows.length === 0
