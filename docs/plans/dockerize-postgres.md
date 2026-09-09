@@ -633,14 +633,27 @@ prior months (`budget.ts:92`) doing three more queries per level. Shape:
   Postgres              one socket round trip each            → ~220 queries at N=20, D=6
 ```
 
-The cold path is the common path: `invalidateForwardRollover` clears
+> **STALE as of 2026-09-08 (migration `0021_drop_rollover_cache`) — re-measure before
+> acting on any of this.** The paragraph below assumed a cache that was constantly being
+> cleared and refilled. There is no cache: `effective_allocation_cents` and
+> `invalidateForwardRollover` are both gone, and `loadMonthView` has used the set-based
+> `computeEffectiveAllocationsForRollover` prefix scan since T8 — two queries covering
+> every rollover category at once, not `getEffectiveAllocation` per leaf. So the
+> `2N + 3ND` fan-out above does not describe the current code, and the only remaining
+> recursive caller is `upsertAllocation`'s single read-back (measured at ~0.6ms for a
+> 72-month contiguous chain on SQLite). The concern may still be real under Postgres
+> round-trip latency, but the numbers have to be re-derived from the set-based path.
+
+~~The cold path is the common path: `invalidateForwardRollover` clears
 `effective_allocation_cents` on every categorize and every allocation edit, so the
-fan-out runs on exactly the reload that follows an edit.
+fan-out runs on exactly the reload that follows an edit.~~
 
 **Do not pre-emptively rewrite this.** `getEffectiveAllocation`'s rollover math is the
-most subtly-tested logic in the repo (`budget.test.ts` covers both persist modes and
-all three invalidation triggers), and restructuring it during a dialect migration means
-a wrong envelope number would have two candidate causes.
+most subtly-tested logic in the repo, and restructuring it during a dialect migration
+means a wrong envelope number would have two candidate causes. (This used to cite
+`budget.test.ts` covering "both persist modes and all three invalidation triggers" —
+those tests went with the cache; what remains covers the rollover ARITHMETIC, which is
+the part that matters here.)
 
 Instead: add a dev-only query counter to `src/db/index.ts` and record count + wall time
 for `/budget`, cold and warm, on real data immediately after cutover. Under ~150ms cold,

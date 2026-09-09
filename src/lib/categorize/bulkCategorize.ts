@@ -1,7 +1,5 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
 import { assertAssignableCategory } from "./assertAssignableCategory";
 import type { PriorRuleSnapshot } from "./priorRuleSnapshot";
@@ -84,11 +82,6 @@ export type BulkCategorizeResult = BulkCategorizeSnapshot & {
  * rather than a throw, which would also discard the categorization the user
  * did want.
  *
- * Invalidation: the earliest month in `txnIds` is the floor for
- * `invalidateForwardRollover`. Spend changed on `categoryId` starting that
- * month, so every downstream rollover row for that category must recompute.
- * (The old category for these rows was NULL → no prior attribution to clear.)
- *
  * Defensive DB-bound rejects (the pure Zod validator already covered shape)
  * live in `assertAssignableCategory`, shared with `categorizeTransaction` and
  * `bulkRetarget`: not found, savings goal, archived, parent.
@@ -136,11 +129,6 @@ export function bulkCategorize(
         .set({ categoryId, updatedAt: new Date() })
         .where(inArray(schema.transactions.id, txnIds))
         .run();
-
-      if (earliestDate) {
-        const { year, month } = parseIsoMonth(earliestDate);
-        invalidateForwardRollover(tx, categoryId, year, month);
-      }
     }
 
     return {

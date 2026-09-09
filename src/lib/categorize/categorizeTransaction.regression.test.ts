@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { computeMtdSpent } from "@/lib/budget";
-import { primeCache } from "@/lib/test/primeCache";
+import { computeMtdSpent, getEffectiveAllocation } from "@/lib/budget";
 import { categorizeTransaction } from "./categorizeTransaction";
 import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
 
@@ -12,14 +11,20 @@ import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
  *
  *   categorize via Track B
  *     → `/budget` MTD for the new category reflects the new number
- *     → forward rollover rows for future months are invalidated
+ *     → MAY's carried-forward rollover shrinks by the same amount
  *     → Undo reverts all three
  *
  * Spine: April + May budget_periods with carryoverPolicy = "rollover".
- * Seed a $50 uncategorized txn in April. Categorize into Groceries via the
- * single-row path. Prime May's effective cache. Confirm April MTD = $50 and
- * May's cache is cleared. Undo. Confirm April MTD back to 0 and May is
- * cleared again (the only thing that matters is the cache re-clear).
+ * Seed a $50 uncategorized txn in April, categorize it into Groceries via
+ * the single-row path, then undo.
+ *
+ * This used to assert that May's `effective_allocation_cents` CACHE was
+ * cleared. That column and its invalidation contract are gone, and the
+ * assertion is stronger without them: clearing a cache was only ever a proxy
+ * for "May now carries less money forward", so the test asserts the carried
+ * figure itself. April is allocated $100 and spends $50, so May opens at
+ * $100 + $50 carried = $150; undo returns April's spend to $0 and May opens
+ * at $200. A mechanism assertion became an outcome assertion.
  */
 
 let handle: TestDbHandle;
@@ -33,7 +38,7 @@ afterEach(() => {
 });
 
 describe("Track B regression guard — budget ↔ categorize ↔ rollover", () => {
-  it("categorize flows into /budget MTD + invalidates May; undo reverses both", () => {
+  it("categorize flows into /budget MTD and shrinks May's carried rollover; undo reverses both", () => {
     const [account] = handle.db
       .insert(schema.accounts)
       .values({
@@ -65,15 +70,12 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
       ])
       .run();
 
-    // Prime both months' caches so invalidation has something visible to clear.
-    primeCache(handle.db, groceries.id, 2026, 4);
-    primeCache(handle.db, groceries.id, 2026, 5);
-    expect(
-      readBudget(groceries.id, 2026, 4)?.effectiveAllocationCents,
-    ).not.toBeNull();
-    expect(
-      readBudget(groceries.id, 2026, 5)?.effectiveAllocationCents,
-    ).not.toBeNull();
+    // Baseline: nothing spent in April, so May carries April's whole $100.
+    expect(getEffectiveAllocation(handle.db, groceries.id, 2026, 5)).toEqual({
+      allocatedCents: 10_000,
+      rolloverCents: 10_000,
+      effectiveCents: 20_000,
+    });
 
     // Baseline: uncategorized April txn, no MTD yet.
     const [target] = handle.db
@@ -105,20 +107,13 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
 
     // (1) /budget MTD reflects the new number — $50 spent.
     expect(computeMtdSpent(handle.db, groceries.id, 2026, 4)).toBe(5_000);
-    // (2) May's rollover cache cleared.
-    expect(
-      readBudget(groceries.id, 2026, 5)?.effectiveAllocationCents,
-    ).toBeNull();
-    // April's cache cleared too (floor = April).
-    expect(
-      readBudget(groceries.id, 2026, 4)?.effectiveAllocationCents,
-    ).toBeNull();
-
-    // Re-prime May so we can observe undo re-clears it.
-    primeCache(handle.db, groceries.id, 2026, 5);
-    expect(
-      readBudget(groceries.id, 2026, 5)?.effectiveAllocationCents,
-    ).not.toBeNull();
+    // (2) May carries $50 less forward, on the next read, with nothing
+    //     needing to have been invalidated for it to be true.
+    expect(getEffectiveAllocation(handle.db, groceries.id, 2026, 5)).toEqual({
+      allocatedCents: 10_000,
+      rolloverCents: 5_000,
+      effectiveCents: 15_000,
+    });
 
     // Undo.
     const undo = undoCategorizeTransaction(handle.db, result);
@@ -126,10 +121,12 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
 
     // (3a) Spend reversed off Groceries.
     expect(computeMtdSpent(handle.db, groceries.id, 2026, 4)).toBe(0);
-    // (3b) May's re-primed cache cleared again.
-    expect(
-      readBudget(groceries.id, 2026, 5)?.effectiveAllocationCents,
-    ).toBeNull();
+    // (3b) May carries the full $100 again.
+    expect(getEffectiveAllocation(handle.db, groceries.id, 2026, 5)).toEqual({
+      allocatedCents: 10_000,
+      rolloverCents: 10_000,
+      effectiveCents: 20_000,
+    });
     // (3c) Target row back to NULL.
     const reverted = handle.db
       .select()
@@ -138,18 +135,4 @@ describe("Track B regression guard — budget ↔ categorize ↔ rollover", () =
       .get();
     expect(reverted?.categoryId).toBeNull();
   });
-
-  function readBudget(categoryId: number, year: number, month: number) {
-    return handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, categoryId),
-          eq(schema.budgetPeriods.year, year),
-          eq(schema.budgetPeriods.month, month),
-        ),
-      )
-      .get();
-  }
 });

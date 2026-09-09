@@ -1,7 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import type { CategorizeTransactionSnapshot } from "./categorizeTransaction";
 import { restorePriorRule } from "./restorePriorRule";
 import type { RuleUndoAction } from "./undoBulkCategorize";
@@ -38,9 +36,9 @@ export type UndoCategorizeTransactionResult = {
  * `Subscriptions` with no UI in front of it. The old lookup then matched
  * nothing, the rule survived, and the undo still said it had gone.
  *
- * Invalidation: both categories get invalidated at their respective earliest
- * months. New category at earliest(target.date, earliestApplyToPastDate);
- * prior category (if non-null) at target.date month.
+ * Rollover: spend moves back across the same boundary it crossed, and both
+ * categories' downstream months reflect that on their next read — migration
+ * 0021 removed the cache this used to invalidate.
  */
 export function undoCategorizeTransaction(
   db: Db,
@@ -94,30 +92,7 @@ export function undoCategorizeTransaction(
       }
     }
 
-    const newCatEarliest = earlierDate(
-      snapshot.targetDate,
-      snapshot.earliestApplyToPastDate,
-    );
-    const { year: newYear, month: newMonth } = parseIsoMonth(newCatEarliest);
-    invalidateForwardRollover(tx, snapshot.newCategoryId, newYear, newMonth);
-
-    if (snapshot.targetPriorCategoryId !== null) {
-      const { year: priorYear, month: priorMonth } = parseIsoMonth(
-        snapshot.targetDate,
-      );
-      invalidateForwardRollover(
-        tx,
-        snapshot.targetPriorCategoryId,
-        priorYear,
-        priorMonth,
-      );
-    }
-
     return { targetReverted, revertedApplyToPastCount, ruleAction };
   });
 }
 
-function earlierDate(a: string, b: string | null): string {
-  if (b === null) return a;
-  return a < b ? a : b;
-}

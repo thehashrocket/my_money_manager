@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import { monthBoundary, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 // Typed on the derived union, never `string`: this predicate exists so the
@@ -43,16 +43,31 @@ export function spendIgnoresPositiveRows(kind: CategoryKind | null | undefined):
  * Return the effective allocation for a category in a given month, or `null`
  * if no budget_periods row exists for that month.
  *
- * Read-only single-row API — kept for the allocate dialog's one-field
- * breakdown read. `loadMonthView`'s per-month render path does NOT call
- * this per leaf; it uses the set-based `computeEffectiveAllocationsForRollover`
- * prefix scan instead (T8/P1), which is what `persist` existed to make fast
- * before this rewrite. TS1: `persist` is deleted — its only production
- * caller was this function's own prior-month recursion, and no production
- * code ever passed `{ persist: true }` at the top of that recursion (B5),
- * so deleting it changes no real behavior. `effective_allocation_cents`
- * stays in the schema and this function still prefers a cached non-NULL
- * value if one is ever present, but nothing writes one anymore.
+ * Read-only single-row API. Its one production caller is `upsertAllocation`,
+ * for the reconciled triple it hands back to `<MonthEditor>`.
+ * `loadMonthView`'s per-month render path does NOT call this per leaf; it
+ * uses the set-based `computeEffectiveAllocationsForRollover` prefix scan
+ * instead (T8/P1), which is what the old `persist` option existed to make
+ * fast before that rewrite.
+ *
+ * Always recomputes. There was a memoised `effective_allocation_cents`
+ * column behind this, plus a cache-read branch here and a 13-call-site
+ * `invalidateForwardRollover` contract keeping it honest; T8/TS1 deleted the
+ * only writer and left the rest standing, so for four releases every write
+ * path paid to clear a column nothing could ever fill. The whole apparatus
+ * was removed once rollover had actually run against real data and the
+ * recompute proved cheap enough not to need it. Cost is NOT a function of
+ * chain length alone — three queries per level, dominated by
+ * `computeMtdSpent`, so it scales with the transactions in each month of the
+ * chain: a 72-month chain measures ~0.1ms at 0 txn/month, ~1ms at 3, ~4ms at
+ * a realistic 150 txn/month across 25 categories. That is fine because this
+ * function has exactly one production caller (`upsertAllocation`, once per
+ * allocate commit) and the render path never touches it. If a cache ever comes back it needs a writer, an
+ * invalidation contract AND tests that can fail for the right reason: most of
+ * the deleted ones primed a value through a test-only helper and asserted it
+ * went back to NULL, which exercised the clearing but never the CACHE — no
+ * production state could reach those assertions, and six were vacuous
+ * outright (their only assertion was that a never-written column was null).
  *
  * Rollover math: when the category's `carryover_policy = 'rollover'`, the
  * prior month's remaining budget (effective − MTD spent, floored at 0) is
@@ -65,8 +80,16 @@ export function getEffectiveAllocation(
   year: number,
   month: number,
 ): EffectiveAllocation | null {
+  // Explicit projection, not a bare `.select()`. Drizzle expands a bare select
+  // into the full column list from the schema, which made this the ONE query in
+  // production that would break on a schema/DB mismatch after migration 0021 —
+  // `SQLITE_ERROR: no such column: effective_allocation_cents` on every allocate
+  // commit if the image is ever rolled back past the migration, while every
+  // other `budget_periods` read (loadAllocationsForMonth, copyMonth) projects
+  // explicitly and keeps working. 0021 is still forward-only for the DATA (see
+  // the migration header), but it no longer has to be forward-only for the CODE.
   const row = db
-    .select()
+    .select({ allocatedCents: schema.budgetPeriods.allocatedCents })
     .from(schema.budgetPeriods)
     .where(
       and(
@@ -79,14 +102,6 @@ export function getEffectiveAllocation(
   if (!row) return null;
 
   const allocatedCents = row.allocatedCents;
-
-  if (row.effectiveAllocationCents !== null) {
-    return {
-      allocatedCents,
-      rolloverCents: row.effectiveAllocationCents - allocatedCents,
-      effectiveCents: row.effectiveAllocationCents,
-    };
-  }
 
   const category = db
     .select({ carryoverPolicy: schema.categories.carryoverPolicy, kind: schema.categories.kind })
@@ -196,69 +211,6 @@ export function computeEffectiveAllocationsForRollover(
 
 export function periodKey(year: number, month: number): string {
   return `${year}-${month}`;
-}
-
-/**
- * Clear cached `effective_allocation_cents` for the given month and every
- * later month of the same category.
- *
- * P3: this clears a column that, after T8, nothing can ever read a non-NULL
- * value out of. `getEffectiveAllocation`'s cache-read branch is still there
- * (line ~50 above) but structurally unreachable — TS1 deleted the only
- * writer (`persist`), and `loadMonthView`'s set-based path (the read every
- * real render takes) never consults this column at all; it recomputes from
- * `budget_periods.allocated_cents` and transaction sums directly. Six call
- * sites today (`upsertAllocation`, `categorizeTransaction`, `bulkCategorize`,
- * and the three undo paths) still call this faithfully on every write that
- * could shift downstream rollover; PR2a/PR2b add more (a carryover-policy
- * change, a kind change, `copyPreviousMonth`). Deliberately not ripped out:
- * PR3's fund work may legitimately want a real cache, in which case deleting
- * the column now just becomes a migration to add it back — see `TODOS.md`
- * for the tracked follow-up. Kept working today at zero cost either way,
- * since the column being NULL vs also-NULL-after-this-call is not
- * observable.
- *
- * Callers MUST invoke this after any change that shifts downstream rollover:
- * 1. Allocation edit — `upsertBudgetAllocationAction` passes the edited month.
- * 2. Transaction categorize / re-categorize — changing `category_id` shifts
- *    prior-month spend for both the old and new category. Pass the
- *    transaction's date month for each affected category.
- * 3. `carryover_policy` change — flipping rollover ↔ reset re-keys the math
- *    for every downstream month. Pass the earliest allocation month for the
- *    category (or any month <= the earliest that matters).
- */
-export function invalidateForwardRollover(
-  db: AnyDb,
-  categoryId: number,
-  fromYear: number,
-  fromMonth: number,
-): void {
-  invalidateForwardRolloverMany(db, [categoryId], fromYear, fromMonth);
-}
-
-/**
- * D8A: batched form of {@link invalidateForwardRollover} — one UPDATE
- * across every category rather than one per category. `copyPreviousMonth`
- * (T16c) can touch 40 categories in a single copy; the single-category
- * function now delegates here so there is one implementation of the month
- * predicate rather than two that could drift.
- */
-export function invalidateForwardRolloverMany(
-  db: AnyDb,
-  categoryIds: number[],
-  fromYear: number,
-  fromMonth: number,
-): void {
-  if (categoryIds.length === 0) return;
-  db.update(schema.budgetPeriods)
-    .set({ effectiveAllocationCents: null })
-    .where(
-      and(
-        inArray(schema.budgetPeriods.categoryId, categoryIds),
-        sql`(${schema.budgetPeriods.year} > ${fromYear} OR (${schema.budgetPeriods.year} = ${fromYear} AND ${schema.budgetPeriods.month} >= ${fromMonth}))`,
-      ),
-    )
-    .run();
 }
 
 /**

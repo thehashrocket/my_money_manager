@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { primeCache as primeCacheOnDb } from "@/lib/test/primeCache";
 import { categorizeTransaction } from "./categorizeTransaction";
 import { undoCategorizeTransaction } from "./undoCategorizeTransaction";
 
@@ -62,10 +61,6 @@ function seedCategory(
     .returning()
     .all();
   return row;
-}
-
-function primeCache(categoryId: number, year: number, month: number) {
-  return primeCacheOnDb(handle.db, categoryId, year, month);
 }
 
 function seedTxn(opts: {
@@ -396,92 +391,3 @@ describe("undoCategorizeTransaction — rule", () => {
   });
 });
 
-describe("undoCategorizeTransaction — invalidation", () => {
-  it("invalidates new category on undo starting at earliest(target, applyToPast)", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values([
-        { categoryId: groceries.id, year: 2026, month: 2, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 3, allocatedCents: 1000 },
-        { categoryId: groceries.id, year: 2026, month: 4, allocatedCents: 1000 },
-      ])
-      .run();
-
-    const target = seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "SAFEWAY",
-      date: "2026-04-10",
-    });
-    seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "SAFEWAY",
-      date: "2026-02-05",
-    });
-
-    const snapshot = categorizeTransaction(handle.db, {
-      transactionId: target.id,
-      categoryId: groceries.id,
-      rememberMerchant: false,
-      applyToPast: true,
-    });
-
-    // Re-persist to verify undo re-clears.
-    primeCache(groceries.id, 2026, 4);
-
-    undoCategorizeTransaction(handle.db, snapshot);
-
-    const rows = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, groceries.id))
-      .all();
-    // Feb/Mar/Apr all cleared on undo (floor = Feb).
-    expect(rows.every((r) => r.effectiveAllocationCents === null)).toBe(true);
-  });
-
-  it("invalidates prior category on undo (spend moving back)", () => {
-    const a = seedAccount();
-    const b = seedBatch();
-    const groceries = seedCategory("Groceries");
-    const household = seedCategory("Household", { carryoverPolicy: "rollover" });
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values({ categoryId: household.id, year: 2026, month: 4, allocatedCents: 1000 })
-      .run();
-
-    const target = seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      categoryId: household.id,
-      date: "2026-04-10",
-    });
-
-    const snapshot = categorizeTransaction(handle.db, {
-      transactionId: target.id,
-      categoryId: groceries.id,
-      rememberMerchant: false,
-      applyToPast: false,
-    });
-
-    primeCache(household.id, 2026, 4);
-
-    undoCategorizeTransaction(handle.db, snapshot);
-
-    const apr = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(
-        and(
-          eq(schema.budgetPeriods.categoryId, household.id),
-          eq(schema.budgetPeriods.month, 4),
-        ),
-      )
-      .get();
-    expect(apr?.effectiveAllocationCents).toBeNull();
-  });
-});

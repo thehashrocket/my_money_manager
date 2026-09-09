@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-09
+
+### Changed
+- **Removed a stored figure the app had stopped using.** Each budgeted month kept a saved copy of its "effective" amount — what you allocated plus anything carried over from the month before — so the app would not have to work it out again. The code that filled that copy in was deleted four releases ago and nothing replaced it, so for four releases the value was always empty while every single edit you made (categorizing a transaction, setting an amount, copying a month, changing a category's kind, undoing any of it) still paid to clear it. The stored copy is gone, along with the thirteen places that maintained it. The figure is worked out fresh on every read, which is what was already happening; a five-year run of months resolves in a fraction of a millisecond, so there was nothing for the saved copy to buy.
+
+### Fixed
+- **Nothing you can see changes.** This release is deliberately behaviour-preserving: the same month renders the same carried-over amounts before and after, verified against the real ledger. It is listed here because it moves a column out of the database, which is not reversible by switching back to an older version of the app — restoring an older version means restoring the automatic backup taken just before the change, which the app writes for exactly this reason. That backup lives in the same pool the app prunes to the most recent ten, so if you may want to go back, copy it somewhere else first.
+
 ## [0.24.0] - 2026-09-09
 
 ### Fixed

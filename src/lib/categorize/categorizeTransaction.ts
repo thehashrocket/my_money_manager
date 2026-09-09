@@ -1,7 +1,5 @@
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
 import { assertAssignableCategory } from "./assertAssignableCategory";
 import {
@@ -19,7 +17,10 @@ export type CategorizeTransactionSnapshot = {
   targetTxnId: number;
   /** Prior category on the target row — `null` if it was uncategorized. */
   targetPriorCategoryId: number | null;
-  /** ISO date of the target row. Used to locate the prior-category invalidation month on undo. */
+  /** ISO date of the target row. Carried in the undo snapshot; its only
+   *  reader was the prior-category invalidation, removed with the rollover
+   *  cache (migration 0021) — see `earliestDate` in TODOS.md for why the
+   *  round-tripped fields are being retired separately. */
   targetDate: string;
   /** IDs flipped by the "Apply to past" pass; all had `categoryId = NULL`. */
   applyToPastTxnIds: number[];
@@ -89,11 +90,10 @@ export type CategorizeTransactionResult = CategorizeTransactionSnapshot & {
  * action leaves behind rather than the one it found. Moving a key's only filed
  * row to a new category used to be refused on the category it was leaving.
  *
- * Invalidation: the new category is invalidated starting at the earliest of
- * (target.date, earliest applyToPast date). If the target had a prior
- * category, that category is also invalidated at the target's date month —
- * spend moved off it too. (The applyToPast rows were NULL before → no prior
- * attribution on that path.)
+ * Rollover: spend moves onto the new category from the earliest of
+ * (target.date, earliest applyToPast date), and off any prior category at the
+ * target's date month. Both categories' downstream months reflect that on
+ * their next read — migration 0021 removed the cache this used to invalidate.
  */
 export function categorizeTransaction(
   db: Db,
@@ -175,20 +175,6 @@ export function categorizeTransaction(
       }
     }
 
-    const newCatEarliest = earlierDate(target.date, earliestApplyToPastDate);
-    const { year: newYear, month: newMonth } = parseIsoMonth(newCatEarliest);
-    invalidateForwardRollover(tx, categoryId, newYear, newMonth);
-
-    if (targetPriorCategoryId !== null) {
-      const { year: priorYear, month: priorMonth } = parseIsoMonth(target.date);
-      invalidateForwardRollover(
-        tx,
-        targetPriorCategoryId,
-        priorYear,
-        priorMonth,
-      );
-    }
-
     return {
       normalizedMerchant,
       newCategoryId: categoryId,
@@ -207,7 +193,3 @@ export function categorizeTransaction(
   });
 }
 
-function earlierDate(a: string, b: string | null): string {
-  if (b === null) return a;
-  return a < b ? a : b;
-}

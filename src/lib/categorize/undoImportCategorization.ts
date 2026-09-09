@@ -1,7 +1,5 @@
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRollover } from "@/lib/budget";
-import { parseIsoMonth } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
 
@@ -115,15 +113,6 @@ export function undoImportCategorization(
         .where(inArray(schema.transactions.id, stillMatching.map((r) => r.id)))
         .run();
       revertedCount += stillMatching.length;
-
-      const earliestDate = stillMatching.reduce<string | null>(
-        (acc, r) => (!acc || r.date < acc ? r.date : acc),
-        null,
-      );
-      if (earliestDate) {
-        const { year, month } = parseIsoMonth(earliestDate);
-        invalidateForwardRollover(tx, categoryId, year, month);
-      }
     }
 
     tx.delete(schema.importBatchCategorizations)

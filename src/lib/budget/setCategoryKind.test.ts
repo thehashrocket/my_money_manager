@@ -88,37 +88,13 @@ describe("setCategoryKind — TC23 (D9A)", () => {
     expect(() => setCategoryKind(handle.db, cat.id, "income")).toThrow(CategoryKindChangeRefusedError);
   });
 
-  it("succeeds on an unused category and invalidates forward rollover", () => {
+  it("succeeds on an unused category", () => {
     const cat = seedCategory("Someday", "expense");
-    // A later month's budget_periods row with a stale cached effective value
-    // — present only so we can prove the (no-op here, since the category
-    // itself is unused) invalidation path doesn't blow up when there is
-    // nothing to invalidate.
     const result = setCategoryKind(handle.db, cat.id, "fund");
 
     expect(result).toEqual({ categoryId: cat.id, previousKind: "expense", newKind: "fund" });
     const row = handle.db.select().from(schema.categories).where(eq(schema.categories.id, cat.id)).get();
     expect(row?.kind).toBe("fund");
-  });
-
-  it("invalidates cached effective_allocation_cents forward from the earliest budget_periods row on the X1 exception path", () => {
-    const account = seedAccount();
-    const batch = seedBatch();
-    const cat = seedCategory("Freelance", "expense");
-    seedTxn(account.id, batch.id, cat.id, 50000, "2026-03-15");
-    handle.db
-      .insert(schema.budgetPeriods)
-      .values({ categoryId: cat.id, year: 2026, month: 3, allocatedCents: 0, effectiveAllocationCents: 12300 })
-      .run();
-
-    setCategoryKind(handle.db, cat.id, "income");
-
-    const period = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, cat.id))
-      .get();
-    expect(period?.effectiveAllocationCents).toBeNull();
   });
 
   it("throws CategoryNotFoundError for an unknown category id", () => {

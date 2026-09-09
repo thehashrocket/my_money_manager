@@ -162,8 +162,9 @@ src/
                    than refusing on evidence this very call is erasing. The source gets a
                    name lookup and NONE of assertAssignableCategory's checks — rows are
                    moving OFF it, so archived/parent/fund are reasons to be here.
-                   Invalidates BOTH categories' rollover chains from the earliest moved
-                   month. Throws rather than no-oping on an empty row set or a same-source
+                   Both categories' rollover chains recompute on the next read;
+                   there is no cache to invalidate (migration 0021).
+                   Throws rather than no-oping on an empty row set or a same-source
                    destination (bulkRetargetErrors), because applyRuleWrite keys off the
                    MERCHANT and not the rows: a zero-effect "move" would still retrain or
                    DELETE the key's rule
@@ -172,10 +173,16 @@ src/
                    its two load-bearing decisions (matchType is z.literal("exact"), so a
                    crafted Undo cannot install a {regex, ".*"} catch-all; no .min(1) on
                    either key, because "" is a real stored key). earliestDate is
-                   z.iso.date() and non-nullable: it is client round-tripped straight into
-                   parseIsoMonth, where a shape-valid 2026-13-01 would match no
-                   budget_periods row and leave both categories' cached
-                   effective_allocation_cents stale for the rest of the year.
+                   z.iso.date() and non-nullable, and its ORIGINAL reason is gone — worth
+                   recording as gone rather than quietly restating. It fed parseIsoMonth ->
+                   invalidateForwardRollover, where a shape-valid 2026-13-01 matched no
+                   budget_periods row and left a rollover cache stale for the rest of the
+                   year. That cache was deleted (migration 0021), so NOTHING consumes
+                   earliestDate today: bulkRetarget still produces it and the client still
+                   round-trips it, but every reader was an invalidation call. It stays
+                   validated because a field the client can hand back is part of this
+                   schema's contract whether or not today's code reads it. Removing it is
+                   tracked in TODOS.md and is a wire-format change, not a cleanup.
                    Both also carry CROSS-FIELD refinements the object shape cannot
                    express: fromCategoryId !== categoryId (a pure invariant, so it
                    belongs in the pure layer — SameCategoryRetargetError stays as the

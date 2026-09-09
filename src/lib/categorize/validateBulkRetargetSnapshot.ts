@@ -37,13 +37,23 @@ export const bulkRetargetSnapshotSchema = z.object({
   priorRule: priorRuleSchema.nullable(),
   insertedRuleId: z.number().int().positive().nullable(),
   /* `z.iso.date()`, not a `^\d{4}-\d{2}-\d{2}$` regex — the same choice
-     `startingBalanceDateSchema` documents (rule 1) and for a live reason
-     here, not a stylistic one. This value is client round-tripped, and
-     `undoBulkRetarget` feeds it straight to `parseIsoMonth`: a
-     shape-valid but calendar-invalid `2026-13-01` yields month 13, so
-     `invalidateForwardRollover` matches no `budget_periods` row and both
-     categories' rows move back while their cached
-     `effective_allocation_cents` stays stale for the rest of the year. */
+     `startingBalanceDateSchema` documents (rule 1).
+
+     Its original reason is gone and is worth recording as gone rather than
+     quietly restating: this fed `parseIsoMonth` → `invalidateForwardRollover`,
+     where a calendar-invalid `2026-13-01` matched no `budget_periods` row and
+     left a rollover cache stale for the rest of the year. That cache no
+     longer exists, and NOTHING now consumes `earliestDate` — it is still
+     produced by `bulkRetarget` and round-tripped through the client, but
+     every reader was an invalidation call.
+
+     It stays validated anyway, deliberately. A field a client can hand back
+     is part of this schema's contract whether or not today's code reads it,
+     and a schema that accepts `2026-13-01` for a field it carries is a trap
+     set for whoever adds the next reader. Removing the field outright is the
+     honest end state and is tracked in TODOS.md — it changes the undo wire
+     format, which is a different risk from deleting a cache and does not
+     belong in the same change. */
   earliestDate: z.iso.date(),
 }) satisfies z.ZodType<BulkRetargetSnapshot>;
 

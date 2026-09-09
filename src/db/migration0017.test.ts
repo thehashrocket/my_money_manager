@@ -227,26 +227,6 @@ describe("migration 0017 (categories.kind / sort_order / archived_at)", () => {
     }
   });
 
-  it("clears effective_allocation_cents globally (reclassification invalidates cached rollover)", () => {
-    const { sqlite, close } = setup();
-    try {
-      sqlite.exec(
-        `INSERT INTO budget_periods (category_id, year, month, allocated_cents, effective_allocation_cents)
-         VALUES (1, 2026, 9, 1000, 1000)`,
-      );
-      // Re-running the same clear the migration performs, to prove the
-      // column really is nullable and the statement runs cleanly against a
-      // populated table (the migration itself already ran during setup()).
-      sqlite.exec(`UPDATE budget_periods SET effective_allocation_cents = NULL`);
-      const row = sqlite
-        .prepare(`SELECT effective_allocation_cents FROM budget_periods WHERE category_id = 1`)
-        .get() as { effective_allocation_cents: number | null };
-      expect(row.effective_allocation_cents).toBeNull();
-    } finally {
-      close();
-    }
-  });
-
   it("archived_at is nullable with no backfill (E7)", () => {
     const { sqlite, close } = setup();
     try {

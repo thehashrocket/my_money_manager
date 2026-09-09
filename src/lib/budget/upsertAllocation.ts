@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { getEffectiveAllocation, invalidateForwardRollover, type EffectiveAllocation } from "@/lib/budget";
+import { getEffectiveAllocation, type EffectiveAllocation } from "@/lib/budget";
 import {
   CategoryArchivedError,
   CategoryNotFoundError,
@@ -14,8 +14,12 @@ export { CategoryArchivedError, CategoryNotFoundError, ParentAllocationError };
 
 /**
  * Upsert a single `budget_periods` row (unique on `category_id, year, month`)
- * and clear cached `effective_allocation_cents` for that row plus every
- * downstream rollover month for the same category.
+ * and return the reconciled allocation triple.
+ *
+ * Every downstream rollover month reflects the change on its next read —
+ * `getEffectiveAllocation` and `computeEffectiveAllocationsForRollover` both
+ * recompute from `allocated_cents` and spend. There is nothing to invalidate;
+ * migration 0021 removed the cache this used to clear.
  *
  * DB-bound invariants enforced here (the pure `validateAllocateInput` has
  * already checked the shape/range):
@@ -27,16 +31,15 @@ export { CategoryArchivedError, CategoryNotFoundError, ParentAllocationError };
  * - Parent categories (those referenced by at least one child's `parent_id`)
  *   are header-only and reject allocations.
  *
- * Upsert + invalidation run inside a single `db.transaction` so an error
- * between steps never leaves a stale cache pointing at a mutated
- * `allocated_cents`. Nothing rebuilds the cache column, though (T8/TS1
- * deleted the only writer, `getEffectiveAllocation`'s `persist` option) — it
- * just stays NULL, which every real reader (`loadMonthView`'s set-based
- * path) already ignores. See `invalidateForwardRollover`'s own docstring in
- * `budget.ts`.
+ * The upsert and the read-back run inside a single `db.transaction` so the
+ * value returned to the client is the one this call actually wrote, not a
+ * figure a concurrent write could have moved in between. (It used to also
+ * clear an `effective_allocation_cents` cache here; that column and its
+ * invalidation contract are gone — `getEffectiveAllocation` always
+ * recomputes now. See its docstring in `budget.ts`.)
  *
  * P2 (T18): returns the reconciled row — `getEffectiveAllocation`, read
- * inside the same transaction right after the invalidation it depends on —
+ * inside the same transaction right after the write —
  * so `<MonthEditor>`'s inline commit can merge the real
  * allocated/rollover/effective triple back into client state instead of
  * trusting its own optimistic guess (which cannot know a rollover
@@ -72,12 +75,10 @@ export function upsertAllocation(db: Db, input: AllocateInput): EffectiveAllocat
         ],
         set: {
           allocatedCents,
-          effectiveAllocationCents: null,
           updatedAt: new Date(),
         },
       })
       .run();
-    invalidateForwardRollover(tx, categoryId, year, month);
 
     // The row we just wrote always exists at this point — `reconciled` can
     // only be null when no `budget_periods` row exists for the month, which

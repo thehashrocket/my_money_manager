@@ -88,12 +88,15 @@ describe("validateBulkRetargetSnapshot — trust boundary", () => {
   });
 
   /* Shape-valid but calendar-invalid. A `^\d{4}-\d{2}-\d{2}$` regex passes
-     all of these, and `undoBulkRetarget` hands the value straight to
-     `parseIsoMonth` — `2026-13-01` yields month 13, so
-     `invalidateForwardRolloverMany` matches no `budget_periods` row and both
-     categories keep a stale `effective_allocation_cents` for the rest of the
-     year while their rows move back. `z.iso.date()` is what rejects them,
-     the same spelling rule 1 mandates on every anchor-writing path. */
+     all of these; `z.iso.date()` is what rejects them, the same spelling
+     rule 1 mandates on every anchor-writing path.
+
+     The concrete harm this used to name is gone with the rollover cache
+     (migration 0021): `2026-13-01` fed `parseIsoMonth` and yielded month 13,
+     so the invalidation matched no `budget_periods` row and left a stale
+     cache. Nothing consumes `earliestDate` today. These cases stay pinned
+     because the field is still round-tripped through the client and is part
+     of this schema's contract regardless — see the schema's own comment. */
   it.each([
     ["month 13", "2026-13-01"],
     ["Feb 31", "2026-02-31"],

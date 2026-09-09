@@ -1,6 +1,5 @@
 import { and, eq } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { invalidateForwardRolloverMany } from "@/lib/budget";
 import { previousMonth } from "@/lib/budget/monthOfIso";
 
 type Db = typeof defaultDb;
@@ -42,9 +41,6 @@ export function hasAnyAllocations(db: Db, year: number, month: number): boolean 
  * exists to set `archived_at` — that is correct behavior for today, not a
  * stub standing in for one.
  *
- * D8A: one `invalidateForwardRolloverMany` call across every copied
- * category rather than one `invalidateForwardRollover` per category.
- *
  * Whole thing in one transaction — a crash mid-copy must not leave some
  * categories filled and others not, with no record of which.
  */
@@ -73,7 +69,6 @@ export function copyPreviousMonth(db: Db, targetYear: number, targetMonth: numbe
     let copied = 0;
     let skipped = 0;
     let skippedArchived = 0;
-    const copiedCategoryIds: number[] = [];
 
     for (const row of priorRows) {
       if (row.archivedAt !== null) {
@@ -93,10 +88,7 @@ export function copyPreviousMonth(db: Db, targetYear: number, targetMonth: numbe
         })
         .run();
       copied += 1;
-      copiedCategoryIds.push(row.categoryId);
     }
-
-    invalidateForwardRolloverMany(tx, copiedCategoryIds, targetYear, targetMonth);
 
     return { copied, skipped, skippedArchived };
   });

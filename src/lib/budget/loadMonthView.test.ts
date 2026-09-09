@@ -435,24 +435,6 @@ describe("loadMonthView — uncategorized backlog tile", () => {
   });
 });
 
-describe("loadMonthView — read-only contract (no prefetch-write hazard)", () => {
-  it("does not persist effective_allocation_cents (render-only path)", () => {
-    clearSeedCategories();
-    const cat = seedCategory("Gifts", { carryoverPolicy: "rollover" });
-    seedAllocation(cat.id, 2026, 3, 5000);
-    seedAllocation(cat.id, 2026, 4, 1000);
-
-    loadMonthView(handle.db, 2026, 4);
-
-    const rows = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, cat.id))
-      .all();
-    expect(rows.every((r) => r.effectiveAllocationCents === null)).toBe(true);
-  });
-});
-
 describe("loadMonthView — month boundaries", () => {
   it("isolates spend and pending to the requested month", () => {
     clearSeedCategories();
@@ -609,7 +591,7 @@ describe("loadMonthView — income band (TC6, TC7)", () => {
 });
 
 describe("loadMonthView — leftToBudgetCents (TC9)", () => {
-  it("uses allocated_cents, not effective_allocation_cents, for the expense side", () => {
+  it("uses allocated_cents, not the rollover-inflated effective figure, for the expense side", () => {
     clearSeedCategories();
     const account = seedAccount();
     const batch = seedBatch();
@@ -922,10 +904,10 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
     expect(fundRow?.allocation?.rolloverCents).toBe(30000);
   });
 
-  /* `plannedFundCents` is `allocated_cents`, NEVER `effective_allocation_cents`
-     (D3A) — and now that `FundRow` carries `allocation.effectiveCents` right
-     beside `plannedCents`, the "tidy-up" that swaps one for the other is one
-     keystroke away. Nothing pinned it: verified during v0.23.0's review by
+  /* `plannedFundCents` is `allocated_cents`, NEVER the rollover-inflated
+     effective figure (D3A) — and since `FundRow` carries
+     `allocation.effectiveCents` right beside `plannedCents`, the "tidy-up"
+     that swaps one for the other is one keystroke away. Nothing pinned it: verified during v0.23.0's review by
      changing `summarize()` to `fund.allocation?.effectiveCents ?? …`, which
      left all 1,755 tests green.
 
@@ -1412,8 +1394,8 @@ describe("loadMonthView — query-count invariance (TC29, TS5 + E13)", () => {
   });
 });
 
-describe("loadMonthView — TC12 (INVERTED A4): effective_allocation_cents stays NULL, figures still correct", () => {
-  it("upsertAllocation never writes effective_allocation_cents, and loadMonthView is unaffected by that", () => {
+describe("loadMonthView — TC12 (INVERTED A4): rollover is recomputed on read, figures still correct", () => {
+  it("upsertAllocation feeds loadMonthView the recomputed rollover, not a stored one", () => {
     clearSeedCategories();
     const income = seedCategory("Paycheck", { kind: "income" });
     seedAllocation(income.id, 2026, 4, 100000);
@@ -1421,14 +1403,6 @@ describe("loadMonthView — TC12 (INVERTED A4): effective_allocation_cents stays
     seedAllocation(cat.id, 2026, 3, 5000);
 
     upsertAllocation(handle.db, { categoryId: cat.id, year: 2026, month: 4, allocatedCents: 1000 });
-
-    const row = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.categoryId, cat.id))
-      .all()
-      .find((r) => r.month === 4);
-    expect(row?.effectiveAllocationCents).toBeNull();
 
     const view = loadMonthView(handle.db, 2026, 4);
     const leaf = view.sections.flatMap((s) => s.categories).find((c) => c.name.startsWith("Groceries-"))!;

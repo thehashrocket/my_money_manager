@@ -35,10 +35,12 @@ type AllocateFormTriggerProps = {
  * Client island for the `/budget` Allocate flow (Track D).
  *
  * Shows the full envelope math the user is committing to: Explicit is the only
- * editable field; Rollover is auto-computed upstream (see
- * `invalidateForwardRollover` contract in src/lib/budget.ts) and displayed
- * read-only; Effective updates live as the user types so the envelope total is
- * never a surprise at submit.
+ * editable field; Rollover arrives already computed on the `allocation` prop
+ * — `loadMonthView`'s `allocationFor`, fed by the set-based
+ * `computeEffectiveAllocationsForRollover` prefix scan, NOT by
+ * `getEffectiveAllocation` (which the per-month render path deliberately does
+ * not call per leaf) — and is displayed read-only; Effective updates live as
+ * the user types so the envelope total is never a surprise at submit.
  *
  * Input is `text-base sm:text-sm` — iOS Safari autozooms inputs below 16px, so
  * the mobile breakpoint must hit 16px (TODOS.md v0.3.0 ship review P3).

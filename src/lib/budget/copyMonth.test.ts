@@ -100,37 +100,6 @@ describe("hasAnyAllocations (DS7)", () => {
 });
 
 describe("copyPreviousMonth — invalidation and transaction safety", () => {
-  it("invalidates forward rollover for every copied category starting at the target month", () => {
-    const cat = seedCategory("Gifts");
-    seedAllocation(cat.id, 2026, 8, 5000);
-    seedAllocation(cat.id, 2026, 10, 5000);
-    handle.db
-      .update(schema.budgetPeriods)
-      .set({ effectiveAllocationCents: 12345 })
-      .where(and(eq(schema.budgetPeriods.categoryId, cat.id), eq(schema.budgetPeriods.month, 10)))
-      .run();
-
-    copyPreviousMonth(handle.db, 2026, 9);
-
-    expect(readAllocation(cat.id, 2026, 10)?.effectiveAllocationCents).toBeNull();
-  });
-
-  it("does not invalidate a category that was skipped (already set this month)", () => {
-    const cat = seedCategory("Rent");
-    seedAllocation(cat.id, 2026, 8, 180000);
-    seedAllocation(cat.id, 2026, 9, 180000);
-    seedAllocation(cat.id, 2026, 10, 5000);
-    handle.db
-      .update(schema.budgetPeriods)
-      .set({ effectiveAllocationCents: 999 })
-      .where(and(eq(schema.budgetPeriods.categoryId, cat.id), eq(schema.budgetPeriods.month, 10)))
-      .run();
-
-    copyPreviousMonth(handle.db, 2026, 9);
-
-    expect(readAllocation(cat.id, 2026, 10)?.effectiveAllocationCents).toBe(999);
-  });
-
   it("crosses a year boundary correctly (December's prior month is November, not January)", () => {
     const cat = seedCategory("Gifts");
     seedAllocation(cat.id, 2026, 11, 7500);

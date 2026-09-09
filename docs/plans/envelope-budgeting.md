@@ -9,6 +9,16 @@ and its `Planned funding` stat are unchanged. Two parts of PR3 remain open and
 are the substance of the TODOS.md entry: what a fund's *progress* means when
 `loadGoals` counts money planned rather than money that moved (B2), and open
 question O2 (does an overspent fund carry forward or reset).
+> **PARTLY STALE as of v0.24.0 (migration `0021_drop_rollover_cache`).** Every
+> reference below to `invalidateForwardRollover` / `invalidateForwardRolloverMany`,
+> to the `effective_allocation_cents` cache column, and to `parseIsoMonth`
+> describes code that no longer exists — the cache had had no writer since T8/TS1
+> and the whole apparatus (column, both functions, 13 call sites, `parseIsoMonth`,
+> `primeCache.ts`) was removed once rollover had actually run against real data.
+> This affects the §3 inventory table's "Rollover cache invalidation" and "Month key
+> parsing" rows, the §6.3 `copyPreviousMonth` flow diagram, and instruction D8A.
+> Rollover itself is unchanged and correct; it recomputes on read.
+
 Branch: `thehashrocket/envelope-budgeting-plan`
 Scope decided 2026-09-04 (decision `0e52e0af`): **PR1 + PR2 now, PR3 deferred.**
 Scope refined 2026-09-04 (eng review round 2, decisions `D1` and `X6`):

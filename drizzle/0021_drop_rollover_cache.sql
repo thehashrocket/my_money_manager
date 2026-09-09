@@ -1,0 +1,16 @@
+-- Drop the memoised rollover cache.
+--
+-- `effective_allocation_cents` was a per-(category, month) cache of
+-- `getEffectiveAllocation`'s result. T8/TS1 deleted its only writer (the
+-- `persist` option) and left the read branch plus a 13-call-site
+-- `invalidateForwardRollover` contract standing, so for four releases every
+-- write path paid to NULL a column nothing could ever fill.
+--
+-- Every value in it is NULL by construction, so this drops no information.
+-- A plain DROP COLUMN, not a table rebuild: nothing has a foreign key to
+-- `budget_periods`, and neither of its two indexes
+-- (`budget_periods_category_year_month_unique`, `budget_periods_year_month_idx`)
+-- includes this column — so rule 7's rebuild hazard does not apply here.
+-- It still runs through `scripts/migrate.mjs` (or the container entrypoint),
+-- both of which snapshot first.
+ALTER TABLE `budget_periods` DROP COLUMN `effective_allocation_cents`;
