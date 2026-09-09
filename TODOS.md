@@ -2561,3 +2561,47 @@ tests across 117 files.
       silent: a divergence here does not look wrong on screen, it just stops
       being announced. Blocked by: nothing.
       (`src/app/accounts/_status.tsx`, `src/app/accounts/_charge-dialog.tsx`)
+
+## Follow-ups from the `/ship` review of the card-repair branch (2026-09-09)
+
+Four review cycles plus two adversarial passes (Claude + Codex). Everything
+found was fixed except the four below, each deliberately left with its reason.
+
+- [ ] **P3** — **`removeCardActivity` assumes a manual `import_batches` row owns
+      exactly one transaction, and the schema does not enforce it.** It deletes
+      the transaction then unconditionally deletes the batch, while
+      `transactions.import_batch_id` is `ON DELETE RESTRICT`. E21 gives every
+      manual operation its own single-row batch, so the invariant holds for
+      anything this app writes — but a recovery path is exactly the code that
+      should survive inconsistent local state, and here a legacy or hand-edited
+      ledger with two manual rows sharing a batch turns the repair into a
+      rollback and an opaque refusal. Not a corruption risk (the transaction
+      aborts; nothing partial lands), which is why it is P3 rather than P2.
+      Fix: scope the batch delete to "no rows remain on it", or count first.
+      Found by Codex adversarial. (`src/lib/accounts/manualTransaction.ts`)
+
+- [ ] **P3** — **No EDIT path for a hand-entered card charge.** Delete +
+      re-add covers correction, and that is the whole reason it was acceptable
+      to ship without one. What to re-check before relying on that: the round
+      trip changes the transaction id and mints a NEW `import_batches` row
+      (E21). Nothing references a manual row's id today — `grep` for
+      `transactionId` consumers before that stops being true.
+
+- [ ] **P3** — **"Add a charge" disappears silently on a card anchored today.**
+      `chargeableDateExists` (`_account-row.tsx`) hides the affordance when no
+      legal charge date exists, which is the pattern rule 8 established
+      (`assignableKinds`: offer only what the server will accept). The trade
+      is real but one-sided: the user gets no explanation, and on a feed-linked
+      card there is no Reconcile to fall back to either, so the honest answer
+      is "wait until the feed's balance-date is no longer today". Worth a line
+      of copy on the row rather than an absence. Found by Claude adversarial,
+      classified INVESTIGATE.
+
+- [ ] **P4** — **The single-toast idiom is hand-copied in three client files.**
+      `_transaction-row.tsx`, `_merchant-row.tsx` and `_retarget-form.tsx` each
+      carry the same `notes` array → `notify` → one-toast block, and the
+      matching undo idiom beside it; ~22 lines removable by one
+      `notifyWrite(headline, notes)` / `notifyUndo(message, warning)` helper.
+      Advisory from the simplification lens. Filed at P4 because the copies are
+      currently identical and rule 6's constraint (one toast, never a success
+      plus a warning) is what they encode — the risk is drift, not a live bug.
