@@ -79,17 +79,31 @@ export function RetargetForm({
   // it is a second belt rather than the mechanism.
   if (filed.length === 0) return null;
 
-  // Derived, not synced. `filed` changes under us on every revalidation — a
-  // completed move empties the category that was selected — and deriving the
-  // effective choice each render means there is no stale state to reset and no
-  // effect to write. Falls back to the largest group, which `summarizeByCategory`
-  // has already sorted to the front.
-  const from =
-    filed.find((f) => String(f.categoryId) === fromChoice) ?? filed[0];
+  /* Derived, not synced. `filed` changes under us on every revalidation — a
+     completed move empties the category that was selected — and deriving the
+     effective choice each render means there is no stale state to reset and no
+     effect to write.
+
+     `undefined` when the chosen category is GONE, and that is deliberately not
+     a fallback to `filed[0]`. It used to be, and the substitution was silent
+     and armed: `toValue` is untouched by the swap, so `canSubmit` stayed true
+     and the button the user had already aimed at was still live — one click
+     moved the LARGEST group (`summarizeByCategory` sorts it to the front) off
+     a category they never named, and with Remember ticked retrained the rule
+     against that set instead. The server refuses this exact condition
+     (`NoRowsToRetargetError`), so the client was the laxer of the two. Now it
+     refuses too, and says which choice evaporated. */
+  const from = filed.find((f) => String(f.categoryId) === fromChoice);
+  const chosenIsGone = fromChoice !== "" && from === undefined;
+  const effective = from ?? (fromChoice === "" ? filed[0] : undefined);
 
   const toId = toValue === "" ? null : Number(toValue);
   const canSubmit =
-    !isPending && toId !== null && Number.isFinite(toId) && toId !== from.categoryId;
+    !isPending &&
+    effective !== undefined &&
+    toId !== null &&
+    Number.isFinite(toId) &&
+    toId !== effective.categoryId;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -97,51 +111,84 @@ export function RetargetForm({
     const formData = new FormData(event.currentTarget);
 
     startTransition(async () => {
+      /* The action returns its refusals as STATE, so this catch is only for
+         what is genuinely unexpected — a transport failure, or a bug. Without
+         it a throw inside an async `startTransition` callback is an unhandled
+         rejection and the user sees nothing at all. */
+      let result: Awaited<ReturnType<typeof bulkRetargetAction>>;
       try {
-        const result = await bulkRetargetAction(formData);
-        setRemember(false);
-        setToValue("");
-
-        /* ONE toast, never a success plus a warning — `<Toaster>` runs
-           Sonner's default collapsed stack, where a non-front toast has its
-           contents INCLUDING its action button drawn at `opacity: 0` until the
-           stack is hovered. Two toasts would force a choice between the
-           refusal being readable and this Undo being reachable, and this Undo
-           is the only way back for a move that just touched every row for a
-           merchant. */
-        const moved = `Moved ${result.updatedCount} row${
-          result.updatedCount === 1 ? "" : "s"
-        } from ${result.fromCategoryName} to ${result.categoryName}.`;
-        const notify =
-          result.ruleRefusal === null ? toast.success : toast.warning;
-        notify(
-          result.ruleRefusal === null
-            ? moved
-            : `${moved} ${result.ruleRefusal.message}`,
-          {
-            duration: 10_000,
-            action: {
-              label: "Undo",
-              onClick: async () => {
-                try {
-                  const undo = await undoBulkRetargetAction(result.snapshot);
-                  toast(
-                    `Moved ${undo.revertedCount} row${
-                      undo.revertedCount === 1 ? "" : "s"
-                    } back to ${result.fromCategoryName}.${describeRuleUndo(undo.ruleAction)}`,
-                  );
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Undo failed.",
-                  );
-                }
-              },
-            },
-          },
-        );
+        result = await bulkRetargetAction(formData);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Move failed.");
+        return;
       }
+      if (result.status === "error") {
+        toast.error(result.message);
+        return;
+      }
+      setRemember(false);
+      setToValue("");
+      /* `fromChoice` MUST be cleared here, and it is the success path that
+         needs it. A complete move empties the source out of `filed` —
+         `summarizeByCategory` GROUPs over the remaining rows, so a category
+         with none left produces no row — and this component is unkeyed in the
+         same tree position, so client state survives the revalidation. Leaving
+         the old pick set therefore made `chosenIsGone` true immediately after
+         a move that WORKED, and the form accused another tab of doing what the
+         user had just done. Clearing it collapses the post-success state back
+         into "nothing explicitly picked", where `effective` falls to
+         `filed[0]` — now the destination the rows just landed in. */
+      setFromChoice("");
+
+      /* ONE toast, never a success plus a warning — `<Toaster>` runs
+         Sonner's default collapsed stack, where a non-front toast has its
+         contents INCLUDING its action button drawn at `opacity: 0` until the
+         stack is hovered. Two toasts would force a choice between the
+         refusal being readable and this Undo being reachable, and this Undo
+         is the only way back for a move that just touched every row for a
+         merchant. */
+      const moved = `Moved ${result.updatedCount} row${
+        result.updatedCount === 1 ? "" : "s"
+      } from ${result.fromCategoryName} to ${result.categoryName}.`;
+      const notify =
+        result.ruleRefusal === null ? toast.success : toast.warning;
+      notify(
+        result.ruleRefusal === null
+          ? moved
+          : `${moved} ${result.ruleRefusal.message}`,
+        {
+          duration: 10_000,
+          action: {
+            label: "Undo",
+            onClick: async () => {
+              let undo: Awaited<ReturnType<typeof undoBulkRetargetAction>>;
+              try {
+                undo = await undoBulkRetargetAction(result.snapshot);
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Undo failed.");
+                return;
+              }
+              if (undo.status === "error") {
+                toast.error(undo.message);
+                return;
+              }
+              /* "Moved 0 rows back" is honest but unreadable on its own — it
+                 is the same sentence whether there was nothing to move or
+                 whether the user re-categorized all 49 inside the window.
+                 The snapshot knows which, so it says which. */
+              const scope =
+                undo.revertedCount === result.snapshot.txnIds.length
+                  ? ""
+                  : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
+              toast(
+                `Moved ${undo.revertedCount} row${
+                  undo.revertedCount === 1 ? "" : "s"
+                } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`,
+              );
+            },
+          },
+        },
+      );
     });
   };
 
@@ -161,7 +208,9 @@ export function RetargetForm({
           name="normalizedMerchant"
           value={normalizedMerchant}
         />
-        <input type="hidden" name="fromCategoryId" value={from.categoryId} />
+        {effective !== undefined && (
+          <input type="hidden" name="fromCategoryId" value={effective.categoryId} />
+        )}
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
           <label className="flex items-center gap-2">
@@ -171,11 +220,18 @@ export function RetargetForm({
                 beside its name — neither of which `CategoryCombobox`'s
                 search-over-all-categories shape is for. */}
             <select
-              value={String(from.categoryId)}
+              value={effective === undefined ? "" : String(effective.categoryId)}
               onChange={(e) => setFromChoice(e.target.value)}
               className={`h-8 rounded-md border border-border bg-background px-2 text-sm ${FOCUS_RING}`}
               aria-label={`Rows to move for ${merchantLabel(normalizedMerchant)}`}
             >
+              {/* Only rendered when the picked category has vanished, so the
+                  <select> has a value to show that is not silently some other
+                  group. Selecting it is not a route back to the old choice —
+                  there is nothing to go back to. */}
+              {effective === undefined && (
+                <option value="">— no longer filed here —</option>
+              )}
               {filed.map((f) => (
                 <option key={f.categoryId} value={String(f.categoryId)}>
                   {f.count} row{f.count === 1 ? "" : "s"} filed as{" "}
@@ -220,16 +276,27 @@ export function RetargetForm({
             disabled={!canSubmit}
             className={`h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
           >
-            {isPending ? "Moving…" : `Move ${from.count}`}
+            {isPending
+              ? "Moving…"
+              : effective === undefined
+                ? "Move"
+                : `Move ${effective.count}`}
           </button>
         </div>
 
-        <p className="text-xs text-ink-3">
-          Moves every non-transfer row for this merchant that is filed as{" "}
-          {from.categoryName} — the whole merchant, not just the rows matching
-          the filters above. Ticking Remember retrains the merchant&apos;s rule
-          to follow them.
-        </p>
+        {chosenIsGone ? (
+          <p className="text-xs text-money-neg">
+            The category you picked no longer has rows for this merchant —
+            another tab, or an Undo, moved them. Pick one of the groups above.
+          </p>
+        ) : (
+          <p className="text-xs text-ink-3">
+            Moves every non-transfer row for this merchant that is filed as{" "}
+            {effective?.categoryName} — the whole merchant, not just the rows
+            matching the filters above. Ticking Remember retrains the
+            merchant&apos;s rule to follow them.
+          </p>
+        )}
       </form>
     </details>
   );

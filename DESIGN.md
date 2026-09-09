@@ -418,7 +418,7 @@ Accounts, the utilization bar, money weight, the backlog banner, the focus
 ring and the state components — and had no entry for the densest interactive
 page in the app. The FUNDS band was consequently designed against its own
 siblings rather than against a spec, which is how a 2-column table ended up
-between two 5-column ones. This section exists so the next band has something
+below two 5-column ones. This section exists so the next band has something
 to calibrate against.
 
 The page is one zero-based envelope form: plan income, assign every dollar,
@@ -438,18 +438,19 @@ drive **Left to budget** to `$0.00`.
   │   $9,632.80    $9,632.80      $7,289.27   $6,102  funding] Rem.  │     paired cells
   └──────────────────────────────────────────────────────────────────┘
 
-  INCOME                                    ← mono uppercase, --ink-3, --text-xs
-  ┌───────────────┬─────────┬───────────┬────────────────┬──────────┐
-  │ Category      │ Planned │ Received  │ Variance       │ Allocate │
+  INCOME                                       ← mono uppercase, --ink-3, --text-xs
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Received        │ Variance       │ Allocate │
   EXPENSES
-  ┌───────────────┬─────────┬───────────┬────────────────┬──────────┐
-  │ Category      │ Planned │ Spent     │ Remaining      │ Allocate │
-  FUNDS                                   ← only when a fund exists (A6)
-  ┌───────────────┬─────────┬───────────┬────────────────┬──────────┐
-  │ Category      │ Planned │ Planned   │ Left to target │ Allocate │
-  │               │         │ to date   │                │          │
-  └───────────────┴─────────┴───────────┴────────────────┴──────────┘
-       40%            15%       15%           18%            12%       ← BandColumns
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Spent           │ Remaining      │ Allocate │
+  FUNDS                                       ← only when a fund exists (A6)
+  ┌───────────────┬─────────┬─────────────────┬────────────────┬──────────┐
+  │ Category      │ Planned │ Planned to date │ Left to target │ Allocate │
+  └───────────────┴─────────┴─────────────────┴────────────────┴──────────┘
+       40%            15%           15%             18%            12%      ← BandColumns
+                                     ↑ one line: TableHead is whitespace-nowrap,
+                                       so no band header ever wraps
 
   ▸ How this page works                    ← help panel, AFTER all three bands
 ```
@@ -457,7 +458,7 @@ drive **Left to budget** to `$0.00`.
 **One column geometry for all three bands (`BandColumns`).** Each band is its
 own `<Table>`. Under the browser's default auto layout every band sized its
 columns from its own content, so `Planned` sat at a different x in each one —
-worst on FUNDS (a 2-column table between two 5-column ones, ~450px off, landing
+worst on FUNDS (a 2-column table below two 5-column ones, ~450px off, landing
 on the x-position EXPENSES uses for `Remaining`: same screen position, different
 meaning, one scroll apart), but INCOME and EXPENSES already disagreed with each
 other by ~37px. `table-fixed` plus one shared `<colgroup>` makes the geometry a
@@ -490,8 +491,8 @@ middle of a form.
 
 **FUNDS is editable, which reverses DS19 (D3=C, 2026-09-08).** DS19 made the
 band read-only and put contributions on `/goals`; `/goals` never got the form,
-so for five releases a fund could be created and never funded, with each page
-linking to the other. The contribution belongs here because
+so across v0.18.0-v0.21.0 a fund could be created and never funded, with each
+page linking to the other. The contribution belongs here because
 `leftToBudget = plannedIncome − allocated − plannedFund` — it is a Left to
 Budget decision, and setting it anywhere else means doing the zero-based math
 blind. `/goals` keeps targets, history and the long-horizon view, and links back
@@ -499,9 +500,14 @@ with "Fund this month →".
 
 **A6 — no fund, no band, and no `Planned funding` cell.** An empty FUNDS
 section has nothing to reconcile, and an always-present `$0.00` funding stat on
-the ~100% of months with no savings goals is an inert row. This is also why
-first-run never shows three peer input bands: a first-run user has zero funds,
-so the band does not exist for them.
+the ~100% of months with no savings goals is an inert row. What it does NOT do is
+guarantee first-run never shows three peer input bands. `isFirstRun` is a
+per-MONTH predicate (`plannedIncomeCents === 0 && allocatedCents === 0 &&
+plannedFundCents === 0`) and the band gate is per-LEDGER
+(`fundRows.length > 0`), so a fund created on `/goals` and not yet allocated
+satisfies both, and `FirstRunCard` renders above all three bands. The real
+guarantee is narrower: a month with a nonzero fund allocation is never
+first-run, because `plannedFundCents` is the third clause.
 
 **DS27 — every term of the headline is derivable from something on screen.**
 `leftToBudgetCents` subtracts three quantities and the summary strip listed two,

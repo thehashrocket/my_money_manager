@@ -15,6 +15,7 @@ import type { EffectiveAllocation } from "@/lib/budget";
 import type {
   FundRow,
   IncomeLeafRow,
+  LeafAllocation,
   LeafRow,
   SectionGroup,
   UncategorizedRow,
@@ -48,7 +49,7 @@ import { NewCategoryRow, NewGroupRow } from "./_create-category";
  * every band sized its columns from its OWN content — `Planned` sat at a
  * different x in each one, and the Ledger Paper idiom reads three stacked
  * ruled tables as a single sheet. It was worst on FUNDS (a 2-column table
- * between two 5-column ones, ~450px off and landing on the x-position
+ * below two 5-column ones, ~450px off and landing on the x-position
  * Expenses uses for `Remaining`), but Income and Expenses already disagreed
  * with each other by ~37px before any of this.
  *
@@ -1135,7 +1136,7 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
 
    FIVE columns, matching Income and Expenses exactly. That is a layout
    decision with a reason, not symmetry for its own sake: as a 2-column table
-   between two 5-column ones, the Planned money column landed ~450px to the
+   below two 5-column ones, the Planned money column landed ~450px to the
    right of its siblings and squarely on the x-position the Expenses band
    uses for REMAINING. Same screen position, different meaning, one scroll
    apart. The column count IS the fix.
@@ -1155,6 +1156,34 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
    ──────────────────────────────────────────────────────────────────────── */
 
 /**
+ * "Planned to date" as of the CURRENT EDITOR STATE, not as of the last server
+ * render.
+ *
+ * `FundRow.plannedToDateCents` is a server prop and includes the month being
+ * viewed, while the Planned cell one column to its left reads live editor
+ * state — and `commitAllocationAction` deliberately does not revalidate (P2),
+ * with `revalidateBudgetSurfacesAction` firing only when focus leaves the
+ * WHOLE island. Tabbing between fund rows, which is the "fund all my goals"
+ * pass this band exists for, never leaves it. So a row read
+ * `$500.00 │ $0.00 │ $1,000.00` — three numbers in one `<TableRow>` that
+ * cannot all be true, one column apart.
+ *
+ * The fix is to swap the month's server figure out and the live one in.
+ * `page.tsx`'s reasoning about `SummaryStrip`'s staleness ("the same
+ * deliberate staleness `Planned spending` already has") does NOT extend here:
+ * the strip is a separate block with no live sibling, these cells share a row
+ * with one.
+ */
+function livePlannedToDateCents(
+  fund: FundRow,
+  live: LeafAllocation | null,
+): number {
+  const serverThisMonth = fund.allocation?.allocatedCents ?? 0;
+  const liveThisMonth = live?.allocatedCents ?? 0;
+  return fund.plannedToDateCents - serverThisMonth + liveThisMonth;
+}
+
+/**
  * The gap between a fund's target and what has been planned toward it.
  *
  * `null` target is NOT zero — it means no target recorded, which is the
@@ -1163,10 +1192,16 @@ function MobileIncomeRow({ income, year, month }: { income: IncomeLeafRow; year:
  * the one genuinely good outcome on this band, so it takes `positive`; every
  * other state is `neutral`. Tones come from `TONE_CLASS`, the map
  * `resolveRowDisplay` owns, rather than a fourth local copy.
+ *
+ * Takes the planned-to-date figure rather than reading `fund` for it, so the
+ * caller decides live-vs-server once — see {@link livePlannedToDateCents}.
  */
-function fundTargetGap(fund: FundRow): { label: string; tone: RowTone } {
+function fundTargetGap(
+  fund: FundRow,
+  plannedToDateCents: number,
+): { label: string; tone: RowTone } {
   if (fund.targetCents === null) return { label: "—", tone: "neutral" };
-  const remaining = fund.targetCents - fund.plannedToDateCents;
+  const remaining = fund.targetCents - plannedToDateCents;
   if (remaining <= 0) return { label: "Funded", tone: "positive" };
   return { label: formatCents(remaining), tone: "neutral" };
 }
@@ -1246,7 +1281,8 @@ function FundDesktopRow({
 }) {
   const { hydrated, getAllocation, commit } = useEditor();
   const allocation = getAllocation(fund.categoryId);
-  const gap = fundTargetGap(fund);
+  const plannedToDateCents = livePlannedToDateCents(fund, allocation);
+  const gap = fundTargetGap(fund, plannedToDateCents);
   return (
     <TableRow>
       <TableHead scope="row" className="px-3 py-2 font-normal">
@@ -1280,7 +1316,7 @@ function FundDesktopRow({
           hydrated={hydrated}
         />
       </TableCell>
-      <TableCell className="px-3 py-2 text-right text-ink-1">{formatCents(fund.plannedToDateCents)}</TableCell>
+      <TableCell className="px-3 py-2 text-right text-ink-1">{formatCents(plannedToDateCents)}</TableCell>
       <TableCell className={cn("px-3 py-2 text-right", TONE_CLASS[gap.tone])}>{gap.label}</TableCell>
       <TableCell className="px-3 py-2 text-right">
         <CategoryMenu
@@ -1342,7 +1378,8 @@ function MobileFundRow({
 }) {
   const { hydrated, getAllocation, commit } = useEditor();
   const allocation = getAllocation(fund.categoryId);
-  const gap = fundTargetGap(fund);
+  const plannedToDateCents = livePlannedToDateCents(fund, allocation);
+  const gap = fundTargetGap(fund, plannedToDateCents);
   return (
     <li className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-2">
@@ -1356,7 +1393,7 @@ function MobileFundRow({
         <span className={cn("shrink-0 font-mono text-sm", TONE_CLASS[gap.tone])}>{gap.label}</span>
       </div>
       <div className="mt-1 flex items-center gap-1 font-mono text-xs text-ink-3">
-        <span>{formatCents(fund.plannedToDateCents)} planned to date</span>
+        <span>{formatCents(plannedToDateCents)} planned to date</span>
         <RolloverChip policy={fund.carryoverPolicy} />
       </div>
       <div className="mt-2 flex items-center justify-between gap-2">

@@ -47,6 +47,39 @@ export const bulkRetargetSnapshotSchema = z.object({
   earliestDate: z.iso.date(),
 }) satisfies z.ZodType<BulkRetargetSnapshot>;
 
+/**
+ * The two CROSS-FIELD facts, which the object shape alone cannot carry.
+ *
+ * 1. `priorRule.matchValue === normalizedMerchant`. `undoBulkRetarget`'s row
+ *    UPDATE is bounded by the merchant for exactly this reason (see the long
+ *    comment there), but `restorePriorRule` got no equivalent — and its third
+ *    mechanism is `onConflictDoUpdate` on `(match_type, match_value)`, which
+ *    REPOINTS whatever rule currently occupies that slot at the snapshot's
+ *    category. So a hand-edited payload could retarget an arbitrary merchant's
+ *    rule to an arbitrary category, and — because the restore deliberately
+ *    writes `updatedAt` back to influence `compareRules`' tie-break — reorder
+ *    rule priority while doing it. Rows bounded and rules unbounded, in one
+ *    function. This closes the half that was open.
+ *
+ * 2. `fromCategoryId !== categoryId`. A same-category snapshot degenerates to
+ *    a no-op UPDATE today, but it is a contradiction on its face and the
+ *    forward path refuses it (`SameCategoryRetargetError`); the undo should
+ *    not accept a shape its own producer cannot emit.
+ */
+export const bulkRetargetSnapshotSchemaChecked = bulkRetargetSnapshotSchema
+  .refine(
+    (s) => s.priorRule === null || s.priorRule.matchValue === s.normalizedMerchant,
+    {
+      path: ["priorRule", "matchValue"],
+      message:
+        "priorRule belongs to a different merchant than the snapshot it is attached to",
+    },
+  )
+  .refine((s) => s.fromCategoryId !== s.categoryId, {
+    path: ["fromCategoryId"],
+    message: "source and destination categories are the same",
+  });
+
 export type BulkRetargetSnapshotValidation =
   | { success: true; data: BulkRetargetSnapshot }
   | { success: false; error: z.ZodError };
@@ -54,5 +87,5 @@ export type BulkRetargetSnapshotValidation =
 export function validateBulkRetargetSnapshot(
   input: unknown,
 ): BulkRetargetSnapshotValidation {
-  return bulkRetargetSnapshotSchema.safeParse(input);
+  return bulkRetargetSnapshotSchemaChecked.safeParse(input);
 }

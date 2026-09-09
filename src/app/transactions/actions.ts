@@ -3,18 +3,17 @@
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
-  bulkRetarget,
-  type BulkRetargetSnapshot,
-} from "@/lib/categorize/bulkRetarget";
-import {
   categorizeTransaction,
   type CategorizeTransactionSnapshot,
 } from "@/lib/categorize/categorizeTransaction";
 import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
-import { undoBulkRetarget } from "@/lib/categorize/undoBulkRetarget";
+import {
+  runBulkRetarget,
+  runUndoBulkRetarget,
+  type BulkRetargetRunResult,
+  type UndoBulkRetargetRunResult,
+} from "@/lib/categorize/runBulkRetarget";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
-import { validateBulkRetargetInput } from "@/lib/categorize/validateBulkRetargetInput";
-import { validateBulkRetargetSnapshot } from "@/lib/categorize/validateBulkRetargetSnapshot";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
 import { validateCategorizeTransactionSnapshot } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
 
@@ -112,6 +111,11 @@ export async function undoCategorizeTransactionAction(
   return result;
 }
 
+export type {
+  BulkRetargetRunResult as BulkRetargetActionResult,
+  UndoBulkRetargetRunResult as UndoBulkRetargetActionResult,
+} from "@/lib/categorize/runBulkRetarget";
+
 /**
  * Move every non-transfer row for one merchant off the category it is filed
  * under and onto another — the repair for a bulk categorize that went to the
@@ -124,71 +128,35 @@ export async function undoCategorizeTransactionAction(
  * so a fully-filed group disappears from the page you filed it on. That is
  * why the repair could not live there.
  *
- * Returns the snapshot required to reverse it via
- * {@link undoBulkRetargetAction}.
+ * The pipeline itself is `runBulkRetarget`, which takes an explicit `db` so a
+ * test can drive it; only `revalidatePath` lives here, because it closes over
+ * the singleton DB and cannot run under `:memory:`. Outcomes are returned as
+ * STATE, never thrown — see that module for why.
  */
-export async function bulkRetargetAction(formData: FormData) {
-  const raw = Object.fromEntries(formData);
-  const parsed = validateBulkRetargetInput(raw);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(input)"}: ${i.message}`)
-      .join("; ");
-    throw new Error(`Invalid retarget input — ${issues}`);
-  }
-
-  /* Same opt-in as the row form above, for the same reason: naming a merchant
-     and moving its history is the most deliberate per-merchant retrain the app
-     offers, so a refusal here may remove the rule the user has just
-     contradicted. An argument, never a form field (`applyRuleWrite`). */
-  const result = bulkRetarget(db, parsed.data, { allowRuleRemoval: true });
-
-  const snapshot: BulkRetargetSnapshot = {
-    normalizedMerchant: result.normalizedMerchant,
-    fromCategoryId: result.fromCategoryId,
-    categoryId: result.categoryId,
-    txnIds: result.txnIds,
-    ruleTouched: result.ruleTouched,
-    priorRule: result.priorRule,
-    insertedRuleId: result.insertedRuleId,
-    earliestDate: result.earliestDate,
-  };
+export async function bulkRetargetAction(
+  formData: FormData,
+): Promise<BulkRetargetRunResult> {
+  const result = runBulkRetarget(db, Object.fromEntries(formData));
+  if (result.status === "error") return result;
 
   revalidatePath("/transactions");
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");
   revalidatePath("/goals");
   revalidatePath("/");
-
-  return {
-    snapshot,
-    updatedCount: result.updatedCount,
-    categoryName: result.categoryName,
-    fromCategoryName: result.fromCategoryName,
-    // Outside `snapshot` for the reason its sibling documents: a refusal is a
-    // REASON, not state to reverse, and it is resolved to a finished sentence
-    // server-side because naming a removed rule's category needs a lookup.
-    ruleRefusal:
-      result.ruleRefusal === null
-        ? null
-        : describeRuleRefusal(db, result.ruleRefusal),
-  };
+  return result;
 }
 
 /**
  * Reverse a prior {@link bulkRetargetAction}. Rows the user re-categorized
  * inside the undo window are preserved.
  */
-export async function undoBulkRetargetAction(snapshot: BulkRetargetSnapshot) {
-  const parsed = validateBulkRetargetSnapshot(snapshot);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(snapshot)"}: ${i.message}`)
-      .join("; ");
-    throw new Error(`Invalid undo snapshot — ${issues}`);
-  }
+export async function undoBulkRetargetAction(
+  snapshot: unknown,
+): Promise<UndoBulkRetargetRunResult> {
+  const result = runUndoBulkRetarget(db, snapshot);
+  if (result.status === "error") return result;
 
-  const result = undoBulkRetarget(db, parsed.data);
   revalidatePath("/transactions");
   revalidatePath("/categorize");
   revalidatePath("/budget", "layout");

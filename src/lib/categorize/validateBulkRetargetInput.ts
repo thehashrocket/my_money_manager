@@ -35,6 +35,27 @@ export const bulkRetargetInputSchema = z.object({
 
 export type BulkRetargetInput = z.infer<typeof bulkRetargetInputSchema>;
 
+/**
+ * `fromCategoryId !== categoryId` is a PURE invariant, so it belongs here —
+ * this module's own docstring says the DB-free checks run first and the
+ * DB-bound ones inside `bulkRetarget`.
+ *
+ * It was enforced only by `SameCategoryRetargetError`, which fires after the
+ * write transaction has opened and two SELECTs have run. That throw stays as
+ * the backstop (a second writer can make source and destination collide
+ * between validation and the UPDATE, and `applyRuleWrite` keys off the
+ * merchant rather than the rows, so a zero-effect "move" could still retrain
+ * or DELETE the key's rule) — but the contradiction no longer travels that
+ * far.
+ */
+export const bulkRetargetInputSchemaChecked = bulkRetargetInputSchema.refine(
+  (d) => d.fromCategoryId !== d.categoryId,
+  {
+    path: ["categoryId"],
+    message: "Pick a different category to move these rows to.",
+  },
+);
+
 export type BulkRetargetValidation =
   | { success: true; data: BulkRetargetInput }
   | { success: false; error: z.ZodError };
@@ -42,5 +63,5 @@ export type BulkRetargetValidation =
 export function validateBulkRetargetInput(
   input: unknown,
 ): BulkRetargetValidation {
-  return bulkRetargetInputSchema.safeParse(input);
+  return bulkRetargetInputSchemaChecked.safeParse(input);
 }

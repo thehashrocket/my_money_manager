@@ -54,7 +54,30 @@ src/
                    only after the first keystroke. plannedToDateCents is deliberately
                    NOT loadGoals' progressCents: it is allocated ALONE, because what
                    `withdrawn` should mean is the question rule 1's loadGoals note
-                   parks
+                   parks.
+                   loadFundPlannedToDate has NO lower bound and a HARD UPPER one at
+                   the month being viewed. The upper bound is not optional: the route
+                   is editable for future months and nothing gates a commit on phase,
+                   so without it the figure was month-INVARIANT — allocate next month,
+                   navigate back, and an earlier month reported money not yet planned,
+                   with fundTargetGap rendering a green "Funded" for a target reached
+                   later. It is a (year, month) PAIR comparison, never month alone
+                   (2026-01 must not pick up 2025-12); both directions are pinned.
+                   allocationFor is the ONE spelling of the {allocated, rollover,
+                   effective} triple, called by both leafRows and fundRows — they ran
+                   verbatim-identical copies until v0.23.0, with only the fund copy
+                   carrying a comment saying so, which is how the pair drifts.
+                   FundRow.hasAllocation has NO reader: both fund row components
+                   branch on getAllocation() !== null, and it is kept only for parity
+                   with IncomeLeafRow (whose copy IS read) — its docstring called
+                   itself load-bearing until the v0.23.0 review, which was backwards.
+                   The rendered "Planned to date"/"Left to target" cells are computed
+                   from LIVE editor state (livePlannedToDateCents in _month-editor),
+                   not from the server prop: commitAllocationAction deliberately does
+                   not revalidate and revalidateBudgetSurfacesAction only fires when
+                   focus leaves the WHOLE island, so tabbing between fund rows — the
+                   pass the band exists for — left three numbers in one <TableRow>
+                   that could not all be true
                    upsertAllocation, validateAllocateInput — the per-cell allocate write path
                    manageCategories, archiveCategory, setCategoryKind, loadAllCategories —
                    category CRUD, archive/unarchive, and expense→income reclassification
@@ -100,9 +123,10 @@ src/
                    that legitimately differs. It was hand-duplicated in both until
                    v0.20.0; a parity test still pins the two callers against each other
                    applyRuleWrite — the ONLY place that decides what happens to a key's
-                   exact rule: upsert, withhold, or withhold AND remove. Shared by all
-                   three write paths, which ran hand-maintained copies that had already
-                   drifted. Owns the allowRuleRemoval opt-in (rule 6)
+                   exact rule: upsert, withhold, or withhold AND remove. Shared by all three
+                   categorize write paths; the two that predate it ran hand-maintained
+                   copies that had already drifted (bulkRetarget is newer and never had
+                   one). Owns the allowRuleRemoval opt-in (rule 6)
                    assertAssignableCategory — "may a transaction be filed under this
                    category?", the ONE spelling. Four checks (exists, not a fund, not
                    archived, not a parent) that bulkCategorize and categorizeTransaction
@@ -145,7 +169,37 @@ src/
                    z.iso.date() and non-nullable: it is client round-tripped straight into
                    parseIsoMonth, where a shape-valid 2026-13-01 would match no
                    budget_periods row and leave both categories' cached
-                   effective_allocation_cents stale for the rest of the year
+                   effective_allocation_cents stale for the rest of the year.
+                   Both also carry CROSS-FIELD refinements the object shape cannot
+                   express: fromCategoryId !== categoryId (a pure invariant, so it
+                   belongs in the pure layer — SameCategoryRetargetError stays as the
+                   backstop for a second writer, but the contradiction no longer
+                   reaches an open write transaction), and, on the snapshot only,
+                   priorRule.matchValue === normalizedMerchant. That second one closes
+                   the half of undoBulkRetarget that was unbounded: its ROW update is
+                   merchant-scoped, but restorePriorRule was not, and its third
+                   mechanism (onConflictDoUpdate on (match_type, match_value))
+                   REPOINTS whatever rule holds that slot — so a hand-edited payload
+                   could retarget an unrelated merchant's rule to any category, and
+                   reorder rule priority while doing it, since the restore writes
+                   updated_at back to influence compareRules
+                   runBulkRetarget / runUndoBulkRetarget — the two /transactions retarget
+                   Server Action BODIES, minus revalidatePath, taking an explicit db.
+                   Two reasons, both load-bearing. (1) Outcomes are returned as STATE,
+                   never thrown: Next.js replaces a thrown Server Action's message with
+                   a generic digest in production builds, and this app ships one
+                   (Dockerfile → next start), so every sentence in bulkRetargetErrors.ts
+                   was dev-only text — including NoRowsToRetargetError, which its own
+                   docstring calls reachable from ordinary use and whose whole payload
+                   is "reload to see the current counts". Same shape /sync uses.
+                   (2) A test can drive the REAL path: actions.test.ts used to MIRROR
+                   the body by hand, re-declaring {allowRuleRemoval: true} itself, so
+                   deleting the opt-in from the action left all 1,755 tests green while
+                   claiming in its own docstring to pin it. Anything after the commit
+                   (describeRuleRefusal does its own read; SQLITE_BUSY is live here)
+                   degrades the MESSAGE rather than failing the result — a throw there
+                   reported "Move failed." for a move that succeeded and discarded the
+                   only copy of a deleted rule's priorRule with the Undo toast
                    priorRuleSnapshot — PriorRuleSnapshot + toPriorRuleSnapshot, with
                    matchType narrowed to "exact"; it used to live in bulkCategorize.ts,
                    so the undo path type-depended on a write path
@@ -253,7 +307,7 @@ These are load-bearing. Violating them corrupts the database.
    A bank figure being present doesn't mean it's current, though: SimpleFIN's `balance` carries its own `balance-date`, and when the connection stops refreshing, that snapshot simply stops moving — measured once at +$893.84 of "drift" that was really just a day of activity the feed hadn't reported yet. `classifyBalanceFreshness` (`src/lib/simplefin/balanceFreshness.ts`) only treats a non-zero difference as real drift once the bank figure's date is strictly *after* the ledger's newest row (or its anchor, when there are no rows after it); a same-day, older, or dateless bank figure renders as unconfirmed instead of accusing the ledger of a missing or duplicated row it doesn't have.
    A wrong anchor is no longer a raw-SQL fix, either: `updateAccountAnchorAction` (`src/app/import/actions.ts`) plus `validateUpdateAnchorInput` (`src/lib/import/validateUpdateAnchorInput.ts`) give `/import` an inline per-account form to set `(starting_balance_cents, starting_balance_date)` directly — the only way back once `deriveStartingBalance`'s forward-only anchor has already moved too late. The date is capped at today: a future anchor would exclude every real transaction from the sum and permanently silence the freshness check above for that account too. The shared `startingBalanceDateSchema` (`accountAnchorFields.ts`) validates with `z.iso.date()`, not a bare `YYYY-MM-DD` regex, so a syntactically-shaped but calendar-invalid date like `2026-13-40` is rejected on every anchor-writing path (hand-typed and CSV-derived alike) rather than reaching the `>` comparison above, where SQLite's lexicographic TEXT sort would put it after every real date in the year and silently drop the account's entire history out of the sum.
    That same `startingBalanceDateSchema` check now also runs on every ordinary transaction row during CSV import, not just the anchor: `parseCsv.ts`'s `mmddyyyyToIso` previously only range-checked month (1-12) and day (1-31), which passes a calendar-invalid combination like `04/31` (April has 30 days) or `02/29` on a non-leap year straight through as a syntactically-valid but wrong ISO string. As of v0.12.4 that candidate string is validated the same way, and a calendar-invalid row is rejected with a `ParseError` instead of landing in `transactions.date` unvalidated.
-   **"Spend" is a SIGNED sum, and what counts as spending is decided by `categories.kind`, never by the amount's sign (v0.19.0).** A refund reduces the category's spend — envelope budgeting implies it, since returning $20 of groceries restores $20 of grocery-buying capacity. `/budget`'s rendered spend (`loadSpendForMonth` → `loadMonthView.ts`) always worked this way; the dashboard's 6-month chart (`src/lib/trends/loadMonthlyTrends.ts`) did not, and the two disagreed live — September 2026 read $10.00 of Misc on `/budget` and $295.00 on the dashboard, the same category in the same month. Both are now `0 - SUM(amount_cents)`. They share an EXPRESSION, not one predicate: only the chart restricts to `kind = 'expense'` in SQL, because it aggregates across categories rather than being handed one; `loadMonthView` decides expense-ness by iterating `expenseLeaves`, and `computeMtdSpent` (which feeds the *rollover* chain, not the rendered figure) applies no kind filter at all. `leftToBudgetCents` is untouched by any of this, and NOT because it is computed from spend — it is `plannedIncomeCents - allocatedCents - plannedFundCents` and has no spend term, so no spend convention can move it. **An amount-sign predicate in this repo is never only a sign predicate.** `loadMonthlyTrends`' `amount_cents < 0` was doing two jobs: dropping refunds (the bug) and incidentally excluding every income row, which is positive. Deleting it alone pulls 43 paycheck/interest rows worth +$52,131.17 into the six-month window and draws them as ~$52k of *negative* spend, so it was replaced by an explicit `category_id IN (SELECT id FROM categories WHERE kind = 'expense')` subquery — check what else a sign filter is excluding before touching one. A month whose refunds exceed its spend reports negative rather than clamping to zero (clamping is the same class of lie), which is why `trend-chart.tsx` uses `stackOffset="sign"` and its tooltip keeps negative values; a group is dropped from a *month* whose net is exactly zero, while `categoryNames` keeps any group that draws in at least one month — those are different tests, and conflating them blanked two months of real activity (a charge in March refunded in April nets to zero across the window while drawing a real bar in both). "Is there anything to draw" now has one definition, `hasDrawableData`, in the read model rather than in `TrendChart`; `totalSpentCents === 0` is NOT it. **`src/lib/goals/loadGoals.ts` is deliberately NOT converted** — goal progress is `allocated − withdrawn`, and a *net* withdrawn figure would let a deposit into a fund increase progress on top of the allocation already counting the same intention. It stays outflows-only, with the analysis recorded in-code; do not "align" it without reading that.
+   **"Spend" is a SIGNED sum, and what counts as spending is decided by `categories.kind`, never by the amount's sign (v0.19.0).** A refund reduces the category's spend — envelope budgeting implies it, since returning $20 of groceries restores $20 of grocery-buying capacity. `/budget`'s rendered spend (`loadSpendForMonth` → `loadMonthView.ts`) always worked this way; the dashboard's 6-month chart (`src/lib/trends/loadMonthlyTrends.ts`) did not, and the two disagreed live — September 2026 read $10.00 of Misc on `/budget` and $295.00 on the dashboard, the same category in the same month. Both are now `0 - SUM(amount_cents)`. They share an EXPRESSION, not one predicate: only the chart restricts to `kind = 'expense'` in SQL, because it aggregates across categories rather than being handed one; `loadMonthView` decides expense-ness by iterating `expenseLeaves`, and `computeMtdSpent` (which feeds the *rollover* chain, not the rendered figure) applies no kind filter at all. `leftToBudgetCents` is untouched by any of this, and NOT because it is computed from spend — it is `plannedIncomeCents - allocatedCents - plannedFundCents` and has no spend term, so no spend convention can move it. **An amount-sign predicate in this repo is never only a sign predicate.** `loadMonthlyTrends`' `amount_cents < 0` was doing two jobs: dropping refunds (the bug) and incidentally excluding every income row, which is positive. Deleting it alone pulls 43 paycheck/interest rows worth +$52,131.17 into the six-month window and draws them as ~$52k of *negative* spend, so it was replaced by an explicit `category_id IN (SELECT id FROM categories WHERE kind = 'expense')` subquery — check what else a sign filter is excluding before touching one. A month whose refunds exceed its spend reports negative rather than clamping to zero (clamping is the same class of lie), which is why `trend-chart.tsx` uses `stackOffset="sign"` and its tooltip keeps negative values; a group is dropped from a *month* whose net is exactly zero, while `categoryNames` keeps any group that draws in at least one month — those are different tests, and conflating them blanked two months of real activity (a charge in March refunded in April nets to zero across the window while drawing a real bar in both). "Is there anything to draw" now has one definition, `hasDrawableData`, in the read model rather than in `TrendChart`; `totalSpentCents === 0` is NOT it. **`src/lib/goals/loadGoals.ts` is deliberately NOT converted** — goal progress is `allocated − withdrawn`, and a *net* withdrawn figure would let a deposit into a fund increase progress on top of the allocation already counting the same intention. It stays outflows-only, with the analysis recorded in-code; do not "align" it without reading that. **`GoalRow.targetCents` is `number | null`, never coerced** — it was `number` with a `?? 0` until v0.23.0's review, which made `/goals` render "target $0.00" for a fund with no target (a claim that it is already complete) and prefill its Edit-target form with `0.00`, a value `updateGoalTargetSchema`'s `.positive()` then refuses — so submitting the value the form itself supplied took out the page via `error.tsx`. `FundRow.targetCents` on `/budget` had the nullable version and rendered an em dash, so the two surfaces disagreed about one column and the coerced half was the wrong one. Newly ORDINARY rather than exotic: the FUNDS band's "+ Add a line" goes through `createCategory`, which does not write `target_cents`, where the only prior fund-creation path (`createGoalAction`) is `.positive()`. `GoalsView` also carries `totalTargetedContributedCents` and `untargetedGoalCount` so the headline ratio's two halves cover the SAME funds — the page summed contributions across every fund against a denominator of targets alone, which compares different sets and looks fine doing it.
 
 2. **The CSV's signs are already correct.** `Amount Debit` is pre-negative, `Amount Credit` is positive, mutually exclusive. Parser rule: `debit ? debit*100 : credit*100`. No `Math.abs`, no negation by `Description`. The Plaid bug happens because Plaid transforms the data; this app doesn't.
 

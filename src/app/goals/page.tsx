@@ -52,8 +52,9 @@ export default async function GoalsPage() {
         <>
           {view.totalTargetCents > 0 && (
             <PlannedTotalLine
-              plannedCents={view.goals.reduce((sum, g) => sum + g.totalContributedCents, 0)}
+              plannedCents={view.totalTargetedContributedCents}
               targetCents={view.totalTargetCents}
+              untargetedGoalCount={view.untargetedGoalCount}
             />
           )}
           <section className="space-y-4">
@@ -130,14 +131,33 @@ function CreateGoalForm() {
   );
 }
 
-/** DS11: replaces the old bar-plus-ratio `SummaryStrip` — a plain two-number line, no bar. */
-function PlannedTotalLine({ plannedCents, targetCents }: { plannedCents: number; targetCents: number }) {
+/**
+ * DS11: replaces the old bar-plus-ratio `SummaryStrip` — a plain two-number
+ * line, no bar.
+ *
+ * Both halves are drawn from the funds that HAVE a target (`loadGoals`'
+ * `totalTargetedContributedCents` / `totalTargetCents`). The label says "all
+ * funds" only when that really is all of them; otherwise it names the funds it
+ * is leaving out, because a ratio silently computed over two different sets is
+ * worse than a longer label.
+ */
+function PlannedTotalLine({
+  plannedCents,
+  targetCents,
+  untargetedGoalCount,
+}: {
+  plannedCents: number;
+  targetCents: number;
+  untargetedGoalCount: number;
+}) {
   return (
-    <div className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 text-sm">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm">
       <span className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
-        Planned to date, all funds
+        {untargetedGoalCount === 0
+          ? "Planned to date, all funds"
+          : `Planned to date, funds with a target · ${untargetedGoalCount} without`}
       </span>
-      <span className="font-mono text-sm">
+      <span className="font-mono text-sm shrink-0">
         {formatCents(plannedCents)} / {formatCents(targetCents)}
       </span>
     </div>
@@ -171,8 +191,15 @@ function GoalCard({ goal, year, month }: { goal: GoalRow; year: number; month: n
           <div className="font-mono text-sm font-medium">
             {formatCents(goal.totalContributedCents)}
           </div>
+          {/* A NULL target is "no target recorded", never `$0.00` — the same
+              rule `fundTargetGap` applies on `/budget`, which renders an em
+              dash. A fund created from the FUNDS band's "+ Add a line" has no
+              target until one is set here, so this is the ordinary state of a
+              fund born on the other page, not an edge case. */}
           <div className="font-mono text-xs text-muted-foreground">
-            planned to date, target {formatCents(goal.targetCents)}
+            {goal.targetCents === null
+              ? "planned to date · no target set"
+              : `planned to date, target ${formatCents(goal.targetCents)}`}
           </div>
           {goal.totalWithdrawnCents > 0 && (
             <div className="font-mono text-xs text-muted-foreground">
@@ -203,18 +230,31 @@ function GoalCard({ goal, year, month }: { goal: GoalRow; year: number; month: n
   );
 }
 
+/**
+ * `currentTargetCents` is nullable, and the NULL case must not prefill.
+ *
+ * It used to take `number`, fed by `loadGoals`' `?? 0` — so a fund with no
+ * target opened this form already filled in with `0.00`, which fails
+ * `updateGoalTargetSchema`'s `.positive()`. `updateGoalTargetAction` throws on
+ * a validation failure and nothing catches it, so submitting the value the
+ * form itself supplied took out the page via `error.tsx` (and in a production
+ * build the message is replaced by a generic digest, so it did not even say
+ * why). An empty field with a placeholder cannot do that: `required` stops the
+ * submit in the browser first.
+ */
 function UpdateTargetForm({
   categoryId,
   currentTargetCents,
 }: {
   categoryId: number;
-  currentTargetCents: number;
+  currentTargetCents: number | null;
 }) {
-  const currentDollars = (currentTargetCents / 100).toFixed(2);
+  const currentDollars =
+    currentTargetCents === null ? undefined : (currentTargetCents / 100).toFixed(2);
   return (
     <details className="text-sm">
       <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground transition-colors select-none">
-        Edit target
+        {currentTargetCents === null ? "Set target" : "Edit target"}
       </summary>
       <form action={updateGoalTargetAction} className="mt-2 flex gap-2 items-center">
         <input type="hidden" name="categoryId" value={categoryId} />
@@ -225,6 +265,7 @@ function UpdateTargetForm({
           min="0.01"
           step="0.01"
           defaultValue={currentDollars}
+          placeholder="1000.00"
           className="w-32 rounded-md border border-border bg-background px-3 py-1 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-ring"
         />
         <button

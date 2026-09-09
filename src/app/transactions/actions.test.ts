@@ -5,11 +5,10 @@ import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { categorizeTransaction } from "@/lib/categorize/categorizeTransaction";
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
-import { bulkRetarget } from "@/lib/categorize/bulkRetarget";
-import type { BulkRetargetSnapshot } from "@/lib/categorize/bulkRetarget";
-import { undoBulkRetarget } from "@/lib/categorize/undoBulkRetarget";
-import { validateBulkRetargetInput } from "@/lib/categorize/validateBulkRetargetInput";
-import { bulkRetargetSnapshotSchema } from "@/lib/categorize/validateBulkRetargetSnapshot";
+import {
+  runBulkRetarget,
+  runUndoBulkRetarget,
+} from "@/lib/categorize/runBulkRetarget";
 import { categorizeTransactionSnapshotSchema } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
 import type { CategorizeTransactionSnapshot } from "@/lib/categorize/categorizeTransaction";
 
@@ -58,11 +57,14 @@ function seedBatch() {
   return row;
 }
 
-function seedCategory(name: string) {
+function seedCategory(
+  name: string,
+  opts: { kind?: "income" | "expense" | "fund" } = {},
+) {
   seq += 1;
   const [row] = handle.db
     .insert(schema.categories)
-    .values({ name: `${name}-${seq}` })
+    .values({ name: `${name}-${seq}`, ...(opts.kind ? { kind: opts.kind } : {}) })
     .returning()
     .all();
   return row;
@@ -358,17 +360,21 @@ describe("categorizeTransactionAction — ruleRefusal pass-through", () => {
 });
 
 /**
- * The same mirror for `bulkRetargetAction` + `undoBulkRetargetAction`:
+ * `bulkRetargetAction` + `undoBulkRetargetAction`, driven through the REAL
+ * pipeline — `runBulkRetarget` / `runUndoBulkRetarget`, which is everything
+ * those two actions do except `revalidatePath`.
  *
- *   FormData → validate → bulkRetarget(db, {allowRuleRemoval}) → snapshot
- *   snapshot → JSON round-trip → validate → undoBulkRetarget(db)
+ * This suite used to be a hand-written MIRROR: it re-declared
+ * `{ allowRuleRemoval: true }` itself and called the library, so deleting the
+ * opt-in from the action left every test green — while the docstring here
+ * claimed to pin "the opt-in is passed by the action rather than merely
+ * supported by the library". Verified during v0.23.0's review by doing exactly
+ * that: 1,755/1,755 still passed. The same blindness covered the snapshot's
+ * field list, which was re-typed by hand, so an action that dropped
+ * `earliestDate` would also have passed.
  *
- * Both halves of that pipeline have their own suites; what neither can state
- * is that the ACTION wires them together correctly. The two things pinned
- * here are the two the sibling above was written for after each broke once:
- * the snapshot has to survive the Server Action serialization boundary and
- * re-validate on the way back in, and the `allowRuleRemoval` opt-in has to be
- * passed by the action rather than merely supported by the library.
+ * Extracting the body is what makes the claim true, because there is now only
+ * one copy of it and this is the thing that calls it.
  */
 describe("bulkRetargetAction — end-to-end pipeline", () => {
   it("validates string FormData values, moves the rows, and the snapshot survives JSON", () => {
@@ -379,42 +385,30 @@ describe("bulkRetargetAction — end-to-end pipeline", () => {
     const txn = seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: gas.id });
 
     // Exactly what `Object.fromEntries(formData)` hands the action: strings.
-    const parsed = validateBulkRetargetInput({
+    const result = runBulkRetarget(handle.db, {
       normalizedMerchant: "COSTCO",
       fromCategoryId: String(gas.id),
       categoryId: String(groceries.id),
       rememberMerchant: "true",
     });
-    expect(parsed.success).toBe(true);
-    if (!parsed.success) return;
-
-    const result = bulkRetarget(handle.db, parsed.data, { allowRuleRemoval: true });
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
     expect(result.updatedCount).toBe(1);
     expect(result.fromCategoryName).toBe(gas.name);
     expect(result.categoryName).toBe(groceries.name);
 
-    const snapshot: BulkRetargetSnapshot = {
-      normalizedMerchant: result.normalizedMerchant,
-      fromCategoryId: result.fromCategoryId,
-      categoryId: result.categoryId,
-      txnIds: result.txnIds,
-      ruleTouched: result.ruleTouched,
-      priorRule: result.priorRule,
-      insertedRuleId: result.insertedRuleId,
-      earliestDate: result.earliestDate,
-    };
-
     /* The boundary. `priorRule.createdAt`/`updatedAt` are real `Date`s on the
        way out and ISO strings on the way back; `z.coerce.date()` is what makes
        that survivable, and a plain `z.date()` would fail here and nowhere
-       else. */
-    const reparsed = bulkRetargetSnapshotSchema.safeParse(
-      JSON.parse(JSON.stringify(snapshot)),
+       else. Fed back through the real undo entry point, which re-validates —
+       so the snapshot the action ACTUALLY emits has to satisfy the schema the
+       action ACTUALLY applies. */
+    const undone = runUndoBulkRetarget(
+      handle.db,
+      JSON.parse(JSON.stringify(result.snapshot)),
     );
-    expect(reparsed.success).toBe(true);
-    if (!reparsed.success) return;
-
-    const undone = undoBulkRetarget(handle.db, reparsed.data);
+    expect(undone.status).toBe("ok");
+    if (undone.status !== "ok") return;
     expect(undone.revertedCount).toBe(1);
     expect(
       handle.db
@@ -428,10 +422,12 @@ describe("bulkRetargetAction — end-to-end pipeline", () => {
   it("passes allowRuleRemoval, so a contradicted rule goes with the rows", () => {
     /* Rule 6's discipline: the opt-in is an ARGUMENT and never a form field,
        and `/transactions`' retarget is one of only two callers that may set
-       it. Drop it from the action and every test in `bulkRetarget.test.ts`
-       still passes while the wrong rule keeps auto-filing every future import
-       — with the merchant kept off `/categorize` precisely BECAUSE the rule
-       keeps filing it. */
+       it. Because this drives `runBulkRetarget` rather than calling
+       `bulkRetarget` with its own option object, dropping the opt-in from the
+       pipeline FAILS here — which is the whole reason the body was extracted.
+       Without it the wrong rule keeps auto-filing every future import, with
+       the merchant kept off `/categorize` precisely BECAUSE the rule keeps
+       filing it. */
     const a = seedAccount();
     const b = seedBatch();
     const gas = seedCategory("Gas");
@@ -446,14 +442,22 @@ describe("bulkRetargetAction — end-to-end pipeline", () => {
       .values({ categoryId: other.id, matchType: "exact", matchValue: "COSTCO", priority: 0, source: "manual" })
       .run();
 
-    const result = bulkRetarget(
-      handle.db,
-      { normalizedMerchant: "COSTCO", fromCategoryId: gas.id, categoryId: groceries.id, rememberMerchant: true },
-      { allowRuleRemoval: true },
-    );
+    const result = runBulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: String(gas.id),
+      categoryId: String(groceries.id),
+      rememberMerchant: "true",
+    });
 
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
     expect(result.ruleRefusal).not.toBeNull();
-    expect(result.priorRule?.categoryId).toBe(other.id);
+    // Resolved to a finished sentence server-side, naming the category the
+    // removed rule pointed at — the one fact a user needs to decide whether
+    // to restore it.
+    expect(result.ruleRefusal?.removedRule).toBe(true);
+    expect(result.ruleRefusal?.message).toContain(other.name);
+    expect(result.snapshot.priorRule?.categoryId).toBe(other.id);
     expect(
       handle.db
         .select()
@@ -461,5 +465,157 @@ describe("bulkRetargetAction — end-to-end pipeline", () => {
         .where(eq(schema.categoryRules.matchValue, "COSTCO"))
         .all(),
     ).toHaveLength(0);
+  });
+});
+
+/**
+ * Refusals arrive as STATE, never as a throw.
+ *
+ * Next.js replaces a thrown Server Action's message with a generic digest in
+ * production builds, and this app ships one (`Dockerfile` → `next start`), so
+ * every sentence in `bulkRetargetErrors.ts` was dev-only text. These pin the
+ * shape that actually reaches the browser.
+ */
+describe("bulkRetargetAction — refusals are returned, not thrown", () => {
+  it("reports 'no rows' without throwing, and writes nothing", () => {
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+
+    const result = runBulkRetarget(handle.db, {
+      normalizedMerchant: "NOBODY",
+      fromCategoryId: String(gas.id),
+      categoryId: String(groceries.id),
+    });
+
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    // The message a person can act on, intact — this is the half production
+    // used to delete, and its whole payload is "reload to see the counts".
+    expect(result.message).toContain(gas.name);
+    expect(result.message).toContain("Reload");
+  });
+
+  it("reports source === destination without throwing", () => {
+    const gas = seedCategory("Gas");
+    const result = runBulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: String(gas.id),
+      categoryId: String(gas.id),
+    });
+    expect(result.status).toBe("error");
+  });
+
+  it("reports a refusal on the DESTINATION category rather than throwing", () => {
+    /* `assertAssignableCategory`'s four checks are defensive — the picker
+       filters all of them out — so they only fire on a stale tab or a crafted
+       post, which is exactly when a legible message matters most. */
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const fund = seedCategory("Emergency", { kind: "fund" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: gas.id });
+
+    const result = runBulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: String(gas.id),
+      categoryId: String(fund.id),
+    });
+    expect(result.status).toBe("error");
+
+    // And the rows did not move.
+    expect(
+      handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.categoryId, gas.id))
+        .all(),
+    ).toHaveLength(1);
+  });
+
+  it("reports an invalid undo snapshot without throwing", () => {
+    const result = runUndoBulkRetarget(handle.db, { nonsense: true });
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.message).toContain("Invalid undo snapshot");
+  });
+
+  it("refuses an undo whose priorRule belongs to a DIFFERENT merchant", () => {
+    /* `undoBulkRetarget`'s row UPDATE is merchant-bounded; `restorePriorRule`
+       was not, and its third mechanism (`onConflictDoUpdate` on
+       (match_type, match_value)) REPOINTS whichever rule holds that slot. So a
+       hand-edited payload could retarget an unrelated merchant's rule to an
+       arbitrary category. Rows bounded, rules unbounded, in one function. */
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const result = runUndoBulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: gas.id,
+      categoryId: groceries.id,
+      txnIds: [1],
+      ruleTouched: true,
+      priorRule: {
+        id: 1,
+        categoryId: groceries.id,
+        matchType: "exact",
+        matchValue: "SAFEWAY", // <- not COSTCO
+        priority: 0,
+        source: "manual",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      insertedRuleId: null,
+      earliestDate: "2026-03-01",
+    });
+    expect(result.status).toBe("error");
+  });
+
+  /* The other half of that refinement, and the one it could break: a
+     LEGITIMATE undo carrying a real removed rule has to pass. It does because
+     `applyRuleWrite` only ever reads or deletes via `readExactRule` /
+     `deleteExactRule` on the SAME key it was handed, and `match_value` has no
+     `COLLATE NOCASE` (checked in `drizzle/0000`), so the stored value is a
+     byte-for-byte match for the snapshot's merchant. Pinned because a
+     collation change, or a caller that normalized the key differently on the
+     two sides, would silently make every rule-restoring undo unreachable —
+     and that undo is the only way back from a refusal that deleted a rule. */
+  it("accepts a legitimate undo carrying the rule a refusal removed", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const other = seedCategory("Other");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: gas.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", categoryId: other.id });
+    handle.db
+      .insert(schema.categoryRules)
+      .values({ categoryId: other.id, matchType: "exact", matchValue: "COSTCO", priority: 0, source: "manual" })
+      .run();
+
+    const moved = runBulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: String(gas.id),
+      categoryId: String(groceries.id),
+      rememberMerchant: "true",
+    });
+    expect(moved.status).toBe("ok");
+    if (moved.status !== "ok") return;
+    expect(moved.snapshot.priorRule?.matchValue).toBe("COSTCO");
+
+    // Through the real validator, via the JSON boundary the browser imposes.
+    const undone = runUndoBulkRetarget(
+      handle.db,
+      JSON.parse(JSON.stringify(moved.snapshot)),
+    );
+    expect(undone.status).toBe("ok");
+    if (undone.status !== "ok") return;
+    expect(undone.ruleAction).toBe("restored");
+    // The rule the refusal deleted is back, pointing where it did before.
+    expect(
+      handle.db
+        .select()
+        .from(schema.categoryRules)
+        .where(eq(schema.categoryRules.matchValue, "COSTCO"))
+        .get()?.categoryId,
+    ).toBe(other.id);
   });
 });

@@ -140,14 +140,30 @@ describe("validateBulkRetargetInput", () => {
     ).toBe(false);
   });
 
-  it("does NOT reject source === destination — that refusal is DB-bound", () => {
-    /* Deliberate division of labour: `SameCategoryRetargetError` carries the
-       category NAME, which needs a lookup. Adding a `.refine()` here would
-       move the check to a layer that can only say "1 and 1". */
+  it("rejects source === destination in the PURE layer", () => {
+    /* This is a cross-field check with no database in it, so it belongs here —
+       the module's contract is that DB-free checks run first. It used to be
+       enforced only by `SameCategoryRetargetError`, which fires after the write
+       transaction has opened and two SELECTs have run.
+
+       `SameCategoryRetargetError` still exists and is still thrown: it carries
+       the category NAME (which needs a lookup, and is why the check was put
+       there originally), and a second writer can make source and destination
+       collide between this validation and the UPDATE. This closes the common
+       case at the cheap layer; that one stays as the backstop. */
     const result = validateBulkRetargetInput({
       normalizedMerchant: "SAFEWAY",
       fromCategoryId: "5",
       categoryId: "5",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("still accepts a genuine move between two different categories", () => {
+    const result = validateBulkRetargetInput({
+      normalizedMerchant: "SAFEWAY",
+      fromCategoryId: "5",
+      categoryId: "6",
     });
     expect(result.success).toBe(true);
   });

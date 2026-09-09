@@ -595,38 +595,54 @@ describe("bulkRetarget — invalidation", () => {
      rows came from NULL. Spend LEFT the source and ARRIVED on the destination
      in the same month; invalidating one chain would leave the other still
      claiming the rows. */
-  it("clears the cached rollover chain on BOTH categories from the earliest month", () => {
+  /* Two moved rows in DIFFERENT months, and every month primed.
+
+     The earlier version of this test seeded ONE transaction and primed only
+     month 4, which made it blind in both directions: "earliest moved month"
+     was indistinguishable from "the only moved month", and the sweeping
+     `after.every(… === null)` was trivially true for the months that had never
+     been primed. Verified during v0.23.0's review by invalidating from the
+     LATEST moved date instead of the earliest — the suite stayed green, while
+     in reality every cached `effective_allocation_cents` between the two dates
+     would be left stale in BOTH categories, with nothing to recompute it. */
+  it("clears the cached rollover chain on BOTH categories from the EARLIEST moved month", () => {
     const a = seedAccount();
     const b = seedBatch();
     const gas = seedCategory("Gas", { carryoverPolicy: "rollover" });
     const groceries = seedCategory("Groceries", { carryoverPolicy: "rollover" });
+    const months = [1, 2, 3, 4, 5, 6];
     for (const category of [gas, groceries]) {
       handle.db
         .insert(schema.budgetPeriods)
-        .values([
-          { categoryId: category.id, year: 2026, month: 2, allocatedCents: 1000 },
-          { categoryId: category.id, year: 2026, month: 3, allocatedCents: 1000 },
-          { categoryId: category.id, year: 2026, month: 4, allocatedCents: 1000 },
-        ])
+        .values(
+          months.map((month) => ({
+            categoryId: category.id,
+            year: 2026,
+            month,
+            allocatedCents: 1000,
+          })),
+        )
         .run();
     }
 
-    seedTxn({
-      accountId: a.id,
-      batchId: b.id,
-      merchant: "COSTCO",
-      amountCents: -5000,
-      date: "2026-02-10",
-      categoryId: gas.id,
-    });
+    // The move spans February → June. January is BEFORE the earliest moved
+    // row, so it must be left primed: invalidation is forward-only.
+    for (const date of ["2026-02-10", "2026-06-20"]) {
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "COSTCO",
+        amountCents: -5000,
+        date,
+        categoryId: gas.id,
+      });
+    }
 
-    primeCache(handle.db, gas.id, 2026, 4);
-    primeCache(handle.db, groceries.id, 2026, 4);
-    const primed = handle.db
-      .select()
-      .from(schema.budgetPeriods)
-      .where(eq(schema.budgetPeriods.month, 4))
-      .all();
+    for (const category of [gas, groceries]) {
+      for (const month of months) primeCache(handle.db, category.id, 2026, month);
+    }
+    const primed = handle.db.select().from(schema.budgetPeriods).all();
+    expect(primed).toHaveLength(12);
     expect(primed.every((r) => r.effectiveAllocationCents !== null)).toBe(true);
 
     bulkRetarget(handle.db, {
@@ -637,7 +653,20 @@ describe("bulkRetarget — invalidation", () => {
     });
 
     const after = handle.db.select().from(schema.budgetPeriods).all();
-    expect(after.every((r) => r.effectiveAllocationCents === null)).toBe(true);
+    const cleared = (categoryId: number, month: number) =>
+      after.find((r) => r.categoryId === categoryId && r.month === month)
+        ?.effectiveAllocationCents === null;
+
+    for (const category of [gas, groceries]) {
+      // January precedes the earliest moved row and keeps its cached value.
+      expect(cleared(category.id, 1)).toBe(false);
+      // February (the earliest moved month) through June are all cleared —
+      // including March, April and May, which hold no moved row themselves but
+      // sit downstream of one in the rollover chain.
+      for (const month of [2, 3, 4, 5, 6]) {
+        expect(cleared(category.id, month)).toBe(true);
+      }
+    }
   });
 });
 
