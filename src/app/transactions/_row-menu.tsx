@@ -212,7 +212,15 @@ export function TransactionRowMenu({
           </DialogDescription>
         </DialogHeader>
         <div className="rounded-md border border-[color-mix(in_oklch,var(--accent-redbrown)_35%,transparent)] bg-[color-mix(in_oklch,var(--accent-redbrown)_12%,var(--background))] px-3 py-2 text-sm text-ink-1">
-          <p>The card&apos;s balance and this category&apos;s spend both change.</p>
+          {/* "may change", not "changes". Under rule 1 the balance sum is
+              `date > starting_balance_date`, so a row dated on or before the
+              account's current anchor — the ordinary state after any later
+              reconcile — contributes nothing to it. Overstating the blast
+              radius of a delete that has no undo is the direction that erodes
+              trust in every other confirmation in the app. */}
+          <p>
+            This category&apos;s spend changes, and the card&apos;s balance may too.
+          </p>
           <p className="mt-1 font-medium text-money-neg">This cannot be undone in the app.</p>
         </div>
         {/* Same footer treatment as the budget menu's dialogs: Cancel FIRST in

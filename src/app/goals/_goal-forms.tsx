@@ -28,6 +28,15 @@ import { StatusWarning } from "@/components/ledger/action-status";
  * date" — which is worth nothing once they have already looked.
  */
 function RefreshWarning({ state }: { state: GoalsActionState }) {
+  // A REFUSAL first — a name collision is ordinary use (double-submit, stale
+  // tab), and it used to escape into `/goals/error.tsx` and take the page down.
+  if (state.error !== undefined) {
+    return (
+      <p role="alert" aria-live="assertive" className="text-sm text-money-neg">
+        {state.error}
+      </p>
+    );
+  }
   if (state.warning === undefined) return null;
   // `StatusWarning`, not a local `<p>`. `/goals`' state is the one shape that
   // does NOT satisfy `ActionState` — it carries a warning and nothing else,
@@ -36,7 +45,17 @@ function RefreshWarning({ state }: { state: GoalsActionState }) {
   // the part that has to look the same everywhere: this is the byte-identical
   // sentence `/sync` and `/accounts` render, and a fifth visual language for
   // it is how a design system stops being one.
-  return <StatusWarning warning={state.warning} />;
+  // The LIVE REGION is the point, and it was lost for one review cycle when
+  // this switched to `StatusWarning`: on the create path a successful write
+  // normally redirects away, so this warning is the only signal the fund
+  // exists. Silent for assistive tech is the resubmit loop, not a cosmetic gap.
+  // `assertive`, per `action-status.tsx`'s rule — a warning about a committed
+  // write is one the user must hear BEFORE deciding to click again.
+  return (
+    <div role="alert" aria-live="assertive">
+      <StatusWarning warning={state.warning} />
+    </div>
+  );
 }
 
 export function CreateGoalForm() {

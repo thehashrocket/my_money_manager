@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { db, schema } from "@/db";
 import {
   CategoryArchivedError,
+  CategoryNameTakenError,
   CategoryNotFoundError,
   NotASavingsGoalError,
 } from "@/lib/categoryErrors";
@@ -37,6 +38,12 @@ function revalidateAfterFundWrite(): string | undefined {
     revalidatePath("/goals");
     revalidatePath("/budget");
     revalidatePath("/budget/[year]/[month]", "page");
+    // The write is a new row in `categories`, and `/budget/categories` is the
+    // surface that LISTS them — omitting it meant creating a fund on /goals and
+    // finding it missing from Categories until some unrelated category action
+    // happened to revalidate that route. Same writer/reader edge CLAUDE.md
+    // records v0.23.0 getting wrong four times.
+    revalidatePath("/budget/categories");
   });
 }
 
@@ -61,7 +68,17 @@ export async function createGoalAction(
   // this became worth fixing now: v0.24.0 filters archived funds out of
   // `loadGoals`, so the colliding category is no longer visible on the page
   // the user is standing on.
-  assertNameAvailable(db, name);
+  // Returned as STATE, never thrown. A name collision is what a double-submit
+  // and a stale tab both produce — ordinary use — and since this action now
+  // stays put on a refresh warning, the form is still mounted with the same
+  // name in it when the user clicks again. Throwing took `/goals` down; both
+  // adversarial reviewers found that path independently.
+  try {
+    assertNameAvailable(db, name);
+  } catch (err) {
+    if (err instanceof CategoryNameTakenError) return { error: err.message };
+    throw err;
+  }
 
   // Dual-write (T5, D1B/A2): kind is authoritative everywhere else in the
   // app now, but isSavingsGoal keeps being written so it stays truthful for

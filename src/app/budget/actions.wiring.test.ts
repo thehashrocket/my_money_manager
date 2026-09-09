@@ -33,9 +33,14 @@ vi.mock("next/cache", () => ({
   revalidatePath: revalidatePathMock,
 }));
 
-vi.mock("next/navigation", () => ({
-  redirect: redirectMock,
-}));
+// Spreads the REAL module and overrides `redirect` only. `guardRefresh` now
+// calls `unstable_rethrow` so a `redirect()` slipping inside a guarded callback
+// cannot be swallowed — a hand-written stub for it would be a second spelling of
+// Next's own control-flow detection, free to drift from the one production uses.
+vi.mock("next/navigation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/navigation")>();
+  return { ...actual, redirect: redirectMock };
+});
 
 vi.mock("@/db", () => ({
   db: {},

@@ -27,9 +27,9 @@ import type { MonthPhase } from "@/lib/budget/monthOfIso";
 import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
-// Safe in a client component: `revalidateAfterWrite` has ZERO imports, so this
+// Safe in a client component: `refreshWarning` has ZERO imports, so this
 // pulls nothing else into the route bundle (the +376 KB `limits.ts` shape).
-import { REFRESH_FAILED_WARNING } from "@/lib/revalidateAfterWrite";
+import { REFRESH_FAILED_WARNING } from "@/lib/refreshWarning";
 import { cn } from "@/lib/utils";
 import { LeftToBudget } from "@/components/ledger/left-to-budget";
 import { CurrencyInput, type CurrencyInputCommitResult } from "@/components/ledger/currency-input";

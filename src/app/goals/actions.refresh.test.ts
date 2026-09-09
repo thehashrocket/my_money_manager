@@ -45,16 +45,25 @@ const redirectMock = vi.hoisted(() =>
 );
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
-vi.mock("next/navigation", () => ({ redirect: redirectMock }));
+// Spreads the REAL module and overrides `redirect` only. `guardRefresh` now
+// calls `unstable_rethrow` so a `redirect()` slipping inside a guarded callback
+// cannot be swallowed — a hand-written stub for it would be a second spelling of
+// Next's own control-flow detection, free to drift from the one production uses.
+vi.mock("next/navigation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/navigation")>();
+  return { ...actual, redirect: redirectMock };
+});
 
 vi.mock("@/db", async () => ({
   db: dbMock,
   schema: await import("@/db/schema"),
 }));
 
+const assertNameAvailableMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/budget/manageCategories", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/budget/manageCategories")>()),
-  assertNameAvailable: vi.fn(),
+  assertNameAvailable: assertNameAvailableMock,
 }));
 
 const { revalidatePath } = await import("next/cache");
@@ -96,6 +105,8 @@ beforeEach(() => {
   insertRunMock.mockReset();
   updateRunMock.mockReset();
   categoryRowMock.current = { id: 4, name: "Vacation", kind: "fund", archivedAt: null };
+  // Available by default; the collision case opts in.
+  assertNameAvailableMock.mockReset();
 });
 
 afterEach(() => {
@@ -169,5 +180,40 @@ describe("updateGoalTargetAction", () => {
 
     await expect(updateGoalTargetAction({}, targetForm())).rejects.toThrow();
     expect(updateRunMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A duplicate name is ORDINARY USE, not an exceptional condition.
+ *
+ * Both adversarial reviewers found this independently. It was survivable while
+ * `createGoalAction` always redirected on success — but once it began STAYING
+ * PUT on a refresh warning (so the user is told the fund exists), the form is
+ * still mounted with the same name in it, and the obvious second click threw
+ * `CategoryNameTakenError` out of the action and took `/goals` down. The warning
+ * that exists to prevent a blind resubmit was creating the crash the resubmit
+ * runs into.
+ */
+describe("createGoalAction — a name collision is returned, not thrown", () => {
+  it("returns `error` instead of taking the route out", async () => {
+    const { CategoryNameTakenError } = await import("@/lib/categoryErrors");
+    assertNameAvailableMock.mockImplementation(() => {
+      throw new CategoryNameTakenError("Vacation");
+    });
+
+    const fd = new FormData();
+    fd.set("name", "Vacation");
+    fd.set("targetDollars", "500");
+    fd.set("carryoverPolicy", "rollover");
+
+    const state = await createGoalAction({}, fd);
+
+    expect(state.error).toBeDefined();
+    expect(state.warning).toBeUndefined();
+    // The write never ran, so there is nothing to report as saved.
+    expect(insertRunMock).not.toHaveBeenCalled();
+    // And crucially it did NOT redirect or throw — the two shapes that lose the
+    // message.
+    expect(redirectMock).not.toHaveBeenCalled();
   });
 });

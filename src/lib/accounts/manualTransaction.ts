@@ -712,6 +712,7 @@ export function removeCardActivity(
   }
 
   let cardAccountId: number | null = null;
+  let removedWasRefund = false;
 
   const result = db.transaction((tx): ManualWriteResult => {
     const row = tx
@@ -770,10 +771,14 @@ export function removeCardActivity(
       .run();
 
     cardAccountId = row.accountId;
+    // Rule 1: a card CHARGE is negative, a refund positive. Captured inside the
+    // transaction, from the row actually deleted.
+    removedWasRefund = row.amountCents > 0;
     return { status: "ok", message: "", transactionId: row.id, balanceCents: 0 };
   });
 
   if (result.status !== "ok" || cardAccountId === null) return result;
+  const noun = removedWasRefund ? "Refund" : "Charge";
   // Read AFTER the commit, so the figure quoted is the one the row will show.
   // `currentBalanceCents` returns null rather than 0 for a missing account, so
   // a concurrent delete cannot make this claim the card is paid off.
@@ -782,8 +787,12 @@ export function removeCardActivity(
     ...result,
     balanceCents: balanceCents ?? 0,
     message:
+      // "Charge" is wrong for half the rows this accepts: `createCardActivity`
+      // also mints `kind: "refund"` (positive amount), and the row menu offers
+      // the same item for both. Derived from the row's own sign rather than
+      // from a second parameter nobody would remember to pass.
       balanceCents === null
-        ? "Charge removed."
-        : `Charge removed. The balance is now ${formatCents(balanceCents)}.`,
+        ? `${noun} removed.`
+        : `${noun} removed. The balance is now ${formatCents(balanceCents)}.`,
   };
 }

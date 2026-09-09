@@ -20,6 +20,23 @@ export type GoalsActionState = {
    * the state from before it. See `src/lib/revalidateAfterWrite.ts`.
    */
   warning?: string;
+  /**
+   * A refusal the user can act on, rendered inline.
+   *
+   * `createGoalAction` used to let `assertNameAvailable`'s
+   * `CategoryNameTakenError` escape into `/goals/error.tsx`. That was survivable
+   * while the action always redirected on success — but once it began STAYING
+   * PUT on a refresh warning (so the user is told the fund exists), the form is
+   * still mounted with the same name in it, and the obvious second click took
+   * the whole Funds page down. Both adversarial reviewers found that path
+   * independently.
+   *
+   * A name collision is ordinary use, not an exceptional condition: it is what
+   * a double-submit and a stale tab both produce. `/sync` settled this posture
+   * for the same reason — several failures are reachable from ordinary use, and
+   * a throw takes out unrelated controls on the same page.
+   */
+  error?: string;
 };
 
 export const IDLE_GOALS: GoalsActionState = {};

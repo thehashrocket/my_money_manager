@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useId, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,7 +14,7 @@ import {
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import type { LeafCategory } from "@/lib/categories";
 import { IDLE_ACTIVITY } from "./action-state";
-import { StatusWarning, statusRole, statusTone, warningOf } from "@/components/ledger/action-status";
+import { statusRole, warningOf } from "@/components/ledger/action-status";
 import { addCardActivityAction } from "./actions";
 
 /**
@@ -105,7 +106,21 @@ export function ChargeDialog({
     // Staying open puts the message where they are already looking, and the
     // fields are cleared either way because the charge did save.
     if (state.status === "ok") {
-      if (warningOf(state) === undefined) setOpen(false);
+      // CLEAR AND CLOSE, OR NEITHER. `createCardActivity` is not idempotent —
+      // each call mints its own batch and its own `import_row_hash` — so
+      // staying open with every field reset to pristine and the submit enabled
+      // builds the duplicate-write affordance directly under a message whose
+      // whole point is that the write succeeded. On the warning path the dialog
+      // closes too and the warning goes to a toast, which is what every other
+      // surface on this branch does with one.
+      setOpen(false);
+      // ONE toast, warning-aware. The dialog is gone by the time this renders,
+      // so an in-dialog message had nowhere to live; every other surface on
+      // this branch reports a post-commit refresh failure the same way, and
+      // rule 6 requires one toast rather than a success plus a warning.
+      const warning = warningOf(state);
+      if (warning === undefined) toast.success(state.message);
+      else toast.warning(`${state.message} ${warning}`, { duration: 10_000 });
       // Now that the fields are controlled, React's own reset no longer clears
       // them — so clear them here, on SUCCESS only. Reopening the dialog after
       // a saved charge shows an empty form; reopening after a refusal shows
@@ -267,19 +282,6 @@ export function ChargeDialog({
               placeholder="Search categories…"
             />
           </div>
-
-          {warningOf(state) !== undefined ? (
-            // `alert`, not `status` — the charge COMMITTED, so a message a
-            // polite region holds until idle is one the user acts against
-            // rather than on. Role and the amber block both come from
-            // `action-status.tsx`; this surface renders the PARTS rather than
-            // `<ActionStatus>` because it also decides whether to close on the
-            // same state, and re-deriving them here is how the pair drifts.
-            <div role="alert" aria-live="assertive">
-              <p className={`text-base ${statusTone(state)}`}>{state.status === "ok" ? state.message : ""}</p>
-              <StatusWarning warning={warningOf(state)!} />
-            </div>
-          ) : null}
 
           {state.status === "error" ? (
             // `alert` for a refusal too — `statusRole` is the one derivation,

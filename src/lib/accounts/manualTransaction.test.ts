@@ -1080,7 +1080,12 @@ describe("removeCardActivity", () => {
     if (created.status !== "ok") throw new Error("setup failed");
     expect(balanceOf(card.id)).toBe(-91975);
 
-    expect(removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED).status).toBe("ok");
+    const removed = removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
+    expect(removed.status).toBe("ok");
+    // Names what it removed. "Charge removed" is wrong for half the rows this
+    // accepts, and the row menu offers the same item for both.
+    if (removed.status !== "ok") throw new Error("unreachable");
+    expect(removed.message).toContain("Refund removed");
     expect(balanceOf(card.id)).toBe(-100000);
   });
 });

@@ -56,7 +56,15 @@ function fail(message: string, field?: "balance" | "date"): AccountsActionState 
  * three row actions so the destructive one cannot be the only one fixed.
  */
 function readTransactionId(formData: FormData): number | null {
-  const raw = formData.get("transactionId");
+  return readPositiveIntField(formData, "transactionId");
+}
+
+/** The shared reader. `readTransactionId` is the named case; `cardAccountId`
+ *  goes through the same one, because leaving it on bare `Number()` two lines
+ *  below a docstring enumerating that coercion's leniencies is how the pair
+ *  drifts back apart. */
+function readPositiveIntField(formData: FormData, field: string): number | null {
+  const raw = formData.get(field);
   if (typeof raw !== "string") return null;
   // DECIMAL DIGITS ONLY, checked before `Number`. Bare coercion also accepts
   // "0x10" (16), "1e3" (1000) and " 7 ", so a guard written against the
@@ -595,8 +603,8 @@ export async function markAsCardPaymentAction(
 ): Promise<CardActivityState> {
   try {
     const transactionId = readTransactionId(formData);
-    const cardAccountId = Number(formData.get("cardAccountId"));
-    if (transactionId === null || !Number.isSafeInteger(cardAccountId) || cardAccountId <= 0) {
+    const cardAccountId = readPositiveIntField(formData, "cardAccountId");
+    if (transactionId === null || cardAccountId === null) {
       return { status: "error", message: "That transaction no longer exists." };
     }
 

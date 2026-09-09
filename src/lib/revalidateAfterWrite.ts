@@ -1,3 +1,6 @@
+import { unstable_rethrow } from "next/navigation";
+import { REFRESH_FAILED_WARNING } from "./refreshWarning";
+
 /**
  * The ONE spelling of "this revalidation follows a COMMITTED write".
  *
@@ -30,20 +33,20 @@
  * the answer is one function rather than an eighth copy.
  *
  * Deliberately NOT a `"use server"` module. Such a module may only export async
- * functions, so `REFRESH_FAILED_WARNING` living beside an action would make
- * Turbopack report "the module has no exports at all" and every importer of
- * every action in that file would fail to resolve — blanking the route, with
- * `tsc` and vitest both structurally blind to it (it is a bundler rule, not a
- * type rule). That is why the constant lives here and route files import it.
+ * functions, so a guard living beside an action would make Turbopack report
+ * "the module has no exports at all" and every importer of every action in that
+ * file would fail to resolve — blanking the route, with `tsc` and vitest both
+ * structurally blind to it (it is a bundler rule, not a type rule).
+ *
+ * This module is no longer import-free — `unstable_rethrow` pulls
+ * `next/navigation` — so the WARNING STRING moved to `./refreshWarning`, which
+ * is. A client component needs the sentence and must not drag this graph in
+ * with it.
  */
 
-/**
- * One sentence for every surface. It says the two things the reader needs — the
- * write landed, and what they see may be stale — and nothing about which page
- * or which write, so no caller has to keep a variant in sync.
- */
-export const REFRESH_FAILED_WARNING =
-  "Your change was saved, but this page couldn't refresh — reload to see the current state.";
+/** Re-exported for the callers that already import it from here. The constant
+ *  itself lives in a zero-import module because this one is no longer one. */
+export { REFRESH_FAILED_WARNING } from "./refreshWarning";
 
 /**
  * Runs a post-commit revalidation and converts a failure into a warning.
@@ -58,14 +61,25 @@ export const REFRESH_FAILED_WARNING =
  * result makes a failed refresh silent again, which is the whole failure this
  * guards — so the return type is not `void` on purpose.
  *
- * `run` must contain revalidation ONLY. Do not put a `redirect()` inside it:
- * `redirect` signals by throwing, and this would swallow it into a warning.
+ * `run` should contain revalidation only, but a `redirect()` slipping in is no
+ * longer silent: `unstable_rethrow` sends Next's control-flow throws back up.
  */
 export function guardRefresh(scope: string, run: () => void): string | undefined {
   try {
     run();
     return undefined;
   } catch (err) {
+    // STRUCTURAL, NOT A COMMENT. `redirect()`, `notFound()` and Next's dynamic
+    // bailouts all signal by THROWING, so a bare catch here would swallow a
+    // navigation and hand back a warning string instead — on
+    // `confirmImportAction` that is a committed several-hundred-row import
+    // whose redirect silently vanishes, with no state channel to notice
+    // (`Promise<void>`). Five call sites keep their `redirect` outside `run`
+    // by hand, guided only by prose; rule 11 is explicit that a property
+    // defended by a comment is a property waiting to be refactored away.
+    // `unstable_rethrow` re-throws exactly those control-flow signals and
+    // returns for everything else.
+    unstable_rethrow(err);
     console.error(`[${scope}] revalidation failed after a committed write`, err);
     return REFRESH_FAILED_WARNING;
   }

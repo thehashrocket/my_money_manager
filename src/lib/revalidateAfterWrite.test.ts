@@ -74,3 +74,40 @@ describe("guardRefresh", () => {
     })).toBe(REFRESH_FAILED_WARNING);
   });
 });
+
+/**
+ * The structural half: Next's control-flow throws must pass THROUGH.
+ *
+ * Five call sites keep their `redirect()` outside `run` by hand, guided by a
+ * comment. Rule 11 is explicit that a property defended by a comment is a
+ * property waiting to be refactored away — and the cost here is specific: on
+ * `confirmImportAction` a swallowed redirect is a committed several-hundred-row
+ * import whose navigation silently vanishes, with no state channel to notice.
+ */
+describe("guardRefresh — Next control-flow signals", () => {
+  it("RETHROWS a redirect instead of swallowing it into a warning", async () => {
+    const { redirect } = await import("next/navigation");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // The real `redirect`, so this tracks whatever Next actually throws rather
+    // than a hand-built lookalike that could drift from it.
+    expect(() => guardRefresh("/test", () => redirect("/somewhere"))).toThrow();
+
+    // And it is NOT reported as a failed refresh: no warning, no log line.
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("still swallows an ORDINARY throw, so the guard keeps doing its job", () => {
+    // The other side of the same coin — `unstable_rethrow` must not turn every
+    // failure into a route crash.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      guardRefresh("/test", () => {
+        throw new Error("revalidatePath blew up");
+      }),
+    ).toBe(REFRESH_FAILED_WARNING);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+});
