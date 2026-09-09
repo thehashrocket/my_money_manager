@@ -2363,18 +2363,22 @@ WHAT was wrong rather than a queue. The three that are worth remembering:
 
 ### Still open
 
-- [ ] **P3** — **The dedup preconditions are still read before the `await`.**
-      `seenExternalIds` and `existingByContent` are computed pre-fetch and the
-      insert happens in a later transaction, so a CSV `commitImport` or a second
-      sync committing in that window makes rows that are now duplicates pass the
-      in-memory content budget. The id pass is protected by the partial unique
-      index, but a collision there aborts the WHOLE batch and surfaces the raw
-      SQLite constraint text — the `existingByContent` comment predicts this
-      outcome in as many words. The convergent fix is to re-read both inside the
-      write transaction alongside `verifyStagedLinks`, so a concurrent writer
-      degrades to zero new rows rather than aborting. Deliberately not bundled:
-      this branch already reworked that transaction twice, and the failure needs
-      genuine simultaneity where the link race needed only a slow round trip.
+- [x] **P3 — the ID half is DONE; the CONTENT half is the residual.** The id
+      pass now re-runs inside the write transaction, so a second sync committing
+      between staging and the write has its rows dropped as the duplicates they
+      are instead of colliding on the partial unique index and aborting the
+      whole batch with a raw `SqliteError` (verified: removing the re-check
+      reproduces exactly that error in the regression test). Note the window is
+      NOT the fetch — the id pass reads in the staging loop — it is staging →
+      transaction, which spans `createSnapshot`'s `VACUUM INTO`; the test races
+      at that seam because that is where the seam is.
+      **Still open: the CONTENT pass.** `existingByContent` is also read in the
+      staging loop, and it has no unique index behind it, so a concurrent CSV
+      `commitImport` in the same window produces a genuine duplicate row rather
+      than an abort — quieter and worse. Not fixed by widening the id query: the
+      content budget is a multiset COUNT (rule 3, so two identical same-day
+      coffees both survive), and re-deriving that inside the transaction is a
+      different and larger change than re-checking a unique key.
       (`src/lib/simplefin/sync.ts`)
 
 - [ ] **P3** — **`verifyStagedLinks` proves *a* transaction, not *the* one.**
@@ -2388,8 +2392,8 @@ WHAT was wrong rather than a queue. The three that are worth remembering:
       function is module-private and has one caller.
       (`src/lib/simplefin/sync.ts`)
 
-- [ ] **P4** — **`feedId` is a bare `string` in a codebase that spent a release
-      on the distinction.** Rule 3 makes "which feed produced this row" a
+- [x] **P4 — DONE.** **`feedId` was a bare `string` in a codebase that spent a
+      release on the distinction.** Rule 3 makes "which feed produced this row" a
       different fact from "which account holds it", and migration `0020` exists
       because `account_id` was a wrong proxy for it. `verifyStagedLinks(staged
       .map(s => ({...s, feedId: s.rows[0].externalId})), tx)` typechecks —
@@ -2397,9 +2401,11 @@ WHAT was wrong rather than a queue. The three that are worth remembering:
       does `feedId: ""`, which drops every account with a plausible warning. A
       branded `FeedAccountId` minted once off `account.simplefinAccountId` and
       once off `response.accounts[].id` would make both a type error.
-      (`src/lib/simplefin/sync.ts`, `src/lib/simplefin/mapTransaction.ts`)
+      Done: `src/lib/simplefin/feedAccountId.ts` brands it, `asFeedAccountId`
+      is the one mint and rejects `""`, and substituting a transaction id at the
+      staging site is now a build error.
 
-- [ ] **P4** — **~140 lines of duplicated test harness.**
+- [x] **P4 — DONE.** **~140 lines of duplicated test harness.**
       `syncRelinkGuard.test.ts` re-declares the `syncSimpleFin` harness
       `sync.test.ts` owns — the `vi.hoisted` mock trio, all three `vi.mock`
       factories, the date constants, and a 21st hand-copy of `seedAccount` —
@@ -2408,7 +2414,11 @@ WHAT was wrong rather than a queue. The three that are worth remembering:
       `seedAccount`/`seedBatch`/`seedCategory`/`seedTxn` duplication across 13+
       files as a known item; this is the same problem, and the fix is one
       shared `src/lib/simplefin/test/` module rather than another local copy.
-      (`src/lib/simplefin/syncRelinkGuard.test.ts`, `sync.test.ts`)
+      Done: `src/lib/simplefin/test/syncFixtures.ts` owns the constants,
+      `seedAccount`, `feedTxn`, `feedAccount` and the outcome narrowers. The
+      `vi.mock` block stays per-file — `vi.mock` is hoisted per-FILE, so a
+      shared module cannot register mocks for a caller — and the reason is
+      recorded in the new file.
 
 - [ ] **P4** — **`verifyStagedLinks` returns three parallel collections.**
       `{ verified, warnings, droppedAccountIds }` leaves the caller correlating

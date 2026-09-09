@@ -895,7 +895,62 @@ export async function syncSimpleFin(
     written = db.transaction((tx) => {
     // The links were read before the network round trip; re-check them here,
     // inside the transaction that actually writes. See `verifyStagedLinks`.
-    const { verified, warnings: linkWarnings, droppedAccountIds } = verifyStagedLinks(staged, tx);
+    const { verified: linkChecked, warnings: linkWarnings, droppedAccountIds } =
+      verifyStagedLinks(staged, tx);
+
+    // The link is not the only precondition carried across the `await`.
+    // `seenExternalIds` was read BEFORE the fetch, so a second sync (two /sync
+    // tabs, the same reachability bar the link guard is written for) can commit
+    // rows for the same feed in the window — and those rows are protected by
+    // the partial unique index on (simplefin_source_account_id, external_id),
+    // so the collision does not double-count. It does something else bad: it
+    // aborts the ENTIRE transaction, including good rows for accounts that were
+    // fine, and surfaces the driver's raw "UNIQUE constraint failed" text. The
+    // comment on `existingByContent` predicts exactly that outcome.
+    //
+    // So the id pass is re-run here, against the same handle that inserts.
+    // Rows another writer already landed are DROPPED, which is the correct
+    // reading of them — they are duplicates, and dedup is what this pass is
+    // for. One query for the batch, not one per row.
+    //
+    // Deliberately NOT the content pass: content dedup has no unique index
+    // behind it, so a concurrent CSV import racing this one produces a genuine
+    // duplicate row rather than an abort. That is a real residual and it is
+    // recorded in TODOS rather than fixed by widening this query, because the
+    // content budget is a multiset count (rule 3) and re-deriving it inside the
+    // transaction is a different and larger change.
+    const verified = linkChecked
+      .map((entry) => {
+        if (entry.rows.length === 0) return entry;
+        const landed = new Set(
+          tx
+            .select({ externalId: schema.transactions.externalId })
+            .from(schema.transactions)
+            .where(
+              and(
+                eq(schema.transactions.simplefinSourceAccountId, entry.feedId),
+                inArray(
+                  schema.transactions.externalId,
+                  entry.rows.map((r) => r.externalId),
+                ),
+              ),
+            )
+            .all()
+            .map((r) => r.externalId),
+        );
+        if (landed.size === 0) return entry;
+        return { ...entry, rows: entry.rows.filter((r) => !landed.has(r.externalId)) };
+      })
+      .filter((entry) => entry.rows.length > 0 || entry.accountWarnings.length > 0);
+
+    const raced = linkChecked.reduce((n, e) => n + e.rows.length, 0)
+      - verified.reduce((n, e) => n + e.rows.length, 0);
+    if (raced > 0) {
+      linkWarnings.push(
+        `${raced} transaction${raced === 1 ? "" : "s"} had already been imported by another sync running at the same time, so ${raced === 1 ? "it was" : "they were"} skipped.`,
+      );
+    }
+
     const verifiedTotal = verified.reduce((n, s) => n + s.rows.length, 0);
 
     // Same contract as the CSV path: read the trained rules once for the batch

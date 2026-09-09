@@ -629,3 +629,72 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
     expect(after?.priorStartingBalanceDate).toBe("2026-02-02");
   });
 });
+
+describe("a concurrent sync no longer aborts the whole batch", () => {
+  it("skips rows another writer landed between staging and the write, and writes the rest", async () => {
+    // The id pass runs in the staging loop, so the vulnerable window is
+    // staging -> transaction — which spans `createSnapshot`'s `VACUUM INTO`,
+    // not a trivial slice. A second /sync tab committing there used to collide
+    // on the partial unique index and abort the ENTIRE transaction, taking
+    // good rows with it and surfacing the driver's raw constraint text (the
+    // `existingByContent` comment predicts exactly that). The id pass now
+    // re-runs inside the write transaction and drops the raced rows as the
+    // duplicates they are.
+    //
+    // `createSnapshotMock` IS that seam: sync calls it after staging and
+    // before `db.transaction`.
+    const account = seedAccount({ simplefinAccountId: "ACT-1", name: "Checking" });
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      const [b] = handle.db
+        .insert(schema.importBatches)
+        .values({ source: "simplefin", label: "other-tab" })
+        .returning()
+        .all();
+      handle.db
+        .insert(schema.transactions)
+        .values({
+          accountId: account.id,
+          importBatchId: b.id,
+          date: "2026-09-01",
+          rawDescription: "PURCHASE",
+          rawMemo: "OTHER TAB",
+          normalizedMerchant: "OTHER TAB",
+          amountCents: -487,
+          importRowHash: "raced-hash",
+          importSource: "simplefin",
+          externalId: "TRN-a",
+          simplefinSourceAccountId: "ACT-1",
+          isPending: false,
+        })
+        .run();
+      return {
+        snapshotPath: "/tmp/money.db.pre-import-TEST",
+        timestamp: "TEST",
+        prunedPaths: [] as string[],
+        consistent: true,
+        degradedReason: null as string | null,
+      };
+    });
+
+    respondAfter(() => {}, [
+      { id: "ACT-1", transactions: [feedTxn("TRN-a", "-4.87"), feedTxn("TRN-b", "-9.99")] },
+    ]);
+
+    const outcome = syncedOrThrow(await syncSimpleFin({ now: NOW }, handle.db));
+
+    // TRN-b lands; TRN-a is recognised as already imported rather than
+    // colliding and rolling the whole batch back.
+    expect(outcome.insertedCount).toBe(1);
+    const external = handle.db
+      .select({ id: schema.transactions.externalId })
+      .from(schema.transactions)
+      .all()
+      .map((r) => r.id)
+      .sort();
+    expect(external).toEqual(["TRN-a", "TRN-b"]);
+    expect(
+      warningsOf(outcome).some((w) => w.includes("another sync running at the same time")),
+    ).toBe(true);
+  });
+});
