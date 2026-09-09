@@ -44,7 +44,11 @@ export function CopyPreviousMonthButton({
         if (result.skippedArchived > 0) {
           parts.push(`skipped ${result.skippedArchived} archived`);
         }
-        toast.success(parts.join(" · ") + ".");
+        // A refresh failure is a WARNING on a committed copy, never a
+        // success and never an error — the counts above are real either way.
+        // `/sync`'s doctrine: "a warning is not a success."
+        if (result.warning) toast.warning(`${parts.join(" · ")}. ${result.warning}`);
+        else toast.success(parts.join(" · ") + ".");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Copy failed.");
       }

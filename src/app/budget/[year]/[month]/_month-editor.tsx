@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { toast } from "sonner";
 import {
   createContext,
   useCallback,
@@ -321,7 +322,16 @@ export function MonthEditor(props: MonthEditorProps) {
   const revalidate = useCallback(() => {
     if (!dirtyRef.current) return;
     dirtyRef.current = false;
-    void revalidateBudgetSurfacesAction();
+    // The allocations this flushes were committed by `commitAllocationAction`
+    // long before this fires — so a `revalidatePath` throw in here is by
+    // construction a throw after a durable write. `revalidateBudgetSurfacesAction`
+    // catches it and hands back a warning; surfacing it is what keeps a user
+    // who then navigates to `/goals` and sees the old total from concluding the
+    // allocation never saved. Unguarded, this `void` swallowed the rejection
+    // entirely.
+    void revalidateBudgetSurfacesAction().then((warning) => {
+      if (warning) toast.warning(warning);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
 

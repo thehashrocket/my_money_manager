@@ -277,15 +277,30 @@ export function CreateAccountForm({ today }: { today: string }) {
           took every typed field with it, so the DS61 message the schema was
           written to produce never reached anyone. */}
       {state.status !== "idle" ? (
-        <p
-          role="status"
-          aria-live="polite"
-          className={`sm:col-span-2 text-base ${
-            state.status === "error" ? "text-redbrown" : "text-ledger"
-          }`}
-        >
-          {state.message}
-        </p>
+        (() => {
+          // A refresh warning means the account WAS created and the list behind
+          // this form is stale. `alert`, not `status`, for the reason
+          // `/accounts/_status.tsx` sets out: a polite region can be held until
+          // the user is idle, and the user who does not hear this one adds the
+          // account a second time.
+          const warning = state.status === "ok" ? state.warning : undefined;
+          const loud = state.status === "error" || warning !== undefined;
+          return (
+            <p
+              role={loud ? "alert" : "status"}
+              aria-live={loud ? "assertive" : "polite"}
+              className={`sm:col-span-2 text-base ${
+                state.status === "error"
+                  ? "text-redbrown"
+                  : warning !== undefined
+                    ? "text-ink-1"
+                    : "text-ledger"
+              }`}
+            >
+              {warning === undefined ? state.message : `${state.message} ${warning}`}
+            </p>
+          );
+        })()
       ) : null}
     </form>
   );

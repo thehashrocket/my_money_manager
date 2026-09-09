@@ -63,8 +63,9 @@ export type UndoBulkRetargetRunResult =
  * rule survives and keeps auto-filing every future import, with no
  * rules-management surface to repair it from.
  *
- * `revalidatePath` stays in the action because it closes over the singleton DB
- * and cannot run under `:memory:` — it is now the only untested line there.
+ * `revalidatePath` stays in the action, wrapped in `guardRefresh` so a throw
+ * from it can never discard the snapshot this function just built (that
+ * failure mode, and the tests pinning it, live in `actions.test.ts`).
  */
 export function runBulkRetarget(
   db: Db,

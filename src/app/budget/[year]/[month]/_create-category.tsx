@@ -74,6 +74,11 @@ export function NewCategoryRow({
       return;
     }
     setName("");
+    // The category EXISTS — but this component's whole appear-then-focus dance
+    // above depends on the revalidated payload rendering the new row, so a
+    // failed refresh leaves the user staring at a list the category is not in.
+    // Saying so is the difference between "stale" and "it didn't work".
+    if (result.warning) toast.warning(result.warning);
     cancelWaitRef.current?.();
     cancelWaitRef.current = waitForCategoryInput(result.category.id, () => {
       cancelWaitRef.current = null;
@@ -161,6 +166,7 @@ export function NewGroupRow() {
       return;
     }
     setName("");
+    if (result.warning) toast.warning(result.warning);
     setPendingGroup({ id: result.category.id, name: result.category.name });
   }
 
@@ -232,6 +238,10 @@ function FirstLeafForm({ parentId, parentName, onDone }: { parentId: number; par
       setError(result.message);
       return;
     }
+    // Same reason as `NewCategoryRow` above: the row only appears via the
+    // revalidated payload, so a refresh failure is indistinguishable from a
+    // failed create unless it is said out loud.
+    if (result.warning) toast.warning(result.warning);
     cancelWaitRef.current?.();
     cancelWaitRef.current = waitForCategoryInput(result.category.id, () => {
       cancelWaitRef.current = null;

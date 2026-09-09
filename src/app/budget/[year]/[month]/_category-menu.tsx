@@ -144,6 +144,10 @@ export function CategoryMenu({
         toast.error(result.message);
         return;
       }
+      // The move COMMITTED; only the refresh failed, so the list the user is
+      // looking at still shows the old order. Announcing the new position on
+      // its own would then contradict the screen.
+      if (result.warning) toast.warning(result.warning);
       // DS16: "an aria-live announcement of the new position" — the
       // commit-only Left to Budget region (T23) covers allocation edits,
       // not reorder, so this is its own small live region rather than
@@ -204,6 +208,10 @@ export function CategoryMenu({
     startTransition(async () => {
       const result = await setCarryoverPolicyAction(categoryId, policy);
       if (result.status === "error") toast.error(result.message);
+      // No success toast on this path by design (the menu's own checked state
+      // is the feedback), but a stale page needs saying: the policy changed
+      // and the row still renders the old one.
+      else if (result.warning) toast.warning(result.warning);
     });
   }
 
@@ -523,6 +531,9 @@ function RenameDialog({
                 return;
               }
               onOpenChange(false);
+              // Committed, so the dialog closes either way — but every row
+              // label still reads the old name until a reload.
+              if (result.warning) toast.warning(result.warning);
             });
           }}
         >
@@ -599,6 +610,9 @@ function ArchiveDialog({
                   return;
                 }
                 onOpenChange(false);
+                // Same shape as RenameDialog: the archive landed, the page did
+                // not refresh, so the row is still sitting there.
+                if (result.warning) toast.warning(result.warning);
               });
             }}
           >

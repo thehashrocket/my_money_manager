@@ -168,35 +168,44 @@ export function MerchantRow({
            choice between the warning being readable and the Undo being
            reachable, and the Undo is the only thing that puts a removed rule
            back inside its 10s window. Merging them makes the notice and its
-           remedy the same front toast. */
+           remedy the same front toast.
+
+           `result.warning` (a `revalidatePath` that threw AFTER the write
+           committed) joins the refusal in that same one toast for exactly the
+           same reason — it is a second note about a write that SUCCEEDED, so
+           stacking it would hide whichever of the two was not newest, action
+           button and all. */
         const filed = `Categorized ${result.updatedCount} ${merchant} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
-        const notify =
-          result.ruleRefusal === null ? toast.success : toast.warning;
-        notify(
-          result.ruleRefusal === null
-            ? filed
-            : `${filed} ${result.ruleRefusal.message}`,
-          {
-            duration: 10_000,
-            action: {
-              label: "Undo",
-              onClick: async () => {
-                try {
-                  const undo = await undoBulkCategorizeAction(result.snapshot);
-                  onUndo(undo.revertedCount);
-                  onDismissedChange(merchant, false);
-                  toast(
-                    `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                  );
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Undo failed.",
-                  );
-                }
-              },
+        const notes = [result.ruleRefusal?.message, result.warning].filter(
+          (n): n is string => n !== undefined && n !== null,
+        );
+        // A warning is not a success — the /sync doctrine. Either note demotes
+        // this from `toast.success`, and the Undo stays attached to whichever
+        // one is rendered.
+        const notify = notes.length === 0 ? toast.success : toast.warning;
+        notify([filed, ...notes].join(" "), {
+          duration: 10_000,
+          action: {
+            label: "Undo",
+            onClick: async () => {
+              try {
+                const undo = await undoBulkCategorizeAction(result.snapshot);
+                onUndo(undo.revertedCount);
+                onDismissedChange(merchant, false);
+                const reverted = `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`;
+                // The undo is a committed write too, and it restores a removed
+                // rule — so its own failed refresh gets said, in its own single
+                // toast rather than a second one behind it.
+                if (undo.warning === undefined) toast(reverted);
+                else toast.warning(`${reverted} ${undo.warning}`);
+              } catch (err) {
+                toast.error(
+                  err instanceof Error ? err.message : "Undo failed.",
+                );
+              }
             },
           },
-        );
+        });
       } catch (err) {
         // Revert optimistic counter on error.
         onUndo(group.count);

@@ -87,8 +87,13 @@ export function ChargeDialog({
   const [handledState, setHandledState] = useState(state);
   if (state !== handledState) {
     setHandledState(state);
+    // A refresh warning KEEPS THE DIALOG OPEN. Closing on it would be the
+    // worst of both: the row behind is stale (that is what the warning says),
+    // and the one sentence telling the user so is dismissed in the same frame.
+    // Staying open puts the message where they are already looking, and the
+    // fields are cleared either way because the charge did save.
     if (state.status === "ok") {
-      setOpen(false);
+      if (state.warning === undefined) setOpen(false);
       // Now that the fields are controlled, React's own reset no longer clears
       // them — so clear them here, on SUCCESS only. Reopening the dialog after
       // a saved charge shows an empty form; reopening after a refusal shows
@@ -221,6 +226,15 @@ export function ChargeDialog({
               placeholder="Search categories…"
             />
           </div>
+
+          {state.status === "ok" && state.warning !== undefined ? (
+            // `alert`, not `status`, and the reasoning is `_status.tsx`'s: the
+            // charge COMMITTED, so a message a polite region holds until idle
+            // is one the user acts against rather than on.
+            <p role="alert" aria-live="assertive" className="text-base text-ink-1">
+              {`${state.message} ${state.warning}`}
+            </p>
+          ) : null}
 
           {state.status === "error" ? (
             <div role="status" aria-live="polite" className="space-y-1">

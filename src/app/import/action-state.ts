@@ -28,9 +28,15 @@ export type CreateAccountField =
   | "creditLimit"
   | "minimumPayment";
 
+/**
+ * `warning` rides on `ok` only: it means the account WAS created but the page
+ * behind it could not be refreshed. Putting it on `error` would send a
+ * committed write back down the failure branch, which is the whole defect
+ * `guardRefresh` exists to prevent — here the user would re-add the account.
+ */
 export type CreateAccountState =
   | { status: "idle" }
-  | { status: "ok"; message: string }
+  | { status: "ok"; message: string; warning?: string }
   | { status: "error"; message: string; field?: CreateAccountField };
 
 export const IDLE_CREATE_ACCOUNT: CreateAccountState = { status: "idle" };

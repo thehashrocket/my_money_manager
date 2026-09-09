@@ -263,3 +263,120 @@ describe("addCardActivityAction — guards that run before the write", () => {
     expect(state).toMatchObject({ status: "error", reason: "before-anchor" });
   });
 });
+
+/**
+ * The refresh that follows an ALREADY-COMMITTED write.
+ *
+ * These drive the real action rather than mirroring its body, which is the
+ * point — `accounts/actions.test.ts` mirrors the DB pipeline by hand, and
+ * CLAUDE.md records what that costs: a mirrored test kept 1,755 tests green
+ * while the opt-in it claimed to pin had been deleted from the action. Here the
+ * write is mocked and `revalidatePath` is real-enough (a mock that throws), so
+ * the thing under test is the wiring itself.
+ *
+ * Removing `guardRefresh` from `revalidateCardActivitySurfaces` /
+ * `revalidateBalanceSurfaces` makes every case below fail: the throw reaches
+ * each action's outer `catch`, which returns `{status:"error"}` for a charge
+ * that is already in the ledger.
+ */
+describe("a failed refresh never denies a committed write", () => {
+  function throwingRevalidate() {
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+    // Silenced here; the log itself is asserted in its own case below.
+    return vi.spyOn(console, "error").mockImplementation(() => {});
+  }
+
+  function goodCharge(): FormData {
+    return formData({
+      accountId: "1",
+      categoryId: "2",
+      amount: "80.25",
+      date: "2026-01-05",
+      merchant: "Costco",
+    });
+  }
+
+  it("reports a charge that COMMITTED as ok, with a warning, not as an error", async () => {
+    createCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Recorded. Citi Bank is now -$2,286.68.",
+      transactionId: 42,
+      balanceCents: -228668,
+    });
+    const logged = throwingRevalidate();
+
+    const state = await addCardActivityAction(IDLE_ACTIVITY, goodCharge());
+    logged.mockRestore();
+
+    // NOT `error`. The row exists; saying otherwise sends the user round the
+    // loop again, and `createCardActivity` has no delete path to undo the
+    // duplicate they would create.
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toMatch(/Recorded/);
+    expect(state.warning).toBe(
+      "Your change was saved, but this page couldn't refresh — reload to see the current state.",
+    );
+  });
+
+  it("leaves `warning` undefined when the refresh works, so success stays plain", async () => {
+    createCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Recorded.",
+      transactionId: 42,
+      balanceCents: -228668,
+    });
+    revalidatePathMock.mockImplementation(() => {});
+
+    const state = await addCardActivityAction(IDLE_ACTIVITY, goodCharge());
+
+    expect(state).toMatchObject({ status: "ok" });
+    if (state.status !== "ok") throw new Error("unreachable");
+    // An always-present warning would paint every ordinary save as degraded.
+    expect(state.warning).toBeUndefined();
+  });
+
+  it("does not swallow the refresh failure silently", async () => {
+    createCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Recorded.",
+      transactionId: 42,
+      balanceCents: -228668,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    await addCardActivityAction(IDLE_ACTIVITY, goodCharge());
+
+    expect(logged).toHaveBeenCalledWith(
+      "[/accounts] revalidation failed after a committed write",
+      expect.any(Error),
+    );
+    logged.mockRestore();
+  });
+
+  it("still REFUSES a genuine refusal — the guard must not turn errors into warnings", async () => {
+    // The other direction, and worth pinning: a guard that reported every
+    // outcome as ok would hide `before-anchor`, which is a real refusal the
+    // user has to act on.
+    createCardActivityMock.mockReturnValue({
+      status: "refused",
+      reason: "before-anchor",
+      message: "This is dated before your last reconcile.",
+      accountId: 1,
+    });
+    const logged = throwingRevalidate();
+
+    const state = await addCardActivityAction(IDLE_ACTIVITY, goodCharge());
+    logged.mockRestore();
+
+    // Refused BEFORE the refresh runs, so no warning and no log — nothing was
+    // written for a stale page to be stale about.
+    expect(state).toMatchObject({ status: "error", reason: "before-anchor" });
+    expect(logged).not.toHaveBeenCalled();
+  });
+});

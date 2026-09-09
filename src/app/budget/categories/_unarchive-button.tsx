@@ -24,6 +24,10 @@ export function UnarchiveButton({ categoryId, categoryName }: { categoryId: numb
         startTransition(async () => {
           const result = await unarchiveCategoryAction(categoryId);
           if (result.status === "error") toast.error(result.message);
+          // The unarchive COMMITTED; only the refresh failed. A warning, not a
+          // success — this page still lists the category as archived until the
+          // reload the message asks for.
+          else if (result.warning) toast.warning(result.warning);
           else toast.success(`"${categoryName}" is active again.`);
         });
       }}

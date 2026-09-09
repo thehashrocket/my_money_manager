@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
 import { validateAllocateInput } from "@/lib/budget/validateAllocateInput";
 import {
   CategoryArchivedError,
@@ -82,15 +83,29 @@ export async function upsertBudgetAllocationAction(
   upsertAllocation(db, parsed.data);
 
   const { year, month } = parsed.data;
-  revalidatePath("/budget");
-  // Pattern form, not the literal path, and still load-bearing after
-  // migration 0021 removed the rollover cache — only the reason changed. A
-  // rollover category's carried balance is derived from every prior month, so
-  // changing THIS month's allocation changes what every LATER month renders.
-  // Nothing is invalidated in the database any more (each month recomputes on
-  // read), but Next still has those later months cached, and the literal form
-  // would only ever revalidate the one month just submitted.
-  revalidatePath("/budget/[year]/[month]", "page");
+  // Guarded even though this action has NOWHERE to put the warning: it is a
+  // `<form action>` (see `_allocate-form.tsx`), so its return type is pinned to
+  // `Promise<void>` and there is no state channel to fold a warning into. The
+  // guard still earns its place — without it a throw from `revalidatePath`
+  // escapes an ALREADY-COMMITTED `upsertAllocation` into
+  // `budget/[year]/[month]/error.tsx`, which tells the reader the write did not
+  // happen. Landing on a possibly-stale month page is the better of the two
+  // wrongs. The `console.error` inside `guardRefresh` is the only record, and
+  // that is a deliberate accepted cost here, not an oversight.
+  guardRefresh("/budget", () => {
+    revalidatePath("/budget");
+    // Pattern form, not the literal path, and still load-bearing after
+    // migration 0021 removed the rollover cache — only the reason changed. A
+    // rollover category's carried balance is derived from every prior month, so
+    // changing THIS month's allocation changes what every LATER month renders.
+    // Nothing is invalidated in the database any more (each month recomputes on
+    // read), but Next still has those later months cached, and the literal form
+    // would only ever revalidate the one month just submitted.
+    revalidatePath("/budget/[year]/[month]", "page");
+  });
+  // OUTSIDE the guard, and that placement is the whole point: `redirect`
+  // signals by THROWING, so a `redirect()` inside `run` would be caught and
+  // downgraded into a warning string — the navigation silently dropped.
   redirect(`/budget/${year}/${month}`);
 }
 
@@ -119,35 +134,6 @@ export type SetCategoryKindActionState =
   | { status: "idle" }
   | { status: "ok"; categoryId: number; warning?: string }
   | { status: "error"; message: string };
-
-/**
- * Shown when the write landed but the page could not be refreshed.
- *
- * NOT exported, and that is a Next.js constraint rather than a style choice: a
- * `"use server"` module may only export async functions, so adding an exported
- * const here makes Turbopack report "the module has no exports at all" and
- * every importer of every action in this file fails to resolve. `tsc` cannot
- * see it — it is a bundler rule, not a type rule — and no unit test imports a
- * route module, so it surfaces only by loading the page.
- */
-const BUDGET_REFRESH_FAILED_WARNING =
-  "The change was saved, but this page could not be refreshed — reload to see it.";
-
-/**
- * Runs a revalidation that follows an already-committed write and converts a
- * failure into a warning rather than letting it escape as a throw. Same shape
- * and same reasoning as `/sync`'s `guardRefresh`; the budget actions never got
- * it, which left a committed one-way write able to surface as a load error.
- */
-function guardBudgetRefresh(run: () => void): string | undefined {
-  try {
-    run();
-    return undefined;
-  } catch (err) {
-    console.error("[/budget] revalidation failed after a committed write", err);
-    return BUDGET_REFRESH_FAILED_WARNING;
-  }
-}
 
 export async function setCategoryKindAction(
   _prev: SetCategoryKindActionState,
@@ -191,7 +177,7 @@ export async function setCategoryKindAction(
   // `error.tsx` would tell them "Nothing was written that you didn't already
   // ask for". A stale page with an accurate message beats a crash with a false
   // one, so a refresh failure comes back as a warning on a successful result.
-  const refreshWarning = guardBudgetRefresh(() => {
+  const refreshWarning = guardRefresh("/budget", () => {
     revalidatePath("/budget");
     revalidatePath("/budget/[year]/[month]", "page");
     revalidatePath("/");
@@ -263,20 +249,28 @@ export async function commitAllocationAction(
  * close — fund it on `/budget`, see it on `/goals` — serves a stale RSC
  * payload on the way back. Same bug class `setCategoryKindAction` already
  * carries a comment about; the editable band reintroduced it for funds.
+ *
+ * Returns the refresh warning rather than `void`. This action IS the refresh
+ * for allocations `commitAllocationAction` has already committed, so a throw
+ * here is by construction a throw after a durable write — and unguarded it
+ * rejects the promise `<MonthEditor>` fires as `void ...`, which surfaces as an
+ * unhandled rejection with the user told nothing at all.
  */
-export async function revalidateBudgetSurfacesAction(): Promise<void> {
-  revalidatePath("/budget");
-  // Pattern form, matching `upsertBudgetAllocationAction` above — which is
-  // also why this takes no arguments any more. The literal
-  // form was here and is wrong for the same reason it is wrong there: a
-  // rollover category's carried balance is derived from every prior month, so
-  // the allocations this island just committed change what every LATER month
-  // renders, and revalidating only the month just edited leaves those stale.
-  // It mattered more here than anywhere, because this is the path the inline
-  // editor takes and therefore the only way a fund can be funded at all — on
-  // the one band where rollover is a first-class choice.
-  revalidatePath("/budget/[year]/[month]", "page");
-  revalidatePath("/goals");
+export async function revalidateBudgetSurfacesAction(): Promise<string | undefined> {
+  return guardRefresh("/budget", () => {
+    revalidatePath("/budget");
+    // Pattern form, matching `upsertBudgetAllocationAction` above — which is
+    // also why this takes no arguments any more. The literal
+    // form was here and is wrong for the same reason it is wrong there: a
+    // rollover category's carried balance is derived from every prior month, so
+    // the allocations this island just committed change what every LATER month
+    // renders, and revalidating only the month just edited leaves those stale.
+    // It mattered more here than anywhere, because this is the path the inline
+    // editor takes and therefore the only way a fund can be funded at all — on
+    // the one band where rollover is a first-class choice.
+    revalidatePath("/budget/[year]/[month]", "page");
+    revalidatePath("/goals");
+  });
 }
 
 const copyPreviousMonthInputSchema = z.object({
@@ -291,24 +285,38 @@ const copyPreviousMonthInputSchema = z.object({
  * skippedArchived}` counts to build its own Sonner toast message, not a
  * generic ok/error union.
  */
-export async function copyPreviousMonthAction(year: number, month: number): Promise<CopyPreviousMonthResult> {
+export type CopyPreviousMonthActionResult = CopyPreviousMonthResult & {
+  /** Present only when the post-commit refresh failed; the counts are real
+   * either way. See `guardRefresh`. */
+  warning?: string;
+};
+
+export async function copyPreviousMonthAction(
+  year: number,
+  month: number,
+): Promise<CopyPreviousMonthActionResult> {
   const parsed = copyPreviousMonthInputSchema.safeParse({ year, month });
   if (!parsed.success) {
     throw new Error(`Invalid copy-month request — ${formatZodIssues(parsed.error)}`);
   }
   const result = copyPreviousMonth(db, parsed.data.year, parsed.data.month);
-  revalidatePath("/budget");
-  revalidatePath("/budget/[year]/[month]", "page");
-  // `copyPreviousMonth` has NO kind filter, so it copies FUND allocations too
-  // — and a fund's `budget_periods.allocated_cents` is exactly the SUM
-  // `loadGoals` reads for `totalContributedCents`. Without this, the natural
-  // move (copy September into October, then open Funds to check the totals)
-  // serves a stale RSC payload on the one page the copy just changed.
-  // Fifth instance of the same shape v0.23.0 fixed four of: the write is in
-  // this file, the stale read is in `loadGoals.ts`, and neither is wrong on
-  // its own — see `setCategoryKindAction` below, which carries the same note.
-  revalidatePath("/goals");
-  return result;
+  // Guarded: `copyPreviousMonth` has committed by here, and its caller renders
+  // the real `{copied, skipped, skippedArchived}` counts — reporting "Copy
+  // failed." for rows that exist is exactly the lie `guardRefresh` exists for.
+  const warning = guardRefresh("/budget", () => {
+    revalidatePath("/budget");
+    revalidatePath("/budget/[year]/[month]", "page");
+    // `copyPreviousMonth` has NO kind filter, so it copies FUND allocations too
+    // — and a fund's `budget_periods.allocated_cents` is exactly the SUM
+    // `loadGoals` reads for `totalContributedCents`. Without this, the natural
+    // move (copy September into October, then open Funds to check the totals)
+    // serves a stale RSC payload on the one page the copy just changed.
+    // Fifth instance of the same shape v0.23.0 fixed four of: the write is in
+    // this file, the stale read is in `loadGoals.ts`, and neither is wrong on
+    // its own — see `setCategoryKindAction` above, which carries the same note.
+    revalidatePath("/goals");
+  });
+  return { ...result, warning };
 }
 
 /* ── PR2b — category CRUD and archive (T25/T27/T29) ──────────────────────
@@ -329,13 +337,25 @@ export async function copyPreviousMonthAction(year: number, month: number): Prom
  * rename and archive a FUND from `/budget`, and `/goals` is the only
  * surface that can set that fund's target. Without this, a fund born on
  * `/budget` is invisible on the page you go to next. */
-function revalidateCategorySurfaces(): void {
-  revalidatePath("/budget");
-  revalidatePath("/budget/[year]/[month]", "page");
-  revalidatePath("/budget/categories");
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/goals");
+/*
+ * GUARDED HERE, ONCE — not at the six call sites. Every caller runs this
+ * strictly after its own write has committed, so the failure mode is identical
+ * in all six and there is nothing per-caller to decide; each folds the returned
+ * string into its own `{status:"ok", …, warning}`. The stakes are higher on
+ * this helper than anywhere else in the file: `_create-category.tsx` depends on
+ * the revalidated payload to make the new row appear at all (it polls the DOM
+ * for `[data-category-id]`), so a swallowed refresh failure there reads as "the
+ * category was never created."
+ */
+function revalidateCategorySurfaces(): string | undefined {
+  return guardRefresh("/budget", () => {
+    revalidatePath("/budget");
+    revalidatePath("/budget/[year]/[month]", "page");
+    revalidatePath("/budget/categories");
+    revalidatePath("/transactions");
+    revalidatePath("/categorize");
+    revalidatePath("/goals");
+  });
 }
 
 const categoryNameSchema = z
@@ -345,7 +365,7 @@ const categoryNameSchema = z
   .max(80, "Name must be 80 characters or fewer");
 
 export type CreateCategoryActionResult =
-  | { status: "ok"; category: CreatedCategory }
+  | { status: "ok"; category: CreatedCategory; warning?: string }
   | { status: "error"; message: string };
 
 export async function createCategoryGroupAction(name: string): Promise<CreateCategoryActionResult> {
@@ -355,8 +375,8 @@ export async function createCategoryGroupAction(name: string): Promise<CreateCat
   }
   try {
     const category = createCategoryGroup(db, parsed.data);
-    revalidateCategorySurfaces();
-    return { status: "ok", category };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", category, warning };
   } catch (err) {
     if (err instanceof CategoryNameTakenError) return { status: "error", message: err.message };
     throw err;
@@ -382,8 +402,8 @@ export async function createCategoryAction(params: {
   }
   try {
     const category = createCategory(db, parsed.data);
-    revalidateCategorySurfaces();
-    return { status: "ok", category };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", category, warning };
   } catch (err) {
     if (err instanceof CategoryNameTakenError || err instanceof CategoryNotFoundError) {
       return { status: "error", message: err.message };
@@ -393,7 +413,7 @@ export async function createCategoryAction(params: {
 }
 
 export type RenameCategoryActionResult =
-  | { status: "ok"; categoryId: number; name: string }
+  | { status: "ok"; categoryId: number; name: string; warning?: string }
   | { status: "error"; message: string };
 
 export async function renameCategoryAction(categoryId: number, name: string): Promise<RenameCategoryActionResult> {
@@ -403,8 +423,8 @@ export async function renameCategoryAction(categoryId: number, name: string): Pr
   }
   try {
     const renamed = renameCategory(db, categoryId, parsedName.data);
-    revalidateCategorySurfaces();
-    return { status: "ok", categoryId: renamed.id, name: renamed.name };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", categoryId: renamed.id, name: renamed.name, warning };
   } catch (err) {
     if (err instanceof CategoryNameTakenError || err instanceof CategoryNotFoundError) {
       return { status: "error", message: err.message };
@@ -414,7 +434,7 @@ export async function renameCategoryAction(categoryId: number, name: string): Pr
 }
 
 export type SetCarryoverPolicyActionResult =
-  | { status: "ok"; categoryId: number; carryoverPolicy: "none" | "rollover" | "reset" }
+  | { status: "ok"; categoryId: number; carryoverPolicy: "none" | "rollover" | "reset"; warning?: string }
   | { status: "error"; message: string };
 
 const setCarryoverPolicyInputSchema = z.object({
@@ -442,8 +462,8 @@ export async function setCarryoverPolicyAction(
     // `revalidateCategorySurfaces` (not a hand-rolled 2-of-5 subset, which
     // this used to be): `/budget/categories` renders `carryoverPolicy`
     // directly and was left stale by the previous, narrower revalidate.
-    revalidateCategorySurfaces();
-    return { status: "ok", ...result };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", ...result, warning };
   } catch (err) {
     if (err instanceof CategoryNotFoundError) return { status: "error", message: err.message };
     throw err;
@@ -451,14 +471,14 @@ export async function setCarryoverPolicyAction(
 }
 
 export type ArchiveCategoryActionResult =
-  | { status: "ok"; categoryId: number; categoryName: string }
+  | { status: "ok"; categoryId: number; categoryName: string; warning?: string }
   | { status: "error"; message: string };
 
 export async function archiveCategoryAction(categoryId: number): Promise<ArchiveCategoryActionResult> {
   try {
     const result = archiveCategory(db, categoryId);
-    revalidateCategorySurfaces();
-    return { status: "ok", categoryId: result.categoryId, categoryName: result.categoryName };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", categoryId: result.categoryId, categoryName: result.categoryName, warning };
   } catch (err) {
     if (
       err instanceof CategoryNotFoundError ||
@@ -475,8 +495,8 @@ export async function archiveCategoryAction(categoryId: number): Promise<Archive
 export async function unarchiveCategoryAction(categoryId: number): Promise<ArchiveCategoryActionResult> {
   try {
     const result = unarchiveCategory(db, categoryId);
-    revalidateCategorySurfaces();
-    return { status: "ok", categoryId: result.categoryId, categoryName: result.categoryName };
+    const warning = revalidateCategorySurfaces();
+    return { status: "ok", categoryId: result.categoryId, categoryName: result.categoryName, warning };
   } catch (err) {
     if (err instanceof CategoryNotFoundError) return { status: "error", message: err.message };
     throw err;
@@ -484,7 +504,7 @@ export async function unarchiveCategoryAction(categoryId: number): Promise<Archi
 }
 
 export type MoveCategoryActionResult =
-  | { status: "ok"; result: MoveCategoryResult }
+  | { status: "ok"; result: MoveCategoryResult; warning?: string }
   | { status: "error"; message: string };
 
 const moveCategoryInputSchema = z.object({
@@ -504,10 +524,18 @@ export async function moveCategoryAction(categoryId: number, direction: MoveDire
   }
   try {
     const result = moveCategory(db, parsed.data.categoryId, parsed.data.direction);
-    revalidatePath("/budget");
-    revalidatePath("/budget/[year]/[month]", "page");
-    revalidatePath("/budget/categories");
-    return { status: "ok", result };
+    // Its own narrower list rather than `revalidateCategorySurfaces` — a
+    // reorder changes neither the category SET nor any name, so
+    // `/transactions`, `/categorize` and `/goals` render identically after it.
+    // Guarded for the same reason all the others are: `moveCategory` has
+    // already committed, and the caller announces the new position to a live
+    // region on the strength of this result.
+    const warning = guardRefresh("/budget", () => {
+      revalidatePath("/budget");
+      revalidatePath("/budget/[year]/[month]", "page");
+      revalidatePath("/budget/categories");
+    });
+    return { status: "ok", result, warning };
   } catch (err) {
     if (err instanceof CategoryNotFoundError) return { status: "error", message: err.message };
     throw err;

@@ -2,10 +2,10 @@ import { connection } from "next/server";
 import { loadSubscriptions } from "@/lib/subscriptions/loadSubscriptions";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
-import { dismissSubscriptionAction, restoreSubscriptionAction } from "./actions";
 import {
   CategorizeAllSubscriptionsButton,
   CategorizeSubscriptionButton,
+  DismissSubscriptionButton,
 } from "./_categorize-buttons";
 import type { DetectedSubscription } from "@/lib/subscriptions/detectSubscriptions";
 
@@ -40,7 +40,7 @@ export default async function SubscriptionsPage() {
                     key={sub.normalizedMerchant}
                     sub={sub}
                     showCategorize
-                    dismissAction={dismissSubscriptionAction}
+                    dismissMode="dismiss"
                   />
                 ))}
               </div>
@@ -57,8 +57,7 @@ export default async function SubscriptionsPage() {
                   <SubscriptionRow
                     key={sub.normalizedMerchant}
                     sub={sub}
-                    dismissAction={restoreSubscriptionAction}
-                    dismissLabel="Restore"
+                    dismissMode="restore"
                   />
                 ))}
               </div>
@@ -73,13 +72,11 @@ export default async function SubscriptionsPage() {
 function SubscriptionRow({
   sub,
   showCategorize = false,
-  dismissAction,
-  dismissLabel = "Not a subscription",
+  dismissMode,
 }: {
   sub: DetectedSubscription;
   showCategorize?: boolean;
-  dismissAction: (formData: FormData) => Promise<void>;
-  dismissLabel?: string;
+  dismissMode: "dismiss" | "restore";
 }) {
   const today = todayIso();
   const daysUntil = Math.round(
@@ -123,15 +120,10 @@ function SubscriptionRow({
             normalizedMerchant={sub.normalizedMerchant}
           />
         )}
-        <form action={dismissAction}>
-          <input type="hidden" name="normalizedMerchant" value={sub.normalizedMerchant} />
-          <button
-            type="submit"
-            className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-          >
-            {dismissLabel}
-          </button>
-        </form>
+        <DismissSubscriptionButton
+          normalizedMerchant={sub.normalizedMerchant}
+          mode={dismissMode}
+        />
       </div>
     </div>
   );

@@ -146,49 +146,54 @@ export function RetargetForm({
          stack is hovered. Two toasts would force a choice between the
          refusal being readable and this Undo being reachable, and this Undo
          is the only way back for a move that just touched every row for a
-         merchant. */
+         merchant.
+
+         `result.warning` — a `revalidatePath` that threw AFTER the move
+         committed — is a second note about a write that SUCCEEDED, so it
+         merges into this same toast for the same reason. */
       const moved = `Moved ${result.updatedCount} row${
         result.updatedCount === 1 ? "" : "s"
       } from ${result.fromCategoryName} to ${result.categoryName}.`;
-      const notify =
-        result.ruleRefusal === null ? toast.success : toast.warning;
-      notify(
-        result.ruleRefusal === null
-          ? moved
-          : `${moved} ${result.ruleRefusal.message}`,
-        {
-          duration: 10_000,
-          action: {
-            label: "Undo",
-            onClick: async () => {
-              let undo: Awaited<ReturnType<typeof undoBulkRetargetAction>>;
-              try {
-                undo = await undoBulkRetargetAction(result.snapshot);
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : "Undo failed.");
-                return;
-              }
-              if (undo.status === "error") {
-                toast.error(undo.message);
-                return;
-              }
-              /* "Moved 0 rows back" is honest but unreadable on its own — it
-                 is the same sentence whether there was nothing to move or
-                 whether the user re-categorized all 49 inside the window.
-                 The snapshot knows which, so it says which. */
-              const scope =
-                undo.revertedCount === result.snapshot.txnIds.length
-                  ? ""
-                  : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
-              toast(
-                `Moved ${undo.revertedCount} row${
-                  undo.revertedCount === 1 ? "" : "s"
-                } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`,
-              );
-            },
+      const notes = [result.ruleRefusal?.message, result.warning].filter(
+        (n): n is string => n !== undefined && n !== null,
+      );
+      // A warning is not a success — the /sync doctrine. Either note demotes
+      // this from `toast.success`; the Undo rides on it either way.
+      const notify = notes.length === 0 ? toast.success : toast.warning;
+      notify([moved, ...notes].join(" "), {
+        duration: 10_000,
+        action: {
+          label: "Undo",
+          onClick: async () => {
+            let undo: Awaited<ReturnType<typeof undoBulkRetargetAction>>;
+            try {
+              undo = await undoBulkRetargetAction(result.snapshot);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Undo failed.");
+              return;
+            }
+            if (undo.status === "error") {
+              toast.error(undo.message);
+              return;
+            }
+            /* "Moved 0 rows back" is honest but unreadable on its own — it
+               is the same sentence whether there was nothing to move or
+               whether the user re-categorized all 49 inside the window.
+               The snapshot knows which, so it says which. */
+            const scope =
+              undo.revertedCount === result.snapshot.txnIds.length
+                ? ""
+                : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
+            const message = `Moved ${undo.revertedCount} row${
+              undo.revertedCount === 1 ? "" : "s"
+            } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`;
+            // The undo is a committed write too — it restores the rule the
+            // refusal removed — so its own failed refresh gets said.
+            if (undo.warning === undefined) toast(message);
+            else toast.warning(`${message} ${undo.warning}`);
           },
         },
-      );
+      });
     });
   };
 

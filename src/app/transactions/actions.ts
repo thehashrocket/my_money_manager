@@ -16,6 +16,40 @@ import {
 import { undoCategorizeTransaction } from "@/lib/categorize/undoCategorizeTransaction";
 import { validateCategorizeTransactionInput } from "@/lib/categorize/validateCategorizeTransactionInput";
 import { validateCategorizeTransactionSnapshot } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
+
+/**
+ * The ONE post-commit refresh for this route, guarded.
+ *
+ * All four actions here revalidate the same five paths after a write that has
+ * already committed, so the guard lives here once rather than at each call
+ * site. An unguarded `revalidatePath` throw was not a stale page: the
+ * `snapshot` is returned BELOW this call, so the throw discarded it, the
+ * client's `catch` rendered "Categorize failed." / "Move failed." for a write
+ * that landed, and the 10s Undo toast never appeared — for a write that may
+ * have DELETED a trained rule (rule 6), whose `priorRule` copy exists nowhere
+ * else. `bulkRetarget` is the worst case: it moves every row for a merchant.
+ *
+ * Returns the warning rather than `void`; a caller that drops it makes a
+ * failed refresh silent again. See `@/lib/revalidateAfterWrite`.
+ *
+ * `/goals` and `/` join the older three because every action in this file
+ * moves rows BETWEEN categories. A fund's rows are `loadGoals`' withdrawn
+ * term, and any expense→expense move redraws the dashboard's 6-month trend
+ * chart — `bulkRetarget` most of all, since it is the one bulk path here and
+ * applies no check to the SOURCE category at all ("a fund holding rows is a
+ * state this action should help drain"). Leaving either stale is the same
+ * freshness bug the editable FUNDS band hit from the other side.
+ */
+function revalidateAfterWrite(): string | undefined {
+  return guardRefresh("/transactions", () => {
+    revalidatePath("/transactions");
+    revalidatePath("/categorize");
+    revalidatePath("/budget", "layout");
+    revalidatePath("/goals");
+    revalidatePath("/");
+  });
+}
 
 /**
  * Flip a single transaction onto a category. Optional "Remember for all
@@ -56,22 +90,14 @@ export async function categorizeTransactionAction(formData: FormData) {
     insertedRuleId: result.insertedRuleId,
   };
 
-  /* `/goals` and `/` join the older three because every action in this
-     file moves rows BETWEEN categories. A fund's rows are `loadGoals`'
-     withdrawn term, and any expense→expense move redraws the dashboard's
-     6-month trend chart — `bulkRetarget` most of all, since it is the one
-     bulk path here and applies no check to the SOURCE category at all
-     ("a fund holding rows is a state this action should help drain").
-     Leaving either stale is the same freshness bug the editable FUNDS
-     band hit from the other side. */
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/budget", "layout");
-  revalidatePath("/goals");
-  revalidatePath("/");
+  const warning = revalidateAfterWrite();
 
   return {
     snapshot,
+    // A failed refresh NEVER turns this committed write into a failure — it
+    // rides out beside the snapshot so the row can merge it into the one
+    // toast that also carries the Undo.
+    warning,
     updatedCount: result.updatedCount,
     categoryName: result.categoryName,
     // Deliberately outside `snapshot`: the refusal is a REASON, not state to
@@ -103,18 +129,36 @@ export async function undoCategorizeTransactionAction(
   }
 
   const result = undoCategorizeTransaction(db, parsed.data);
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/budget", "layout");
-  revalidatePath("/goals");
-  revalidatePath("/");
-  return result;
+  // The undo is itself a committed write — it puts a removed rule back
+  // (`restorePriorRule`) — so its refresh gets the same treatment.
+  return { ...result, warning: revalidateAfterWrite() };
 }
 
-export type {
-  BulkRetargetRunResult as BulkRetargetActionResult,
-  UndoBulkRetargetRunResult as UndoBulkRetargetActionResult,
-} from "@/lib/categorize/runBulkRetarget";
+/**
+ * The two retarget results, widened with the refresh warning.
+ *
+ * The `warning` is added HERE rather than in `runBulkRetarget`, because it is
+ * a fact about the Next.js shell (`revalidatePath`) and that module exists
+ * precisely to be the half a `:memory:` test can drive without one. It hangs
+ * off the `ok` arm only: an `error` result is returned BEFORE any refresh
+ * runs, because revalidating there would re-render the form out from under the
+ * only rendering of the refusal (the `/sync` doctrine, four instances of which
+ * were got wrong).
+ *
+ * `export type` and not a value: this is a `"use server"` module, where a
+ * runtime export that is not an async function makes Turbopack report "the
+ * module has no exports at all" and blanks the whole route — invisible to
+ * `tsc` and to vitest. Types are erased, so they are safe.
+ */
+export type BulkRetargetActionResult =
+  | (Extract<BulkRetargetRunResult, { status: "ok" }> & { warning?: string })
+  | Extract<BulkRetargetRunResult, { status: "error" }>;
+
+export type UndoBulkRetargetActionResult =
+  | (Extract<UndoBulkRetargetRunResult, { status: "ok" }> & {
+      warning?: string;
+    })
+  | Extract<UndoBulkRetargetRunResult, { status: "error" }>;
 
 /**
  * Move every non-transfer row for one merchant off the category it is filed
@@ -135,16 +179,13 @@ export type {
  */
 export async function bulkRetargetAction(
   formData: FormData,
-): Promise<BulkRetargetRunResult> {
+): Promise<BulkRetargetActionResult> {
   const result = runBulkRetarget(db, Object.fromEntries(formData));
+  // Returned BEFORE the refresh: nothing was written, and revalidating would
+  // re-render the form holding the only rendering of this refusal.
   if (result.status === "error") return result;
 
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/budget", "layout");
-  revalidatePath("/goals");
-  revalidatePath("/");
-  return result;
+  return { ...result, warning: revalidateAfterWrite() };
 }
 
 /**
@@ -153,14 +194,9 @@ export async function bulkRetargetAction(
  */
 export async function undoBulkRetargetAction(
   snapshot: unknown,
-): Promise<UndoBulkRetargetRunResult> {
+): Promise<UndoBulkRetargetActionResult> {
   const result = runUndoBulkRetarget(db, snapshot);
   if (result.status === "error") return result;
 
-  revalidatePath("/transactions");
-  revalidatePath("/categorize");
-  revalidatePath("/budget", "layout");
-  revalidatePath("/goals");
-  revalidatePath("/");
-  return result;
+  return { ...result, warning: revalidateAfterWrite() };
 }

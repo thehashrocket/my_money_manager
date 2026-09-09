@@ -145,49 +145,53 @@ export function TransactionRowForm({
 
            This row cannot disable its checkbox up front the way `/categorize`
            does, because the list carries no per-key filing history to check
-           against, so the toast is the only channel there is. */
+           against, so the toast is the only channel there is.
+
+           `result.warning` — a `revalidatePath` that threw AFTER the write
+           committed — is a second note about a write that SUCCEEDED, so it
+           merges into this same toast rather than stacking behind it. */
         const filed = `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
-        const notify =
-          result.ruleRefusal === null ? toast.success : toast.warning;
-        notify(
-          result.ruleRefusal === null
-            ? filed
-            : `${filed} ${result.ruleRefusal.message}`,
-          {
-            duration: 10_000,
-            action: {
-              label: "Undo",
-              onClick: async () => {
-                try {
-                  const undo = await undoCategorizeTransactionAction(
-                    result.snapshot,
-                  );
-                  const reverted =
-                    (undo.targetReverted ? 1 : 0) +
-                    undo.revertedApplyToPastCount;
-                  setCurrentCategoryId(priorCategoryId);
-                  setCurrentCategoryName(
-                    priorCategoryId === null
-                      ? null
-                      : (leafCategories.find((c) => c.id === priorCategoryId)
-                          ?.name ?? null),
-                  );
-                  setPickerValue(
-                    priorCategoryId !== null ? String(priorCategoryId) : "",
-                  );
-                  onUndone(priorCategoryId, reverted);
-                  toast(
-                    `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                  );
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Undo failed.",
-                  );
-                }
-              },
+        const notes = [result.ruleRefusal?.message, result.warning].filter(
+          (n): n is string => n !== undefined && n !== null,
+        );
+        // A warning is not a success — the /sync doctrine. Either note demotes
+        // this from `toast.success`; the Undo rides on it either way.
+        const notify = notes.length === 0 ? toast.success : toast.warning;
+        notify([filed, ...notes].join(" "), {
+          duration: 10_000,
+          action: {
+            label: "Undo",
+            onClick: async () => {
+              try {
+                const undo = await undoCategorizeTransactionAction(
+                  result.snapshot,
+                );
+                const reverted =
+                  (undo.targetReverted ? 1 : 0) + undo.revertedApplyToPastCount;
+                setCurrentCategoryId(priorCategoryId);
+                setCurrentCategoryName(
+                  priorCategoryId === null
+                    ? null
+                    : (leafCategories.find((c) => c.id === priorCategoryId)
+                        ?.name ?? null),
+                );
+                setPickerValue(
+                  priorCategoryId !== null ? String(priorCategoryId) : "",
+                );
+                onUndone(priorCategoryId, reverted);
+                const message = `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`;
+                // The undo is a committed write too — it restores the rule the
+                // refusal removed — so its own failed refresh gets said.
+                if (undo.warning === undefined) toast(message);
+                else toast.warning(`${message} ${undo.warning}`);
+              } catch (err) {
+                toast.error(
+                  err instanceof Error ? err.message : "Undo failed.",
+                );
+              }
             },
           },
-        );
+        });
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Categorize failed.");
       }

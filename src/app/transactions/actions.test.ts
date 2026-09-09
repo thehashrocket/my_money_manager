@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
@@ -11,11 +11,53 @@ import {
 } from "@/lib/categorize/runBulkRetarget";
 import { categorizeTransactionSnapshotSchema } from "@/lib/categorize/validateCategorizeTransactionSnapshot";
 import type { CategorizeTransactionSnapshot } from "@/lib/categorize/categorizeTransaction";
+import { REFRESH_FAILED_WARNING } from "@/lib/revalidateAfterWrite";
+
+/**
+ * The action module binds the `@/db` singleton, which opens `./data/money.db`.
+ * Redirecting that binding at a mutable holder — rather than mocking the
+ * library functions the actions call — is what lets the refresh suites below
+ * drive the REAL actions (input → write → snapshot → refresh) against the same
+ * `:memory:` database the rest of this file uses. Mirroring an action by hand
+ * is the exact shape that let `{ allowRuleRemoval: true }` be deleted with
+ * 1,755 tests still green (see the `bulkRetargetAction` suite below), so it is
+ * not repeated for the one line those suites are about.
+ *
+ * The proxy mirrors `@/db`'s own: a plain `db: dbHolder.current` would capture
+ * `undefined` at factory time, since the handle is created per-test.
+ */
+const dbHolder = vi.hoisted(() => ({ current: null as unknown }));
+
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+
+vi.mock("@/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/db")>()),
+  db: new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        const target = dbHolder.current as Record<string | symbol, unknown>;
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    },
+  ),
+}));
+
+const { revalidatePath } = await import("next/cache");
+const {
+  bulkRetargetAction,
+  categorizeTransactionAction,
+  undoBulkRetargetAction,
+  undoCategorizeTransactionAction,
+} = await import("./actions");
 
 /**
  * Mirrors `categorizeTransactionAction` + `undoCategorizeTransactionAction`
- * minus the Next.js shell (`revalidatePath` closes over the singleton DB
- * and can't run under `:memory:`). Exercises the exact pipeline:
+ * minus the Next.js shell. (`revalidatePath` is mocked for the refresh suite
+ * at the bottom of this file, which drives the real actions; these earlier
+ * suites predate it and compose the pipeline themselves.) Exercises the exact
+ * pipeline:
  *
  *   FormData → validate → categorizeTransaction(db) → snapshot
  *   snapshot → undoCategorizeTransaction(db)
@@ -25,6 +67,8 @@ let handle: TestDbHandle;
 
 beforeEach(() => {
   handle = createTestDb();
+  dbHolder.current = handle.db;
+  vi.mocked(revalidatePath).mockReset();
 });
 
 afterEach(() => {
@@ -617,5 +661,219 @@ describe("bulkRetargetAction — refusals are returned, not thrown", () => {
         .where(eq(schema.categoryRules.matchValue, "COSTCO"))
         .get()?.categoryId,
     ).toBe(other.id);
+  });
+});
+
+/**
+ * A COMMITTED write whose refresh then fails is still a COMMITTED write — and
+ * on these two actions that is not a cosmetic distinction.
+ *
+ * `revalidatePath` throws in this Next build, and its five calls sat AFTER the
+ * write had committed but BEFORE the action returned its snapshot. A throw
+ * therefore left the write in place and threw the snapshot away: the client's
+ * `catch` rendered "Categorize failed." / "Move failed." for rows that had
+ * moved, and the 10s Undo toast never appeared. Per rule 6 that same write can
+ * have DELETED the merchant's trained rule, whose only surviving copy is
+ * `snapshot.priorRule` — and with no rules-management surface anywhere, that
+ * loss is permanent. `bulkRetarget` is the worst case, because it moves every
+ * row for the merchant in one go.
+ *
+ * The mock has to THROW or there is nothing being tested: with a bare
+ * `vi.fn()` every assertion here passes against the unguarded code too.
+ */
+describe("a failed refresh never costs /transactions its undo snapshot", () => {
+  function throwOnRefresh() {
+    vi.mocked(revalidatePath).mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+  }
+
+  function form(entries: Record<string, string>) {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(entries)) fd.set(k, v);
+    return fd;
+  }
+
+  it("categorizeTransactionAction returns the snapshot and a warning", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({ accountId: a.id, batchId: b.id });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    throwOnRefresh();
+
+    const result = await categorizeTransactionAction(
+      form({
+        transactionId: String(txn.id),
+        categoryId: String(groceries.id),
+        rememberMerchant: "true",
+      }),
+    );
+    logged.mockRestore();
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.snapshot.targetTxnId).toBe(txn.id);
+    expect(result.snapshot.ruleTouched).toBe(true);
+    expect(result.warning).toBe(REFRESH_FAILED_WARNING);
+    // The write really landed, which is what makes losing the snapshot the
+    // destructive outcome rather than a harmless one.
+    expect(
+      handle.db
+        .select({ categoryId: schema.transactions.categoryId })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, txn.id))
+        .get()?.categoryId,
+    ).toBe(groceries.id);
+  });
+
+  it("categorizeTransactionAction logs the refresh failure rather than swallowing it", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({ accountId: a.id, batchId: b.id });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    throwOnRefresh();
+
+    await categorizeTransactionAction(
+      form({ transactionId: String(txn.id), categoryId: String(groceries.id) }),
+    );
+
+    expect(logged).toHaveBeenCalledWith(
+      "[/transactions] revalidation failed after a committed write",
+      expect.any(Error),
+    );
+    logged.mockRestore();
+  });
+
+  it("reports no warning, and revalidates all five paths, when the refresh works", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({ accountId: a.id, batchId: b.id });
+
+    const result = await categorizeTransactionAction(
+      form({ transactionId: String(txn.id), categoryId: String(groceries.id) }),
+    );
+
+    expect(result.warning).toBeUndefined();
+    for (const path of ["/transactions", "/categorize", "/goals", "/"]) {
+      expect(revalidatePath).toHaveBeenCalledWith(path);
+    }
+    expect(revalidatePath).toHaveBeenCalledWith("/budget", "layout");
+  });
+
+  it("undoCategorizeTransactionAction carries the warning out of the UNDO too", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({ accountId: a.id, batchId: b.id });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const filed = await categorizeTransactionAction(
+      form({ transactionId: String(txn.id), categoryId: String(groceries.id) }),
+    );
+    throwOnRefresh();
+    const undo = await undoCategorizeTransactionAction(filed.snapshot);
+    logged.mockRestore();
+
+    expect(undo.targetReverted).toBe(true);
+    expect(undo.warning).toBe(REFRESH_FAILED_WARNING);
+  });
+
+  it("bulkRetargetAction stays `ok` — snapshot, counts and names intact", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "COSTCO",
+      categoryId: gas.id,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    throwOnRefresh();
+
+    const result = await bulkRetargetAction(
+      form({
+        normalizedMerchant: "COSTCO",
+        fromCategoryId: String(gas.id),
+        categoryId: String(groceries.id),
+        rememberMerchant: "true",
+      }),
+    );
+    logged.mockRestore();
+
+    // NOT `{ status: "error" }` — that arm is for refusals thrown BEFORE the
+    // UPDATE, and reporting one here would deny a move that happened.
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.updatedCount).toBe(1);
+    expect(result.snapshot.txnIds).toEqual([txn.id]);
+    expect(result.snapshot.fromCategoryId).toBe(gas.id);
+    expect(result.warning).toBe(REFRESH_FAILED_WARNING);
+  });
+
+  it("undoBulkRetargetAction stays `ok` and carries the warning", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    const txn = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "COSTCO",
+      categoryId: gas.id,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const moved = await bulkRetargetAction(
+      form({
+        normalizedMerchant: "COSTCO",
+        fromCategoryId: String(gas.id),
+        categoryId: String(groceries.id),
+      }),
+    );
+    expect(moved.status).toBe("ok");
+    if (moved.status !== "ok") return;
+
+    throwOnRefresh();
+    // Through the JSON boundary the browser imposes on a stashed snapshot.
+    const undo = await undoBulkRetargetAction(
+      JSON.parse(JSON.stringify(moved.snapshot)),
+    );
+    logged.mockRestore();
+
+    expect(undo.status).toBe("ok");
+    if (undo.status !== "ok") return;
+    expect(undo.revertedCount).toBe(1);
+    expect(undo.warning).toBe(REFRESH_FAILED_WARNING);
+    expect(
+      handle.db
+        .select({ categoryId: schema.transactions.categoryId })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, txn.id))
+        .get()?.categoryId,
+    ).toBe(gas.id);
+  });
+
+  it("a REFUSAL is still returned before any refresh, and carries no warning", async () => {
+    // `runBulkRetarget` rejects this before the UPDATE, so nothing committed —
+    // revalidating there would re-render the form out from under the only
+    // rendering of the refusal (the /sync doctrine, four instances of which
+    // were got wrong).
+    const gas = seedCategory("Gas");
+    throwOnRefresh();
+
+    const result = await bulkRetargetAction(
+      form({
+        normalizedMerchant: "COSTCO",
+        fromCategoryId: String(gas.id),
+        categoryId: String(gas.id),
+      }),
+    );
+
+    expect(result.status).toBe("error");
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 });

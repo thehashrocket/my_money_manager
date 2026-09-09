@@ -21,6 +21,7 @@ import {
 } from "@/lib/import/accountAnchorFields";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
 import { refreshLiabilityBalancesOnly } from "@/lib/simplefin/sync";
 
 /**
@@ -54,11 +55,54 @@ function toMessage(err: unknown): string {
  * `/sync`'s revalidateAll, and deliberately NOT `revalidatePath("/", "layout")`
  * — that unmounts the client components holding `useActionState` and would
  * strand a row's button on "Saving…" forever.
+ *
+ * RETURNS A WARNING, AND CANNOT THROW. That is the load-bearing part, and it
+ * is what makes T28/E20's promise at the top of this file true rather than
+ * merely stated. Every action here wraps its WHOLE body — this call included —
+ * in one `try` whose `catch` returns `fail(...)`. `revalidatePath` throws, so
+ * an unguarded call inside that `try` converts an ALREADY-COMMITTED write into
+ * `{status:"error"}`: the contract this file exists to keep, broken by the
+ * refresh that follows the write it is keeping the contract about.
+ *
+ * The concrete harm is rule 9's, and it is not a stale page:
+ *
+ *   reconcile $1,200 ─▶ UPDATE commits, prior := 1200 ─▶ revalidate throws
+ *        ▶ inline form says "failed"
+ *        ▶ user resubmits, believing nothing saved
+ *        ▶ second UPDATE reads the row the FIRST one wrote
+ *        ▶ prior := 500 — the value from the "failed" attempt
+ *        ▶ the true prior anchor no longer exists anywhere
+ *
+ * `prior_starting_balance_*` is ONE slot (rule 9), so that is the whole undo,
+ * spent on a figure that was never current. CLAUDE.md documents exactly this
+ * harm for the feed's balance pass; this is the same harm on the hand path,
+ * reached through the refresh rather than through a race.
+ *
+ * Because `guardRefresh` cannot throw, the enclosing `try/catch` in every
+ * caller is now unreachable from this call, and each caller folds the returned
+ * warning into its `ok` outcome instead. A caller that DISCARDS the return
+ * makes a failed refresh silent again.
  */
-function revalidateBalanceSurfaces(): void {
-  for (const p of ["/accounts", "/", "/import", "/sync", "/transactions", "/categorize", "/budget"]) {
-    revalidatePath(p);
-  }
+function revalidateBalanceSurfaces(): string | undefined {
+  return guardRefresh("/accounts", () => {
+    for (const p of ["/accounts", "/", "/import", "/sync", "/transactions", "/categorize", "/budget"]) {
+      revalidatePath(p);
+    }
+  });
+}
+
+/**
+ * The card-activity variant: the balance surfaces plus the month view, because
+ * a charge changes an envelope's spend. One guarded pass rather than two, so a
+ * failure in either half produces one warning.
+ */
+function revalidateCardActivitySurfaces(): string | undefined {
+  return guardRefresh("/accounts", () => {
+    for (const p of ["/accounts", "/", "/import", "/sync", "/transactions", "/categorize", "/budget"]) {
+      revalidatePath(p);
+    }
+    revalidatePath("/budget/[year]/[month]", "page");
+  });
 }
 
 /**
@@ -170,8 +214,8 @@ export async function updateLiabilityBalanceAction(
       .where(eq(schema.accounts.id, accountId))
       .run();
 
-    revalidateBalanceSurfaces();
-    return { status: "ok", message: `${account.name} is now ${formatCents(cents)}.` };
+    const warning = revalidateBalanceSurfaces();
+    return { status: "ok", message: `${account.name} is now ${formatCents(cents)}.`, warning };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -236,13 +280,14 @@ export async function revertLiabilityBalanceAction(
       .where(eq(schema.accounts.id, accountId))
       .run();
 
-    revalidateBalanceSurfaces();
+    const warning = revalidateBalanceSurfaces();
     // Names the restored ANCHOR date, not a dollar figure: what is stored is
     // the anchor, what the row shows is the derived balance, and they differ
     // whenever activity was entered between the two reconciles.
     return {
       status: "ok",
       message: `${account.name} is back to where it was on ${account.priorStartingBalanceDate}.`,
+      warning,
     };
   } catch (err) {
     return fail(toMessage(err));
@@ -321,8 +366,8 @@ export async function updateCardTermsAction(
 
     db.update(schema.accounts).set(patch).where(eq(schema.accounts.id, accountId)).run();
 
-    revalidateBalanceSurfaces();
-    return { status: "ok", message: `Updated ${account.name}'s card details.` };
+    const warning = revalidateBalanceSurfaces();
+    return { status: "ok", message: `Updated ${account.name}'s card details.`, warning };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -383,7 +428,11 @@ export async function refreshLiabilityBalanceAction(
     // so refreshing the mortgage could render a warning about the Visa in red
     // under the mortgage's own button.
     const outcome = await refreshLiabilityBalancesOnly({ accountId }, db);
-    revalidateBalanceSurfaces();
+    // Held rather than folded immediately: the branches below can still refuse
+    // (`no-linked-accounts`, or a warning-only outcome), and a refresh warning
+    // belongs only on the branches that report a WRITE. Attaching it to a
+    // refusal would claim something was saved.
+    const refreshWarning = revalidateBalanceSurfaces();
 
     if (outcome.status === "no-linked-accounts") {
       return fail("No accounts are linked to SimpleFIN yet.");
@@ -399,6 +448,7 @@ export async function refreshLiabilityBalanceAction(
       return {
         status: "ok",
         message: `${account.name} is now ${formatCents(update.balanceCents)}.${note}`,
+        warning: refreshWarning,
       };
     }
 
@@ -412,7 +462,11 @@ export async function refreshLiabilityBalanceAction(
     if (outcome.warnings.length > 0) {
       return fail(outcome.warnings.join(" "));
     }
-    return { status: "ok", message: `${account.name} is unchanged — the bank reports the same balance.` };
+    return {
+      status: "ok",
+      message: `${account.name} is unchanged — the bank reports the same balance.`,
+      warning: refreshWarning,
+    };
   } catch (err) {
     return fail(toMessage(err));
   }
@@ -480,10 +534,10 @@ export async function addCardActivityAction(
       return { status: "error", message: result.message, reason: result.reason };
     }
 
-    revalidateBalanceSurfaces();
-    // A charge changes an envelope's spend, so the month view has to go too.
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    // A charge changes an envelope's spend, so the month view goes too — see
+    // `revalidateCardActivitySurfaces`, which folds both into one guarded pass.
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }
@@ -505,9 +559,8 @@ export async function markAsCardPaymentAction(
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }
-    revalidateBalanceSurfaces();
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }
@@ -530,9 +583,8 @@ export async function unmarkCardPaymentAction(
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }
-    revalidateBalanceSurfaces();
-    revalidatePath("/budget/[year]/[month]", "page");
-    return { status: "ok", message: result.message };
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
   } catch (err) {
     return { status: "error", message: toMessage(err) };
   }

@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { guardRefresh } from "@/lib/revalidateAfterWrite";
 import { eq } from "drizzle-orm";
 import type { ZodError } from "zod";
 import { db, schema } from "@/db";
@@ -86,8 +87,8 @@ export async function createAccountAction(
     })
     .run();
 
-  revalidatePath("/import");
-  return { status: "ok", message: `${name} added.` };
+  const warning = guardRefresh("/import", () => revalidatePath("/import"));
+  return { status: "ok", message: `${name} added.`, warning };
 }
 
 /**
@@ -146,9 +147,18 @@ export async function updateAccountAnchorAction(
     throw new Error(`Account ${accountId} not found`);
   }
 
-  for (const p of ["/import", "/sync", "/", "/transactions", "/categorize", "/budget"]) {
-    revalidatePath(p);
-  }
+  // Guarded, and the `redirect` deliberately OUTSIDE it — `redirect` signals by
+  // throwing, so a call inside `run` would be swallowed into a warning string
+  // and the navigation silently dropped. This action is `Promise<void>` (a
+  // `<form action>`), so there is no state channel for the warning and
+  // `guardRefresh`'s `console.error` is the only record. Accepted: landing on a
+  // possibly-stale `/import` beats `import/error.tsx`, which tells the reader
+  // "Nothing was imported" about an anchor move that already committed.
+  guardRefresh("/import", () => {
+    for (const p of ["/import", "/sync", "/", "/transactions", "/categorize", "/budget"]) {
+      revalidatePath(p);
+    }
+  });
   redirect("/import");
 }
 
@@ -197,7 +207,23 @@ export async function confirmImportAction(formData: FormData): Promise<void> {
   }
 
   deletePendingImport(id);
-  revalidatePath("/import");
+  // THE WORST INSTANCE OF THE CLASS, and the reason this guard exists at all.
+  //
+  // `commitImport` above has already written the batch, every imported row, the
+  // snapshot, and any anchor-move or snapshot-degraded warning meant for the
+  // success page. An unguarded throw here never reaches the redirect, so a
+  // several-hundred-row CSV import renders `import/error.tsx` — whose copy
+  // reads "Nothing was imported. Every import snapshots the database before it
+  // writes, and commits happen in a single transaction." Every word of that is
+  // false once this line is reached, and the pending import is already deleted,
+  // so the user's only signal is a screen telling them to try again.
+  //
+  // No state channel here either (`Promise<void>` + redirect), so the warning
+  // is `console.error` only. That is the accepted cost: the batch id survives
+  // in the redirect, and `/import/success/[batchId]` is where the real record
+  // lives — persisted on `import_batches.snapshot_warning`, per rule 5, for
+  // exactly this reason.
+  guardRefresh("/import", () => revalidatePath("/import"));
   redirect(`/import/success/${result.batchId}`);
 }
 
@@ -228,10 +254,14 @@ export async function undoImportCategorizationAction(
   // rendering the undo as having taken effect (Codex structured review,
   // `/ship` 2026-09-03). `/sync` also shows this batch's revertible count
   // when it's the SimpleFIN-sourced one.
-  for (const p of ["/import", `/import/success/${batchId}`, "/sync", "/", "/transactions", "/categorize", "/budget"]) {
-    revalidatePath(p);
-  }
-  revalidatePath("/budget/[year]/[month]", "page");
+  guardRefresh("/import", () => {
+    for (const p of ["/import", `/import/success/${batchId}`, "/sync", "/", "/transactions", "/categorize", "/budget"]) {
+      revalidatePath(p);
+    }
+    revalidatePath("/budget/[year]/[month]", "page");
+  });
+  // Outside the guard: `redirect` throws to signal. See
+  // `updateAccountAnchorAction` for the full note.
   redirect(`/import/success/${batchId}`);
 }
 

@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils";
 import {
   categorizeAllSubscriptionsAction,
   categorizeSubscriptionAction,
+  dismissSubscriptionAction,
+  restoreSubscriptionAction,
 } from "./actions";
 
 /**
@@ -48,9 +50,17 @@ export function CategorizeSubscriptionButton({
           outcome.filedCount === 0
             ? `Nothing left to file for ${normalizedMerchant}.`
             : `Filed ${outcome.filedCount} ${normalizedMerchant} row${outcome.filedCount === 1 ? "" : "s"} as Subscriptions.`;
-        const notes = [outcome.refusal, outcome.retargetedRule].filter(
-          (n): n is string => n !== null,
-        );
+        /* `warning` rides in the SAME array as the refusal sentences, never a
+           second toast. Sonner's collapsed stack draws a non-newest toast's
+           children at `opacity: 0`, so stacking would make one of the two
+           unreadable until hover (rule 6) — and here the unreadable one could
+           be "a hand-trained rule was repointed", which this page cannot
+           undo. */
+        const notes = [
+          outcome.refusal,
+          outcome.retargetedRule,
+          outcome.warning,
+        ].filter((n): n is string => n !== null && n !== undefined);
         if (notes.length === 0) toast.success(filed);
         else
           toast.warning(`${filed} ${notes.join(" ")}`, { duration: 10_000 });
@@ -100,6 +110,7 @@ export function CategorizeAllSubscriptionsButton() {
           ...describeSome(outcome.refusals.map((r) => r.refusal), "had no rule saved"),
           ...describeSome(outcome.retargets.map((r) => r.retargetedRule), "had an existing rule repointed"),
         ];
+        if (outcome.warning !== undefined) notes.push(outcome.warning);
         if (outcome.failures.length > 0) {
           notes.push(
             `Failed for ${nameList(outcome.failures.map((f) => f.normalizedMerchant))}: ${outcome.failures[0].message}`,
@@ -151,4 +162,61 @@ function nameList(names: readonly string[]): string {
   if (names.length <= MAX_NAMED) return names.join(", ");
   const shown = names.slice(0, MAX_NAMED).join(", ");
   return `${shown} and ${names.length - MAX_NAMED} more`;
+}
+
+/**
+ * "Not a subscription" / "Restore", as a client island rather than a plain
+ * `<form action={serverAction}>`.
+ *
+ * Both writes are idempotent, so there is nothing to report about the write
+ * itself — but they revalidate after committing, and an unguarded throw there
+ * used to render `/subscriptions/error.tsx`, whose copy denies that anything
+ * was written. Guarded, the failure becomes a warning, and a warning needs a
+ * channel: a dismissed row that is still on the list because the page could not
+ * refresh is indistinguishable from a dismiss that never took.
+ *
+ * `mode` rather than the action itself as a prop: a server component may pass a
+ * Server Action across the boundary, but this component picks its own so the
+ * two labels and the two actions cannot drift apart.
+ */
+export function DismissSubscriptionButton({
+  normalizedMerchant,
+  mode,
+}: {
+  normalizedMerchant: string;
+  mode: "dismiss" | "restore";
+}) {
+  const [isPending, startTransition] = useTransition();
+
+  const onClick = () => {
+    startTransition(async () => {
+      const formData = new FormData();
+      formData.set("normalizedMerchant", normalizedMerchant);
+      try {
+        const action =
+          mode === "dismiss" ? dismissSubscriptionAction : restoreSubscriptionAction;
+        const { warning } = await action(formData);
+        const done =
+          mode === "dismiss"
+            ? `Dismissed ${normalizedMerchant}.`
+            : `Restored ${normalizedMerchant}.`;
+        // One toast, same rule as above.
+        if (warning === undefined) toast.success(done);
+        else toast.warning(`${done} ${warning}`, { duration: 10_000 });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "That didn't save.");
+      }
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={isPending}
+      className={cn(BUTTON_CLASS, FOCUS_RING)}
+    >
+      {isPending ? "Saving…" : mode === "dismiss" ? "Not a subscription" : "Restore"}
+    </button>
+  );
 }
