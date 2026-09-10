@@ -2443,8 +2443,11 @@ describe("syncSimpleFin — D8.4 card completeness check", () => {
     expect(rows).toHaveLength(0);
 
     const warnings = "warnings" in outcome ? outcome.warnings : [];
-    // The race itself is reported (it is worth knowing about)...
-    expect(warnings.join(" ")).toContain("landed on or before an account's balance");
+    // The race itself is reported (it is worth knowing about), naming the
+    // account and the remedy...
+    expect(warnings.join(" ")).toContain('landed on or before its balance date while this sync was running');
+    expect(warnings.join(" ")).toContain('"Citi"');
+    expect(warnings.join(" ")).toContain('Undo" on /accounts');
     // ...but D8.4's completeness check must NOT also complain about the same
     // row, which would be reporting an intentional exclusion as a defect.
     expect(warnings.join(" ")).not.toContain("appear in the ledger");
@@ -2501,7 +2504,8 @@ describe("syncSimpleFin — D8.4 card completeness check", () => {
     expect(rows[0].externalId).toBe("CITI-SURVIVES");
 
     const warnings = "warnings" in outcome ? outcome.warnings : [];
-    expect(warnings.join(" ")).toContain("landed on or before an account's balance");
+    expect(warnings.join(" ")).toContain('landed on or before its balance date while this sync was running');
+    expect(warnings.join(" ")).toContain('"Citi"');
     expect(warnings.join(" ")).not.toContain("appear in the ledger");
     if (outcome.status === "synced") {
       const citiCounts = outcome.accounts.find((a) => a.accountId === card.id);
@@ -4057,5 +4061,70 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
     expect(rows).toHaveLength(1);
     expect(rows[0].accountId).toBe(account.id);
     expect(rows[0].simplefinSourceAccountId).toBe("ACT-1");
+  });
+
+  // A CARD going through the same relink race, now that D8.1's cutover and
+  // D8.4's completeness check both run over cards for the first time
+  // (card-transaction-import). Nothing above uses `type: "credit"` — this is
+  // the gap a `/pr-review-toolkit:review-pr` pass found: the
+  // `dropped.has(entry.account.id)` guard in `checkCardCompleteness`, and the
+  // rollback path's cutover recheck, were both new for cards and neither had
+  // a card fixture driving them through this race.
+  it("does not double-warn a card under the wrong cause when its link AND its anchor both move mid-fetch", async () => {
+    // Mutating BOTH `simplefinAccountId` and `startingBalanceDate` inside the
+    // same fetch is what actually exercises the bug: unlinking alone leaves
+    // the anchor untouched, so `recheckCutoverAnchor` would re-confirm the
+    // same rows are still after it and drop nothing — the double-warning only
+    // fires when a concurrent Reconcile ALSO moves the anchor past the
+    // staged row's date in the same window.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-1",
+      name: "Citi",
+      type: "credit",
+      startingBalanceDate: "2026-01-01",
+    });
+    fetchAccountsMock.mockImplementation(async () => {
+      handle.db
+        .update(schema.accounts)
+        .set({ simplefinAccountId: null, startingBalanceDate: "2026-09-02" })
+        .where(eq(schema.accounts.id, card.id))
+        .run();
+      return {
+        accounts: [
+          {
+            id: "ACT-1",
+            name: "CITI",
+            balance: "0.00",
+            "available-balance": "0.00",
+            "balance-date": SEP_1_NOON,
+            // Dated 2026-09-01 — after the OLD anchor (2026-01-01), staged
+            // normally, but on-or-before the NEW anchor (2026-09-02) by the
+            // time the rollback path re-reads it.
+            transactions: [feedTxn("TRN-a", "-80.00")],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(handle.db.select().from(schema.transactions).all()).toEqual([]);
+
+    // The correct, single explanation.
+    expect(outcome.warnings.some((w) => w.includes("unlinked") && w.includes("Citi"))).toBe(true);
+
+    // NOT a second warning attributing the same drop to the cutover — that
+    // account was already excluded by the link check, so re-running the
+    // cutover recheck over its unfiltered rows must not fire at all.
+    expect(outcome.warnings.some((w) => w.includes("balance date"))).toBe(false);
+
+    // NOT a spurious D8.4 "don't appear in the ledger" warning either — the
+    // row was correctly, intentionally dropped by the link race, not missing.
+    expect(outcome.warnings.some((w) => w.includes("appear in the ledger"))).toBe(false);
+
+    // Exactly one warning for this account, not two.
+    expect(outcome.warnings.filter((w) => w.includes("Citi"))).toHaveLength(1);
   });
 });

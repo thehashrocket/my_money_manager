@@ -297,7 +297,7 @@ export function createCardActivity(
     // (PR2's T7) will fold the `_account-row.tsx` caller into one component,
     // but the shared COMPARISON this comment is about predates that
     // extraction and does not wait on it.
-    if (!isAfterAnchor(input.date, account.startingBalanceDate)) {
+    if (!isAfterAnchor({ date: input.date, anchor: account.startingBalanceDate })) {
       return refused(
         "before-anchor",
         // DS61 #12. States the consequence and names no schema concept.

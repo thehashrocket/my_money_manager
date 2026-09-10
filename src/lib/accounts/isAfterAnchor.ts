@@ -35,7 +35,16 @@
  * before the cutover would produce it identically, and in bulk — plus, under
  * D8.1, on top of a Phase-A-filed payment for the same dollars in the same
  * month.
+ *
+ * NAMED PARAMETERS, deliberately, even though both are `YYYY-MM-DD` strings
+ * and a positional pair would read the same at every call site today. That
+ * sameness is exactly the risk: this function's whole reason to exist is a
+ * prior incident where the comparison itself drifted (`<=` to `<`) with no
+ * test catching it, and two same-typed positional strings hand a future call
+ * site the identical failure mode one level up — `isAfterAnchor(anchor,
+ * date)` type-checks and silently inverts the answer. A property-name typo
+ * is a loud failure; a transposed positional argument is not.
  */
-export function isAfterAnchor(dateIso: string, anchorIso: string): boolean {
-  return dateIso > anchorIso;
+export function isAfterAnchor({ date, anchor }: { date: string; anchor: string }): boolean {
+  return date > anchor;
 }

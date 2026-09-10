@@ -68,7 +68,7 @@ export function AccountRow({
   // drifted once from the server's `<=` to a local `<` with no test catching
   // it (TODOS.md). Same shared module `createCardActivity`'s refusal and the
   // sync cutover now both go through.
-  const chargeableDateExists = isAfterAnchor(today, account.startingBalanceDate);
+  const chargeableDateExists = isAfterAnchor({ date: today, anchor: account.startingBalanceDate });
 
   const amountLabel = isLiability
     ? `owed ${formatCents(Math.abs(account.balanceCents))}`

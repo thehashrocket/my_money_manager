@@ -208,10 +208,12 @@ export function ReconcileForm({
         // case (reconcile right after a sync) to guard the unusual one.
         //
         // Amber, not muted gray: DESIGN.md's amber inventory names this exact
-        // role — a "consequence-of-this-action" notice, the same one
-        // `_charge-dialog.tsx`'s `endsFeedRefresh` box established (v0.27.0,
-        // "the token's first use as a consequence-of-this-action notice
-        // rather than a state"). A stale bank row silently becoming
+        // role — a "consequence-of-this-action" notice, the token's first
+        // use as of v0.27.0 ("the token's first use as a
+        // consequence-of-this-action notice rather than a state" —
+        // originally established by `_charge-dialog.tsx`'s `endsFeedRefresh`
+        // box, since removed once the card-transaction-import plan made it
+        // provably unreachable). A stale bank row silently becoming
         // permanently un-importable is comparable stakes to that box's
         // warning and should not read as routine help text beside it.
         <div className="w-full rounded-md border border-[color-mix(in_oklch,var(--accent-amber)_45%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_18%,var(--background))] px-3 py-2 text-sm text-ink-1">

@@ -122,13 +122,17 @@ export function CardControls({
           // DS56's handoff only exists where the destination does. On a
           // feed-refreshed card the row offers Refresh instead, so
           // "Reconcile instead →" would point at a form that is not on screen.
+          //
+          // Provably always `true` as of the card-transaction-import plan:
+          // `canAddCharge` (this block's own gate) requires
+          // `!importsTransactions(account)`, which for a non-long-term
+          // account is only ever true when it is UNLINKED — and
+          // `resolveBalanceAction` always answers `"reconcile"` for an
+          // unlinked account. `showReconcile` can therefore never be
+          // `false` here; kept as a real prop rather than hardcoded so a
+          // future change to either predicate that reopens the `"refresh"`
+          // case is caught by the type, not silently wrong again.
           canReconcile={showReconcile}
-          // `!showReconcile` is exactly `resolveBalanceAction === "refresh"`,
-          // which is exactly "feed-linked and holding no rows" — the state the
-          // first charge ENDS. Passed so the dialog can say so before the
-          // click rather than leaving the user to notice the Refresh button
-          // has gone.
-          endsFeedRefresh={!showReconcile}
           onReconcileInstead={() => setHandoff((n) => n + 1)}
         />
       ) : null}

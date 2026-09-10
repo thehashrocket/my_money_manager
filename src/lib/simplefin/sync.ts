@@ -936,7 +936,7 @@ export async function syncSimpleFin(
       // the budget is a multiset count of rows this account already holds, and
       // letting a row we are refusing to write consume one would silently
       // drop a LATER, in-window row that is a genuine second occurrence.
-      if (cutoverAnchor !== null && !isAfterAnchor(row.date, cutoverAnchor)) {
+      if (cutoverAnchor !== null && !isAfterAnchor({ date: row.date, anchor: cutoverAnchor })) {
         skippedBeforeAnchor++;
         continue;
       }
@@ -1039,7 +1039,7 @@ export async function syncSimpleFin(
     // legitimately 0), and it is precisely the case this function exists to
     // cover. No account was ever dropped on this path — nothing was written,
     // so `verifyStagedLinks` never ran — hence the empty set.
-    warnings.push(...checkCardCompleteness(staged, new Set(), db));
+    warnings.push(...safeCheckCardCompleteness(staged, new Set(), db));
     return {
       status: "up-to-date",
       accounts: finalised.summaries,
@@ -1131,9 +1131,9 @@ export async function syncSimpleFin(
     const {
       checked: cutoverChecked,
       droppedByAccountId: cutoverDroppedByAccountId,
-      warning: cutoverWarning,
+      warnings: cutoverWarnings,
     } = recheckCutoverAnchor(verified, tx);
-    if (cutoverWarning) linkWarnings.push(cutoverWarning);
+    linkWarnings.push(...cutoverWarnings);
 
     const verifiedTotal = cutoverChecked.reduce((n, s) => n + s.rows.length, 0);
 
@@ -1266,24 +1266,31 @@ export async function syncSimpleFin(
     );
     for (const w of linkWarnings) console.error(`sync: ${w}`);
     warnings.push(...linkWarnings);
+    const dropped = new Set(linkDropped);
 
     // D8.1 — the SAME re-check the write path runs, against the live handle
     // this time. `NothingVerifiedError` means every staged account's rows
-    // were already dropped by the LINK check above, by construction — but a
-    // DUPLICATE-by-external-id row (already stored from an earlier sync)
-    // never entered `entry.rows` at all, so it is untouched by either drop
-    // and D8.4 below still needs an accurate `expectedCardExternalIds` to
-    // check it against. `staged` here is the original pre-transaction array
-    // (nothing mutates it in place), which is exactly what this needs.
-    const { droppedByAccountId: cutoverDropped, warning: cutoverWarning } =
-      recheckCutoverAnchor(staged, db);
-    if (cutoverWarning) {
-      console.error(`sync: ${cutoverWarning}`);
-      warnings.push(cutoverWarning);
-    }
-    const dropped = new Set(linkDropped);
+    // were withheld somewhere — the link check above is ONE way that
+    // happens, but not the only one: a cutover-only or raced-id-only drop on
+    // every staged account reaches this branch too. So an account already
+    // covered by a link-drop warning above is EXCLUDED here rather than
+    // re-checked: `staged` still carries its original, unfiltered
+    // pre-transaction `rows`, and re-running the cutover check over them
+    // would double-warn the same rows under the wrong cause ("landed on or
+    // before its balance date" for rows that were never going to be written
+    // for an entirely different reason). A DUPLICATE-by-external-id row
+    // (already stored from an earlier sync) never entered `entry.rows` at
+    // all, so it is untouched by either drop and D8.4 below still needs an
+    // accurate `expectedCardExternalIds` to check it against — which is why
+    // this filters `staged` rather than reusing `verified`/`linkChecked`
+    // from the write path (those don't exist here; nothing was written).
+    const stagedForCutover = staged.filter((entry) => !dropped.has(entry.account.id));
+    const { droppedByAccountId: cutoverDropped, warnings: cutoverWarnings } =
+      recheckCutoverAnchor(stagedForCutover, db);
+    for (const w of cutoverWarnings) console.error(`sync: ${w}`);
+    warnings.push(...cutoverWarnings);
     applyCutoverPruning(staged, counts, cutoverDropped);
-    warnings.push(...checkCardCompleteness(staged, dropped, db));
+    warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
     const finalised = finaliseBalances(
       counts.map((c) => ({
@@ -1358,7 +1365,7 @@ export async function syncSimpleFin(
   // update" doctrine exists to prevent, just on a count instead of a balance.
   applyCutoverPruning(staged, counts, written.cutoverDroppedByAccountId);
 
-  warnings.push(...checkCardCompleteness(staged, dropped, db));
+  warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
   // Prune only now that the write has committed, so a failed sync never evicts
   // an older snapshot to make room for a useless one.
@@ -1427,13 +1434,30 @@ class NothingVerifiedError extends Error {}
  * to re-check. `droppedByAccountId` lets the caller prune `expectedCardExternalIds`
  * (D8.4, built pre-fetch): an id dropped here was never going to land under
  * this feed's provenance, and D8.4 must not report it as unexplainedly missing.
+ *
+ * Callers must pass only accounts that SURVIVED their own link re-check.
+ * `NothingVerifiedError`'s rollback path used to pass the raw pre-transaction
+ * `staged` array here, unfiltered — so a card that was ALSO unlinked or
+ * re-linked mid-run got its rows counted as cutover-dropped too, producing a
+ * second warning with the wrong cause ("landed on or before its balance
+ * date") for rows that were never going to be written for an entirely
+ * different reason (rule 11's own "a warning naming the wrong remedy is
+ * close to no guard at all"). `NothingVerifiedError` means nothing SURVIVED
+ * — that is sufficient reason for the exception, not proof every account was
+ * individually link-dropped — so the caller filters first.
+ *
+ * Returns one warning PER ACCOUNT that lost rows, not one aggregate count:
+ * every sibling warning in this file names the account, and this is the one
+ * place that money is dropped with no manual way back — `createCardActivity`
+ * (D8.3) already refuses to let the user re-type a replacement on an
+ * importing card, so the remedy has to be spelled out rather than implied.
  */
 function recheckCutoverAnchor<
   T extends {
     account: { id: number; type: AccountType; name: string };
     rows: readonly MappedRow[];
   },
->(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warning: string | null } {
+>(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
   const droppedByAccountId = new Map<number, Set<string>>();
   const checked = staged.map((entry) => {
     if (!isCreditCard(entry.account.type) || entry.rows.length === 0) return entry;
@@ -1445,7 +1469,9 @@ function recheckCutoverAnchor<
     // Deleted or unlinked: the link re-check (whichever variant the caller
     // also runs) already accounts for that account. Nothing further to do.
     if (!current) return entry;
-    const stillEligible = entry.rows.filter((r) => isAfterAnchor(r.date, current.startingBalanceDate));
+    const stillEligible = entry.rows.filter((r) =>
+      isAfterAnchor({ date: r.date, anchor: current.startingBalanceDate }),
+    );
     if (stillEligible.length === entry.rows.length) return entry;
     droppedByAccountId.set(
       entry.account.id,
@@ -1454,14 +1480,17 @@ function recheckCutoverAnchor<
     return { ...entry, rows: stillEligible };
   });
 
-  const before = staged.reduce((n, e) => n + e.rows.length, 0);
-  const after = checked.reduce((n, e) => n + e.rows.length, 0);
-  const dropped = before - after;
-  const warning =
-    dropped > 0
-      ? `${dropped} transaction${dropped === 1 ? "" : "s"} landed on or before an account's balance while this sync was running, so ${dropped === 1 ? "it wasn't" : "they weren't"} imported.`
-      : null;
-  return { checked, droppedByAccountId, warning };
+  const warnings = staged.flatMap((entry) => {
+    const droppedIds = droppedByAccountId.get(entry.account.id);
+    if (!droppedIds || droppedIds.size === 0) return [];
+    const n = droppedIds.size;
+    return [
+      `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" landed on or ` +
+        `before its balance date while this sync was running, so ${n === 1 ? "it wasn't" : "they weren't"} ` +
+        `imported — use "Undo" on /accounts to put the balance back, then sync again.`,
+    ];
+  });
+  return { checked, droppedByAccountId, warnings };
 }
 
 /**
@@ -1518,9 +1547,7 @@ function missingAccountWarnings(names: string[]): string[] {
  * `classifyBalanceFreshness` only reports real drift once the bank's
  * balance-date is strictly AFTER the ledger's newest row, and a card that was
  * just synced will very often share today's date with the balance the feed
- * just reported — the monitor that is supposed to justify giving up a
- * feed-maintained balance is silent on exactly the days it matters most.
- *
+ * just reported — that monitor is silent on exactly the days it matters most.
  * This answers a narrower, date-independent question instead: did every row
  * the feed sent for this card, that we did not INTEND to exclude, actually
  * land in the ledger UNDER THIS FEED'S OWN PROVENANCE? A COUNT comparison was
@@ -1530,6 +1557,23 @@ function missingAccountWarnings(names: string[]): string[] {
  * under `(simplefinSourceAccountId, externalId)` — by this sync or an earlier
  * one — is present in both sets and never counts as missing. It also NAMES
  * which id is missing, which a count cannot.
+ *
+ * WHAT THIS ACTUALLY CATCHES, stated precisely after a review pass traced
+ * every path that can add to `expectedCardExternalIds`: an id only ever
+ * enters that set when it is (a) already stored under this feed's tag before
+ * this run started, (b) about to be written by THIS run's own insert loop
+ * and not subsequently pruned by the link/id-race/cutover re-checks (each of
+ * which removes its drops from the set — see `applyCutoverPruning` and the
+ * `dropped.has(...)` guard below), or (c) landed by a concurrent sync this
+ * same run's raced-id check found already stored. Every one of those is, by
+ * construction, provably in the database by the time this check runs — so
+ * under CORRECT code this function can never actually find a gap. Its real
+ * value is as a REGRESSION GUARD on the insert pipeline: if a future change
+ * to the staging/pruning logic silently drops a row this run genuinely
+ * intended to write, without also removing its id from
+ * `expectedCardExternalIds`, this is what notices. It is not, and cannot be,
+ * a monitor for a BAD content-dedup match — the one case that would be a
+ * genuine silent loss on a card.
  *
  * "UNDER THIS FEED'S OWN PROVENANCE" IS LOAD-BEARING, and it decides what
  * `expectedCardExternalIds` may contain. A row the CONTENT-dedup pass matches
@@ -1546,6 +1590,19 @@ function missingAccountWarnings(names: string[]): string[] {
  * entirely (E6/E18) — so a manual charge or a re-minted feed id are the real
  * cases this guards.
  *
+ * THE ACCEPTED RESIDUAL this leaves: a false content-dedup match (this
+ * card's row matches a differently-provenanced existing row on date/amount/
+ * memo that is NOT actually the same transaction) silently drops a real
+ * charge, and nothing here — or anywhere else — can see it, by the same
+ * reasoning the previous paragraph gives. This is not a new risk class:
+ * rule 3 already accepts the equivalent gap for the content-dedup pass
+ * generally ("a concurrent CSV import racing this one produces a genuine
+ * duplicate row rather than an abort... recorded residual in TODOS.md, not a
+ * closed one") for the identical reason — content dedup is a multiset count,
+ * and building a monitor for it is a different and larger change than this
+ * one. Tracked in TODOS.md rather than silently left for a reader to
+ * discover by tracing every path into `expectedCardExternalIds` by hand.
+ *
  * CALLED FROM THREE PLACES, deliberately. The up-to-date early return
  * (nothing to insert) is where a count-based check would have been most
  * wrong — every row already existing IS the ordinary case, not a failure —
@@ -1561,6 +1618,12 @@ function missingAccountWarnings(names: string[]): string[] {
  * this file: this is new defensive machinery for the account type this plan
  * just gave a second write path, not a general-purpose monitor — extending it
  * to every account is a larger, separate change.
+ *
+ * A throw from the DB read below (e.g. the `inArray(...)` bind-parameter
+ * limit) must not be allowed to escape this function's caller: by every call
+ * site, the write this is checking has either already committed or was never
+ * going to happen, so a diagnostic failure here is not a write failure.
+ * `safeCheckCardCompleteness`, below, is the only way this should be called.
  */
 
 /**
@@ -1641,6 +1704,32 @@ function checkCardCompleteness(
     }
   }
   return warnings;
+}
+
+/**
+ * `checkCardCompleteness`, best-effort. Every call site runs it after the
+ * write it is checking has either already committed (the success path) or
+ * was never going to happen (the up-to-date and `NothingVerifiedError`
+ * paths) — so a throw here is not a write failure, and letting it escape
+ * would report a durable, already-landed import as `fail(...)` to the user
+ * (`syncNowAction`'s catch cannot tell the two apart). That is exactly the
+ * failure class CLAUDE.md's sync doctrine says was "got wrong twice" for
+ * `revalidatePath`, reproduced here for a diagnostic instead. Same "best
+ * effort" contract as the `unlinkSync` cleanup a few lines above in this
+ * file: log for whoever reads the server console, degrade to no warning
+ * rather than no result.
+ */
+function safeCheckCardCompleteness(
+  staged: Parameters<typeof checkCardCompleteness>[0],
+  dropped: ReadonlySet<number>,
+  db: AnyDb,
+): string[] {
+  try {
+    return checkCardCompleteness(staged, dropped, db);
+  } catch (err) {
+    console.error("sync: card completeness check failed", err);
+    return [];
+  }
 }
 
 /**
