@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import type { SimpleFinResponse, SimpleFinTransaction } from "./types";
@@ -1514,6 +1514,185 @@ describe("syncSimpleFin — liability partition and balance pass (E1/E2, T7)", (
     expect(checkingRows).toHaveLength(1);
   });
 
+  /**
+   * T4 — the three MANDATORY regression tests, not offered as a choice.
+   *
+   * Every test in this describe block through F9 is loan-shaped, and F9's own
+   * assertion is an ABSENCE: a loan's rows never land. D4.3 inverts that
+   * behavior for a linked card, and there was no card-shaped equivalent to
+   * invert — per the `mm-delete-the-column-not-just-the-cache-machinery`
+   * learning, an absence-assertion is only real coverage if something in the
+   * codebase can make the asserted thing PRESENT. Before these three, nothing
+   * here could.
+   */
+  it("DOES stage a linked card's transactions — the inverse of F9", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK" });
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHK",
+          name: "REGULAR CHECKING",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("CHK-1", "-12.00")],
+        },
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-980.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // Dated 09-01, strictly after the 08-01 anchor, so D8.1's cutover
+          // does not remove it — this test is about the PARTITION, not the
+          // cutover, and the cutover has its own describe block.
+          transactions: [feedTxn("CITI-1", "-20.00", "COSTCO")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const cardRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(cardRows).toHaveLength(1);
+    expect(cardRows[0].rawMemo).toContain("COSTCO");
+
+    const checkingRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, checking.id))
+      .all();
+    expect(checkingRows).toHaveLength(1);
+  });
+
+  it("keeps a linked LOAN out of transaction staging after the split — F9 must stay green beside a card", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-980.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("CITI-1", "-20.00", "COSTCO")],
+        },
+        {
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // The feed DOES send mortgage transactions (F9's own point). The
+          // card being present and importing must not change that the loan's
+          // are still dropped — this is the "one bucket's routing does not
+          // leak into the other's" half of the split.
+          transactions: [feedTxn("LOAN-TXN-1", "-1850.00", "MORTGAGE PAYMENT")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const loanRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, loan.id))
+      .all();
+    expect(loanRows).toHaveLength(0);
+
+    const cardRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(cardRows).toHaveLength(1);
+  });
+
+  it("does not warn has-rows for a card that imports — D4.3 removed the noise STRUCTURALLY", async () => {
+    // Before D4.3, the SECOND sync after a card's first imported row would
+    // hit `refreshLiabilityBalances`'s `has-rows` branch and push "its
+    // balance was not refreshed from the feed — update it from the Accounts
+    // page" — forever, on a card this plan deliberately chose to keep
+    // reconciling by hand. Proving the warning text never appears is a weaker
+    // test than proving the card is out of the pass entirely (T4's first two
+    // tests already do that structurally), but it is the regression this task
+    // exists to name, so it is asserted directly too.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-980.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("CITI-1", "-20.00", "COSTCO")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    // First sync: imports the one row.
+    await syncSimpleFin({ now: NOW }, handle.db);
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+
+    // Second sync: the card now HAS rows. Under the old asset/liability split
+    // this would have hit `refreshLiabilityBalances`'s `has-rows` branch,
+    // because the card would have been in `balanceOnlyAccounts` both times.
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+    const second = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const warnings = "warnings" in second ? second.warnings : [];
+    expect(warnings.join(" ")).not.toContain("has transactions");
+    expect(warnings.join(" ")).not.toContain("was not refreshed from the feed");
+  });
+
   it("still asks the feed for the loan — partition, not exclude (E2)", async () => {
     seedAccount({ simplefinAccountId: "ACT-CHK" });
     seedAccount({
@@ -1690,29 +1869,38 @@ describe("syncSimpleFin — liability partition and balance pass (E1/E2, T7)", (
   });
 
   it("REFUSES to refresh a liability that has transaction rows (D15, E16)", async () => {
-    // Credit cards get manual reconcile only: balance-date is an instant, so
-    // collapsing it to a date on an account WITH rows silently drops every
-    // row later that same day out of the balance.
-    const card = seedAccount({
-      simplefinAccountId: "ACT-CARD",
-      name: "Visa",
-      type: "credit",
+    // Balance-date is an INSTANT, so collapsing it to a date on an account
+    // WITH rows silently drops every row later that same day out of the
+    // balance.
+    //
+    // The fixture is a LOAN and was a card until D4.3. A card no longer
+    // reaches this pass at all, so as a card this test would pass by
+    // exercising nothing — the anchor sits still because nothing looked at
+    // it, and the "has transactions" warning it asserts could never fire.
+    // Rows are seeded directly here because no write path puts one on a loan
+    // (E17 refuses a manual write, and the partition stages none), which is
+    // the point: the branch has to stay defended even though the app cannot
+    // currently produce its input.
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
       startingBalanceCents: -200_000,
       startingBalanceDate: "2026-08-01",
     });
     const batch = seedBatch("manual");
     seedTxn({
-      accountId: card.id,
+      accountId: loan.id,
       batchId: batch.id,
       amountCents: -8_000,
-      rawMemo: "COSTCO",
+      rawMemo: "ESCROW",
       source: "manual",
     });
     seedAccount({ simplefinAccountId: "ACT-CHK" });
     respondWithBoth({
       checkingId: "ACT-CHK",
       checkingTxns: [],
-      loanId: "ACT-CARD",
+      loanId: "ACT-LOAN",
       loanBalance: "-1580.00",
     });
 
@@ -1721,7 +1909,7 @@ describe("syncSimpleFin — liability partition and balance pass (E1/E2, T7)", (
     const after = handle.db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, card.id))
+      .where(eq(schema.accounts.id, loan.id))
       .get();
     expect(after?.startingBalanceCents).toBe(-200_000);
     if (outcome.status !== "no-linked-accounts") {
@@ -1750,6 +1938,696 @@ describe("syncSimpleFin — liability partition and balance pass (E1/E2, T7)", (
     if (outcome.status !== "no-linked-accounts") {
       expect(outcome.balanceUpdates).toHaveLength(0);
     }
+  });
+});
+
+/**
+ * D8.1 — THE ACCOUNTING CUTOVER, the one critical gap named in the review.
+ *
+ * Phase A files a checking-side card payment as spend, in the month it
+ * happened. Phase B imports the CARD's own rows. Those are two accounting
+ * bases over the SAME dollars, and the feed's window reaches back up to 45
+ * days — into months Phase A may have already accounted for. Without a
+ * boundary at the card's anchor, a historical charge lands in the same month
+ * as the payment that already covered it, and that month's spend is doubled
+ * with no error anywhere.
+ *
+ * The acceptance test asserts a MONETARY total across the boundary, not just
+ * that a row count changed — a row-count assertion can pass while the dollars
+ * are still wrong (e.g. an off-by-one that drops the CORRECT row and keeps
+ * the one that should have been cut).
+ */
+describe("syncSimpleFin — the D8.1 accounting cutover", () => {
+  function seedCategory(name: string): number {
+    const [row] = handle.db.insert(schema.categories).values({ name }).returning().all();
+    return row.id;
+  }
+
+  it("drops a feed row dated ON the anchor — the boundary is strict, matching rule 1's `>`", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            { ...feedTxn("CITI-ANCHOR-DAY", "-50.00", "COSTCO"), posted: 1785585600 }, // 2026-08-01T12:00Z
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("imports a feed row dated the day AFTER the anchor", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1050.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            { ...feedTxn("CITI-NEXT-DAY", "-50.00", "COSTCO"), posted: 1785672000 }, // 2026-08-02T12:00Z
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+  });
+
+  it("leaves an ASSET's pre-anchor history untouched — the cutover is card-only", async () => {
+    // The checking account's whole CSV history predates nothing meaningful to
+    // this account; applying the cutover there would delete the ledger's
+    // past. Confirmed with a checking anchor set to TODAY, the most aggressive
+    // case: if the cutover applied here, nothing would ever import.
+    const checking = seedAccount({
+      simplefinAccountId: "ACT-CHK",
+      startingBalanceCents: 500_000,
+      startingBalanceDate: "2026-09-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHK",
+          name: "REGULAR CHECKING",
+          balance: "480.00",
+          "available-balance": "480.00",
+          "balance-date": SEP_1_NOON,
+          // Dated ON the checking account's own anchor — would be dropped by
+          // the cutover if it applied here.
+          transactions: [{ ...feedTxn("CHK-SAME-DAY", "-20.00"), posted: SEP_1_NOON }],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, checking.id))
+      .all();
+    // Rule 1's `>` still excludes it from the BALANCE sum, but it is not
+    // silently dropped from the ledger — that distinction is the whole point
+    // of scoping D8.1 to cards.
+    expect(rows).toHaveLength(1);
+  });
+
+  it("ACCEPTANCE: a Phase-A-filed August payment plus a Phase-B August charge does not double August's card-payment total — a pre-anchor charge never lands, in dollars", async () => {
+    const checking = seedAccount({ name: "Checking", startingBalanceCents: 500_000 });
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      // The anchor sits at cutover: reconciled 2026-09-01, per D9.1.
+      startingBalanceCents: -112_000,
+      startingBalanceDate: "2026-09-01",
+    });
+    const ccPayments = seedCategory("Credit Card Payments");
+
+    // Phase A, already done: the August checking-side payment, filed under
+    // the CC Payments envelope, exactly as T1 describes.
+    const batch = seedBatch("csv");
+    seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      amountCents: -50_00,
+      rawMemo: "CITI CARD ONLINEPAYMENT",
+      date: "2026-08-15",
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ categoryId: ccPayments })
+      .where(eq(schema.transactions.accountId, checking.id))
+      .run();
+
+    const augustTotalBefore = (
+      handle.db
+        .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)` })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.categoryId, ccPayments),
+            gte(schema.transactions.date, "2026-08-01"),
+            sql`${schema.transactions.date} < '2026-09-01'`,
+          ),
+        )
+        .get()?.total ?? 0
+    );
+    expect(augustTotalBefore).toBe(-5000);
+
+    // Phase B: the feed's window reaches back into August, where a Costco
+    // charge from BEFORE the anchor is exactly what the checking payment
+    // above already covers, plus a genuine September charge after cutover.
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1200.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            // Before the anchor — must be dropped, or August's total moves.
+            { ...feedTxn("CITI-AUG", "-73.41", "COSTCO"), posted: 1785585600 }, // 2026-08-01T12:00Z
+            // After the anchor — the first row the card is actually allowed
+            // to attribute.
+            { ...feedTxn("CITI-SEP", "-80.77", "TARGET"), posted: 1789041600 }, // 2026-09-10T12:00Z
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const cardRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    // The pre-anchor August charge never lands. Only the September one does.
+    expect(cardRows).toHaveLength(1);
+    expect(cardRows[0].externalId).toBe("CITI-SEP");
+
+    // The August total for the payments envelope is EXACTLY what Phase A put
+    // there — not a cent moved, which is what "no historical month ever
+    // changes" means as a number rather than as a sentence.
+    const augustTotalAfter = (
+      handle.db
+        .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amountCents}), 0)` })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.categoryId, ccPayments),
+            gte(schema.transactions.date, "2026-08-01"),
+            sql`${schema.transactions.date} < '2026-09-01'`,
+          ),
+        )
+        .get()?.total ?? 0
+    );
+    expect(augustTotalAfter).toBe(augustTotalBefore);
+
+    // And the drop is counted, not merely absent — D8.1's own field.
+    if (outcome.status === "synced") {
+      const citiCounts = outcome.accounts.find((a) => a.accountId === card.id);
+      expect(citiCounts?.skippedBeforeAnchor).toBe(1);
+      expect(citiCounts?.insertedCount).toBe(1);
+    }
+  });
+});
+
+/**
+ * D8.4 — the SET-based completeness check. A card's `balance-date` will
+ * frequently equal its newest imported row's date, which is exactly when
+ * `classifyBalanceFreshness` goes quiet (rule 1's deliberate same-day
+ * conservatism) — so this is a second, date-independent monitor for the
+ * account type that most needs one.
+ */
+describe("syncSimpleFin — D8.4 card completeness check", () => {
+  it("stays QUIET on an ordinary resync — the whole reason it is a SET, not a count", async () => {
+    // A count-based check breaks exactly here: `insertedCount` is
+    // legitimately 0 on the second run, because the row already exists. That
+    // is normal operation, not a gap.
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const response = {
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("CITI-1", "-20.00", "COSTCO")],
+        },
+      ],
+    } satisfies SimpleFinResponse;
+
+    fetchAccountsMock.mockResolvedValue(response);
+    const first = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(first.status).toBe("synced");
+
+    // Second sync: the feed sends the SAME row again, id-deduped rather than
+    // re-inserted — the exact shape of a normal resync.
+    fetchAccountsMock.mockResolvedValue(response);
+    const second = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const warnings = "warnings" in second ? second.warnings : [];
+    expect(warnings.join(" ")).not.toContain("don't appear in the ledger");
+    expect(warnings.join(" ")).not.toContain("doesn't appear in the ledger");
+  });
+
+  it("stays QUIET when nothing new arrives and NOTHING is inserted — the up-to-date path", async () => {
+    // The branch a count-based check would have been most wrong on: zero
+    // inserted IS the correct outcome, not a symptom.
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const response = {
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("CITI-1", "-20.00", "COSTCO")],
+        },
+      ],
+    } satisfies SimpleFinResponse;
+    fetchAccountsMock.mockResolvedValue(response);
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    // Balance now matches too, so this run has NOTHING to do at all.
+    fetchAccountsMock.mockResolvedValue(response);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status === "up-to-date") {
+      expect(outcome.warnings.join(" ")).not.toContain("appear in the ledger");
+    }
+  });
+
+  it("stays QUIET on a re-minted feed id matched by content dedup — this was a real false positive, now fixed", async () => {
+    // Builds the scenario rule 3 documents: a re-minted feed id for the same
+    // underlying bank account. The content-dedup fallback correctly matches
+    // the new row against the OLD row's date/amount/memo and skips inserting
+    // a duplicate — but the DB row on file carries the OLD feed's provenance,
+    // never the new one.
+    //
+    // An earlier version of this test asserted the OPPOSITE — that this
+    // scenario WARNS — because `expectedCardExternalIds` was populated for
+    // every non-excluded feed transaction regardless of how dedup resolved
+    // it. That made every ordinary content-dedup match (also true of an
+    // ordinary hand-entered charge later confirmed by the feed) a PERMANENT
+    // false positive: reloading /sync can never make the warning go away,
+    // because the row it names was never going to carry this feed's tag by
+    // design. The fix is in the staging loop: a content-deduped id is never
+    // added to `expectedCardExternalIds` in the first place, because a
+    // content match IS the row landing, just under different provenance.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI-NEW",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const staleBatch = seedBatch("simplefin");
+    seedTxn({
+      accountId: card.id,
+      batchId: staleBatch.id,
+      amountCents: -2_000,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+      source: "simplefin",
+      externalId: "OLD-FEED-TXN",
+      simplefinSourceAccountId: "ACT-CITI-STALE",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI-NEW",
+          name: "CITI CARD",
+          balance: "-1020.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // Same date/amount/memo as the stale row above, under the NEW
+          // feed's id — this is exactly what content dedup matches on.
+          transactions: [feedTxn("NEW-FEED-TXN", "-20.00")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    // The row genuinely never gets the new feed's provenance — that is
+    // correct dedup, not a gap.
+    const tagged = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "NEW-FEED-TXN"))
+      .all();
+    expect(tagged).toHaveLength(0);
+
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.join(" ")).not.toContain("appear in the ledger");
+  });
+
+  it("stays QUIET when the SAME external id appears TWICE in one feed response, and the first occurrence is content-deduped (red team)", async () => {
+    // The sibling test above fixed one false-positive route; this closes a
+    // second, found by a red-team pass on the fix itself. `seenExternalIds`
+    // is a LIVE set: it starts DB-derived, but the loop also `.add()`s to it
+    // to catch a duplicate WITHIN this same response. The dup-by-id branch
+    // used to treat any hit against that set as "already stored under this
+    // feed" — true when the hit is against the DB-derived membership, false
+    // when the hit is only because an EARLIER transaction in this same
+    // response added it moments ago.
+    //
+    // Concretely: two occurrences of the same external id in one feed
+    // response, where occurrence 1 matches an existing DIFFERENTLY-
+    // provenanced row by content and is correctly dropped (never written
+    // under this feed's tag), and occurrence 2 then reads `seenExternalIds`
+    // as "already known" purely because occurrence 1 added it — pushing an
+    // id into `expectedCardExternalIds` that will never be found, a
+    // permanent false "missing" alarm for a pair of rows that were both
+    // correctly, quietly deduped.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: manualBatch.id,
+      amountCents: -2_000,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+      source: "manual",
+    });
+
+    const dupe = feedTxn("DUPLICATE-TXN", "-20.00");
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1020.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // Same id, same content, appearing TWICE — a real feed sending a
+          // repeated transaction id is not something anything validates
+          // against upstream of this loop.
+          transactions: [dupe, dupe],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    // Neither occurrence gets this feed's provenance — both were correctly
+    // absorbed by content dedup / within-response dedup, never inserted.
+    const tagged = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUPLICATE-TXN"))
+      .all();
+    expect(tagged).toHaveLength(0);
+
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.join(" ")).not.toContain("appear in the ledger");
+  });
+
+  it("stays QUIET when the sync-race cutover re-check drops a row — the exclusion is intentional, not a gap", async () => {
+    // The other correctness fix in this same pass: rule 11's precondition
+    // class applied to D8.1's anchor. `cutoverAnchor` in the staging loop is
+    // read from the PRE-fetch account row; a hand Reconcile landing in
+    // another tab during the fetch moves `starting_balance_date` forward,
+    // and a charge legitimately after the OLD anchor can land on-or-before
+    // the NEW one. The write transaction re-checks and drops such rows — see
+    // "D8.1 — THE CUTOVER ANCHOR IS ALSO A PRECONDITION" in sync.ts. Without
+    // pruning `expectedCardExternalIds` to match, D8.4 would report the
+    // correctly-excluded row as unexplainedly missing.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+
+    fetchAccountsMock.mockImplementation(async () => {
+      // The race: a Reconcile lands mid-fetch, moving the anchor past the
+      // date of the transaction the feed is about to send.
+      handle.db
+        .update(schema.accounts)
+        .set({ startingBalanceCents: -102_000, startingBalanceDate: "2026-08-20" })
+        .where(eq(schema.accounts.id, card.id))
+        .run();
+      return {
+        accounts: [
+          {
+            id: "ACT-CITI",
+            name: "CITI CARD",
+            balance: "-1040.00",
+            "available-balance": null,
+            "balance-date": SEP_1_NOON,
+            // Dated 08-15 — after the OLD anchor (08-01), on-or-before the
+            // NEW one (08-20) set by the race above.
+            transactions: [{ ...feedTxn("CITI-RACED", "-20.00"), posted: 1786795200 }], // 2026-08-15T12:00Z
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    // This is the ONLY row staged this run, and the race drops it, so
+    // `verifiedTotal` reaches 0 inside the transaction and `NothingVerifiedError`
+    // rolls it back — proving this exercises the READ-ONLY fallback path
+    // (`recheckCutoverAnchor` called against `db`, not `tx`), not the
+    // in-transaction success path a card with OTHER, unaffected rows would take.
+    expect(outcome.status).toBe("up-to-date");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(0);
+
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    // The race itself is reported (it is worth knowing about)...
+    expect(warnings.join(" ")).toContain("landed on or before an account's balance");
+    // ...but D8.4's completeness check must NOT also complain about the same
+    // row, which would be reporting an intentional exclusion as a defect.
+    expect(warnings.join(" ")).not.toContain("appear in the ledger");
+  });
+
+  it("the SAME race, but with a surviving row — proves the IN-TRANSACTION re-check, not just the rollback fallback", async () => {
+    // The sibling of the previous test. Two feed rows this time: one that the
+    // race catches (08-15, on-or-before the new 08-20 anchor) and one that
+    // survives it (08-25). `verifiedTotal` is 1, not 0, so the write COMMITS
+    // — this exercises `recheckCutoverAnchor` called against `tx` inside the
+    // transaction, the code path the rollback-only test above cannot reach.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+
+    fetchAccountsMock.mockImplementation(async () => {
+      handle.db
+        .update(schema.accounts)
+        .set({ startingBalanceCents: -102_000, startingBalanceDate: "2026-08-20" })
+        .where(eq(schema.accounts.id, card.id))
+        .run();
+      return {
+        accounts: [
+          {
+            id: "ACT-CITI",
+            name: "CITI CARD",
+            balance: "-1060.00",
+            "available-balance": null,
+            "balance-date": SEP_1_NOON,
+            transactions: [
+              // Caught by the race: after the OLD anchor, on-or-before the NEW one.
+              { ...feedTxn("CITI-RACED", "-20.00"), posted: 1786795200 }, // 2026-08-15T12:00Z
+              // Survives: after BOTH anchors.
+              { ...feedTxn("CITI-SURVIVES", "-40.00"), posted: 1787313600 }, // 2026-08-21T12:00Z
+            ],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("CITI-SURVIVES");
+
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.join(" ")).toContain("landed on or before an account's balance");
+    expect(warnings.join(" ")).not.toContain("appear in the ledger");
+    if (outcome.status === "synced") {
+      const citiCounts = outcome.accounts.find((a) => a.accountId === card.id);
+      expect(citiCounts?.insertedCount).toBe(1);
+      expect(citiCounts?.skippedBeforeAnchor).toBe(1);
+    }
+  });
+
+  it("says nothing for a LOAN — the check is card-scoped", async () => {
+    seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("LOAN-TXN-1", "-1850.00", "MORTGAGE PAYMENT")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.join(" ")).not.toContain("appear in the ledger");
+  });
+
+  /**
+   * NO "WARNS on a genuinely missing row" TEST — still true, but this note
+   * used to claim the gap was UNREACHABLE by construction. A red-team pass
+   * disproved that: the within-response-duplicate-id case above
+   * ("stays QUIET when the SAME external id appears TWICE...") was exactly
+   * this failure, reachable through the public API with no crafted input, no
+   * `await` race and no DB corruption needed — just an ordinary feed response
+   * with a repeated id. It is fixed now (`idsKnownBeforeThisRun`), so the
+   * claim below is narrower than the original: not "cannot happen", but "no
+   * OTHER way to reach it has been found, and the one that was found has its
+   * own regression test."
+   *
+   * For `checkCardCompleteness` to warn, an id has to enter
+   * `expectedCardExternalIds` (freshly inserted, or matched via
+   * `idsKnownBeforeThisRun` as already-stored under THIS feed BEFORE this
+   * sync ran) and then NOT be findable under
+   * `(simplefinSourceAccountId, externalId)` after the write. A fresh insert
+   * lands in the SAME transaction this function reads after. The
+   * `idsKnownBeforeThisRun` check (unlike the `seenExternalIds` check it
+   * replaced) is a FROZEN pre-loop snapshot, so it can no longer be fooled by
+   * an id the loop itself added moments earlier — the mechanism the red-team
+   * case exploited. `removeCardActivity` cannot touch a synced row either (it
+   * refuses anything but `import_source='manual'`, E17's guard).
+   *
+   * Given that history, do not read the absence of this test as proof the
+   * path is dead — read it as "not proven dead beyond the one path already
+   * found and closed." If a future change touches the staging loop's dedup
+   * ordering, re-run this same adversarial question rather than trusting this
+   * comment.
+   */
+});
+
+/**
+ * A PRE-EXISTING bug, caught by a Codex adversarial pass while widening who
+ * reaches the up-to-date early return. `accountWarnings` (e.g. "SimpleFIN
+ * returned nothing for X") was staged per account in the loop but only ever
+ * flushed on the write-commit path (`verifyStagedLinks`) — never on the
+ * `totalToInsert === 0` early return, which never calls it. A dead
+ * connection for an account with nothing new to insert reported a clean
+ * "up to date" with no warning at all — reachable for an ASSET before this
+ * plan ever touched this file; it matters more now that a linked CARD's
+ * connection can break too.
+ */
+describe("syncSimpleFin — accountWarnings flush on the up-to-date path", () => {
+  it("WARNS when the feed omits a linked card entirely, even though nothing was inserted anywhere", async () => {
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    // The feed responds, but with NO account matching "ACT-CITI" — the
+    // omitted-account case, not a network failure.
+    fetchAccountsMock.mockResolvedValue({ accounts: [] } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.join(" ")).toContain("Citi");
+    expect(warnings.join(" ")).toContain("connection may need re-authorising");
+  });
+
+  it("still says nothing when the feed DOES answer for every linked account", async () => {
+    // The control: an ordinary quiet resync with a real, complete response
+    // must not start warning just because this fix touches the same branch.
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings).toEqual([]);
   });
 });
 
@@ -1855,6 +2733,151 @@ describe("D11 — a manual row is never an automatic transfer-matcher candidate"
       .where(eq(schema.transactions.id, out.id))
       .get();
     expect(row?.transferPairId).toBe(inn.id);
+  });
+});
+
+/**
+ * D-CARD — a row on a CREDIT CARD is never a candidate for the two
+ * CROSS-ACCOUNT automatic matchers, and IS still a candidate for the
+ * same-account reversal queue.
+ *
+ * Every row here is `import_source='simplefin'`, deliberately — D11's tests
+ * above already prove the MANUAL exclusion; these prove the exclusion holds
+ * for the row class that D4.3 newly makes possible, which `NOT_MANUAL` alone
+ * does not touch.
+ */
+describe("D-CARD — a linked card's imported rows are excluded from the cross-account matchers", () => {
+  it("does NOT auto-pair a Citi PURCHASE with an unrelated same-day checking deposit", () => {
+    // The concrete failure this guards: an $80.77 Citi charge and an
+    // unrelated $80.77 checking deposit on the same day form a balanced
+    // 1-and-1 bucket. The counting argument would auto-link it without
+    // asking — real spending would drop out of every envelope, silently.
+    const checking = seedAccount({ name: "Checking" });
+    const card = seedAccount({ name: "Citi", type: "credit" });
+    const feed = seedBatch("simplefin");
+
+    const charge = seedTxn({
+      accountId: card.id,
+      batchId: feed.id,
+      amountCents: -8_077,
+      rawMemo: "TARGET",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+    const deposit = seedTxn({
+      accountId: checking.id,
+      batchId: feed.id,
+      amountCents: 8_077,
+      rawMemo: "DEPOSIT",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+
+    expect(linkTransfersByBucket("2026-09-01", handle.db).pairsLinked).toBe(0);
+    for (const id of [charge.id, deposit.id]) {
+      const row = handle.db
+        .select()
+        .from(schema.transactions)
+        .where(eq(schema.transactions.id, id))
+        .get();
+      expect(row?.transferPairId).toBeNull();
+    }
+  });
+
+  it("keeps a card row out of the ambiguous cross-account review queue too", () => {
+    const checking = seedAccount({ name: "Checking" });
+    const card = seedAccount({ name: "Citi", type: "credit" });
+    const feed = seedBatch("simplefin");
+
+    seedTxn({
+      accountId: card.id,
+      batchId: feed.id,
+      amountCents: -8_077,
+      rawMemo: "TARGET",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+    // Two same-day, same-amount checking deposits make an UNBALANCED bucket
+    // (2 negatives would be needed to balance 2 positives) — the shape that
+    // would otherwise surface in the ambiguous queue.
+    seedTxn({
+      accountId: checking.id,
+      batchId: feed.id,
+      amountCents: 8_077,
+      rawMemo: "DEPOSIT 1",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+    seedTxn({
+      accountId: checking.id,
+      batchId: feed.id,
+      amountCents: 8_077,
+      rawMemo: "DEPOSIT 2",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+
+    expect(findAmbiguousTransfers("2026-09-01", handle.db)).toHaveLength(0);
+  });
+
+  it("still pairs two ordinary imported rows on two ASSET accounts, same day and amount", () => {
+    // Guard against over-filtering: the exclusion must be specific to cards.
+    const checking = seedAccount({ name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const feed = seedBatch("simplefin");
+
+    const out = seedTxn({
+      accountId: checking.id,
+      batchId: feed.id,
+      amountCents: -25_000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+    const inn = seedTxn({
+      accountId: savings.id,
+      batchId: feed.id,
+      amountCents: 25_000,
+      rawMemo: "TRANSFER",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+
+    expect(linkTransfersByBucket("2026-09-01", handle.db).pairsLinked).toBe(1);
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, out.id))
+      .get();
+    expect(row?.transferPairId).toBe(inn.id);
+  });
+
+  it("DOES surface a same-account card reversal — the exclusion is deliberately NOT applied here", () => {
+    // A disputed charge and its provisional credit landing on ONE card is the
+    // archetypal case for this queue, and this queue never auto-links.
+    // Excluding cards here would delete the feature for the account type
+    // that produces the most reversals.
+    const card = seedAccount({ name: "Citi", type: "credit" });
+    const feed = seedBatch("simplefin");
+
+    seedTxn({
+      accountId: card.id,
+      batchId: feed.id,
+      amountCents: -3_99,
+      rawMemo: "DISPUTED CHARGE",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+    seedTxn({
+      accountId: card.id,
+      batchId: feed.id,
+      amountCents: 3_99,
+      rawMemo: "PROVISIONAL CREDIT",
+      date: "2026-09-15",
+      source: "simplefin",
+    });
+
+    expect(findSameAccountReversalCandidates("2026-09-01", handle.db)).toHaveLength(1);
   });
 });
 
@@ -1976,11 +2999,16 @@ describe("refreshLiabilityBalances — the sign guard (rule 9)", () => {
     });
   });
 
-  it("ALLOWS a positive balance on a credit card, but says so", async () => {
-    // A card genuinely can carry a credit balance after an overpayment, and
-    // `summarizeBalances` treats one as real. Refusing here would strand a
-    // zero-row feed-linked card with no working control at all, since
-    // `resolveBalanceAction` gives it Refresh rather than Reconcile (E4).
+  it("D4.3 — a linked CARD's balance pass NEVER fires, positive or not", async () => {
+    // This test used to name itself "ALLOWS a positive balance on a credit
+    // card, but says so" and asserted the sign guard's card branch WRITING
+    // +125.00. That is no longer reachable: `partitionLinkedAccounts` now
+    // asks `importsTransactions`, and a linked card always imports, so it
+    // never lands in `balanceOnlyAccounts` and this function never sees it —
+    // whatever the feed reports as `balance`. The guard's card branch (rule 9,
+    // `sync.ts`) is kept defensively for a future caller and is documented
+    // there as currently unreachable; this test asserts the reachable half of
+    // that story instead of the retired one.
     const card = seedAccount({
       simplefinAccountId: "ACT-LIAB",
       name: "Visa",
@@ -1997,9 +3025,12 @@ describe("refreshLiabilityBalances — the sign guard (rule 9)", () => {
       .from(schema.accounts)
       .where(eq(schema.accounts.id, card.id))
       .get();
-    expect(after?.startingBalanceCents).toBe(12_500);
+    // Untouched — the card's balance now comes from anchor + imported rows,
+    // never from a feed-written figure.
+    expect(after?.startingBalanceCents).toBe(-200_000);
     if (outcome.status !== "no-linked-accounts") {
-      expect(outcome.warnings.join(" ")).toContain("Visa");
+      expect(outcome.balanceUpdates).toEqual([]);
+      expect(outcome.warnings.join(" ")).not.toContain("credit balance");
     }
   });
 
@@ -2298,23 +3329,32 @@ describe("refreshLiabilityBalancesOnly — scoping and warning placement", () =>
     }
   });
 
-  it("stops warning about a credit balance once it has settled", async () => {
-    // The notice is worth making when the balance is WRITTEN. Re-emitting it
-    // on every later refresh made a healthy overpaid card render a permanent
-    // red error, because the action treats "no update + a warning" as failure.
-    const card = seedAccount({
-      simplefinAccountId: "ACT-VISA",
-      name: "Visa",
-      type: "credit",
-      startingBalanceCents: -200_000,
+  it("stops updating once the anchor has caught up to the feed", async () => {
+    // The general property: a WRITE is worth reporting, a no-op is not.
+    // Re-emitting an update on every later refresh made a settled account
+    // render a permanent notice, because the action treats "no update + a
+    // warning" as failure.
+    //
+    // The fixture is a LOAN, and was a card until D4.3. A linked card never
+    // reaches this pass at all (`importsTransactions` routes it to staging
+    // instead), so the "credit balance" sign-guard notice this test used to
+    // pin cannot fire through this entry point any more — see the note beside
+    // `refreshLiabilityBalances`'s sign guard in `sync.ts`. This keeps the
+    // write-once/quiet-thereafter behavior covered on the account type that
+    // still reaches the pass.
+    const loan = seedAccount({
+      simplefinAccountId: "ACT-LOAN",
+      name: "Mortgage",
+      type: "loan",
+      startingBalanceCents: -30_000_000,
       startingBalanceDate: "2026-08-01",
     });
     fetchAccountsMock.mockResolvedValue({
       accounts: [
         {
-          id: "ACT-VISA",
-          name: "VISA",
-          balance: "21.48",
+          id: "ACT-LOAN",
+          name: "HOME MORTGAGE",
+          balance: "-302480.11",
           "available-balance": null,
           "balance-date": SEP_1,
           transactions: [],
@@ -2323,17 +3363,17 @@ describe("refreshLiabilityBalancesOnly — scoping and warning placement", () =>
     } satisfies SimpleFinResponse);
 
     const first = await refreshLiabilityBalancesOnly(
-      { now: NOW, accountId: card.id },
+      { now: NOW, accountId: loan.id },
       handle.db,
     );
-    // First time: written, and announced.
+    // First time: written, no complaint — an ordinary negative balance.
     if (first.status === "ok") {
       expect(first.updates).toHaveLength(1);
-      expect(first.warnings.join(" ")).toContain("credit balance");
+      expect(first.warnings).toEqual([]);
     }
 
     const second = await refreshLiabilityBalancesOnly(
-      { now: NOW, accountId: card.id },
+      { now: NOW, accountId: loan.id },
       handle.db,
     );
     // Second time: nothing moved, so nothing to say.

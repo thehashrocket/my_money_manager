@@ -465,8 +465,24 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
    * `balanceOnlyAccounts` comes from the SAME pre-await account read the row
    * path uses, so the window is identical: mutate the ledger inside the mocked
    * fetch, then resolve.
+   *
+   * THE FIXTURE IS A MORTGAGE, AND IT USED TO BE A CARD (changed 2026-09-09,
+   * D4.3). Not cosmetic. `partitionLinkedAccounts` now asks
+   * `importsTransactions`, so `balanceOnlyAccounts` holds linked LOANS and
+   * nothing else — a linked card imports its own rows and never reaches this
+   * pass at all. Left as a card, all five of these would have gone green by
+   * exercising nothing: the pass would skip the account, the anchor would sit
+   * untouched, and "the anchor must not move" is satisfied just as well by
+   * never looking at it. That is the failure mode the
+   * `mm-delete-the-column-not-just-the-cache-machinery` learning names — an
+   * absence-assertion is only coverage if something can make it present.
+   *
+   * The rule 11 property under test is about the LINK, not the account type,
+   * so a loan exercises it identically. That a card no longer arrives here is
+   * pinned separately, in `sync.test.ts`'s partition block, where it is the
+   * subject rather than a side effect.
    */
-  function respondForCardAfter(
+  function respondForLoanAfter(
     mutate: () => void,
     feedId: string,
     balance: string,
@@ -477,7 +493,7 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
         accounts: [
           {
             id: feedId,
-            name: "VISA",
+            name: "HOME MORTGAGE",
             balance,
             "available-balance": balance,
             "balance-date": SEP_1_NOON,
@@ -488,22 +504,22 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
     });
   }
 
-  it("does NOT write the old feed's balance onto a card re-pointed mid-sync", async () => {
-    const card = seedAccount({
-      name: "Visa",
-      type: "credit",
-      simplefinAccountId: "ACT-CARD",
+  it("does NOT write the old feed's balance onto a liability re-pointed mid-sync", async () => {
+    const liability = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      simplefinAccountId: "ACT-LOAN",
       startingBalanceCents: -100000,
       startingBalanceDate: "2026-01-01",
     });
-    respondForCardAfter(() => relink(card.id, "ACT-OTHER"), "ACT-CARD", "-2148.00");
+    respondForLoanAfter(() => relink(liability.id, "ACT-OTHER"), "ACT-LOAN", "-2148.00");
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
     const after = handle.db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, card.id))
+      .where(eq(schema.accounts.id, liability.id))
       .get();
 
     // The anchor is the whole balance. It must not move.
@@ -516,45 +532,45 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
     expect(after?.balanceSource).toBeNull();
 
     // Non-silent, and never reported as a completed action.
-    expect(warningsOf(outcome).some((w) => WAS_DROPPED_BALANCE.test(w) && w.includes("Visa"))).toBe(true);
+    expect(warningsOf(outcome).some((w) => WAS_DROPPED_BALANCE.test(w) && w.includes("Mortgage"))).toBe(true);
     const updates = "balanceUpdates" in outcome ? outcome.balanceUpdates : [];
     expect(updates).toEqual([]);
   });
 
-  it("does NOT write when the card was UNLINKED mid-sync, and says so in its own words", async () => {
-    const card = seedAccount({
-      name: "Visa",
-      type: "credit",
-      simplefinAccountId: "ACT-CARD",
+  it("does NOT write when the liability was UNLINKED mid-sync, and says so in its own words", async () => {
+    const liability = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      simplefinAccountId: "ACT-LOAN",
       startingBalanceCents: -100000,
     });
-    respondForCardAfter(() => relink(card.id, null), "ACT-CARD", "-2148.00");
+    respondForLoanAfter(() => relink(liability.id, null), "ACT-LOAN", "-2148.00");
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
     const after = handle.db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, card.id))
+      .where(eq(schema.accounts.id, liability.id))
       .get();
     expect(after?.startingBalanceCents).toBe(-100000);
     expect(after?.priorStartingBalanceCents).toBeNull();
-    expect(warningsOf(outcome).some((w) => w.includes("Visa") && w.includes("unlinked"))).toBe(true);
+    expect(warningsOf(outcome).some((w) => w.includes("Mortgage") && w.includes("unlinked"))).toBe(true);
   });
 
   it("reports NO balance update for a liability DELETED mid-sync", async () => {
     // The UPDATE would match zero rows. Pushing an update entry anyway is a
     // fabricated durable fact — `describeBalanceUpdates` would announce
-    // "Balance updated: Visa is now …" for an account that no longer exists.
-    const card = seedAccount({
-      name: "Visa",
-      type: "credit",
-      simplefinAccountId: "ACT-CARD",
+    // "Balance updated: Mortgage is now …" for an account that no longer exists.
+    const liability = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      simplefinAccountId: "ACT-LOAN",
       startingBalanceCents: -100000,
     });
-    respondForCardAfter(
-      () => handle.db.delete(schema.accounts).where(eq(schema.accounts.id, card.id)).run(),
-      "ACT-CARD",
+    respondForLoanAfter(
+      () => handle.db.delete(schema.accounts).where(eq(schema.accounts.id, liability.id)).run(),
+      "ACT-LOAN",
       "-2148.00",
     );
 
@@ -562,27 +578,27 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
 
     const updates = "balanceUpdates" in outcome ? outcome.balanceUpdates : [];
     expect(updates).toEqual([]);
-    expect(warningsOf(outcome).some((w) => w.includes("Visa") && w.includes("deleted"))).toBe(true);
+    expect(warningsOf(outcome).some((w) => w.includes("Mortgage") && w.includes("deleted"))).toBe(true);
   });
 
   it("DOES write, and snapshots the CURRENT prior, when the link did not move", async () => {
     // The control: the guard must cost nothing in the ordinary case, and
     // `prior_starting_balance_*` must come from the row as it stands now.
-    const card = seedAccount({
-      name: "Visa",
-      type: "credit",
-      simplefinAccountId: "ACT-CARD",
+    const liability = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      simplefinAccountId: "ACT-LOAN",
       startingBalanceCents: -100000,
       startingBalanceDate: "2026-01-01",
     });
-    respondForCardAfter(() => {}, "ACT-CARD", "-2148.00");
+    respondForLoanAfter(() => {}, "ACT-LOAN", "-2148.00");
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
     const after = handle.db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, card.id))
+      .where(eq(schema.accounts.id, liability.id))
       .get();
     expect(after?.startingBalanceCents).toBe(-214800);
     expect(after?.priorStartingBalanceCents).toBe(-100000);
@@ -597,22 +613,22 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
   it("takes the prior from the ledger NOW, not from the pre-await read", async () => {
     // A hand Reconcile landing during the fetch window must not be silently
     // overwritten with a prior two writes stale.
-    const card = seedAccount({
-      name: "Visa",
-      type: "credit",
-      simplefinAccountId: "ACT-CARD",
+    const liability = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      simplefinAccountId: "ACT-LOAN",
       startingBalanceCents: -100000,
       startingBalanceDate: "2026-01-01",
     });
-    respondForCardAfter(
+    respondForLoanAfter(
       () => {
         handle.db
           .update(schema.accounts)
           .set({ startingBalanceCents: -150000, startingBalanceDate: "2026-02-02" })
-          .where(eq(schema.accounts.id, card.id))
+          .where(eq(schema.accounts.id, liability.id))
           .run();
       },
-      "ACT-CARD",
+      "ACT-LOAN",
       "-2148.00",
     );
 
@@ -621,7 +637,7 @@ describe("refreshLiabilityBalances re-verifies the link before moving an anchor"
     const after = handle.db
       .select()
       .from(schema.accounts)
-      .where(eq(schema.accounts.id, card.id))
+      .where(eq(schema.accounts.id, liability.id))
       .get();
     expect(after?.startingBalanceCents).toBe(-214800);
     // The reconcile that landed mid-fetch is what the undo goes back to.
