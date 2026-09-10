@@ -1183,7 +1183,8 @@ Surfaced while reviewing [docs/plans/liability-accounts-and-budget-signals.md](.
 
 - [ ] **P3** — **Finish the `moneyTone` extraction: ONE call site left.** The liability plan's decision D9=A extracted `moneyTone(cents, { context })` into `src/lib/money.ts` and converted the three sites that PR touched (`src/app/page.tsx` ×2, `src/components/ledger/spine.tsx`). A sixth copy, `src/components/ledger/envelope-card.tsx`, was deleted outright by that plan's D8=A. **CORRECTED 2026-09-09: this entry claimed two local copies remained; only one does.** `_month-editor.tsx` now imports `TONE_CLASS` from `@/lib/budget/resolveRowDisplay` rather than declaring its own, so the single remaining local lookup map is `src/components/ledger/summary-strip.tsx`. (`src/components/ledger/trend-chart.tsx` also declares a local `moneyTone`, but it is a different function — it takes a float dollar value inside a Recharts tooltip, not signed cents — so it is not a copy of this one and is out of scope here.) Worth finishing because this rule has already produced a measured divergence — `spine.tsx` emitted `money-neg` where every other site emitted `text-money-neg` — and because "sign decides color" is exactly the kind of rule that quietly grows an exception. Note the destination is a decision, not a given: `MONEY_TONE_CLASS` and `TONE_CLASS` are two tone maps that agree on three of four keys (tracked separately below), and `summary-strip.tsx` has to pick one. Blocked by: nothing. (`src/lib/money.ts`, `src/components/ledger/summary-strip.tsx`)
 
-- [ ] **P3** — **Revisit importing credit card transactions instead of entering them by hand.** The liability plan's decision D10=C gives credit cards three explicit movements: a payment (transfer pair from checking), a manually-entered charge (an ordinary categorized transaction, `import_source='manual'`), and a reconcile (an anchor move). That is honest and it keeps card spending visible to the budget, but the charge path is data entry, and data entry decays. When it decays the card balance drifts from reality and every envelope under-reports by whatever wasn't entered. **The tell to watch for: a card you have to reconcile by a large amount every month — that gap is precisely the charges you didn't enter.** Automating it is not a small follow-on: cards carry no `bank_transaction_number`, so the CSV ±1 transfer matcher (CLAUDE.md rule 4) does not apply; dedup would need its own `external_id` or content-signature story; and pending card authorizations are a category of row the app currently refuses to write at all (CLAUDE.md's SimpleFIN constraints). Explicitly out of scope for the MVP at the user's request. Blocked by: liability PR2 shipped, plus roughly two months of real use to see whether manual entry actually holds up. (`src/lib/accounts/manualTransaction.ts`, `src/lib/simplefin/`, `src/lib/parseCsv.ts`)
+- [x] **P3** — **Revisit importing credit card transactions instead of entering them by hand.**
+      **RESOLVED v1.1.0 (2026-09-09).** The liability plan's decision D10=C gave credit cards three explicit movements: a payment (transfer pair from checking), a manually-entered charge (an ordinary categorized transaction, `import_source='manual'`), and a reconcile (an anchor move). That was honest and kept card spending visible to the budget, but the charge path was data entry, and data entry decays. This entry's original blocking condition ("liability PR2 shipped, plus roughly two months of real use") never fired — the actual trigger was a live SimpleFIN probe (2026-09-09) that measured Citi's feed as clean (9 transactions/89 days, 0 pending), which retired the two blockers this entry names: `bank_transaction_number` was never required (`matchTransfers.ts`'s bucket matcher has no such dependency, so the CSV rule 4 concern didn't apply), and dedup already had an `external_id`/content-signature story (rule 3) that needed no new design. The pending-authorization concern held — real pending rows on cards would still be refused — but Citi's own feed reports none. Shipped as `docs/plans/card-transaction-import.md`'s PR1: a linked card now imports its own transactions, with a D8.1 accounting cutover (no historical backfill, to avoid double-billing against already-categorized checking-side payments) and dedicated refusals on both hand-entry write paths once a card is importing. AMEX/Bank-of-America-shaped cards not on the feed still get hand-entry exactly as this entry describes — unchanged for them. (`src/lib/accounts/manualTransaction.ts`, `src/lib/simplefin/sync.ts`, `docs/plans/card-transaction-import.md`)
 
 ## Follow-ups from the `/plan-design-review` pass (2026-09-06, liability-accounts-and-budget-signals plan)
 
@@ -2620,23 +2621,25 @@ deferred deliberately, each with the reason.
       bypassed. Rule 11's `SyncTx` idiom is the precedent for making this
       structural. (`src/lib/categorize/refusalNotice.ts`)
 
-- [ ] **P2** — **`chargeableDateExists` is a second spelling of
-      `createCardActivity`'s date rule, inline in a `.tsx`.**
-      `_account-row.tsx:62` computes `startingBalanceDate < today`; the server
-      refuses `date <= startingBalanceDate` (`manualTransaction.ts:250`). They
-      must agree, and CLAUDE.md's V1 exclusion on UI-component tests means the
-      client half cannot be tested where it currently lives. Change the server's
-      comparison and the button hides on a day charges are legal, with `tsc`
-      silent and no test moving. Rule 8's lesson is that the pair belongs in ONE
-      shared module (`categoryKindLock.ts`, `kindsImplyUsed.ts` are the
-      precedents) — this branch adopted the behaviour and skipped the mechanism.
-      Extract `resolveCardAffordances({type, startingBalanceDate, balanceAction},
-      today) → {canAddCharge, canEditTerms, showReconcile}` into
-      `src/lib/accounts/`, beside `resolveBalanceAction` and
+- [ ] **P2 → narrowed by the card-transaction-import plan (2026-09-09).** The
+      comparison-drift half of this entry is CLOSED: `chargeableDateExists`
+      (`_account-row.tsx`) now reads `isAfterAnchor(today, startingBalanceDate)`
+      — the same shared module `createCardActivity`'s before-anchor refusal and
+      the sync accounting cutover (D8.1) both read — rather than a second
+      inline `<`. What remains is the STRUCTURAL half: `canAddCharge`,
+      `canEditTerms` and `showReconcile` are still three separately-computed
+      values passed into `CardControls` rather than one pure decision function,
+      so the "three-gate combination that regressed twice inside this branch's
+      own review cycles" (v0.27.0) is still only guarded by three call sites
+      agreeing by hand, not by a shared module `tsc` and a test can hold to
+      account. **Extract `resolveCardAffordances({type, startingBalanceDate,
+      balanceAction}, today) → {canAddCharge, canEditTerms, showReconcile}`**
+      into `src/lib/accounts/`, beside `resolveBalanceAction` and
       `resolveUtilizationDisplay`, which already establish exactly this shape.
-      That also covers the three-gate combination that regressed twice inside
-      this branch's own review cycles. Filed at P2 rather than P3 because the
-      drift is silent and the surface is money-entry.
+      This is PR2's T7 in `docs/plans/card-transaction-import.md` — do it
+      there rather than as a standalone follow-up; PR2 also needs the same
+      module to decide the pairing-warning and unmark-gate affordances D4.1/D5.2
+      describe, so building it once for all four is the point. (`src/app/accounts/_account-row.tsx`, `src/app/accounts/_card-controls.tsx`)
 
 - [ ] **P2** — **`readPositiveIntField`'s absent-field case is untested, and two
       of its three callers have no test at all.** One case exists (`"abc"` via
@@ -2683,3 +2686,212 @@ deferred deliberately, each with the reason.
       `<form action>` in a server component; converting it to `useActionState` is
       the change `createAccountAction` already made in this branch.
       (`src/app/import/actions.ts`)
+
+## Follow-ups from the card-transaction-import plan (2026-09-09)
+
+Surfaced while implementing `docs/plans/card-transaction-import.md` (PR1: the
+feed imports card transactions). Four entries — none block PR1, all recorded
+per the plan's own "residuals" section.
+
+- [ ] **P3** — **Citi's staleness label goes amber and stays amber (D-STALE).**
+      After the D9.1 hand reconcile at cutover, the card is
+      `balance_source='manual'` with `balance_as_of=NULL`, so
+      `resolveStalenessDisplay` reads `starting_balance_date` and paints amber
+      past 35 days — permanently, on an account whose computed balance is
+      current precisely BECAUSE imports are maintaining it. This is D4.3's
+      own objection ("a permanent warning is one people learn to skip")
+      reappearing on `/accounts` instead of `/sync`. Deliberately not fixed
+      in PR1: `resolveStalenessDisplay` is read by every account row, and
+      changing it to special-case an importing card is the exact "shared
+      classifier changed to fix a card-specific gap" trade that killed D7.2=A
+      in the eng review that produced this plan. A real fix likely means
+      reading the card's newest IMPORTED row's date instead of
+      `balance_as_of`/`starting_balance_date` when `importsTransactions` is
+      true — worth doing once there is a second importing card to generalize
+      from, not for one. Blocked by: nothing; deliberately deferred.
+      (`src/lib/accounts/resolveStalenessDisplay.ts`)
+
+- [ ] **P3** — **Historical Citi attribution was cut, not deferred, and D8.1
+      is the record of why.** Card charges dated on or before the anchor are
+      permanently excluded from import — June through August (relative to the
+      2026-09-09 cutover) never gets per-merchant Citi attribution, on
+      purpose, because retroactively importing them would double-bill the
+      Phase-A-filed checking payments covering those same months and rewrite
+      budget history the app is otherwise careful never to touch (D8.1=A over
+      D8.1=B in the eng review). If this is ever revisited, it needs a
+      reconciliation step that RETARGETS the Phase-A payment rows for the
+      backfilled months onto `transfer_pair_id`-linked pairs against the
+      newly-imported historical charges, not a raw historical import — the
+      double-count is the whole reason B lost. Blocked by: no plan exists for
+      the reconciliation step; this is a placeholder for the decision, not a
+      sized task. (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P3** — **The automatic card-payment matcher was deferred to a manual
+      entry point (D8.2), and the manual entry point is PR2, not yet built.**
+      Measured offsets between a Citi payment's card leg and its checking leg
+      were 1, 3, 1 and 1 days — zero of four would auto-pair on
+      `matchTransfers`' `(date, |amount|)` bucket key. A fuzzy ±N-day matcher
+      was designed (D4.2/D6.2) and then explicitly superseded (D8.2=A,
+      Codex's outside-voice pass) once `linkTransferPairManually` was shown to
+      already accept cross-date cross-account pairs — the missing piece was
+      an entry point, not an engine. If Citi's payment volume ever grows past
+      "a few clicks a month", or a second card is linked, revisit whether the
+      manual entry point still scales; the fuzzy matcher's rejected design is
+      recorded in the eng-review transcript this plan was built from, not
+      here, so it is not silently rediscovered as new work. Blocked by:
+      `docs/plans/card-transaction-import.md`'s PR2 (T7, T9) landing first —
+      this entry tracks the FOLLOW-ON question, not PR2 itself.
+      (`src/lib/simplefin/matchTransfers.ts`, `src/lib/simplefin/sync.ts`)
+
+- [ ] **P3** — **`refreshLiabilityBalances`' credit-card sign-guard arm
+      (rule 9) is now unreachable from both its callers.** `partitionLinkedAccounts`
+      routes every LINKED account into either `importAccounts`
+      (`importsTransactions` true) or `balanceOnlyAccounts` (false), and for a
+      linked account `importsTransactions` is false only for a loan — so no
+      card ever reaches `refreshLiabilityBalances` any more, and the "a card
+      genuinely can carry a positive credit balance, write it and say so"
+      branch cannot fire through `syncSimpleFin` or
+      `refreshLiabilityBalancesOnly`. Kept rather than deleted: the function
+      takes an arbitrary account list and a future caller (or a widened
+      `balanceOnlyAccounts`) could reintroduce a card, at which point deleting
+      the guard would leave a positive card balance from the feed UNGUARDED —
+      rule 9's whole failure mode (net worth wrong by twice the number, no
+      error, a plausible-looking figure). Five lines of dead-in-practice
+      defense is cheap; five lines of missing defense is not. If a future
+      change makes the arm reachable again, delete this entry rather than
+      re-adding a comment. Blocked by: nothing; this is a note, not a task.
+      (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P2 — TIME-SENSITIVE. Snapshot the mortgage's origination principal
+      before the first payment posts, or the data point is lost forever.**
+      Correction to the card-transaction-import plan's original D1, recorded
+      2026-09-09 (see `docs/plans/card-transaction-import.md`). The mortgage
+      currently sits at exactly its origination balance
+      (`starting_balance_cents = -40890000`, unmoved since account creation —
+      `prior_starting_balance_cents` equals `starting_balance_cents`), because
+      the loan was originated 1-2 weeks ago and has had no payments post.
+      That is not evidence the feed can never return mortgage transactions
+      (the original, wrong reading); it is a closing window. Rule 9:
+      `accounts.prior_starting_balance_cents` holds exactly ONE prior anchor,
+      not a series, and the sync balance pass overwrites it on every run. Once
+      the first payment posts and the anchor moves, there is no transaction
+      row to reconstruct the origination figure from (D3=A keeps the mortgage
+      at zero rows), so this is the only moment the true starting principal
+      can ever be captured for a future debt trend line. Take a one-time,
+      even manual, snapshot of `(starting_balance_cents, starting_balance_date)`
+      now — before the next `/sync` — and hold it somewhere durable (a note,
+      a row in a scratch table, anything outside the single mutable slot).
+      This does not require building the `balance_snapshots` table the P3
+      entry above asks for; it only requires not losing the one number that
+      table would need as its first row. Blocked by: nothing — do this before
+      the next sync moves the anchor. (`src/db/schema.ts`, `src/lib/simplefin/sync.ts`)
+
+## Follow-ups from the /ship pre-landing + adversarial review (2026-09-09, card-transaction-import PR1)
+
+- [ ] **P3 — an anchor moving BACKWARD mid-sync-fetch can permanently strand a
+      row (Codex adversarial finding).** The staging loop's `cutoverAnchor`
+      is read from the PRE-fetch account row, and `recheckCutoverAnchor`
+      (rule 11) re-verifies it inside the write transaction — but that
+      re-check only ever NARROWS which staged rows survive; it cannot ADD a
+      row the staging loop already excluded. If a hand `revertLiabilityBalanceAction`
+      ("Undo") fires DURING a sync's fetch window and moves a card's anchor
+      EARLIER (not later), a row between the new, earlier anchor and the old
+      one was never staged in the first place — it fell out at the
+      pre-fetch check, before the race-check ever runs. The NEXT sync's own
+      `resolveStartDate` window may then start AFTER that row's date (it
+      advances from `MAX(date)` of already-imported rows), so the row is
+      never even requested from the feed again — silently missing,
+      permanently, with no warning either run. Requires the same two-tab
+      timing rule 11's other guards already accept as a real, narrow
+      window — an Undo click landing inside one sync's fetch, on one card.
+      Fixing it means the staging loop would need to widen its own window
+      speculatively (stage everything back to the FLOOR, not just the
+      pre-fetch anchor) and let `recheckCutoverAnchor` narrow from there —
+      a real, larger change to the staging loop's contract, not a small
+      patch. Recorded as a residual, matching rule 3's own "boundary that is
+      pinned rather than closed" precedent, not fixed here.
+      (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P4 — a single sync response with 32,766+ new rows for one card would
+      abort the whole write transaction on SQLite's bind-parameter limit
+      (Codex adversarial finding).** Both `checkCardCompleteness` and the
+      in-transaction id-race re-check build one `inArray(...)` SQL `IN`
+      clause per account per run, sized to that account's row count for the
+      window. SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (commonly ~32,766) would
+      reject a query that large; the whole transaction would roll back, not
+      just that account. Measured as a real limit, but not a realistic one
+      for this app: SimpleFIN caps history at 90 days (this app fetches at
+      most 45), the ledger has exactly one importing card today, and its
+      measured volume is ~1.7 transactions a MONTH. Reaching the limit needs
+      four orders of magnitude more card volume than anything measured.
+      Chunking both queries below the bind limit is the fix if this ever
+      stops being true (a second high-volume card, say). Not done now —
+      solving a problem four orders of magnitude away from the real data
+      would be exactly the kind of unrequested robustness this repo's own
+      reuse-ladder discipline argues against. (`src/lib/simplefin/sync.ts`)
+
+- [ ] **P2 — the Reconcile form cannot represent a POSITIVE credit-card
+      balance, and D9.2 makes it the ONLY path for every importing card
+      regardless of row count (Codex structured review).** Pre-existing, not
+      newly introduced: an unlinked card with a genuine credit balance
+      (rule 9: "a card genuinely can carry a credit balance after an
+      overpayment... `summarizeBalances` treats that as real") already had
+      only Reconcile as its control, and `updateLiabilityBalanceAction`
+      refuses a negative `balanceOwed` input (line ~180) then unconditionally
+      negates whatever is typed — there was never a way to submit a positive
+      stored value through this form. What D9.2 changes: a LINKED, ZERO-ROW
+      card used to get REFRESH in that state, and `refreshLiabilityBalances`'s
+      sign guard already correctly WRITES a positive feed-reported balance
+      for a card (rule 9). That worked. Now every importing card — including
+      at the moment of first linking, which is exactly when D9.1's required
+      manual reconcile (T6) happens — resolves to Reconcile unconditionally,
+      so if a card happens to be in a credit-balance state at cutover, the
+      one action the plan requires the user to perform cannot enter the
+      correct sign; it silently accepts a positive "owed" figure and stores
+      it negative. Verified Citi's actual measured state throughout this
+      plan's development was a debt, never a credit balance, so this does
+      not bite THIS rollout — but the gap is real and independent of card
+      import. Fix means letting the Reconcile form represent both signs
+      (a toggle, or reading the CURRENT balance's sign as the default and
+      accepting a matching signed input) — a real UX decision, not a
+      one-line patch, so not done here. (`src/app/accounts/_balance-forms.tsx`,
+      `src/app/accounts/actions.ts`, `src/lib/accounts/resolveBalanceAction.ts`)
+
+- [ ] **P1 — a card's PRE-EXISTING manual history (before it was ever linked
+      to SimpleFIN) is not reconciled or guarded at the moment it starts
+      importing, and would double-count silently if any exists (found
+      independently by three adversarial review passes: a Claude subagent,
+      Codex exec, and Codex's structured review — cross-model agreement,
+      user decision 2026-09-09: document and ship, not fix now).** D8.3
+      refuses a NEW hand-entered charge or payment mirror once
+      `importsTransactions(card)` is true — but it has nothing to say about
+      rows that were written BEFORE the card was ever linked. Concretely: a
+      user hand-enters an $80 "Costco" charge on an unlinked card (fully
+      legal), later links that card to SimpleFIN, then syncs without first
+      reconciling the anchor past that charge's date (D9.1's manual step,
+      T6, documents doing this but nothing enforces it). The bank's real
+      $80 "COSTCO WHSE #..." row for the same event arrives on the next
+      sync; content dedup cannot collapse it against the hand-typed row
+      (different memo, likely a different date too) — the exact
+      double-count D8.3 exists to prevent, reached from the opposite
+      direction. Reproduced independently against an in-memory DB by two
+      separate review passes.
+      **Does NOT affect this ship**: Citi's actual live `import_source='manual'`
+      row count is 0 (verified via the SimpleFIN probe this whole plan was
+      built from), so the account this PR is actually for cannot hit this.
+      The risk is entirely in a FUTURE card link (or Citi, if manual entries
+      are made before the real link+sync happens).
+      **The fix is a real design decision, not a patch**: at minimum, before
+      staging a card's transactions for the very first time, check for
+      existing `import_source='manual'` rows dated after the account's
+      current anchor; if any exist, either refuse to stage (matching D8.3's
+      own "make it unrepresentable" posture) or warn loudly and require an
+      explicit acknowledgment before the first import proceeds. Either
+      needs its own UX pass — what the refusal/warning says, whether it
+      blocks the WHOLE sync or just that account, how a user actually
+      clears the condition (delete the old manual rows? reconcile past
+      them?). Do this as PR2 or PR3 scope, reviewed with the same rigor as
+      D8.1's own cutover design, not bolted onto PR1 under ship pressure.
+      Blocked by: nothing technical — this is a design-then-build item.
+      (`src/lib/simplefin/sync.ts`, `src/lib/accounts/manualTransaction.ts`,
+      `docs/plans/card-transaction-import.md`)
