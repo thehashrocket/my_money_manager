@@ -13,7 +13,11 @@ afterEach(() => {
   handle.close();
 });
 
-function seedAccount(name: string, type: "checking" | "savings" | "credit" | "loan" = "checking") {
+function seedAccount(
+  name: string,
+  type: "checking" | "savings" | "credit" | "loan" = "checking",
+  simplefinAccountId: string | null = null,
+) {
   const [row] = handle.db
     .insert(schema.accounts)
     .values({
@@ -21,6 +25,7 @@ function seedAccount(name: string, type: "checking" | "savings" | "credit" | "lo
       type,
       startingBalanceCents: 0,
       startingBalanceDate: "2026-01-01",
+      simplefinAccountId,
     })
     .returning()
     .all();
@@ -92,5 +97,25 @@ describe("listCardAccounts", () => {
   it("returns an empty list when no cards exist, so the menu can say so", () => {
     seedAccount("Checking");
     expect(listCardAccounts(handle.db)).toEqual([]);
+  });
+
+  it("D8.3 — excludes a LINKED (importing) card, so the menu never offers a payment the server always refuses", () => {
+    // markAsCardPayment refuses on `importsTransactions(card)`: the real bank
+    // credit is coming and a hand-made mirror would double it. Before this,
+    // listCardAccounts still returned an importing card, so the row menu's
+    // "Mark as payment to Citi" was rendered but could never succeed — the
+    // exact "refusal the user can only discover by triggering it" anti-pattern
+    // v0.24.0's assignableKinds fix already established as worse than an
+    // absent control.
+    seedAccount("Checking");
+    seedAccount("Amex", "credit"); // unlinked — still a valid target
+    seedAccount("Citi", "credit", "ACT-citi"); // linked — imports its own rows
+
+    expect(listCardAccounts(handle.db).map((a) => a.name)).toEqual(["Amex"]);
+  });
+
+  it("still includes an UNLINKED card — AMEX/BofA-shaped, never on the feed", () => {
+    seedAccount("Amex", "credit", null);
+    expect(listCardAccounts(handle.db).map((a) => a.name)).toEqual(["Amex"]);
   });
 });

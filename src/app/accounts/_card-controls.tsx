@@ -30,6 +30,7 @@ export function CardControls({
   canAddCharge,
   canEditTerms,
   showReconcile,
+  importsFromFeed,
 }: {
   accountId: number;
   accountName: string;
@@ -72,6 +73,16 @@ export function CardControls({
    * `_account-row.tsx`.
    */
   showReconcile: boolean;
+  /**
+   * D-ANCHOR — whether this card's balance is being maintained by an
+   * ongoing feed import (`importsTransactions`). Relayed to `ReconcileForm`
+   * so it can warn: reconciling moves the anchor FORWARD, and any feed row
+   * dated on or before the new anchor is permanently excluded by D8.1's
+   * cutover, exactly the way it is by rule 1's balance sum. Reconcile before
+   * a sync catches up and an un-imported charge from those days is gone for
+   * good — silently, and it is money.
+   */
+  importsFromFeed: boolean;
 }) {
   // Bumping a key remounts ReconcileDisclosure in its open state, which is
   // also what moves focus into the balance field (DS66: a handoff that
@@ -99,6 +110,7 @@ export function CardControls({
           balanceCents={balanceCents}
           today={today}
           startOpen={handoff > 0}
+          importsFromFeed={importsFromFeed}
         />
       ) : null}
       {canAddCharge ? (
@@ -110,13 +122,17 @@ export function CardControls({
           // DS56's handoff only exists where the destination does. On a
           // feed-refreshed card the row offers Refresh instead, so
           // "Reconcile instead →" would point at a form that is not on screen.
+          //
+          // Provably always `true` as of the card-transaction-import plan:
+          // `canAddCharge` (this block's own gate) requires
+          // `!importsTransactions(account)`, which for a non-long-term
+          // account is only ever true when it is UNLINKED — and
+          // `resolveBalanceAction` always answers `"reconcile"` for an
+          // unlinked account. `showReconcile` can therefore never be
+          // `false` here; kept as a real prop rather than hardcoded so a
+          // future change to either predicate that reopens the `"refresh"`
+          // case is caught by the type, not silently wrong again.
           canReconcile={showReconcile}
-          // `!showReconcile` is exactly `resolveBalanceAction === "refresh"`,
-          // which is exactly "feed-linked and holding no rows" — the state the
-          // first charge ENDS. Passed so the dialog can say so before the
-          // click rather than leaving the user to notice the Refresh button
-          // has gone.
-          endsFeedRefresh={!showReconcile}
           onReconcileInstead={() => setHandoff((n) => n + 1)}
         />
       ) : null}

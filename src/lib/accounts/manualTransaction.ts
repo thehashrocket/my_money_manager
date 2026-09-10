@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { db as defaultDb, schema, type AnyDb } from "@/db";
 import { accountClass } from "./accountClass";
+import { importsTransactions } from "./importsTransactions";
+import { isAfterAnchor } from "./isAfterAnchor";
 import { isCreditCard } from "./isCreditCard";
 import { loadAccountBalances } from "./loadAccountBalances";
 import { formatMonthDay } from "@/lib/now";
@@ -39,6 +41,10 @@ export type ManualRefusalReason =
   | "not-a-card"
   | "before-anchor"
   | "already-paired"
+  /** `markAsCardPayment` only: the card imports its own transactions, so the
+   *  bank's real credit is coming and a hand-made mirror would double it
+   *  (D8.3). */
+  | "card-imports-its-own"
   /** `removeCardActivity` only: the row is a BANK row, so there is nothing to
    *  repair here — deleting it would destroy imported history. */
   | "not-manual"
@@ -236,6 +242,37 @@ export function createCardActivity(
     if (!guard.ok) return guard.result;
     const { account } = guard;
 
+    // D8.3 (widened from `markAsCardPayment` during the card-transaction-import
+    // review) — A CARD THAT IMPORTS ITS OWN TRANSACTIONS MUST NOT ALSO GET A
+    // HAND-TYPED CHARGE OR REFUND FOR THE SAME EVENT.
+    //
+    // The failure is identical in shape to the synthetic-mirror trap this
+    // guard was written for, just on the OTHER write path: a hand-typed
+    // charge's `rawMemo` is the user's own merchant text (`input.merchant`),
+    // not the bank's. When the real posted row arrives on the next sync, its
+    // date and memo will very likely differ from what was typed, so content
+    // dedup (`date|amount_cents|raw_memo`) cannot collapse the two — the card
+    // shows the charge twice and its balance is wrong by twice the amount,
+    // silently, with both rows looking entirely plausible.
+    //
+    // NOT a warning (contrast D4.1's categorized-row pairing warning): a
+    // categorized checking payment has a real reason to stay reachable
+    // (Phase B needs to be ABLE to pair it), where a hand-typed charge on an
+    // importing card has no such reason to exist at all — the feed is going
+    // to report the same real-world event on its own. Once a card imports,
+    // hand-entry stops being a bridge and starts being a pure duplication
+    // risk, so refused outright rather than merely announced (rule 8).
+    //
+    // Applies to refunds too (`kind: "refund"`): the same bank-memo mismatch
+    // applies to a refund row exactly as it does to a charge.
+    if (importsTransactions(account)) {
+      return refused(
+        "card-imports-its-own",
+        `${account.name}'s own transactions come in from your bank, so a hand-typed ${input.kind === "refund" ? "refund" : "charge"} here would risk counting it twice once your next sync reports it. Check back after syncing, or use Reconcile if the balance needs a correction now.`,
+        input.accountId,
+      );
+    }
+
     // D12 — REFUSED on or before the anchor, for charges and refunds only.
     //
     // Rule 1's `>` is strict. Reconcile on the 20th, then remember an $80
@@ -247,7 +284,20 @@ export function createCardActivity(
     //
     // E5 — this is correct for charges and WRONG for payment mirrors, which
     // is why the check lives here and not in the shared guard.
-    if (input.date <= account.startingBalanceDate) {
+    //
+    // The COMPARISON is shared even though the decision to apply it is not:
+    // `isAfterAnchor` is the one spelling of rule 1's strict `>`. Before this
+    // module existed it was three HAND-WRITTEN literals in three files — this
+    // one, the sync cutover (D8.1), and `_account-row.tsx`'s
+    // `chargeableDateExists` (feeding `canAddCharge`) — one of which had
+    // already drifted from `<=` to `<` in a `.tsx` no test can reach. All
+    // three now call this one function; a later caller (`recheckCutoverAnchor`
+    // in sync.ts, added for rule 11) was written directly against the shared
+    // function and was never a fourth literal to convert. `resolveCardAffordances`
+    // (PR2's T7) will fold the `_account-row.tsx` caller into one component,
+    // but the shared COMPARISON this comment is about predates that
+    // extraction and does not wait on it.
+    if (!isAfterAnchor({ date: input.date, anchor: account.startingBalanceDate })) {
       return refused(
         "before-anchor",
         // DS61 #12. States the consequence and names no schema concept.
@@ -441,6 +491,45 @@ export function markAsCardPayment(
       return refused(
         "already-paired",
         `That transaction is already matched with ${partner?.name ?? "another account"}. Unlink it first.`,
+        input.cardAccountId,
+      );
+    }
+
+    // D8.3 — A CARD THAT IMPORTS ITS OWN TRANSACTIONS MUST NOT GET A MIRROR.
+    //
+    // The row this function writes is a fabrication: it carries the CHECKING
+    // leg's date and an invented `PAYMENT TO <CARD>` memo. That was fine while
+    // no real credit could ever arrive on the card. Once the feed stages the
+    // card's rows, the bank's own credit DOES arrive — and it lands on a
+    // different date (measured offsets of 1, 3, 1, 1 days across all four real
+    // Citi payments) with a different memo, so `contentSignature`
+    // (`date|amount_cents|raw_memo`) cannot collapse the two. The card then
+    // shows one payment twice and its balance is wrong by twice the amount,
+    // silently, with both rows looking entirely plausible.
+    //
+    // Refused rather than warned, for the reason rule 8 and D12 both give:
+    // make the bad state unrepresentable. Re-checked HERE inside the write
+    // transaction rather than trusted from the row menu, because the menu's
+    // props are server-rendered and the link can move in another tab (rule 11).
+    //
+    // AFTER E10, deliberately — an adversarial review pass caught this
+    // ordering as a bug, not a style choice. E10's idempotency branch above
+    // is the correct answer for a double-submitted, already-successful
+    // pairing ("Already recorded as a payment to X"); this refusal is about a
+    // NEW write. Checking D8.3 first meant a stale-tab resubmit of a pairing
+    // that succeeded before the card started importing came back
+    // "count the payment twice" instead of the true, harmless "already
+    // recorded" — a misleading refusal for a request that would have changed
+    // nothing.
+    //
+    // The message names PHASE A, not the PR2 linking flow, deliberately —
+    // filing the row under a category is correct advice whether or not a
+    // linking surface exists yet, and it is what makes the payment reach an
+    // envelope at all. Pairing it later is additive.
+    if (importsTransactions(card)) {
+      return refused(
+        "card-imports-its-own",
+        `${card.name}'s own payment rows come in from your bank, so adding a matching one here would count the payment twice. File this transaction under a category instead.`,
         input.cardAccountId,
       );
     }

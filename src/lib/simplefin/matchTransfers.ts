@@ -30,6 +30,22 @@
  * accounts ever carry rows. Removing it changes nothing on the real data
  * (verified: still 56 pairs, still 1 undecidable day). Keep it, but do not read
  * it as load-bearing today.
+ *
+ * THAT LAST PARAGRAPH IS THE ONE TO RE-READ (updated 2026-09-09, D-CARD). A
+ * feed-linked credit card now imports its own transaction rows, so a third
+ * account genuinely can carry them — but this file never sees them, because
+ * the two callers that feed the automatic matcher exclude card rows in SQL
+ * (`NOT_ON_A_CARD`, `sync.ts`). The reason is not row volume: this function
+ * knows nothing about account types, so a card PURCHASE and an unrelated
+ * same-day checking deposit of the same magnitude form a perfectly balanced
+ * bucket and get auto-linked, dropping real spending out of every envelope
+ * with no error. The counting argument is sound about buckets and silent about
+ * whether two rows have anything to do with each other; account type is
+ * exactly the information it does not have.
+ *
+ * So the guard stays dormant, for a new reason. Do not "fix" it by teaching
+ * this function about accounts — the exclusion belongs at the query, beside
+ * `NOT_MANUAL`, where the other row-class exclusions already live.
  */
 export type TransferCandidate = {
   id: string | number;

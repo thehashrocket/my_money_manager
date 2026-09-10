@@ -49,6 +49,40 @@ function seedCategory(name = "Groceries") {
   return existing!;
 }
 
+/**
+ * A `import_source='manual'` row, seeded directly rather than through
+ * `createCardActivity` — used by tests exercising `removeCardActivity` /
+ * `hasAnyTransactionRows` / `resolveBalanceAction` on a LINKED, IMPORTING
+ * card, where `createCardActivity` itself now refuses (D8.3, this same
+ * change). The row shape matches what `createCardActivity` would have
+ * written; only the write PATH differs.
+ */
+function seedManualCardRow(accountId: number, date: string, amountCents: number, categoryId: number) {
+  seq += 1;
+  const [batch] = handle.db
+    .insert(schema.importBatches)
+    .values({ source: "manual", label: "seed.manual" })
+    .returning()
+    .all();
+  const [row] = handle.db
+    .insert(schema.transactions)
+    .values({
+      accountId,
+      date,
+      rawDescription: "WITHDRAWAL",
+      rawMemo: "COSTCO",
+      normalizedMerchant: "costco",
+      amountCents,
+      importSource: "manual",
+      importBatchId: batch.id,
+      importRowHash: `seed-manual-${seq}`,
+      categoryId,
+    })
+    .returning()
+    .all();
+  return row;
+}
+
 function seedCheckingDebit(accountId: number, date: string, amountCents: number) {
   seq += 1;
   const [batch] = handle.db
@@ -214,6 +248,116 @@ describe("createCardActivity — refunds (E13)", () => {
   });
 });
 
+/**
+ * D8.3, widened from `markAsCardPayment` during the card-transaction-import
+ * review. A hand-typed charge/refund's `rawMemo` is the user's own text, not
+ * the bank's, so once a card imports its own rows, content dedup cannot
+ * collapse a manual entry against the real posted row the next sync brings —
+ * the card would show the same real-world event twice, silently, at twice
+ * the dollar amount.
+ */
+describe("createCardActivity — refused on an IMPORTING card (D8.3)", () => {
+  function linkToFeed(accountId: number) {
+    handle.db
+      .update(schema.accounts)
+      .set({ simplefinAccountId: "ACT-citi" })
+      .where(eq(schema.accounts.id, accountId))
+      .run();
+  }
+
+  it("REFUSES a charge on a linked card", () => {
+    const visa = seedAccount({ name: "Citi", type: "credit", anchor: "2026-08-01" });
+    linkToFeed(visa.id);
+
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: visa.id,
+        date: "2026-09-03",
+        amountCents: 8_000,
+        merchant: "COSTCO",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.reason).toBe("card-imports-its-own");
+      expect(result.accountId).toBe(visa.id);
+      expect(result.message).toContain("Citi");
+      expect(result.message).toContain("twice");
+      // Names the way back — Reconcile is still reachable, unlike an
+      // importing card's dead-Refresh-button state D9.2 fixes elsewhere.
+      expect(result.message).toContain("Reconcile");
+    }
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("REFUSES a refund on a linked card too — the mismatch risk is identical", () => {
+    const visa = seedAccount({ name: "Citi", type: "credit", anchor: "2026-08-01" });
+    linkToFeed(visa.id);
+
+    const result = createCardActivity(
+      {
+        kind: "refund",
+        accountId: visa.id,
+        date: "2026-09-03",
+        amountCents: 20_000,
+        merchant: "COSTCO",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") expect(result.reason).toBe("card-imports-its-own");
+    expect(handle.db.select().from(schema.transactions).all()).toHaveLength(0);
+  });
+
+  it("still ACCEPTS a charge on an UNLINKED card — AMEX/BofA-shaped, never on the feed", () => {
+    // The negative control. AMEX and Bank of America are not on the feed and
+    // never will be (Phase A's whole premise) — this guard must not catch
+    // them along with cards that actually import.
+    const amex = seedAccount({ name: "AMEX", type: "credit", anchor: "2026-08-01" });
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: amex.id,
+        date: "2026-09-03",
+        amountCents: 8_000,
+        merchant: "COSTCO",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("is checked BEFORE the anchor refusal — the reason names the real cause", () => {
+    // Ordering matters for the message: an importing card that is ALSO
+    // anchored today should say "this would double-count", not "pick a later
+    // date", which would invite exactly the retry this guard exists to
+    // prevent.
+    const visa = seedAccount({ name: "Citi", type: "credit", anchor: "2026-09-03" });
+    linkToFeed(visa.id);
+
+    const result = createCardActivity(
+      {
+        kind: "charge",
+        accountId: visa.id,
+        date: "2026-09-03", // ON the anchor — would ALSO be refused as before-anchor
+        amountCents: 8_000,
+        merchant: "COSTCO",
+        categoryId: seedCategory().id,
+      },
+      handle.db,
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") expect(result.reason).toBe("card-imports-its-own");
+  });
+});
+
 describe("E17 — the mortgage is not a valid target for any manual write", () => {
   it("REJECTS a charge on a loan (F14)", () => {
     // E1 closed the sync door and E6 closed the CSV door; this was the third.
@@ -323,6 +467,76 @@ describe("markAsCardPayment", () => {
     expect(
       markAsCardPayment({ transactionId: deposit.id, cardAccountId: visa.id }, handle.db).status,
     ).toBe("refused");
+  });
+
+  it("REFUSES on a LINKED/importing card (D8.3) — its own dedicated test, not just createCardActivity's", () => {
+    // This is the ORIGINAL D8.3 guard — the synthetic mirror is a fabrication
+    // dated from the CHECKING leg with an invented "PAYMENT TO <CARD>" memo,
+    // and the real bank credit for the same payment arrives later with a
+    // different date and memo, so content dedup cannot collapse them and the
+    // card would show the payment twice. `createCardActivity`'s sibling
+    // refusal (widened from this one) has its own describe block below; this
+    // is the one this function's own tests were missing.
+    const checking = seedAccount({ name: "Checking", type: "checking" });
+    const visa = seedAccount({ name: "Citi", type: "credit" });
+    handle.db
+      .update(schema.accounts)
+      .set({ simplefinAccountId: "ACT-citi" })
+      .where(eq(schema.accounts.id, visa.id))
+      .run();
+    const leg = seedCheckingDebit(checking.id, "2026-09-15", -50_000);
+
+    const result = markAsCardPayment(
+      { transactionId: leg.id, cardAccountId: visa.id },
+      handle.db,
+    );
+
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.reason).toBe("card-imports-its-own");
+      expect(result.accountId).toBe(visa.id);
+      expect(result.message).toContain("Citi");
+    }
+    // Nothing written — no mirror, no pairing.
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].transferPairId).toBeNull();
+  });
+
+  it("a double-submit of an ALREADY-paired payment reports E10's success, not D8.3's refusal, even once the card imports (adversarial review)", () => {
+    // Found in adversarial review: D8.3's check used to run BEFORE `leg` was
+    // even read, ahead of E10's idempotency branch below. A pairing created
+    // while the card was NOT YET importing, then re-submitted (a stale tab,
+    // a double-click) AFTER the card starts importing, got the misleading
+    // "would count the payment twice" refusal for a request that changes
+    // NOTHING — the pairing already exists and this call would no-op. D8.3
+    // now runs after E10, so the no-op success wins for a request this
+    // specific, and D8.3 only ever fires for a genuinely NEW write.
+    const checking = seedAccount({ name: "Checking", type: "checking" });
+    const visa = seedAccount({ name: "Citi", type: "credit" });
+    const leg = seedCheckingDebit(checking.id, "2026-09-15", -50_000);
+
+    // Pair while UNLINKED — this succeeds today, exactly as before D8.3.
+    const first = markAsCardPayment({ transactionId: leg.id, cardAccountId: visa.id }, handle.db);
+    expect(first.status).toBe("ok");
+
+    // NOW the card starts importing.
+    handle.db
+      .update(schema.accounts)
+      .set({ simplefinAccountId: "ACT-citi" })
+      .where(eq(schema.accounts.id, visa.id))
+      .run();
+
+    // The same request, resubmitted — the stale-tab / double-click case.
+    const second = markAsCardPayment({ transactionId: leg.id, cardAccountId: visa.id }, handle.db);
+    expect(second.status).toBe("ok");
+    if (second.status === "ok") {
+      expect(second.message).toContain("Already recorded as a payment to Citi");
+    }
+
+    // Nothing changed — still exactly one pair, no second mirror.
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(2);
   });
 
   describe("E10 — three-way idempotency, re-read inside the write transaction", () => {
@@ -932,25 +1146,38 @@ describe("removeCardActivity", () => {
    * The reason this function is worth more than an ordinary undo.
    *
    * `hasAnyTransactionRows` has NO anchor filter (E16), so ONE row flips a
-   * feed-linked card off `resolveBalanceAction`'s `refresh` branch and makes
-   * `refreshLiabilityBalances` skip it (D7/D15). Before this existed there was
+   * card off the zero-row scope that `refreshLiabilityBalances` and
+   * `resolveBalanceAction` both key on (D7/D15). Before this existed there was
    * no way back to zero rows, so the first hand-entered charge permanently
    * converted a card whose balance the bank maintained into one the user
-   * maintains. Both gates ask the same question of the same table, so removing
-   * the last row restores it — that round trip is the property, and neither
-   * half of it can be seen from a test of either function alone.
+   * maintains. Removing the last row restores the ROW-COUNT half of that.
+   *
+   * WHAT THIS TEST NO LONGER PINS, AND WHY (D9.2, 2026-09-09). It used to
+   * assert the full round trip on a FEED-LINKED card: `refresh` → add a row →
+   * `reconcile` → remove it → `refresh` again. That property is retired, not
+   * broken. A feed-linked card now imports its own transactions, so
+   * `partitionLinkedAccounts` steers it away from `refreshLiabilityBalances`
+   * entirely and `resolveBalanceAction` answers `reconcile` for it at every
+   * row count. There is nothing for removing the last row to restore, because
+   * the card has no automatic balance to go back to — that is the trade the
+   * import decision takes, and `PLAN.md`'s "reversible by one row" paragraph
+   * is corrected to match.
+   *
+   * So the round trip is asserted here on the row count itself, and on an
+   * UNLINKED card, where `removeCardActivity` is still the only way back from
+   * a mistyped charge. The `resolveBalanceAction` half moved to that
+   * function's own tests, where the new three-input answer belongs.
    */
-  it("RESTORES a feed-linked card's automatic balance by taking the last row away", () => {
+  it("takes the last row back off a card, restoring its zero-row state (E16)", () => {
     const card = seedAccount({ name: "Visa", type: "credit", cents: -100000, anchor: "2026-01-01" });
-    handle.db
-      .update(schema.accounts)
-      .set({ simplefinAccountId: "ACT-visa" })
-      .where(eq(schema.accounts.id, card.id))
-      .run();
-    const linked = { simplefinAccountId: "ACT-visa" };
+    const unlinked = { type: "credit" as const, simplefinAccountId: null };
 
     expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
-    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("refresh");
+    // An unlinked card was never feed-refreshed, so this is `reconcile`
+    // throughout. Asserted anyway: it is the control that must NOT move.
+    expect(resolveBalanceAction(unlinked, hasAnyTransactionRows(card.id, handle.db))).toBe(
+      "reconcile",
+    );
 
     const category = seedCategory();
     const created = createCardActivity(
@@ -967,12 +1194,45 @@ describe("removeCardActivity", () => {
     if (created.status !== "ok") throw new Error("setup failed");
 
     // One row is enough, and its date is irrelevant — that is E16.
-    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("reconcile");
+    expect(hasAnyTransactionRows(card.id, handle.db)).toBe(true);
 
     removeCardActivity({ transactionId: created.transactionId }, handle.db, CONFIRMED);
 
     expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
-    expect(resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db))).toBe("refresh");
+    expect(resolveBalanceAction(unlinked, hasAnyTransactionRows(card.id, handle.db))).toBe(
+      "reconcile",
+    );
+  });
+
+  it("a FEED-LINKED card stays on Reconcile across the same round trip (D9.2)", () => {
+    // The retired property's replacement, asserted rather than described.
+    // Adding and removing a row must not move a linked card's balance control
+    // at all now — if this ever goes back to `refresh` at zero rows, the row
+    // renders a button wired to a pass that skips the account.
+    const card = seedAccount({ name: "Citi", type: "credit", cents: -100000, anchor: "2026-01-01" });
+    handle.db
+      .update(schema.accounts)
+      .set({ simplefinAccountId: "ACT-citi" })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+    const linked = { type: "credit" as const, simplefinAccountId: "ACT-citi" };
+
+    const at = () => resolveBalanceAction(linked, hasAnyTransactionRows(card.id, handle.db));
+
+    expect(at()).toBe("reconcile");
+
+    // Seeded directly, not via `createCardActivity`: this test is about the
+    // round trip through `hasAnyTransactionRows`/`resolveBalanceAction`, and
+    // `createCardActivity` now REFUSES on this exact account shape (D8.3,
+    // covered by its own tests below) — using it here would make this test
+    // fail for a reason unrelated to what it is checking.
+    const category = seedCategory();
+    const row = seedManualCardRow(card.id, "2026-01-05", -8025, category.id);
+    expect(at()).toBe("reconcile");
+
+    removeCardActivity({ transactionId: row.id }, handle.db, CONFIRMED);
+    expect(hasAnyTransactionRows(card.id, handle.db)).toBe(false);
+    expect(at()).toBe("reconcile");
   });
 
   it("REFUSES a bank row — deleting one would destroy imported history", () => {

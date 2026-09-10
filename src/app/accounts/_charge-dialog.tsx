@@ -46,7 +46,6 @@ export function ChargeDialog({
   categories,
   today,
   canReconcile,
-  endsFeedRefresh,
   onReconcileInstead,
 }: {
   accountId: number;
@@ -55,13 +54,6 @@ export function ChargeDialog({
   today: string;
   /** Whether this row is showing a Reconcile form to hand off TO. */
   canReconcile: boolean;
-  /**
-   * True when this card's balance currently comes from the BANK and this
-   * charge would be its first row — which stops that, because the feed balance
-   * pass is scoped to zero-row accounts (D7/D15) and `hasAnyTransactionRows`
-   * has no anchor filter (E16).
-   */
-  endsFeedRefresh: boolean;
   /** DS56 — hands the refusal's recovery back to the row. */
   onReconcileInstead: () => void;
 }) {
@@ -150,35 +142,6 @@ export function ChargeDialog({
             A charge counts as spending in its envelope, in the month you made it.
           </DialogDescription>
         </DialogHeader>
-
-        {/* NAMES THE CONSEQUENCE BEFORE THE CLICK.
-            
-            The first hand-entered row on a feed-linked card stops its balance
-            updating from the bank: the feed balance pass is scoped to zero-row
-            accounts (D7/D15) and `hasAnyTransactionRows` counts rows with no
-            anchor filter (E16), so one row is enough and the row's Refresh
-            button is replaced by Reconcile. That is the designed end state for
-            a card, not a fault — `sync.ts` says as much — but it is a trade the
-            user is making, and this dialog used to describe only the half that
-            sounded good.
-            
-            It is stated as reversible because it now is: "Remove this charge"
-            on the `/transactions` row menu takes the row back out, and both
-            gates ask the same question of the same table, so deleting the last
-            one restores the feed refresh on the next sync. Before that existed
-            this sentence would have had to say "permanently". */}
-        {endsFeedRefresh ? (
-          <div className="rounded-md border border-[color-mix(in_oklch,var(--accent-amber)_45%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_18%,var(--background))] px-3 py-2 text-sm text-ink-1">
-            <p>
-              {accountName}&apos;s balance updates from your bank right now. Adding activity by hand
-              switches it to Reconcile, which you keep up to date yourself.
-            </p>
-            <p className="mt-1 text-ink-2">
-              Reversible — remove the charge from the transaction list and the bank balance takes
-              over again.
-            </p>
-          </div>
-        ) : null}
 
         <form action={formAction} className="space-y-4">
           <input type="hidden" name="accountId" value={accountId} />

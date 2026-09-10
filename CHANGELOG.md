@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-09
+
+### Added
+- **A linked credit card now imports its own transactions from your bank, instead of only its balance.** This is the trade 1.0.0 recorded as a decision rather than a limitation, taken in the other direction for Citi specifically: it now shows every charge and payment your bank reports, attributed by merchant, the same as a checking or savings account. The card's balance stops being read from the bank the moment this starts — it is now computed the same way a checking account's is, from a starting point plus everything imported since — so keeping it accurate is on you from here, the same as any other reconciled account. Nothing changes for a card that is not linked, or not on your bank's feed at all.
+- **Historical spending on that card does not import, and will not.** Only charges and payments dated after the card's own starting point come in. This is deliberate: money already recorded by hand as a checking-side card payment and money imported as the card's own charge are two different ways of counting the same dollars, and importing the history underneath a payment you already recorded would count it twice. The starting point is yours to set with Reconcile, the same control every card already has.
+
+### Fixed
+- **A hand-typed charge or payment on a card that now imports its own transactions is refused, not silently duplicated.** Once a card's transactions come from the bank, a charge or "mark as payment" entered by hand for the same event would show up twice — once as what you typed, once as what the bank reports, with no way for the app to tell they're the same thing. Both are refused for a card in that state, with the app pointing at what to do instead: file a payment under a category, or use Reconcile if a balance genuinely needs a hand correction.
+- **The row menu no longer offers "Mark as payment to" a card that will always refuse it.** Same reasoning v0.24.0 already established for a category's kind menu: an option the server always declines is worse than no option.
+- **The mortgage still does not import — and the app no longer overstates why.** An earlier internal note claimed the bank's feed can never return mortgage transactions, based on measuring zero of them over 89 days. That measurement was real; the conclusion wasn't. The loan is newly originated with no payments posted yet, which is what zero rows actually shows — whether the feed can return loan transactions at all remains untested, and stays closed for now on a different, unaffected argument: importing a mortgage's interest and escrow rows would double-count a payment already budgeted on the checking side, regardless of what the feed eventually reports.
+
 ## [1.0.0] - 2026-09-09
 
 1.0.0 is a marker, not a feature release. Nothing in the app changed between 0.27.0 and this version; what changed is that the last open release condition was closed by making a decision rather than by writing code.
