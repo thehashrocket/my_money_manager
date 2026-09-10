@@ -37,6 +37,8 @@ export function ReconcileDisclosure(props: {
   today: string;
   /** DS56 — arrive open and focused, from "Reconcile instead →". */
   startOpen?: boolean;
+  /** D-ANCHOR — see `ReconcileForm`. */
+  importsFromFeed?: boolean;
 }) {
   const [open, setOpen] = useState(props.startOpen ?? false);
 
@@ -68,12 +70,24 @@ export function ReconcileForm({
   balanceCents,
   today,
   autoFocus = false,
+  importsFromFeed = false,
 }: {
   accountId: number;
   accountName: string;
   balanceCents: number;
   today: string;
   autoFocus?: boolean;
+  /**
+   * D-ANCHOR — this account's balance is (also) maintained by an ongoing
+   * feed import (`importsTransactions`). Reconciling moves the anchor
+   * FORWARD, and D8.1's cutover then drops every feed row dated on or before
+   * the new anchor — permanently, the same way rule 1's `>` drops it from the
+   * balance sum. A charge from the days between the last sync and this
+   * reconcile is unreachable after this submits. Advisory, not a refusal:
+   * there is no way for the client to know whether those days are actually
+   * clear, and a Reconcile that only follows a sync is entirely ordinary.
+   */
+  importsFromFeed?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(updateLiabilityBalanceAction, IDLE);
   // CONTROLLED, for the reason `CardTermsDisclosure` documents: React 19
@@ -188,6 +202,27 @@ export function ReconcileForm({
       >
         {pending ? "Saving…" : "Save"}
       </Button>
+      {importsFromFeed ? (
+        // D-ANCHOR. Advisory, not a refusal — the client cannot know whether
+        // a sync already caught up, and refusing would punish the ordinary
+        // case (reconcile right after a sync) to guard the unusual one.
+        //
+        // Amber, not muted gray: DESIGN.md's amber inventory names this exact
+        // role — a "consequence-of-this-action" notice, the same one
+        // `_charge-dialog.tsx`'s `endsFeedRefresh` box established (v0.27.0,
+        // "the token's first use as a consequence-of-this-action notice
+        // rather than a state"). A stale bank row silently becoming
+        // permanently un-importable is comparable stakes to that box's
+        // warning and should not read as routine help text beside it.
+        <div className="w-full rounded-md border border-[color-mix(in_oklch,var(--accent-amber)_45%,transparent)] bg-[color-mix(in_oklch,var(--accent-amber)_18%,var(--background))] px-3 py-2 text-sm text-ink-1">
+          <p>
+            {accountName} imports its own transactions. Any charge from the bank
+            that hasn&apos;t synced yet won&apos;t be importable once this
+            balance is set — sync first if you&apos;re not sure it&apos;s
+            caught up.
+          </p>
+        </div>
+      ) : null}
       <div className="w-full">
         <ActionStatus state={state} />
       </div>

@@ -30,6 +30,7 @@ export function CardControls({
   canAddCharge,
   canEditTerms,
   showReconcile,
+  importsFromFeed,
 }: {
   accountId: number;
   accountName: string;
@@ -72,6 +73,16 @@ export function CardControls({
    * `_account-row.tsx`.
    */
   showReconcile: boolean;
+  /**
+   * D-ANCHOR — whether this card's balance is being maintained by an
+   * ongoing feed import (`importsTransactions`). Relayed to `ReconcileForm`
+   * so it can warn: reconciling moves the anchor FORWARD, and any feed row
+   * dated on or before the new anchor is permanently excluded by D8.1's
+   * cutover, exactly the way it is by rule 1's balance sum. Reconcile before
+   * a sync catches up and an un-imported charge from those days is gone for
+   * good — silently, and it is money.
+   */
+  importsFromFeed: boolean;
 }) {
   // Bumping a key remounts ReconcileDisclosure in its open state, which is
   // also what moves focus into the balance field (DS66: a handoff that
@@ -99,6 +110,7 @@ export function CardControls({
           balanceCents={balanceCents}
           today={today}
           startOpen={handoff > 0}
+          importsFromFeed={importsFromFeed}
         />
       ) : null}
       {canAddCharge ? (
