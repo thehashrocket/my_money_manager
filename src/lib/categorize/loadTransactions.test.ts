@@ -533,6 +533,89 @@ describe("loadTransactions — includeTransfers (D14=B)", () => {
     expect(byId[ordinary.id].transferPartnerAccountName).toBeNull();
   });
 
+  it("pairIsAppCreated (D5.2) is false for an ordinary bank-to-bank transfer pair", () => {
+    // seedPair()'s two legs are both `importSource: 'csv'` — a real transfer
+    // the automatic matcher paired, not a mirror `markAsCardPayment` wrote.
+    const { leg, mirror, ordinary } = seedPair();
+    const rows = loadTransactions(handle.db, { ...base, includeTransfers: true }).rows;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+
+    expect(byId[leg.id].pairIsAppCreated).toBe(false);
+    expect(byId[mirror.id].pairIsAppCreated).toBe(false);
+    expect(byId[ordinary.id].pairIsAppCreated).toBe(false);
+  });
+
+  it("pairIsAppCreated (D5.2) is true on BOTH legs of an app-created card-payment pair", () => {
+    const checking = seedAccount("Checking");
+    const visa = seedAccount("Visa");
+    const batch = seedBatch();
+    const leg = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      merchant: "PAYMENT TO VISA",
+      amountCents: -50_000,
+      categoryId: null,
+    });
+    // The synthetic mirror shape: manual + uncategorized.
+    const mirror = seedTxn({
+      accountId: visa.id,
+      batchId: batch.id,
+      merchant: "PAYMENT TO VISA",
+      amountCents: 50_000,
+      importSource: "manual",
+      categoryId: null,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: mirror.id })
+      .where(eq(schema.transactions.id, leg.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: leg.id })
+      .where(eq(schema.transactions.id, mirror.id))
+      .run();
+
+    const rows = loadTransactions(handle.db, { ...base, includeTransfers: true }).rows;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+
+    // Reachable from EITHER end, matching `unmarkCardPayment`'s own
+    // "works from either end" note — the row menu can be opened on the
+    // checking leg or on the mirror itself.
+    expect(byId[leg.id].pairIsAppCreated).toBe(true);
+    expect(byId[mirror.id].pairIsAppCreated).toBe(true);
+  });
+
+  it("pairIsAppCreated (D5.2) degrades to false on a dangling transfer_pair_id, rather than guessing", () => {
+    // `transferPairId` has `onDelete: 'set null'`, so a partner's deletion
+    // through the ORM always clears this leg's pairing — a dangling pointer
+    // should be unreachable in ordinary use. Forced here only to prove the
+    // defensive branch degrades safely instead of crashing or mis-reading a
+    // null partner as "not a mirror, so app-created" by accident.
+    const checking = seedAccount("Checking");
+    const batch = seedBatch();
+    const leg = seedTxn({
+      accountId: checking.id,
+      batchId: batch.id,
+      merchant: "PAYMENT",
+      amountCents: -50_000,
+    });
+    handle.sqlite.pragma("foreign_keys = OFF");
+    try {
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: leg.id + 999_999 }) // points at nothing
+        .where(eq(schema.transactions.id, leg.id))
+        .run();
+    } finally {
+      handle.sqlite.pragma("foreign_keys = ON");
+    }
+
+    const rows = loadTransactions(handle.db, { ...base, includeTransfers: true }).rows;
+    const row = rows.find((r) => r.id === leg.id)!;
+    expect(row.pairIsAppCreated).toBe(false);
+  });
+
   it("composes with the other filters rather than overriding them", () => {
     const { visa } = seedPair();
     const result = loadTransactions(handle.db, {

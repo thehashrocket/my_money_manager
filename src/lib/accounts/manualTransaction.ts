@@ -6,6 +6,7 @@ import { importsTransactions } from "./importsTransactions";
 import { isAfterAnchor } from "./isAfterAnchor";
 import { isCreditCard } from "./isCreditCard";
 import { loadAccountBalances } from "./loadAccountBalances";
+import { isSyntheticCardPaymentMirror } from "./resolveCardAffordances";
 import { formatMonthDay } from "@/lib/now";
 import { startingBalanceDateSchema } from "@/lib/import/accountAnchorFields";
 import { normalizeMerchant } from "@/lib/normalize";
@@ -45,6 +46,12 @@ export type ManualRefusalReason =
    *  bank's real credit is coming and a hand-made mirror would double it
    *  (D8.3). */
   | "card-imports-its-own"
+  /** `linkCardPayment` (T9) only: the target row IS on a real credit card,
+   *  it just doesn't import its own transactions — the OPPOSITE condition
+   *  from `card-imports-its-own`, so it gets its own reason rather than
+   *  reusing `not-a-card` (which `linkCardPayment` also returns for the
+   *  genuinely-not-a-card case, a structurally different refusal). */
+  | "not-importing"
   /** `removeCardActivity` only: the row is a BANK row, so there is nothing to
    *  repair here — deleting it would destroy imported history. */
   | "not-manual"
@@ -667,12 +674,13 @@ export function unmarkCardPayment(
     // matcher paired is unlinked, never removed — that is
     // `unlinkTransferPair`'s job, and deleting one would destroy imported
     // history.
-    const isSynthetic = (row: typeof leg) =>
-      row.importSource === "manual" && row.categoryId === null;
-
-    const [sourceLeg, mirror] = isSynthetic(partner)
+    // T9/D5.2 — `isSyntheticCardPaymentMirror` is the shared spelling of this
+    // test; `loadTransactions.ts`'s `pairIsAppCreated` field is the second
+    // reader, so the write side and the read side cannot drift the way
+    // `categoryKindLock.ts`/`kindsImplyUsed.ts` document happening elsewhere.
+    const [sourceLeg, mirror] = isSyntheticCardPaymentMirror(partner)
       ? [leg, partner]
-      : isSynthetic(leg)
+      : isSyntheticCardPaymentMirror(leg)
         ? [partner, leg]
         : [null, null];
 

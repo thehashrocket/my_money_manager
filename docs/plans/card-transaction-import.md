@@ -1,6 +1,6 @@
 # Credit card transaction import (Citi), and the accounting cutover it needs
 
-**Status:** IN PROGRESS (2026-09-09). Two stacked PRs; see "Delivery" below.
+**Status:** DONE (PR1 shipped 2026-09-09 as v1.1.0; PR2 shipped 2026-09-14). See "Delivery" below.
 **Branch:** `thehashrocket/mortgage-card-txn-import-review`
 **Ask:** "are we at a point where we can start importing mortgage and credit
 card transactions now?"
@@ -232,14 +232,16 @@ T8 rides PR1 rather than waiting for its replacement in PR2: otherwise the
 duplication trap is live in the gap between merges. Its refusal points at
 Phase A ("file it under a category"), which is true in both PRs.
 
-**PR2 — "linking a card payment to the real row"**
+**PR2 — "linking a card payment to the real row" (DONE, 2026-09-14)**
 
 | Task | What |
 |---|---|
-| T7 | `resolveCardAffordances()` (D6.1) — closes `TODOS.md`'s entry |
-| T9 | Manual cross-date card-payment link: candidate picker → `linkTransferPairManually` (D8.2) |
-| D4.1 | Warn before pairing a categorized source row |
-| D5.2 | Gate the always-refusing "Not a card payment" item |
+| T7 | `resolveCardAffordances()` (D6.1) — closes `TODOS.md`'s entry. `src/lib/accounts/resolveCardAffordances.ts`; `_account-row.tsx` relays its three fields into `CardControls` instead of computing them inline. |
+| T9 | Manual cross-date card-payment link: candidate picker → `linkTransferPairManually` (D8.2). `src/lib/accounts/loadCardPaymentCandidates.ts` (one query per importing card, not per row) + `src/lib/accounts/linkCardPayment.ts` (the thin wrapper) + `linkCardPaymentAction` (`src/app/accounts/actions.ts`) + a picker dialog on the `/transactions` row menu (`_row-menu.tsx`), gated to candidates matching the source row's exact magnitude. |
+| D4.1 | Warn before pairing a categorized source row. `pairingWarnsOnCategorized` (same module as T7); the warning rides in `linkCardPayment`'s success message, not a new field, since `CardActivityState.warning` is reserved for "the write landed but the refresh failed" and mixing the two would misreport one as the other. |
+| D5.2 | Gate the always-refusing "Not a card payment" item. `isSyntheticCardPaymentMirror`/`isAppCreatedCardPaymentPair` (same module); `loadTransactions.ts` exposes `pairIsAppCreated` per row via a correlated subquery on the partner leg, and the row menu only renders "Not a card payment" when it's true. |
+
+All four covered by tests (`resolveCardAffordances.test.ts`, `loadCardPaymentCandidates.test.ts`, `linkCardPayment.test.ts`, `listAccounts.test.ts`'s new `listImportingCardAccounts` block, `loadTransactions.test.ts`'s new `pairIsAppCreated` cases); 2031 tests pass, `tsc --noEmit` and lint clean, production build succeeds.
 
 **Manual pass (live ledger)**
 

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-14
+
+### Added
+- **You can now link a checking payment straight to a card's own transaction, for a card whose charges already import automatically.** v1.1.0 brought a linked card's own transactions in, but left no way to connect a checking withdrawal you'd already filed under a category to the matching credit that later showed up on the card — the usual "mark as a payment" shortcut isn't offered once a card's own rows are coming in from the bank, since a hand-made copy would double what the bank already reports. A new "Link to a card charge" option on the transactions page lets you pick the real bank row it matches. Linking removes both rows from spending, the same as any other transfer, and says so if the checking side had already been filed under a category — that category's spend total is about to change.
+
+### Fixed
+- **"Not a card payment" no longer appears where it could never work.** It used to show up on every paired transaction regardless of how the pair was made, so clicking it on an ordinary bank-to-bank transfer always failed with the same message. It's now offered only where it can actually do something; everything else gets a plain label instead of a button that was never going to work.
+
 ## [1.1.0] - 2026-09-09
 
 ### Added

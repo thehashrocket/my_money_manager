@@ -13,7 +13,7 @@ import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
-import { TransactionRowMenu } from "./_row-menu";
+import { TransactionRowMenu, type ImportingCardOption } from "./_row-menu";
 import { cn } from "@/lib/utils";
 import {
   categorizeTransactionAction,
@@ -29,11 +29,33 @@ type Props = {
   onUndone: (priorCategoryId: number | null, revertedCount: number) => void;
   /** DS52 — credit cards, for the row menu's "Mark as payment to". */
   cardAccounts: AccountOption[];
+  /** T9 — cards whose own transactions come in from the feed, with candidates. */
+  importingCards: ImportingCardOption[];
   /** Refresh the page after a pairing change, which alters what this list shows. */
   onPairingChanged: () => void;
   /** The whole active filter set — a row's merchant link MERGES into it (D23). */
   filterValues: TransactionsFilterValues;
 };
+
+/**
+ * T9 (Codex adversarial finding) — is `accountId` a checking/savings account,
+ * as opposed to a card? Both `cardAccounts` (non-importing) and
+ * `importingCards` are already fetched for this page, so membership in
+ * either set is cheaper and more honest than a third server round trip —
+ * "not a card we know about" is exactly "an asset account" for every row
+ * `/transactions` can render (a mortgage never appears here at all, per
+ * `listAccounts`'s own E15 exclusion).
+ */
+function isAssetAccount(
+  accountId: number,
+  cardAccounts: AccountOption[],
+  importingCards: ImportingCardOption[],
+): boolean {
+  return (
+    !cardAccounts.some((c) => c.id === accountId) &&
+    !importingCards.some((c) => c.id === accountId)
+  );
+}
 
 /**
  * D17 — shared by every row variant and by `TransactionColumnHeaders`, so a
@@ -64,6 +86,7 @@ export function TransactionRowForm({
   row,
   leafCategories,
   cardAccounts,
+  importingCards,
   onPairingChanged,
   onCategorized,
   onUndone,
@@ -266,13 +289,17 @@ export function TransactionRowForm({
         </button>
         <TransactionRowMenu
           transactionId={row.id}
+          amountCents={row.amountCents}
+          sourceIsAsset={isAssetAccount(row.accountId, cardAccounts, importingCards)}
           isTransfer={false}
+          pairIsAppCreated={false}
           transferPartnerAccountName={null}
           // Hand-entered card activity is the only row with a per-row delete;
           // `removeCardActivity` refuses every other kind. Passed rather than
           // derived in the menu so the menu stays a presenter.
           isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
+          importingCards={importingCards}
           onChanged={onPairingChanged}
         />
       </div>
@@ -489,11 +516,13 @@ function CategoryBadge({ name }: { name: string | null }) {
 export function TransferRowItem({
   row,
   cardAccounts,
+  importingCards,
   onPairingChanged,
   filterValues,
 }: {
   row: TransactionRow;
   cardAccounts: AccountOption[];
+  importingCards: ImportingCardOption[];
   onPairingChanged: () => void;
   filterValues: TransactionsFilterValues;
 }) {
@@ -532,7 +561,14 @@ export function TransferRowItem({
       <div className="flex items-center sm:col-span-4 sm:col-start-2 sm:row-start-2 sm:justify-end">
         <TransactionRowMenu
           transactionId={row.id}
+          amountCents={row.amountCents}
+          // Irrelevant on this branch (isTransfer is always true here, and
+          // "Link to a card charge" only renders on the non-transfer branch)
+          // — computed honestly anyway rather than hard-coded, same reasoning
+          // `isManual` below already documents.
+          sourceIsAsset={isAssetAccount(row.accountId, cardAccounts, importingCards)}
           isTransfer
+          pairIsAppCreated={row.pairIsAppCreated}
           transferPartnerAccountName={row.transferPartnerAccountName}
           // Always false in effect on this branch — a paired row is a payment
           // leg, which `removeCardActivity` refuses and "Not a card payment"
@@ -540,6 +576,7 @@ export function TransferRowItem({
           // precedence rule stays the single place that decides.
           isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
+          importingCards={importingCards}
           onChanged={onPairingChanged}
         />
       </div>

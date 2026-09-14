@@ -2621,25 +2621,20 @@ deferred deliberately, each with the reason.
       bypassed. Rule 11's `SyncTx` idiom is the precedent for making this
       structural. (`src/lib/categorize/refusalNotice.ts`)
 
-- [ ] **P2 → narrowed by the card-transaction-import plan (2026-09-09).** The
-      comparison-drift half of this entry is CLOSED: `chargeableDateExists`
-      (`_account-row.tsx`) now reads `isAfterAnchor(today, startingBalanceDate)`
-      — the same shared module `createCardActivity`'s before-anchor refusal and
-      the sync accounting cutover (D8.1) both read — rather than a second
-      inline `<`. What remains is the STRUCTURAL half: `canAddCharge`,
-      `canEditTerms` and `showReconcile` are still three separately-computed
-      values passed into `CardControls` rather than one pure decision function,
-      so the "three-gate combination that regressed twice inside this branch's
-      own review cycles" (v0.27.0) is still only guarded by three call sites
-      agreeing by hand, not by a shared module `tsc` and a test can hold to
-      account. **Extract `resolveCardAffordances({type, startingBalanceDate,
-      balanceAction}, today) → {canAddCharge, canEditTerms, showReconcile}`**
-      into `src/lib/accounts/`, beside `resolveBalanceAction` and
-      `resolveUtilizationDisplay`, which already establish exactly this shape.
-      This is PR2's T7 in `docs/plans/card-transaction-import.md` — do it
-      there rather than as a standalone follow-up; PR2 also needs the same
-      module to decide the pairing-warning and unmark-gate affordances D4.1/D5.2
-      describe, so building it once for all four is the point. (`src/app/accounts/_account-row.tsx`, `src/app/accounts/_card-controls.tsx`)
+- [x] **P2 → CLOSED (2026-09-14), as PR2's T7.** `resolveCardAffordances({type,
+      startingBalanceDate, simplefinAccountId}, balanceAction, today) →
+      {canAddCharge, canEditTerms, showReconcile}` now lives in
+      `src/lib/accounts/resolveCardAffordances.ts`, beside `resolveBalanceAction`
+      and `resolveUtilizationDisplay`. `_account-row.tsx` calls it once and
+      relays its three fields into `CardControls`, replacing the three
+      separately-computed inline expressions this entry was about. The same
+      module also carries D4.1's `pairingWarnsOnCategorized` and D5.2's
+      `isSyntheticCardPaymentMirror`/`isAppCreatedCardPaymentPair` — built once
+      for all four, per this entry's own note — with a test file
+      (`resolveCardAffordances.test.ts`) covering each. `unmarkCardPayment`'s
+      inline `isSynthetic` check was refactored to call the shared predicate
+      rather than keep its own copy, closing the exact write/read drift risk
+      D5.2 (below) names.
 
 - [ ] **P2** — **`readPositiveIntField`'s absent-field case is untested, and two
       of its three callers have no test at all.** One case exists (`"abc"` via
@@ -2727,20 +2722,23 @@ per the plan's own "residuals" section.
       sized task. (`src/lib/simplefin/sync.ts`)
 
 - [ ] **P3** — **The automatic card-payment matcher was deferred to a manual
-      entry point (D8.2), and the manual entry point is PR2, not yet built.**
-      Measured offsets between a Citi payment's card leg and its checking leg
-      were 1, 3, 1 and 1 days — zero of four would auto-pair on
-      `matchTransfers`' `(date, |amount|)` bucket key. A fuzzy ±N-day matcher
-      was designed (D4.2/D6.2) and then explicitly superseded (D8.2=A,
-      Codex's outside-voice pass) once `linkTransferPairManually` was shown to
-      already accept cross-date cross-account pairs — the missing piece was
-      an entry point, not an engine. If Citi's payment volume ever grows past
-      "a few clicks a month", or a second card is linked, revisit whether the
-      manual entry point still scales; the fuzzy matcher's rejected design is
-      recorded in the eng-review transcript this plan was built from, not
-      here, so it is not silently rediscovered as new work. Blocked by:
-      `docs/plans/card-transaction-import.md`'s PR2 (T7, T9) landing first —
-      this entry tracks the FOLLOW-ON question, not PR2 itself.
+      entry point (D8.2), which shipped 2026-09-14 as PR2 (T9:
+      `linkCardPayment` / `linkCardPaymentAction`, a picker on the
+      `/transactions` row menu calling the ALREADY-EXISTING
+      `linkTransferPairManually`).** Measured offsets between a Citi payment's
+      card leg and its checking leg were 1, 3, 1 and 1 days — zero of four
+      would auto-pair on `matchTransfers`' `(date, |amount|)` bucket key. A
+      fuzzy ±N-day matcher was designed (D4.2/D6.2) and then explicitly
+      superseded (D8.2=A, Codex's outside-voice pass) once
+      `linkTransferPairManually` was shown to already accept cross-date
+      cross-account pairs — the missing piece was an entry point, not an
+      engine, which is exactly what PR2 built. If Citi's payment volume ever
+      grows past "a few clicks a month", or a second card is linked, revisit
+      whether the manual entry point still scales; the fuzzy matcher's
+      rejected design is recorded in the eng-review transcript this plan was
+      built from, not here, so it is not silently rediscovered as new work.
+      This entry now tracks ONLY that follow-on scaling question — PR2 itself
+      is done, T7/T9/D4.1/D5.2 all landed together.
       (`src/lib/simplefin/matchTransfers.ts`, `src/lib/simplefin/sync.ts`)
 
 - [ ] **P3** — **`refreshLiabilityBalances`' credit-card sign-guard arm
@@ -2762,7 +2760,7 @@ per the plan's own "residuals" section.
       re-adding a comment. Blocked by: nothing; this is a note, not a task.
       (`src/lib/simplefin/sync.ts`)
 
-- [ ] **P2 — TIME-SENSITIVE. Snapshot the mortgage's origination principal
+- [x] **P2 — TIME-SENSITIVE. Snapshot the mortgage's origination principal
       before the first payment posts, or the data point is lost forever.**
       Correction to the card-transaction-import plan's original D1, recorded
       2026-09-09 (see `docs/plans/card-transaction-import.md`). The mortgage
@@ -2785,6 +2783,20 @@ per the plan's own "residuals" section.
       entry above asks for; it only requires not losing the one number that
       table would need as its first row. Blocked by: nothing — do this before
       the next sync moves the anchor. (`src/db/schema.ts`, `src/lib/simplefin/sync.ts`)
+
+      **Captured 2026-09-14, from the live container (`my_money_manager-app-1`,
+      volume `my_money_manager_mm_data`), account id 3, "Fixed Rate 1st
+      Mortgage (#173)":** `starting_balance_cents = -40890000`,
+      `prior_starting_balance_cents = -40890000` — both still the origination
+      figure, confirming no payment has posted yet. The window was already
+      closing faster than the note above assumed: `starting_balance_date` had
+      already moved to `2026-09-13` and `balance_as_of` to
+      `2026-09-13T21:47:58Z` (Unix `1789343278`) — a sync ran and re-stamped
+      the DATE against an unchanged balance, which this TODO's "unmoved since
+      account creation" no longer describes precisely. The AMOUNT is what
+      matters for a future debt trend line and it is still exact. **This
+      note is now that durable snapshot; do not delete it when closing this
+      item.**
 
 ## Follow-ups from the /ship pre-landing + adversarial review (2026-09-09, card-transaction-import PR1)
 
@@ -2909,3 +2921,12 @@ A fresh 4-agent review of the shipped PR1 diff, independently corroborated by ha
 - [x] **P3 — no test exercised a CARD going through a mid-sync relink alongside the D8.4 completeness check.** The `dropped.has(entry.account.id)` guard in `checkCardCompleteness`, meant to suppress a spurious completeness warning for a link-dropped account, had only checking/savings fixtures exercising the surrounding relink-race tests — the exact composition the P2 double-warning bug above lived in was untested. Added a card variant asserting both the correct link warning AND the absence of a spurious D8.4 warning for the same dropped rows. (`src/lib/simplefin/sync.test.ts`)
 
 - [ ] **P3 — accepted residual, restated precisely rather than left for a reader to re-derive by tracing the code: D8.4 cannot detect a false content-dedup match on a card.** If a card's feed row is wrongly matched against a differently-provenanced existing row by date/amount/memo (rule 3's content-signature dedup) when it is actually a distinct real charge, the row is silently dropped and nothing — not `classifyBalanceFreshness`, not D8.4 — can see it, by the same construction that makes D8.4's expected-set check exhaustive over every OTHER drop path. This is not a new risk: rule 3 already accepts the equivalent gap for content dedup generally, for the same "the content budget is a multiset count and building a monitor for it is a different and larger change" reasoning. Not fixed here for the same reason CSV content-dedup collisions aren't specially monitored elsewhere in this app — building detection for an already-accepted-elsewhere residual would be inconsistent with how the rest of the codebase treats this exact class of risk. (`src/lib/simplefin/sync.ts`)
+
+## Follow-ups from the `/ship` pre-landing + adversarial review (2026-09-14, card-payment-linking-pr2)
+
+Six specialists, a red-team pass, and both a Claude adversarial subagent and Codex (adversarial + structured review) each independently reviewed T9's `linkCardPayment`/candidate-picker addition. Fixed same-session, across three rounds: a dead-end row menu once "Not a card payment" was gated; a missing aria-label and sub-44px touch target on the new picker `<select>`; no wiring-test coverage for `linkCardPaymentAction`; an overloaded refusal reason; a source-leg account-class/sign guard on `linkCardPayment` (mirroring `markAsCardPayment`'s existing one, plus the matching UI-side gate so the menu never offers a control that would always refuse); `loadCardPaymentCandidates` excluding `import_source = 'manual'` and pending rows (found independently by BOTH Codex and the Claude adversarial subagent — a manual candidate could otherwise be linked with no UI undo on either side); and a server-side re-check of the target row's `import_source` inside `linkCardPayment` itself, matching D8.3's "never trust the picker alone" precedent (Codex structured review). Two were deliberately deferred:
+
+- [ ] **P4 — hand-rolled `seedAccount`/`seedRow` test helpers duplicated across `linkCardPayment.test.ts` and `loadCardPaymentCandidates.test.ts` rather than a shared fixture.** Real DRY observation (maintainability specialist), but not novel to this diff — every other `lib/accounts/*.test.ts` file (`manualTransaction.test.ts`, `listAccounts.test.ts`) already hand-rolls its own copy, the same pattern CLAUDE.md's `lib/simplefin/test/syncFixtures` entry documents happening 13+ times before that module was extracted. Worth doing once, for all of `lib/accounts/`, not as a one-off inside this branch. Blocked by: nothing — a `src/lib/accounts/test/` fixtures module, parameterized the same way `syncFixtures.ts` is, whenever someone next touches three or more of these files in one sitting. (`src/lib/accounts/*.test.ts`)
+- [ ] **P3 — `loadCardPaymentCandidates` has no date bound, so a very old unpaired candidate could produce a T9 link outside `/sync`'s 240-day "linked pairs" review window, with no UI path back. Upgraded from P4: independently confirmed by BOTH the red-team pass and Codex's adversarial challenge.** At this account's measured real volume (~1.7 card transactions/month) an unpaired candidate old enough to matter is unlikely, and the row menu's own "No actions for this pair" state is honest about there being nothing to click — the gap is discoverability of the *existing* `/sync` undo, not a missing capability or a money-safety bug. If a second importing card or a much older backlog ever makes this bite, either bound the picker to the same window `REVIEW_WINDOW_DAYS` names (`src/app/sync/page.tsx`) or note in that constant's docstring that T9 pairs share it. (`src/lib/accounts/loadCardPaymentCandidates.ts`, `src/app/sync/page.tsx`)
+- [ ] **P4 — `linkCardPayment` reads (source row, source account, card leg, card account) OUTSIDE the transaction that performs the write, deviating from this codebase's own "read, guard, write in ONE transaction" doctrine (rule 11).** Claude adversarial finding, marked INVESTIGATE rather than FIXABLE: not exploitable today — the function is fully synchronous, better-sqlite3 is synchronous, and there is no `await` anywhere in the call chain, so nothing can interleave between the pre-checks and `linkTransferPairManually`'s own separate transaction (the same reasoning `markAsCardPayment` and friends already rely on for their own bare-select-then-transaction shape). Worth folding into one `db.transaction()` before, not after, `docs/plans/dockerize-postgres.md`'s staged SQLite→Postgres migration lands — a genuinely async driver would reopen exactly the TOCTOU window rule 11 exists to close, on a function this diff added knowing that plan was already on the roadmap. Blocked by: nothing urgent; revisit alongside that migration, or sooner if `linkTransferPairManually` itself ever needs to accept an existing transaction handle. (`src/lib/accounts/linkCardPayment.ts`)
+- [ ] **P4 — a post-commit balance-read failure in `linkCardPayment` (and its three siblings) reports a durable, committed write as a full ERROR rather than a warning.** Codex structured-review finding: `linkCardPayment.ts` calls `loadAccountBalances(db)` AFTER `linkTransferPairManually` commits, with no try/catch of its own; if that read throws, the exception propagates out to `linkCardPaymentAction`'s catch block and reports `{status:"error"}` for a pairing that already landed. **Not novel to this diff** — `createCardActivity`, `markAsCardPayment` and `removeCardActivity` all call the equivalent `currentBalanceCents` helper the same way, unguarded, after their own transactions commit, and their callers in `actions.ts` wrap the whole body in one `try`/`catch` exactly as `linkCardPaymentAction` does. Fixing only the new function would leave three existing ones with the identical latent gap while looking resolved. This is CLAUDE.md's own "Automated sync" doctrine (a committed write must never be reported as a failure) applied one layer deeper than `guardRefresh` reaches — that machinery only guards the Next.js *revalidation* step, not a plain DB read after commit. Realistic trigger is narrow (DB corruption, disk full — the kind of failure that would also break the write itself), which is why this was deferred rather than fixed under ship pressure for one function only. Blocked by: a decision on whether to harden all four post-commit reads uniformly (e.g. a shared `readBalanceAfterCommit` helper that degrades to a warning rather than an error) — a real design pass, not a one-line patch. (`src/lib/accounts/linkCardPayment.ts`, `src/lib/accounts/manualTransaction.ts`, `src/app/accounts/actions.ts`)

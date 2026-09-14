@@ -43,6 +43,11 @@ src/
                    loadAccountBalancesForRequest — the same, React-cache'd per request
                    listAccounts — {id, name} picker for the /transactions account filter
                    listCardAccounts — cards only, for the "Mark as payment to" row menu
+                   listImportingCardAccounts — PR2/T9's exact complement: cards whose
+                   OWN transactions come in from the feed, for the "Link to a card
+                   charge" row menu. The same importsTransactions split that gets
+                   markAsCardPayment's mirror refused on these cards (D8.3) is why they
+                   need a different affordance instead of being excluded outright
                    accountClass, isLongTermLiability, isCreditCard, importsTransactions
                    — the four type predicates; nothing re-derives these inline (see
                    rule 9). importsTransactions is NOT "can this account hold rows" —
@@ -94,6 +99,45 @@ src/
                    tab, which is why each names the tool to use instead. The other
                    two, not-found and unconfirmed, name no tool: there is none
                    validateCardTermsInput — credit limit + minimum payment repair
+                   resolveCardAffordances.ts — T7 (card-transaction-import plan, PR2):
+                   canAddCharge/canEditTerms/showReconcile as ONE pure decision instead
+                   of three separately-computed booleans agreeing by hand — the same
+                   three-gate combination that regressed twice inside v0.27.0's own
+                   review cycles. showReconcile is a straight RELAY of
+                   resolveBalanceAction's answer, never a second derivation of it. The
+                   same module carries D4.1's pairingWarnsOnCategorized (should linking
+                   a checking payment to a real card row warn rather than proceed
+                   silently — yes, once the source row is already categorized, because
+                   pairing excludes it from every spend query) and D5.2's
+                   isSyntheticCardPaymentMirror / isAppCreatedCardPaymentPair — the ONE
+                   spelling of the structural test unmarkCardPayment already used
+                   inline, needed a second time so the /transactions row menu can
+                   decide whether to OFFER "Not a card payment" at all rather than
+                   render a refusal the user can only discover by clicking it (rule 8)
+                   loadCardPaymentCandidates — T9's candidate list, ONE query per
+                   importing card rather than one per row on the page: every unpaired
+                   POSITIVE, non-pending, non-manual row on the card, unfiltered by
+                   date or amount; the row menu's picker narrows to the source row's
+                   exact magnitude client-side. import_source <> 'manual' keeps a
+                   hand-typed row — or an orphaned markAsCardPayment mirror whose
+                   partner was removed by undoSyncBatch — out of the picker; both would
+                   otherwise read as legitimate, linkable candidates with no way to
+                   detect the corruption afterward
+                   linkCardPayment — T9's manual entry point onto the
+                   ALREADY-EXISTING linkTransferPairManually (D8.2). The missing piece
+                   for pairing a cross-date, cross-account card payment (Citi's
+                   checking-to-card offsets measured at 1, 3, 1, 1 days — zero of which
+                   matchTransfers would ever auto-pair) was an entry point, not a new
+                   matching engine, since that function's date guard sits entirely
+                   inside its same-account branch. Guards the source leg's sign and
+                   account class the same way markAsCardPayment already does for its
+                   own source leg — mirrored rather than trusted to the UI, since a
+                   Visa charge marked as a Mastercard payment already inflated
+                   paidDownCents once — and re-checks the target row's import_source
+                   itself rather than trusting the picker (D8.3's "never trust the
+                   picker alone" precedent). Lives beside, not inside,
+                   manualTransaction.ts: that module's functions each WRITE or delete a
+                   row; this one only links two that already exist
   lib/budget/      loadMonthView, resolveRowDisplay — month read model + row tone/badge decisions
                    FundRow is EDITABLE as of v0.23.0, not the read-only stub DS19
                    described: it carries hasAllocation, carryoverPolicy, targetCents,
@@ -168,7 +212,15 @@ src/
                    under it can never disagree about WHICH ROWS MATCH. That is a predicate
                    guarantee, not a snapshot one: they are two separate reads, so a
                    categorize action committing between them (a second tab, an in-flight
-                   Undo) can still leave the header a beat behind
+                   Undo) can still leave the header a beat behind. As of PR2/D5.2 a row
+                   also carries pairIsAppCreated — computed from the PARTNER leg's
+                   import_source/category_id (a correlated subquery, joined in JS
+                   through isAppCreatedCardPaymentPair rather than a second SQL
+                   spelling of that predicate) — false whenever transferPairId is null.
+                   It is what lets the row menu tell an app-created pair
+                   (markAsCardPayment's mirror, or T9's linkCardPayment) apart from an
+                   ordinary bank-to-bank transfer the automatic matcher paired, so
+                   "Not a card payment" is offered only where it can do something
                    keyTrainability — the "Remember" guard's PURE half:
                    classifyKeyTrainability(key, filedCategoryIds, pendingCategoryId)
                    + LOSSY_MERCHANT_KEYS. The pick is a SEPARATE parameter, not
@@ -550,7 +602,7 @@ A **credit card** is different as of this plan: `partitionLinkedAccounts` now as
 
 So "will my card transactions arrive on the next sync?" is now **yes, for a linked card, from the day it was reconciled forward** — the answer this section used to give as an unconditional no is retired. It remains no for AMEX/Bank-of-America-shaped cards that are simply not on the SimpleFIN feed at all, and no for anything dated at or before a card's anchor.
 
-Three consequences worth knowing, all decided in the same plan. An importing card's balance is no longer feed-maintained — `refreshLiabilityBalances` never sees it (`resolveBalanceAction` answers `reconcile` unconditionally for it, D9.2), so it needs the same hand-reconcile discipline a manual-only card always needed. `markAsCardPayment`'s synthetic payment mirror is refused on an importing card (D8.3) — the real bank credit is coming and would double the payment, so the row menu's "Mark as payment to" is unavailable there and the payment must be filed under a category instead until a real cross-date link exists (PR2, `docs/plans/card-transaction-import.md`). And the automatic transfer matcher (`matchTransfers`) explicitly excludes every card row from its two cross-account queries (`NOT_ON_A_CARD` in `sync.ts`) — a card purchase and an unrelated same-day checking deposit would otherwise form a balanced bucket and auto-link away real spending, which the matcher's counting argument cannot see is wrong.
+Three consequences worth knowing, all decided in the same plan. An importing card's balance is no longer feed-maintained — `refreshLiabilityBalances` never sees it (`resolveBalanceAction` answers `reconcile` unconditionally for it, D9.2), so it needs the same hand-reconcile discipline a manual-only card always needed. `markAsCardPayment`'s synthetic payment mirror is refused on an importing card (D8.3) — the real bank credit is coming and would double the payment, so the row menu's "Mark as payment to" is unavailable there and the payment must be filed under a category first. **That is no longer the end of the story, as of PR2 (2026-09-14, T9).** A "Link to a card charge" item on the `/transactions` row menu now lets that categorized checking row be repointed at the real bank row the card's own import already staged — `linkCardPayment` (`src/lib/accounts/linkCardPayment.ts`) calling the already-existing `linkTransferPairManually`, whose date guard was already cross-date-safe for a cross-account pair; the missing piece was the entry point, not a matching engine (D8.2). Linking removes both rows from spending like any transfer, and warns (does not refuse) when the source row was already categorized, since that category's spend total is about to change (D4.1). "Not a card payment" is gated to only the pairs it can actually undo — an app-created pair, never an ordinary bank transfer the automatic matcher paired (D5.2) — rather than being offered everywhere and refusing everywhere it doesn't apply. See PR2 in `docs/plans/card-transaction-import.md` for the full task breakdown. And the automatic transfer matcher (`matchTransfers`) explicitly excludes every card row from its two cross-account queries (`NOT_ON_A_CARD` in `sync.ts`) — a card purchase and an unrelated same-day checking deposit would otherwise form a balanced bucket and auto-link away real spending, which the matcher's counting argument cannot see is wrong.
 
 A mortgage is still deliberately quiet: muted money weight, grouped under `LONG-TERM`, no utilization bar, no hand-entered charges, and no paid-down line until it has rows — because it is a fact about your life rather than a problem you are solving this month. It **does** still get a balance control (Reconcile, or Refresh when it is feed-linked with no rows); see rule 9 for why gating that on type was tried and reverted.
 

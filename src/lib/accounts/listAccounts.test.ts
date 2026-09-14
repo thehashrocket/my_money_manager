@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { listAccounts, listCardAccounts } from "./listAccounts";
+import { listAccounts, listCardAccounts, listImportingCardAccounts } from "./listAccounts";
 
 let handle: TestDbHandle;
 
@@ -117,5 +117,28 @@ describe("listCardAccounts", () => {
   it("still includes an UNLINKED card — AMEX/BofA-shaped, never on the feed", () => {
     seedAccount("Amex", "credit", null);
     expect(listCardAccounts(handle.db).map((a) => a.name)).toEqual(["Amex"]);
+  });
+});
+
+describe("listImportingCardAccounts (T9)", () => {
+  it("is the exact complement of listCardAccounts", () => {
+    seedAccount("Checking");
+    seedAccount("Amex", "credit"); // unlinked
+    seedAccount("Citi", "credit", "ACT-citi"); // linked — imports its own rows
+    seedAccount("Mortgage", "loan", "ACT-mortgage"); // linked, but never imports (E1)
+
+    expect(listImportingCardAccounts(handle.db).map((a) => a.name)).toEqual(["Citi"]);
+    expect(listCardAccounts(handle.db).map((a) => a.name)).toEqual(["Amex"]);
+  });
+
+  it("returns an empty list when no card imports its own transactions", () => {
+    seedAccount("Checking");
+    seedAccount("Amex", "credit");
+    expect(listImportingCardAccounts(handle.db)).toEqual([]);
+  });
+
+  it("excludes a linked loan — a loan never imports transactions regardless of link (E1)", () => {
+    seedAccount("Mortgage", "loan", "ACT-mortgage");
+    expect(listImportingCardAccounts(handle.db)).toEqual([]);
   });
 });

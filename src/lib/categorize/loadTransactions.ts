@@ -1,5 +1,6 @@
 import { and, desc, eq, gte, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
+import { isAppCreatedCardPaymentPair } from "@/lib/accounts/resolveCardAffordances";
 
 type Db = typeof defaultDb;
 
@@ -82,6 +83,17 @@ export type TransactionRow = {
   transferPairId: number | null;
   /** The other leg's account name — what makes a revealed row legible. */
   transferPartnerAccountName: string | null;
+  /**
+   * D5.2 (card-transaction-import plan, T9) — is this pair one `markAsCardPayment`
+   * (or T9's `linkCardPayment`) created, as opposed to an ordinary bank
+   * transfer the automatic matcher paired? Meaningless when `transferPairId`
+   * is null. Drives whether the row menu offers "Not a card payment" at all:
+   * offering it on a real bank-to-bank transfer pair would be a refusal the
+   * user can only discover by clicking it (rule 8) — `unmarkCardPayment`
+   * already refuses that pair with "wasn't created here", this just means the
+   * menu stops offering the item that always says so.
+   */
+  pairIsAppCreated: boolean;
 };
 
 export type LoadTransactionsResult = {
@@ -221,6 +233,19 @@ export function loadTransactions(
             ON partner_account.id = partner.account_id
           WHERE partner.id = ${schema.transactions.transferPairId}
         )`,
+        // D5.2 — the PARTNER leg's shape, so `isAppCreatedCardPaymentPair` can
+        // be evaluated in JS from the same predicate `unmarkCardPayment` uses
+        // rather than a second, independent SQL spelling of it.
+        partnerImportSource: sql<"csv" | "simplefin" | "manual" | null>`(
+          SELECT partner.import_source
+          FROM ${schema.transactions} AS partner
+          WHERE partner.id = ${schema.transactions.transferPairId}
+        )`,
+        partnerCategoryId: sql<number | null>`(
+          SELECT partner.category_id
+          FROM ${schema.transactions} AS partner
+          WHERE partner.id = ${schema.transactions.transferPairId}
+        )`,
       })
       .from(schema.transactions)
       .leftJoin(
@@ -237,7 +262,25 @@ export function loadTransactions(
       .offset(offset)
       .all();
 
-    return { rows, totalCount };
+    return {
+      rows: rows.map(({ partnerImportSource, partnerCategoryId, ...row }) => ({
+        ...row,
+        // `partnerImportSource` is null only for a dangling `transfer_pair_id`
+        // (the partner row is gone) — never true in practice, since deleting
+        // one leg of a pair also clears the other's `transfer_pair_id`
+        // (`ON DELETE SET NULL`). Treated as "not a mirror" rather than
+        // guessed at, matching `isSyntheticCardPaymentMirror`'s own
+        // `=== "manual"` test, which a null value already fails.
+        pairIsAppCreated:
+          row.transferPairId === null || partnerImportSource === null
+            ? false
+            : isAppCreatedCardPaymentPair(row, {
+                importSource: partnerImportSource,
+                categoryId: partnerCategoryId,
+              }),
+      })),
+      totalCount,
+    };
   });
 }
 
