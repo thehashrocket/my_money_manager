@@ -77,3 +77,28 @@ export function listCardAccounts(db: Db): AccountOption[] {
     .map(({ id, name }) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+/**
+ * T9 (card-transaction-import plan, PR2) — the exact complement of
+ * `listCardAccounts` above: cards whose OWN transactions come in from the
+ * feed, which is precisely why `markAsCardPayment`'s synthetic mirror is
+ * refused on them (D8.3) and they're excluded from that list. Those cards
+ * need a DIFFERENT row-menu affordance — linking a checking-side payment to
+ * the real bank row the feed already imported, rather than fabricating one —
+ * so the row menu needs to know which cards those are.
+ */
+export function listImportingCardAccounts(db: Db): AccountOption[] {
+  return db
+    .select({
+      id: schema.accounts.id,
+      name: schema.accounts.name,
+      type: schema.accounts.type,
+      simplefinAccountId: schema.accounts.simplefinAccountId,
+    })
+    .from(schema.accounts)
+    .where(inArray(schema.accounts.type, [...CARD_TYPES]))
+    .all()
+    .filter((r) => importsTransactions(r))
+    .map(({ id, name }) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}

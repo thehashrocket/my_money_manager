@@ -13,6 +13,7 @@ import {
   removeCardActivity,
   unmarkCardPayment,
 } from "@/lib/accounts/manualTransaction";
+import { linkCardPayment } from "@/lib/accounts/linkCardPayment";
 import type { AccountsActionState, CardActivityState } from "./action-state";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
 import { validateCardTermsInput } from "@/lib/accounts/validateCardTermsInput";
@@ -609,6 +610,44 @@ export async function markAsCardPaymentAction(
     }
 
     const result = markAsCardPayment({ transactionId, cardAccountId }, db);
+    if (result.status === "refused") {
+      return { status: "error", message: result.message, reason: result.reason };
+    }
+    const warning = revalidateCardActivitySurfaces();
+    return { status: "ok", message: result.message, warning };
+  } catch (err) {
+    return { status: "error", message: toMessage(err) };
+  }
+}
+
+/**
+ * T9 (card-transaction-import plan, PR2) — link a checking-side payment to
+ * the REAL bank row an importing card already staged, instead of fabricating
+ * a mirror (`markAsCardPayment` refuses that on an importing card — D8.3).
+ *
+ * "Not a card payment" (`unmarkCardPaymentAction`) is deliberately NOT the
+ * way back for a pair created here — an earlier version of this comment
+ * claimed it was, which was wrong. Both legs a link like this pairs are REAL
+ * bank rows, so `unmarkCardPayment`'s own `isSyntheticCardPaymentMirror`
+ * check reads it exactly like an ordinary auto-matched transfer pair and
+ * refuses it: there is no synthetic mirror to delete, and deleting either
+ * real leg would destroy imported history. The way back is the same one an
+ * ordinary transfer pair already uses — `/sync`'s "linked pairs" review
+ * (`unlinkTransferPair`), which only clears `transfer_pair_id` rather than
+ * deleting a row.
+ */
+export async function linkCardPaymentAction(
+  _prev: CardActivityState,
+  formData: FormData,
+): Promise<CardActivityState> {
+  try {
+    const transactionId = readTransactionId(formData);
+    const cardTransactionId = readPositiveIntField(formData, "cardTransactionId");
+    if (transactionId === null || cardTransactionId === null) {
+      return { status: "error", message: "That transaction no longer exists." };
+    }
+
+    const result = linkCardPayment({ transactionId, cardTransactionId }, db);
     if (result.status === "refused") {
       return { status: "error", message: result.message, reason: result.reason };
     }

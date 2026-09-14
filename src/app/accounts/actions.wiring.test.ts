@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const createCardActivityMock = vi.hoisted(() => vi.fn());
 const removeCardActivityMock = vi.hoisted(() => vi.fn());
+const linkCardPaymentMock = vi.hoisted(() => vi.fn());
 const revalidatePathMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({
@@ -49,8 +50,20 @@ vi.mock("@/lib/accounts/manualTransaction", async (importOriginal) => {
   };
 });
 
-const { updateLiabilityBalanceAction, addCardActivityAction, removeCardActivityAction } =
-  await import("./actions");
+// `linkCardPayment` (T9) lives in its own module, not `manualTransaction.ts`
+// — see that file's own docstring for why — so it needs its own mock rather
+// than riding the one above.
+vi.mock("@/lib/accounts/linkCardPayment", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/accounts/linkCardPayment")>();
+  return { ...actual, linkCardPayment: linkCardPaymentMock };
+});
+
+const {
+  updateLiabilityBalanceAction,
+  addCardActivityAction,
+  removeCardActivityAction,
+  linkCardPaymentAction,
+} = await import("./actions");
 const { IDLE, IDLE_ACTIVITY } = await import("./action-state");
 const { STARTING_BALANCE_DOLLARS_MAX } = await import("@/lib/import/accountAnchorFields");
 // Imported, never re-typed. Two hand-maintained copies of this sentence
@@ -63,6 +76,7 @@ const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
 beforeEach(() => {
   createCardActivityMock.mockReset();
   removeCardActivityMock.mockReset();
+  linkCardPaymentMock.mockReset();
   revalidatePathMock.mockReset();
 });
 
@@ -502,5 +516,75 @@ describe("removeCardActivityAction", () => {
     for (const path of ["/accounts", "/", "/sync", "/transactions"]) {
       expect(revalidatePathMock).toHaveBeenCalledWith(path);
     }
+  });
+});
+
+/**
+ * `linkCardPaymentAction` (T9, card-transaction-import plan PR2) — structurally
+ * identical to `removeCardActivityAction` above: same `readTransactionId`/
+ * `readPositiveIntField` coercion, same refused-to-error mapping, same
+ * `revalidateCardActivitySurfaces` call. Mirrors that suite's cases rather
+ * than inventing a new shape for them.
+ */
+describe("linkCardPaymentAction", () => {
+  function form(transactionId: string, cardTransactionId: string): FormData {
+    return formData({ transactionId, cardTransactionId });
+  }
+
+  it("REFUSES a non-numeric cardTransactionId, and never reaches the writer", async () => {
+    const state = await linkCardPaymentAction(IDLE_ACTIVITY, form("1", "abc"));
+
+    expect(state.status).toBe("error");
+    expect(linkCardPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the refusal REASON through", async () => {
+    linkCardPaymentMock.mockReturnValue({
+      status: "refused",
+      reason: "not-a-card",
+      message: "That row is not on a credit card.",
+    });
+
+    const state = await linkCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+
+    expect(state).toMatchObject({ status: "error", reason: "not-a-card" });
+    expect(revalidatePathMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a COMMITTED link as ok with a warning when the refresh throws", async () => {
+    linkCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "Linked to Citi Bank.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await linkCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+    logged.mockRestore();
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toMatch(/Linked to Citi/);
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
+  });
+
+  it("leaves `warning` undefined when the refresh works", async () => {
+    linkCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "Linked to Citi Bank.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    revalidatePathMock.mockImplementation(() => {});
+
+    const state = await linkCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+
+    expect(state).toMatchObject({ status: "ok" });
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.warning).toBeUndefined();
   });
 });
