@@ -1,8 +1,8 @@
 import { importsTransactions } from "@/lib/accounts/importsTransactions";
-import { isAfterAnchor } from "@/lib/accounts/isAfterAnchor";
 import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import type { AccountBalance } from "@/lib/accounts/loadAccountBalances";
 import { resolveBalanceAction } from "@/lib/accounts/resolveBalanceAction";
+import { resolveCardAffordances } from "@/lib/accounts/resolveCardAffordances";
 import { resolveStalenessDisplay } from "@/lib/accounts/resolveStalenessDisplay";
 import { formatMonthDay } from "@/lib/now";
 import { resolveUtilizationDisplay } from "@/lib/accounts/resolveUtilizationDisplay";
@@ -57,18 +57,10 @@ export function AccountRow({
   const utilization = resolveUtilizationDisplay(account.balanceCents, account.creditLimitCents);
   const action = resolveBalanceAction(account, account.hasAnyRows);
 
-  // Is there any date a hand-entered charge could legally carry? The window is
-  // `startingBalanceDate < date <= today`, so it closes exactly when the anchor
-  // has caught up to today. Derived here rather than inside the dialog because
-  // it decides whether the affordance is OFFERED, not what it says once open.
-  //
-  // `isAfterAnchor`, not a bare `<`, as of the card-transaction-import plan —
-  // this was the one caller its own docstring named as still unconverted, a
-  // drift risk it exists specifically to close: this comparison had already
-  // drifted once from the server's `<=` to a local `<` with no test catching
-  // it (TODOS.md). Same shared module `createCardActivity`'s refusal and the
-  // sync cutover now both go through.
-  const chargeableDateExists = isAfterAnchor({ date: today, anchor: account.startingBalanceDate });
+  // T7 (card-transaction-import plan) — the three CardControls gates below
+  // used to be separately-computed inline expressions agreeing by hand; see
+  // `resolveCardAffordances`'s own docstring for why that regressed twice.
+  const affordances = resolveCardAffordances(account, action, today);
 
   const amountLabel = isLiability
     ? `owed ${formatCents(Math.abs(account.balanceCents))}`
@@ -183,61 +175,20 @@ export function AccountRow({
           categories={categories}
           creditLimitCents={account.creditLimitCents}
           minimumPaymentCents={account.minimumPaymentCents}
-          // OFFERED ONLY WHEN THE SERVER WILL ACCEPT IT. `createCardActivity`
-          // refuses `date <= startingBalanceDate` and the dialog caps the date
-          // at today, so on a feed-refreshed card whose anchor IS today the
-          // legal date set is EMPTY — the button could only ever refuse.
-          // `refreshLiabilityBalances` writes that anchor from the bank's own
-          // balance-date, so it is the ordinary state on a sync day, not an
-          // edge case. (When the feed's date lags, which is the common case on
-          // the real ledger, the button appears and works.)
-          //
-          // This is the pattern rule 8 already established: v0.24.0's
-          // `assignableKinds` work made the row menu's kind item appear exactly
-          // when the server would accept it, because a refusal the user can
-          // only discover by triggering it is worse than an absent control.
-          // Card DETAILS stays available either way — it has no date to refuse.
-          //
-          // `!importsTransactions(account)`, as of the card-transaction-import
-          // plan — `createCardActivity` gained the same D8.3 refusal
-          // `markAsCardPayment` did (a hand-typed row for an event the feed is
-          // about to report on its own is a duplication risk, not a bridge).
-          // Reconcile stays reachable on this same row either way (D9.2 puts
-          // every importing card on `reconcile`), so this does not strand the
-          // account without a way to correct its balance.
-          canAddCharge={!longTerm && chargeableDateExists && !importsTransactions(account)}
-          // NOT `canAddCharge`. Terms have no date to refuse, so the credit-limit
-          // repair form must stay reachable on a card anchored today — that is
-          // the half of the original deadlock that always mattered, and folding
-          // it into the charge flag took it away again for one review cycle.
-          canEditTerms={!longTerm}
-          // DS55 IS INTACT: `action` still solely decides which balance control
-          // renders, and it is relayed here rather than re-derived.
-          //
-          // What changed is that `CardControls` used to be mounted ONLY on the
-          // `reconcile` branch, which silently gated two things that have
-          // nothing to do with the balance control — "Add a charge" and the
-          // card-terms form — on it. That deadlocked a feed-linked card back
-          // in v0.27.0: `resolveBalanceAction` returned "refresh" for ANY
-          // linked account with zero rows, so the row offered Refresh and
-          // nothing else, and the only way to reach the charge form was to
-          // already have a row. A card cannot get its first hand-entered
-          // charge, and a mistyped credit limit cannot be repaired — which is
-          // the exact purpose rule 9 gives that form — without unlinking the
-          // account from SimpleFIN first.
-          //
-          // AS OF D9.2 (card-transaction-import plan), this un-nesting is
-          // ALSO what keeps the deadlock from reopening on an importing card
-          // by a second route: `resolveBalanceAction` now answers `reconcile`
-          // for a linked, IMPORTING zero-row card unconditionally (never
-          // `refresh`), so the historical bug this paragraph describes could
-          // only recur today for a linked LOAN — which never takes a charge
-          // or edits terms to begin with (D3=A), so the state it warns about
-          // has narrowed to one that this component never actually reaches.
-          //
-          // The two questions were always separate; the DS55 block above has
-          // said so since it was written. Only the nesting disagreed.
-          showReconcile={action === "reconcile"}
+          // T7 (card-transaction-import plan) — these three used to be
+          // separately-computed inline expressions passed into `CardControls`
+          // one at a time; see `resolveCardAffordances`'s own docstring for
+          // the history of why that drifted (most recently v0.27.0's
+          // un-nesting, and the D8.3b widening it documents). All three are
+          // now ONE function's output, so a future change to any of them has
+          // one call site to update and a test to hold it, rather than three
+          // agreeing by hand.
+          canAddCharge={affordances.canAddCharge}
+          canEditTerms={affordances.canEditTerms}
+          // DS55 IS INTACT: `action` still solely decides which balance
+          // control renders — `resolveCardAffordances` only RELAYS it here,
+          // never re-derives it.
+          showReconcile={affordances.showReconcile}
           // D-ANCHOR — see `_balance-forms.tsx`'s `ReconcileForm`. Only an
           // IMPORTING card can have a feed row arrive dated before a hand
           // Reconcile that already moved the anchor past it; an unlinked or

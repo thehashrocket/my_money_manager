@@ -21,12 +21,20 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
+import type { CardPaymentCandidate } from "@/lib/accounts/loadCardPaymentCandidates";
+import { formatCents } from "@/lib/money";
 import type { CardActivityState } from "@/app/accounts/action-state";
 import {
+  linkCardPaymentAction,
   markAsCardPaymentAction,
   removeCardActivityAction,
   unmarkCardPaymentAction,
 } from "@/app/accounts/actions";
+
+/** T9 — one importing card's unpaired candidates, as handed down from the page. */
+export type ImportingCardOption = AccountOption & {
+  candidates: CardPaymentCandidate[];
+};
 
 /**
  * DS52 — the row's `⋯` overflow menu.
@@ -45,22 +53,33 @@ import {
  */
 export function TransactionRowMenu({
   transactionId,
+  amountCents,
   isTransfer,
+  pairIsAppCreated,
   transferPartnerAccountName,
   isManual,
   cardAccounts,
+  importingCards,
   onChanged,
 }: {
   transactionId: number;
+  /** T9 — which importing cards' candidates match this row's magnitude. */
+  amountCents: number;
   isTransfer: boolean;
+  /** D5.2 — meaningless unless `isTransfer`. See `isAppCreatedCardPaymentPair`. */
+  pairIsAppCreated: boolean;
   transferPartnerAccountName: string | null;
   /** `import_source = 'manual'` — a row this app wrote, not one a bank sent. */
   isManual: boolean;
   /** Credit cards only — a mortgage is rejected server-side anyway (E17). */
   cardAccounts: AccountOption[];
+  /** T9 — cards whose own transactions come in from the feed. */
+  importingCards: ImportingCardOption[];
   onChanged: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
+  const [linkDialogCard, setLinkDialogCard] = useState<ImportingCardOption | null>(null);
+  const [selectedCandidateId, setSelectedCandidateId] = useState("");
   // A confirmation, because the delete has NO undo. This repo's doctrine
   // (CLAUDE.md rules 4 and 8) is that an irreversible write is confirmed and a
   // reversible one is not — a modal on a reversible action is what teaches
@@ -137,6 +156,35 @@ export function TransactionRowMenu({
       return unmarkCardPaymentAction({ status: "idle" }, fd);
     });
 
+  const link = (cardTransactionId: number) =>
+    run(() => {
+      const fd = new FormData();
+      fd.set("transactionId", String(transactionId));
+      fd.set("cardTransactionId", String(cardTransactionId));
+      return linkCardPaymentAction({ status: "idle" }, fd);
+    });
+
+  // T9/D8.2 — only cards with at least one candidate matching THIS row's
+  // magnitude, so the menu never offers a picker that would open onto an
+  // empty list. Not a rule-8 refusal-avoidance case (an empty picker isn't a
+  // refusal, it's an accurate "nothing posted yet"); this is a plainer
+  // cleanliness call — hide the item until there's something to pick.
+  // Red-team finding (card-payment-linking-pr2): `linkCardPayment` refuses a
+  // non-negative source row server-side ("A card payment has to be money
+  // leaving an account"), so a row that would always be refused must not
+  // offer the item at all (rule 8) — otherwise a positive row (a deposit)
+  // could still find a magnitude-matching card charge and render a control
+  // that can only fail.
+  const linkableCards =
+    amountCents >= 0
+      ? []
+      : importingCards
+          .map((card) => ({
+            ...card,
+            candidates: card.candidates.filter((c) => c.amountCents === -amountCents),
+          }))
+          .filter((card) => card.candidates.length > 0);
+
   const remove = () =>
     run(() => {
       const fd = new FormData();
@@ -186,12 +234,43 @@ export function TransactionRowMenu({
                 : "Paired transfer"}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {/* E12 — unmarkCardPayment, NOT unlinkTransferPair. The latter
-                would strand the synthetic mirror as an uncategorized row in
-                the backlog, still inflating the card balance, and
-                rejection-mark the pair so re-pairing is blocked. It refuses
-                politely if this pair was not created here. */}
-            <DropdownMenuItem onClick={unmark}>Not a card payment</DropdownMenuItem>
+            {/* D5.2 — offered ONLY for a pair `markAsCardPayment` created (a
+                synthetic mirror). `unmarkCardPayment` already refuses an
+                ordinary bank-to-bank transfer pair with "wasn't created
+                here" — showing the item on every paired row was a refusal
+                the user could only discover by clicking it (rule 8), which
+                is exactly the anti-pattern `listCardAccounts`'s own D8.3
+                exclusion already names.
+
+                A T9 `linkCardPayment` pair is DELIBERATELY excluded too, not
+                merely uncovered: both its legs are real bank rows, which is
+                structurally identical to an ordinary auto-matched transfer
+                pair — `isAppCreatedCardPaymentPair` correctly reads it as
+                `false` (`resolveCardAffordances.test.ts`'s own "T9's manual
+                link is NOT app-created" case), because `unmarkCardPayment`
+                would refuse it for the same reason it refuses any real-to-
+                real pair: there is no synthetic mirror to delete, and
+                deleting either real leg would destroy imported history. The
+                way back for a T9 link is the same one an ordinary transfer
+                pair already uses — `/sync`'s "linked pairs" review
+                (`unlinkTransferPair`), which only clears `transfer_pair_id`
+                rather than deleting a row. An earlier draft of this comment
+                claimed T9 pairs render this item too; that was wrong and is
+                corrected here rather than left to drift further (the exact
+                failure class PR #52's comment-accuracy pass found 22 of). */}
+            {pairIsAppCreated ? (
+              <DropdownMenuItem onClick={unmark}>Not a card payment</DropdownMenuItem>
+            ) : (
+              // Design review, card-payment-linking-pr2: the common case here
+              // is an ORDINARY auto-matched bank-to-bank pair, not a card
+              // payment — `pairIsAppCreated` is false for most rows that take
+              // this branch, so `null` left the label + separator above with
+              // nothing clickable beneath them: a dead-end menu that reads as
+              // broken rather than as "nothing to do here." Matches the inert
+              // label already used a few branches down for the analogous
+              // "no credit cards yet" case rather than leaving a silent gap.
+              <DropdownMenuLabel>No actions for this pair</DropdownMenuLabel>
+            )}
           </DropdownMenuGroup>
         ) : canRemove ? (
           <DropdownMenuGroup>
@@ -207,19 +286,48 @@ export function TransactionRowMenu({
               Remove this charge…
             </DropdownMenuItem>
           </DropdownMenuGroup>
-        ) : cardAccounts.length === 0 ? (
+        ) : cardAccounts.length === 0 && linkableCards.length === 0 ? (
           <DropdownMenuGroup>
             <DropdownMenuLabel>No credit cards yet</DropdownMenuLabel>
           </DropdownMenuGroup>
         ) : (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>Mark as payment to</DropdownMenuLabel>
-            {cardAccounts.map((card) => (
-              <DropdownMenuItem key={card.id} onClick={() => mark(card.id)}>
-                {card.name}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuGroup>
+          <>
+            {/* D8.3 already excludes an importing card from this list
+                (`listCardAccounts`) — a hand-made mirror there would double
+                the bank's own credit once it arrives. */}
+            {cardAccounts.length > 0 ? (
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Mark as payment to</DropdownMenuLabel>
+                {cardAccounts.map((card) => (
+                  <DropdownMenuItem key={card.id} onClick={() => mark(card.id)}>
+                    {card.name}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            ) : null}
+            {/* T9 — the entry point onto `linkTransferPairManually` for a card
+                that imports its own transactions: the real bank credit is
+                already staged, so this links to it instead of fabricating a
+                mirror. */}
+            {linkableCards.length > 0 ? (
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Link to a card charge</DropdownMenuLabel>
+                {linkableCards.map((card) => (
+                  <DropdownMenuItem
+                    key={card.id}
+                    onClick={() => {
+                      setSelectedCandidateId(
+                        card.candidates.length === 1 ? String(card.candidates[0]!.id) : "",
+                      );
+                      setLinkDialogCard(card);
+                    }}
+                  >
+                    {card.name}…
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+            ) : null}
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -287,6 +395,60 @@ export function TransactionRowMenu({
             }}
           >
             Remove charge
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    ) : null}
+
+    {/* T9 — mounted only while a linkable card exists, same reasoning as the
+        remove-confirm dialog above: `linkDialogCard` can only become non-null
+        from an item `linkableCards.length > 0` gates. */}
+    {linkableCards.length > 0 ? (
+    <Dialog
+      open={linkDialogCard !== null}
+      onOpenChange={(open) => {
+        if (!open) setLinkDialogCard(null);
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Link to {linkDialogCard?.name}</DialogTitle>
+          <DialogDescription>
+            Pick the transaction your bank reported for this payment — linking
+            takes both rows out of spending, the same as &ldquo;Mark as payment to&rdquo;.
+          </DialogDescription>
+        </DialogHeader>
+        <select
+          aria-label="Bank transaction"
+          className="h-11 w-full rounded-md border border-[var(--border)] bg-background px-2 text-sm"
+          value={selectedCandidateId}
+          onChange={(e) => setSelectedCandidateId(e.target.value)}
+        >
+          <option value="" disabled>
+            Choose…
+          </option>
+          {linkDialogCard?.candidates.map((c) => (
+            <option key={c.id} value={String(c.id)}>
+              {c.date} · {formatCents(c.amountCents)} · {c.rawMemo}
+            </option>
+          ))}
+        </select>
+        <DialogFooter className="sm:flex-row-reverse sm:justify-start">
+          <Button
+            type="button"
+            disabled={!selectedCandidateId || isPending}
+            onClick={() => {
+              const cardTransactionId = Number(selectedCandidateId);
+              setLinkDialogCard(null);
+              setSelectedCandidateId("");
+              link(cardTransactionId);
+            }}
+          >
+            Link
+          </Button>
+          <Button type="button" variant="ghost" onClick={() => setLinkDialogCard(null)}>
+            Cancel
           </Button>
         </DialogFooter>
       </DialogContent>

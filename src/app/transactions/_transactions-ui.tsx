@@ -23,6 +23,7 @@ import {
   TransactionRowForm,
   TransferRowItem,
 } from "./_transaction-row";
+import type { ImportingCardOption } from "./_row-menu";
 
 type Props = {
   rows: TransactionRow[];
@@ -35,6 +36,8 @@ type Props = {
   searchParams: TransactionsFilterValues;
   /** Credit cards, for the row menu's "Mark as payment to" (DS52). */
   cardAccounts: AccountOption[];
+  /** T9 — cards whose own transactions come in from the feed, with candidates. */
+  importingCards: ImportingCardOption[];
 };
 
 /**
@@ -52,6 +55,7 @@ export function TransactionsUi({
   totalPages,
   searchParams,
   cardAccounts,
+  importingCards,
 }: Props) {
   const [backlogCount, setBacklogCount] = useState(initialBacklog.count);
   const router = useRouter();
@@ -84,6 +88,7 @@ export function TransactionsUi({
                   <TransferRowItem
                     row={row}
                     cardAccounts={cardAccounts}
+                    importingCards={importingCards}
                     onPairingChanged={onPairingChanged}
                     filterValues={searchParams}
                   />
@@ -92,6 +97,7 @@ export function TransactionsUi({
                     row={row}
                     leafCategories={leafCategories}
                     cardAccounts={cardAccounts}
+                    importingCards={importingCards}
                     onPairingChanged={onPairingChanged}
                     filterValues={searchParams}
                     onCategorized={(priorCategoryId, updatedCount) => {

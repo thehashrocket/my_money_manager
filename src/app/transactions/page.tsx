@@ -3,7 +3,13 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { db } from "@/db";
 import { listLeafCategories, type LeafCategory } from "@/lib/categories";
-import { listAccounts, listCardAccounts, type AccountOption } from "@/lib/accounts/listAccounts";
+import {
+  listAccounts,
+  listCardAccounts,
+  listImportingCardAccounts,
+  type AccountOption,
+} from "@/lib/accounts/listAccounts";
+import { loadCardPaymentCandidates } from "@/lib/accounts/loadCardPaymentCandidates";
 import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 import {
   loadTransactions,
@@ -187,6 +193,13 @@ export default async function TransactionsPage({
   const allCategoriesForLabels = listLeafCategories(db, { includeArchived: true });
   const accounts = listAccounts(db);
   const cardAccounts = listCardAccounts(db);
+  // T9 (card-transaction-import plan, PR2) — one query per importing card,
+  // not per row: at this app's realistic volume (~1.7 card transactions a
+  // month) every row's picker can share the same small candidate lists.
+  const importingCards = listImportingCardAccounts(db).map((card) => ({
+    ...card,
+    candidates: loadCardPaymentCandidates(card.id, db),
+  }));
   // E5: unscoped (all-time), matching this page's existing behavior — only
   // /budget's own banner is month-scoped (X4).
   const uncategorizedBacklog = loadUncategorizedBacklog(db);
@@ -247,6 +260,7 @@ export default async function TransactionsPage({
         totalPages={totalPages}
         searchParams={filterValues}
         cardAccounts={cardAccounts}
+        importingCards={importingCards}
       />
     </main>
   );

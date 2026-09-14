@@ -13,7 +13,7 @@ import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
-import { TransactionRowMenu } from "./_row-menu";
+import { TransactionRowMenu, type ImportingCardOption } from "./_row-menu";
 import { cn } from "@/lib/utils";
 import {
   categorizeTransactionAction,
@@ -29,6 +29,8 @@ type Props = {
   onUndone: (priorCategoryId: number | null, revertedCount: number) => void;
   /** DS52 — credit cards, for the row menu's "Mark as payment to". */
   cardAccounts: AccountOption[];
+  /** T9 — cards whose own transactions come in from the feed, with candidates. */
+  importingCards: ImportingCardOption[];
   /** Refresh the page after a pairing change, which alters what this list shows. */
   onPairingChanged: () => void;
   /** The whole active filter set — a row's merchant link MERGES into it (D23). */
@@ -64,6 +66,7 @@ export function TransactionRowForm({
   row,
   leafCategories,
   cardAccounts,
+  importingCards,
   onPairingChanged,
   onCategorized,
   onUndone,
@@ -266,13 +269,16 @@ export function TransactionRowForm({
         </button>
         <TransactionRowMenu
           transactionId={row.id}
+          amountCents={row.amountCents}
           isTransfer={false}
+          pairIsAppCreated={false}
           transferPartnerAccountName={null}
           // Hand-entered card activity is the only row with a per-row delete;
           // `removeCardActivity` refuses every other kind. Passed rather than
           // derived in the menu so the menu stays a presenter.
           isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
+          importingCards={importingCards}
           onChanged={onPairingChanged}
         />
       </div>
@@ -489,11 +495,13 @@ function CategoryBadge({ name }: { name: string | null }) {
 export function TransferRowItem({
   row,
   cardAccounts,
+  importingCards,
   onPairingChanged,
   filterValues,
 }: {
   row: TransactionRow;
   cardAccounts: AccountOption[];
+  importingCards: ImportingCardOption[];
   onPairingChanged: () => void;
   filterValues: TransactionsFilterValues;
 }) {
@@ -532,7 +540,9 @@ export function TransferRowItem({
       <div className="flex items-center sm:col-span-4 sm:col-start-2 sm:row-start-2 sm:justify-end">
         <TransactionRowMenu
           transactionId={row.id}
+          amountCents={row.amountCents}
           isTransfer
+          pairIsAppCreated={row.pairIsAppCreated}
           transferPartnerAccountName={row.transferPartnerAccountName}
           // Always false in effect on this branch — a paired row is a payment
           // leg, which `removeCardActivity` refuses and "Not a card payment"
@@ -540,6 +550,7 @@ export function TransferRowItem({
           // precedence rule stays the single place that decides.
           isManual={row.importSource === "manual"}
           cardAccounts={cardAccounts}
+          importingCards={importingCards}
           onChanged={onPairingChanged}
         />
       </div>
