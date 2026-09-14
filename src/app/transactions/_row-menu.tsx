@@ -54,6 +54,7 @@ export type ImportingCardOption = AccountOption & {
 export function TransactionRowMenu({
   transactionId,
   amountCents,
+  sourceIsAsset,
   isTransfer,
   pairIsAppCreated,
   transferPartnerAccountName,
@@ -65,6 +66,16 @@ export function TransactionRowMenu({
   transactionId: number;
   /** T9 — which importing cards' candidates match this row's magnitude. */
   amountCents: number;
+  /**
+   * T9 (Codex adversarial finding) — is THIS row's own account checking or
+   * savings, as opposed to a card? `linkCardPayment` refuses a source leg
+   * that isn't an asset account (mirroring `markAsCardPayment`'s identical
+   * guard), so a row living ON a credit card must never offer "Link to a
+   * card charge" — a charge on Card A whose magnitude happens to match an
+   * unpaired credit on Card B would otherwise render a control that always
+   * refuses (rule 8).
+   */
+  sourceIsAsset: boolean;
   isTransfer: boolean;
   /** D5.2 — meaningless unless `isTransfer`. See `isAppCreatedCardPaymentPair`. */
   pairIsAppCreated: boolean;
@@ -176,7 +187,7 @@ export function TransactionRowMenu({
   // could still find a magnitude-matching card charge and render a control
   // that can only fail.
   const linkableCards =
-    amountCents >= 0
+    amountCents >= 0 || !sourceIsAsset
       ? []
       : importingCards
           .map((card) => ({

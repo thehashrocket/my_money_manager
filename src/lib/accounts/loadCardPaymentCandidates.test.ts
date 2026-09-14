@@ -27,11 +27,17 @@ function seedAccount(name: string, type: "checking" | "credit" = "credit") {
   return row;
 }
 
-function seedRow(accountId: number, date: string, amountCents: number, transferPairId: number | null = null) {
+function seedRow(
+  accountId: number,
+  date: string,
+  amountCents: number,
+  transferPairId: number | null = null,
+  opts: { importSource?: "csv" | "simplefin" | "manual"; isPending?: boolean; categoryId?: number | null } = {},
+) {
   seq += 1;
   const [batch] = handle.db
     .insert(schema.importBatches)
-    .values({ source: "simplefin", label: `seed.${seq}` })
+    .values({ source: opts.importSource ?? "simplefin", label: `seed.${seq}` })
     .returning()
     .all();
   const [row] = handle.db
@@ -43,10 +49,12 @@ function seedRow(accountId: number, date: string, amountCents: number, transferP
       rawMemo: "CITI CARD ONLINEPAYMENT",
       normalizedMerchant: "citi card onlinepayment",
       amountCents,
-      importSource: "simplefin",
+      importSource: opts.importSource ?? "simplefin",
       importBatchId: batch.id,
       importRowHash: `seed-candidate-${seq}`,
       transferPairId,
+      isPending: opts.isPending ?? false,
+      categoryId: opts.categoryId ?? null,
     })
     .returning()
     .all();
@@ -88,6 +96,21 @@ describe("loadCardPaymentCandidates (T9)", () => {
     const citi = seedAccount("Citi");
     const amex = seedAccount("Amex");
     seedRow(amex.id, "2026-09-13", 50_000);
+    expect(loadCardPaymentCandidates(citi.id, handle.db)).toEqual([]);
+  });
+
+  it("excludes a manual row — a categorized refund or an orphaned mirror is not a real bank row to link to (Codex + Claude adversarial)", () => {
+    const citi = seedAccount("Citi");
+    // A categorized manual refund entered before the card started importing
+    // (D-INVESTIGATE's already-accepted residual) — positive, unpaired, but
+    // hand-typed, not a bank row the feed staged.
+    seedRow(citi.id, "2026-09-13", 50_000, null, { importSource: "manual", categoryId: 7 });
+    expect(loadCardPaymentCandidates(citi.id, handle.db)).toEqual([]);
+  });
+
+  it("excludes a pending row — its amount/identity is not final yet (Claude adversarial)", () => {
+    const citi = seedAccount("Citi");
+    seedRow(citi.id, "2026-09-13", 50_000, null, { isPending: true });
     expect(loadCardPaymentCandidates(citi.id, handle.db)).toEqual([]);
   });
 

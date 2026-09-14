@@ -38,6 +38,26 @@ type Props = {
 };
 
 /**
+ * T9 (Codex adversarial finding) — is `accountId` a checking/savings account,
+ * as opposed to a card? Both `cardAccounts` (non-importing) and
+ * `importingCards` are already fetched for this page, so membership in
+ * either set is cheaper and more honest than a third server round trip —
+ * "not a card we know about" is exactly "an asset account" for every row
+ * `/transactions` can render (a mortgage never appears here at all, per
+ * `listAccounts`'s own E15 exclusion).
+ */
+function isAssetAccount(
+  accountId: number,
+  cardAccounts: AccountOption[],
+  importingCards: ImportingCardOption[],
+): boolean {
+  return (
+    !cardAccounts.some((c) => c.id === accountId) &&
+    !importingCards.some((c) => c.id === accountId)
+  );
+}
+
+/**
  * D17 — shared by every row variant and by `TransactionColumnHeaders`, so a
  * column cannot drift out from under its own label.
  *
@@ -270,6 +290,7 @@ export function TransactionRowForm({
         <TransactionRowMenu
           transactionId={row.id}
           amountCents={row.amountCents}
+          sourceIsAsset={isAssetAccount(row.accountId, cardAccounts, importingCards)}
           isTransfer={false}
           pairIsAppCreated={false}
           transferPartnerAccountName={null}
@@ -541,6 +562,11 @@ export function TransferRowItem({
         <TransactionRowMenu
           transactionId={row.id}
           amountCents={row.amountCents}
+          // Irrelevant on this branch (isTransfer is always true here, and
+          // "Link to a card charge" only renders on the non-transfer branch)
+          // — computed honestly anyway rather than hard-coded, same reasoning
+          // `isManual` below already documents.
+          sourceIsAsset={isAssetAccount(row.accountId, cardAccounts, importingCards)}
           isTransfer
           pairIsAppCreated={row.pairIsAppCreated}
           transferPartnerAccountName={row.transferPartnerAccountName}

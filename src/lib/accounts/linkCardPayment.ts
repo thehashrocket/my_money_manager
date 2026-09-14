@@ -97,7 +97,11 @@ export function linkCardPayment(
   }
 
   const cardLeg = db
-    .select({ id: schema.transactions.id, accountId: schema.transactions.accountId })
+    .select({
+      id: schema.transactions.id,
+      accountId: schema.transactions.accountId,
+      importSource: schema.transactions.importSource,
+    })
     .from(schema.transactions)
     .where(eq(schema.transactions.id, input.cardTransactionId))
     .get();
@@ -106,6 +110,22 @@ export function linkCardPayment(
       status: "refused",
       reason: "not-found",
       message: "That card transaction no longer exists.",
+    };
+  }
+  // Codex structured review — `loadCardPaymentCandidates` already excludes
+  // `import_source = 'manual'` rows from the picker, but a Server Action is
+  // a network endpoint regardless of what rendered it (the same argument
+  // D8.3's re-check inside `markAsCardPayment`'s transaction makes). Without
+  // this, a hand-built `cardTransactionId` naming a categorized manual
+  // refund or an orphaned `markAsCardPayment` mirror would still link —
+  // corrupting payment history with no UI undo (neither leg would then read
+  // as a synthetic mirror if the refund carries a real category, so
+  // `isAppCreatedCardPaymentPair` reports it as an ordinary bank pair).
+  if (cardLeg.importSource === "manual") {
+    return {
+      status: "refused",
+      reason: "invalid",
+      message: "That row was entered by hand, not reported by your bank, so there is nothing here to link to.",
     };
   }
 

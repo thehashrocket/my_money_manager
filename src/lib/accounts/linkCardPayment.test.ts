@@ -306,6 +306,33 @@ describe("linkCardPayment (T9)", () => {
     }
   });
 
+  it("refuses when the target row's own import_source is manual, even if a caller bypasses the picker (Codex structured review)", () => {
+    // `loadCardPaymentCandidates` already excludes manual rows from the
+    // picker, but a Server Action is a network endpoint regardless of what
+    // rendered it — re-checked here rather than trusted from the client.
+    const checking = seedAccount({ name: "Checking", type: "checking" });
+    const citi = seedAccount({ name: "Citi", type: "credit", simplefinAccountId: "ACT-citi" });
+    const payment = seedRow({ accountId: checking.id, date: "2026-09-10", amountCents: -50_000 });
+    const manualRefund = seedRow({
+      accountId: citi.id,
+      date: "2026-09-13",
+      amountCents: 50_000,
+      importSource: "manual",
+      categoryId: seedCategory().id,
+    });
+
+    const result = linkCardPayment(
+      { transactionId: payment.id, cardTransactionId: manualRefund.id },
+      handle.db,
+    );
+    expect(result.status).toBe("refused");
+    if (result.status === "refused") {
+      expect(result.message).toContain("entered by hand");
+    }
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows.every((r) => r.transferPairId === null)).toBe(true);
+  });
+
   it("reports a cleared rejection when the pair had a prior 'not a transfer' marker", () => {
     const checking = seedAccount({ name: "Checking", type: "checking" });
     const citi = seedAccount({ name: "Citi", type: "credit", simplefinAccountId: "ACT-citi" });
