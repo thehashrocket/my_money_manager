@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-15
+
+### Added
+- **The transactions page can now tell you up front when "Remember" won't work, instead of letting you find out after you save.** Categorize page already grayed out that checkbox when a merchant's history was too mixed to train a rule from; the transactions page now does the same, with the reason shown right there.
+- **When a merchant already has a rule that contradicts what you just picked, both pages now offer to remove it instead of just refusing.** A rule that keeps auto-filing new transactions the wrong way used to be something you could only fix by hand-editing every future row it touched. The checkbox relabels to "Remove conflicting rule" in that case, and stays clickable — checking it takes the old rule out, even though it can't put a new one in its place.
+
+### Fixed
+- **Correcting the only transaction you'd seen so far for a merchant could permanently block training a rule from that correction.** The transactions page's new "Remember" checkbox didn't know that the row you were re-categorizing was itself part of the evidence it was checking, so it always looked like the merchant was already filed somewhere else — even right after you fixed it. It now recognizes when a row is only contradicting itself.
+- **A "Remember" tick could silently carry over to a different transaction than the one you ticked it for.** Change your mind about the category after ticking the box, or leave the page open long enough for something else to update it, and the tick could survive into a state you never actually confirmed — training or removing a rule you didn't mean to touch. The tick now clears itself whenever what it would actually do changes.
+- **You couldn't remove a conflicting rule without also changing the transaction's category.** Some merchant keys are too generic to ever back a rule and get their rule removed regardless of which category you pick — but the Save button stayed disabled unless you also changed the category, so there was no way to submit a removal-only correction. Save now recognizes a pending removal as something to submit.
+
 ## [1.2.2] - 2026-09-15
 
 ### Fixed
