@@ -313,7 +313,7 @@ function revert(raw: { accountId: unknown }): AccountsActionState {
     .where(eq(schema.accounts.id, accountId))
     .run();
 
-  return { status: "ok", message: "reverted" };
+  return { status: "ok", message: "reverted", warning: undefined };
 }
 
 

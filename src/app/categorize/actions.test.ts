@@ -8,7 +8,7 @@ import {
   bulkCategorize,
   type BulkCategorizeSnapshot,
 } from "@/lib/categorize/bulkCategorize";
-import { describeRuleRefusal } from "@/lib/categorize/refusalNotice";
+import { describeRuleRefusalPostCommit } from "@/lib/categorize/refusalNotice";
 import { undoBulkCategorize } from "@/lib/categorize/undoBulkCategorize";
 import { validateBulkCategorizeInput } from "@/lib/categorize/validateBulkCategorizeInput";
 import { bulkCategorizeSnapshotSchema } from "@/lib/categorize/validateBulkCategorizeSnapshot";
@@ -357,7 +357,8 @@ describe("what the action tells the user", () => {
     expect(result.ruleRefusal).not.toBeNull();
     if (result.ruleRefusal === null) return;
 
-    const notice = describeRuleRefusal(handle.db, result.ruleRefusal);
+    const notice = describeRuleRefusalPostCommit(handle.db, "test", result.ruleRefusal);
+    if (notice === null) throw new Error("unreachable — ruleRefusal was non-null above");
     expect(notice.removedRule).toBe(true);
     expect(notice.message).toContain(dining.name);
     expect(notice.message).toContain("Undo restores it");

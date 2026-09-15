@@ -23,7 +23,7 @@ import type {
  * whatever it was and this rides alongside it (see
  * `src/lib/revalidateAfterWrite.ts`).
  */
-type RefreshWarning = { warning?: string };
+type RefreshWarning = { warning: string | undefined };
 
 /**
  * One merchant's filing outcome plus the refresh warning.

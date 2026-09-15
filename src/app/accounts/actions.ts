@@ -240,7 +240,7 @@ export async function updateLiabilityBalanceAction(
       cents === account.startingBalanceCents &&
       startingBalanceDate === account.startingBalanceDate
     ) {
-      return { status: "ok", message: `${account.name} is unchanged.` };
+      return { status: "ok", message: `${account.name} is unchanged.`, warning: undefined };
     }
 
     db.update(schema.accounts)

@@ -53,7 +53,7 @@
 /** The shape every returned-state action in this app shares. */
 export type ActionState =
   | { status: "idle" }
-  | { status: "ok"; message: string; warning?: string }
+  | { status: "ok"; message: string; warning: string | undefined }
   | { status: "error"; message: string };
 
 /** The warning on an `ok` outcome, or `undefined`.

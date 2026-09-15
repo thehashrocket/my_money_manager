@@ -27,6 +27,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const createCardActivityMock = vi.hoisted(() => vi.fn());
 const removeCardActivityMock = vi.hoisted(() => vi.fn());
 const linkCardPaymentMock = vi.hoisted(() => vi.fn());
+const markAsCardPaymentMock = vi.hoisted(() => vi.fn());
+const unmarkCardPaymentMock = vi.hoisted(() => vi.fn());
 const revalidatePathMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({
@@ -47,6 +49,8 @@ vi.mock("@/lib/accounts/manualTransaction", async (importOriginal) => {
     ...actual,
     createCardActivity: createCardActivityMock,
     removeCardActivity: removeCardActivityMock,
+    markAsCardPayment: markAsCardPaymentMock,
+    unmarkCardPayment: unmarkCardPaymentMock,
   };
 });
 
@@ -63,6 +67,8 @@ const {
   addCardActivityAction,
   removeCardActivityAction,
   linkCardPaymentAction,
+  markAsCardPaymentAction,
+  unmarkCardPaymentAction,
 } = await import("./actions");
 const { IDLE, IDLE_ACTIVITY } = await import("./action-state");
 const { STARTING_BALANCE_DOLLARS_MAX } = await import("@/lib/import/accountAnchorFields");
@@ -77,6 +83,8 @@ beforeEach(() => {
   createCardActivityMock.mockReset();
   removeCardActivityMock.mockReset();
   linkCardPaymentMock.mockReset();
+  markAsCardPaymentMock.mockReset();
+  unmarkCardPaymentMock.mockReset();
   revalidatePathMock.mockReset();
 });
 
@@ -586,5 +594,255 @@ describe("linkCardPaymentAction", () => {
     expect(state).toMatchObject({ status: "ok" });
     if (state.status !== "ok") throw new Error("unreachable");
     expect(state.warning).toBeUndefined();
+  });
+});
+
+/**
+ * `markAsCardPaymentAction` — D10 path 1, and until now "referenced by no
+ * test in the repo" (the exact wording this suite's own P2 backlog entry
+ * used). `cardAccountId` decides WHICH CARD a payment mirror lands on, so its
+ * coercion getting this wrong is not cosmetic — see the `readPositiveIntField`
+ * block below for that guard in isolation. Structurally identical to
+ * `linkCardPaymentAction` above: same two-field coercion, same
+ * refused-to-error mapping, same `revalidateCardActivitySurfaces` call.
+ */
+describe("markAsCardPaymentAction", () => {
+  function form(transactionId: string, cardAccountId: string): FormData {
+    return formData({ transactionId, cardAccountId });
+  }
+
+  it("REFUSES a non-numeric cardAccountId, and never reaches the writer", async () => {
+    const state = await markAsCardPaymentAction(IDLE_ACTIVITY, form("1", "abc"));
+
+    expect(state.status).toBe("error");
+    expect(markAsCardPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES a non-numeric transactionId, and never reaches the writer", async () => {
+    const state = await markAsCardPaymentAction(IDLE_ACTIVITY, form("abc", "1"));
+
+    expect(state.status).toBe("error");
+    expect(markAsCardPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the refusal REASON through", async () => {
+    markAsCardPaymentMock.mockReturnValue({
+      status: "refused",
+      reason: "invalid",
+      message: "A card payment has to be money leaving an account.",
+    });
+
+    const state = await markAsCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+
+    expect(state).toMatchObject({ status: "error", reason: "invalid" });
+    expect(revalidatePathMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a COMMITTED mark as ok with a warning when the refresh throws", async () => {
+    markAsCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "Marked as a payment to Citi Bank.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await markAsCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+    logged.mockRestore();
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toMatch(/Marked as a payment/);
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
+  });
+
+  it("leaves `warning` undefined when the refresh works", async () => {
+    markAsCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "Marked as a payment to Citi Bank.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    revalidatePathMock.mockImplementation(() => {});
+
+    const state = await markAsCardPaymentAction(IDLE_ACTIVITY, form("1", "2"));
+
+    expect(state).toMatchObject({ status: "ok" });
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.warning).toBeUndefined();
+  });
+});
+
+/**
+ * `unmarkCardPaymentAction` — E12, the inverse of the above, and the same
+ * "referenced by no test in the repo" gap. Single-field coercion
+ * (`transactionId` only), same refused/ok mapping shape as its siblings.
+ */
+describe("unmarkCardPaymentAction", () => {
+  function form(transactionId: string): FormData {
+    return formData({ transactionId });
+  }
+
+  it("REFUSES a non-numeric transactionId, and never reaches the writer", async () => {
+    const state = await unmarkCardPaymentAction(IDLE_ACTIVITY, form("abc"));
+
+    expect(state.status).toBe("error");
+    expect(unmarkCardPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the refusal REASON through", async () => {
+    unmarkCardPaymentMock.mockReturnValue({
+      status: "refused",
+      reason: "not-a-mirror",
+      message: "That pair was not created by marking a payment.",
+    });
+
+    const state = await unmarkCardPaymentAction(IDLE_ACTIVITY, form("42"));
+
+    expect(state).toMatchObject({ status: "error", reason: "not-a-mirror" });
+    expect(revalidatePathMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a COMMITTED unmark as ok with a warning when the refresh throws", async () => {
+    unmarkCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "No longer marked as a payment.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    revalidatePathMock.mockImplementation(() => {
+      throw new Error("revalidatePath blew up");
+    });
+
+    const state = await unmarkCardPaymentAction(IDLE_ACTIVITY, form("42"));
+    logged.mockRestore();
+
+    expect(state.status).toBe("ok");
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.message).toMatch(/No longer marked/);
+    expect(state.warning).toBe(REFRESH_FAILED_WARNING);
+  });
+
+  it("leaves `warning` undefined when the refresh works", async () => {
+    unmarkCardPaymentMock.mockReturnValue({
+      status: "ok",
+      message: "No longer marked as a payment.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    revalidatePathMock.mockImplementation(() => {});
+
+    const state = await unmarkCardPaymentAction(IDLE_ACTIVITY, form("42"));
+
+    expect(state).toMatchObject({ status: "ok" });
+    if (state.status !== "ok") throw new Error("unreachable");
+    expect(state.warning).toBeUndefined();
+  });
+});
+
+/**
+ * `readPositiveIntField` — the shared coercion behind `transactionId`,
+ * `cardAccountId` and `cardTransactionId`, exercised here through
+ * `removeCardActivityAction` (single field) rather than importing the
+ * function directly, since it is module-private on purpose (T28/E20: a
+ * Server Action is a network endpoint regardless of what the form rendered,
+ * so the guard has to be proven through the same door a request would use).
+ *
+ * Before this guard existed, `Number(formData.get(...))` treated an ABSENT
+ * field as id `0` (`Number(null)` is `0`, and `Number.isInteger(0)` passes),
+ * so a request that omitted the field reached the write instead of being
+ * refused. That absent-field case had no test anywhere in the repo, nor did
+ * "0", "-1", "0x10", "1e3", or an unsafe integer — all named in this file's
+ * own P2 backlog entry as gaps.
+ */
+describe("readPositiveIntField — the shared id coercion", () => {
+  const rejected = [
+    ["an absent field", undefined],
+    ["an empty string", ""],
+    ["whitespace only", "   "],
+    ["zero", "0"],
+    ["a negative integer", "-1"],
+    ["hex notation", "0x10"],
+    ["exponential notation", "1e3"],
+    ["a decimal", "3.5"],
+    ["a non-numeric string", "abc"],
+    ["a plus-signed integer", "+7"],
+    // Number.MAX_SAFE_INTEGER is 9_007_199_254_740_991; one past it is no
+    // longer exactly representable, which is the failure mode
+    // `Number.isSafeInteger` exists to catch rather than silently round.
+    ["an unsafe integer", "9007199254740993"],
+  ] as const;
+
+  for (const [label, raw] of rejected) {
+    it(`rejects ${label}`, async () => {
+      const fd = new FormData();
+      if (raw !== undefined) fd.set("transactionId", raw);
+
+      const state = await removeCardActivityAction(IDLE_ACTIVITY, fd);
+
+      expect(state.status).toBe("error");
+      expect(removeCardActivityMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("accepts leading/trailing whitespace around an otherwise valid integer", async () => {
+    // Documented, current behavior — `raw.trim()` runs before the digits-only
+    // test, so " 7 " is NOT one of the leniencies this guard closes off. Pinned
+    // so a future change to the trim call is a deliberate edit, not a silent one.
+    removeCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Charge removed.",
+      transactionId: 7,
+      balanceCents: -100000,
+    });
+    const fd = new FormData();
+    fd.set("transactionId", " 7 ");
+
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, fd);
+
+    expect(state.status).toBe("ok");
+    expect(removeCardActivityMock).toHaveBeenCalledWith(
+      { transactionId: 7 },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("accepts an ordinary positive integer", async () => {
+    removeCardActivityMock.mockReturnValue({
+      status: "ok",
+      message: "Charge removed.",
+      transactionId: 42,
+      balanceCents: -100000,
+    });
+    const fd = new FormData();
+    fd.set("transactionId", "42");
+
+    const state = await removeCardActivityAction(IDLE_ACTIVITY, fd);
+
+    expect(state.status).toBe("ok");
+    expect(removeCardActivityMock).toHaveBeenCalledWith(
+      { transactionId: 42 },
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects the same set of malformed values on markAsCardPaymentAction's cardAccountId", async () => {
+    // The function is shared; this pins that the SECOND call site (a
+    // different field name, on a different action) gets the same guard
+    // rather than a hand-rolled one that could drift from it.
+    for (const raw of ["0", "-1", "0x10", "1e3"]) {
+      const state = await markAsCardPaymentAction(
+        IDLE_ACTIVITY,
+        formData({ transactionId: "1", cardAccountId: raw }),
+      );
+      expect(state.status).toBe("error");
+    }
+    expect(markAsCardPaymentMock).not.toHaveBeenCalled();
   });
 });

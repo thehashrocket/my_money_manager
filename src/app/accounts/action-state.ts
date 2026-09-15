@@ -20,7 +20,7 @@ import type { ManualRefusalReason } from "@/lib/accounts/manualTransaction";
  */
 export type AccountsActionState =
   | { status: "idle" }
-  | { status: "ok"; message: string; warning?: string }
+  | { status: "ok"; message: string; warning: string | undefined }
   | { status: "error"; message: string; field?: "balance" | "date" };
 
 export const IDLE: AccountsActionState = { status: "idle" };
@@ -32,7 +32,7 @@ export const IDLE: AccountsActionState = { status: "idle" };
  */
 export type CardActivityState =
   | { status: "idle" }
-  | { status: "ok"; message: string; warning?: string }
+  | { status: "ok"; message: string; warning: string | undefined }
   | { status: "error"; message: string; reason?: ManualRefusalReason };
 
 export const IDLE_ACTIVITY: CardActivityState = { status: "idle" };
