@@ -2274,41 +2274,43 @@ burn-down rate forward.
 
 ### Still open
 
-- [ ] **P2** — **`revalidateBudgetSurfacesAction` is TWO bugs, not one.** (Merged
-      2026-09-09: this was filed three times — twice as separate P2/P3 entries in
-      the 2026-09-09 `/ship` section, once here. One entry, both halves.)
-      **Half one — it can fire before the write it is flushing has landed.**
-      `CurrencyInput`'s `commitIfDirty()` runs on blur/Enter WITHOUT being
-      awaited, and the island's `onBlur`/unmount handler then calls
-      `revalidateBudgetSurfacesAction()` and clears `dirtyRef` immediately. Edit
-      a cell and click straight through to `/goals`, the dashboard, or another
-      month: the revalidate can resolve against the pre-edit database, the
-      navigation caches that, and because `dirtyRef` is already false nothing
-      revalidates again once the commit lands — so a stale money figure sticks
-      until an unrelated mutation clears it. The fix is to make `commit` return
-      its promise and have `revalidate` await the in-flight set, which touches
-      the editor's whole commit path.
-      **Half two — no budget write revalidates `/` at all.** `src/app/page.tsx`
-      renders a "This month" summary and the "Closest to limit" tile from
-      `loadMonthView(db, currentMonth)`, and none of
+- [ ] **P2** — **`revalidateBudgetSurfacesAction` was two bugs; half two is now
+      fixed (2026-09-15), half one needs its own look.** (Merged 2026-09-09:
+      this was filed three times — twice as separate P2/P3 entries in the
+      2026-09-09 `/ship` section, once here. One entry, both halves.)
+      **Half one — it can fire before the write it is flushing has landed —
+      STILL OPEN, NOT TOUCHED HERE.** `CurrencyInput`'s `commitIfDirty()` runs
+      on blur/Enter without the wrapping island's `onBlur` awaiting it.
+      `_month-editor.tsx`'s `dirtyRef` did get reworked since this entry was
+      written — it's a counter now, incremented synchronously before the
+      `await commitAllocationAction(...)` inside `commit` so a same-tick
+      re-entrant blur sees it already dirty (see that file's own comment on
+      `dirtyRef`) — but `revalidate()` still does not await `commit`'s own
+      in-flight promise before calling `revalidateBudgetSurfacesAction()`; it
+      only checks the counter. Whether that still lets the revalidate's fetch
+      resolve on the server before `commitAllocationAction`'s write does is
+      unverified — re-check before believing either "still broken" or
+      "already fixed" here.
+      **Half two — no budget write revalidates `/` at all — FIXED.** Verified
+      2026-09-15 directly against the code, not just this file's prose:
       `upsertBudgetAllocationAction`, `revalidateBudgetSurfacesAction`,
-      `copyPreviousMonthAction` or `setCarryoverPolicyAction` invalidate `/`.
-      Allocate, copy a month, or flip a carryover policy, then go Home: the
-      dashboard serves the pre-edit Allocated/Remaining figures until some
-      unrelated mutation refreshes it. Same shape v0.23.0 fixed four instances
-      of for `/goals` and the trend chart; `/` is the one that never got the
-      same treatment. Cheap on its own (`revalidatePath("/")` on the four
-      actions) but wants a test that actually pins it, which no revalidation in
-      this repo currently has.
-      **Codex's point, and the reason they are one entry:** fixing the unawaited
-      commit alone does not fix the dashboard, because the action never touches
-      `/`. Both halves are one user action — edit a cell, click Home — so they
-      land together or the fix looks complete and is not. Both pre-existing (the
-      ordering predates the branch that found them); found by the Codex
-      adversarial pass during `/ship` 2026-09-09.
-      (`src/components/ledger/currency-input.tsx`,
-      `src/app/budget/[year]/[month]/_month-editor.tsx`,
-      `src/app/budget/actions.ts`, `src/app/page.tsx`)
+      `copyPreviousMonthAction`, and the shared `revalidateCategorySurfaces`
+      (archive/unarchive/create/create-group/rename, set-carryover-policy —
+      a wider set of writers than this entry originally named) all now call
+      `revalidatePath("/")` alongside their existing paths, so `/`'s "This
+      month" summary and "Closest to limit" tile pick up an edit made on
+      `/budget` on the next load. **`moveCategoryAction` is the one
+      exception** — it never called `revalidateCategorySurfaces` (it has its
+      own narrower `guardRefresh`, untouched here) and still does not
+      revalidate `/`, correctly: reordering changes neither the category set
+      nor any name/kind/allocation `loadMonthView` reads. Pinned by ten
+      tests in `actions.wiring.test.ts` ("every budget-surface write
+      revalidates '/', not just /budget") — one per real caller of
+      `revalidateCategorySurfaces` (create, create-group, rename, archive,
+      unarchive, set-carryover-policy) plus the three direct callers and one
+      asserting the `moveCategoryAction` non-call. 2054 tests pass,
+      `tsc --noEmit` clean.
+      (`src/app/budget/actions.ts`, `src/app/budget/actions.wiring.test.ts`)
 
 - [ ] **P2** — **The container spends a snapshot retention slot on every
       restart, not on every migration.** (Merged 2026-09-09: this was filed

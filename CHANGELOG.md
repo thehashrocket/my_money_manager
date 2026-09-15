@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-09-15
+
+### Fixed
+- **The dashboard could show numbers from before your last budget edit.** Allocate money to a category, copy last month's budget forward, rename or archive a category, or change a rollover setting, then go Home — the "This month" summary and "Closest to limit" tile could still be showing the figures from before that change, until something unrelated happened to refresh them. Every one of those actions now tells the dashboard to catch up, so it reflects what you just did.
+
 ## [1.2.0] - 2026-09-14
 
 ### Added
