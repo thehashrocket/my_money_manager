@@ -2171,6 +2171,149 @@ describe("syncSimpleFin — the D8.1 accounting cutover", () => {
 });
 
 /**
+ * P1 (found across three independent adversarial reviews, 2026-09-09; fixed
+ * 2026-09-15) — a card's pre-existing hand-entered history, from before it
+ * was ever linked, would otherwise double-count against the bank's own row
+ * for the same event on the card's very first import.
+ */
+describe("syncSimpleFin — refuses to stage a card with pre-existing manual history", () => {
+  it("stages NOTHING for a card carrying a manual row dated after its anchor, and warns", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    // Hand-entered BEFORE the card was ever linked — exactly D9.1's
+    // unreconciled case. Dated after the anchor, so it is in the same window
+    // the feed's own row for the same event would land in.
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: manualBatch.id,
+      amountCents: -73_41,
+      rawMemo: "Costco",
+      date: "2026-08-15",
+      source: "manual",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1073.41",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            // The bank's own row for the SAME event the manual entry above
+            // already recorded — different memo, would not content-dedup.
+            { ...feedTxn("CITI-COSTCO", "-73.41", "COSTCO WHSE #123"), posted: 1786276800 }, // 2026-08-15T12:00Z
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    // Only the manual row — the feed's row was never staged at all.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("manual");
+
+    const allWarnings =
+      outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
+    expect(allWarnings.some((w) => w.includes("Citi") && w.includes("hand-entered"))).toBe(true);
+  });
+
+  it("does NOT block a card whose manual history sits ON or BEFORE the anchor", async () => {
+    // Rule 1's strict `>`: a row on the anchor date already contributes
+    // nothing to the balance sum, and the cutover already drops a feed row
+    // there — so it cannot collide with one, and the guard must not fire.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: manualBatch.id,
+      amountCents: -20_00,
+      rawMemo: "Old charge",
+      date: "2026-08-01",
+      source: "manual",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1050.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [{ ...feedTxn("CITI-SEP", "-50.00", "TARGET"), posted: 1789041600 }], // 2026-09-10T12:00Z
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    // The old manual row plus the newly-imported September charge.
+    expect(rows).toHaveLength(2);
+    expect(rows.some((r) => r.externalId === "CITI-SEP")).toBe(true);
+  });
+
+  it("does NOT block an unrelated card that has no manual history at all", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1050.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [{ ...feedTxn("CITI-SEP", "-50.00", "TARGET"), posted: 1789041600 }],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    const allWarnings =
+      outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
+    expect(allWarnings.some((w) => w.includes("hand-entered"))).toBe(false);
+  });
+});
+
+/**
  * D8.4 — the SET-based completeness check. A card's `balance-date` will
  * frequently equal its newest imported row's date, which is exactly when
  * `classifyBalanceFreshness` goes quiet (rule 1's deliberate same-day

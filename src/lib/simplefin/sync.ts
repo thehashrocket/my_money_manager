@@ -27,6 +27,7 @@ import {
 } from "@/lib/transferRejections";
 import { formatCents, parseAmountToCents } from "@/lib/money";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
+import { hasPreExistingManualCardHistory } from "@/lib/accounts/hasPreExistingManualCardHistory";
 import { importsTransactions } from "@/lib/accounts/importsTransactions";
 import type { AccountType } from "@/lib/accounts/loadAccountBalances";
 import { isAfterAnchor } from "@/lib/accounts/isAfterAnchor";
@@ -914,7 +915,24 @@ export async function syncSimpleFin(
     // it is scoped to cards.
     const expectedCardExternalIds: string[] = [];
 
-    for (const txn of remote?.transactions ?? []) {
+    // P1 (found across three independent adversarial reviews, 2026-09-09;
+    // fixed 2026-09-15) — refuse to stage THIS card's rows at all when it
+    // carries hand-entered history from before it was ever linked, dated
+    // after its own anchor. D8.3 already makes it impossible to WRITE a new
+    // manual row once linked; this closes the other direction, where the
+    // bank's real row for an already-recorded event would otherwise import
+    // as a second, separate transaction. See
+    // `hasPreExistingManualCardHistory`'s own docstring for the full
+    // argument and why this needs no re-check inside the write transaction.
+    const blockedByManualHistory =
+      cutoverAnchor !== null && hasPreExistingManualCardHistory(account.id, cutoverAnchor, db);
+    if (blockedByManualHistory) {
+      accountWarnings.push(
+        `"${account.name}" has hand-entered charges or payments from before it was linked, dated after its balance anchor — importing could count them twice. Remove those entries or move the anchor past them with Reconcile, then sync again.`,
+      );
+    }
+
+    for (const txn of blockedByManualHistory ? [] : (remote?.transactions ?? [])) {
       const row = mapTransaction(txn);
 
       // Enforce the invariant the design already depends on rather than

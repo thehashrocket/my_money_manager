@@ -2871,7 +2871,30 @@ per the plan's own "residuals" section.
       one-line patch, so not done here. (`src/app/accounts/_balance-forms.tsx`,
       `src/app/accounts/actions.ts`, `src/lib/accounts/resolveBalanceAction.ts`)
 
-- [ ] **P1 — a card's PRE-EXISTING manual history (before it was ever linked
+- [x] **P1 — DONE (2026-09-15).** The design decision named below was made
+      (refuse-to-stage, matching D8.3's own posture, over warn-and-acknowledge
+      — no new UI surface, reuses the existing per-account `/sync` warning
+      channel every other withheld-account case already renders through).
+      `hasPreExistingManualCardHistory` (`src/lib/accounts/`) checks, once per
+      sync per card, whether any `import_source='manual'` row exists dated
+      STRICTLY AFTER the account's own anchor. Needs no re-check inside the
+      write transaction the way rule 11's guards do: D8.3 refuses a NEW
+      manual write the instant `importsTransactions(account)` is true,
+      checked live from the moment the account is linked — so this
+      population can only ever SHRINK once linked, never grow, and is a
+      stable precondition rather than a race. When it finds one, the staging
+      loop treats the feed's transactions for that account as empty for this
+      run (same shape as `skippedPending`/`skippedBeforeAnchor` — the account
+      still gets a `counts` entry with `insertedCount: 0`) and pushes a
+      warning naming the account and the remedy (remove the old manual rows,
+      or Reconcile past them). Every other linked account still imports
+      normally in the same run. 9 new tests (3 in `sync.test.ts` covering the
+      refusal, the on/before-anchor non-trigger, and the no-manual-history
+      no-op; 6 in the new module's own unit test), 2097 total pass,
+      `tsc --noEmit` clean. (`src/lib/simplefin/sync.ts`,
+      `src/lib/accounts/hasPreExistingManualCardHistory.ts`)
+- [x] **P1 — HISTORICAL TEXT BELOW, kept per this file's own practice of not
+      deleting a closed entry's reasoning.** a card's PRE-EXISTING manual history (before it was ever linked
       to SimpleFIN) is not reconciled or guarded at the moment it starts
       importing, and would double-count silently if any exists (found
       independently by three adversarial review passes: a Claude subagent,
