@@ -2906,10 +2906,12 @@ per the plan's own "residuals" section.
       still gets a `counts` entry with `insertedCount: 0`) and pushes a
       warning naming the account and the remedy (remove the old manual rows,
       or Reconcile past them). Every other linked account still imports
-      normally in the same run. 9 new tests (3 in `sync.test.ts` covering the
-      refusal, the on/before-anchor non-trigger, and the no-manual-history
-      no-op; 6 in the new module's own unit test), 2097 total pass,
-      `tsc --noEmit` clean. (`src/lib/simplefin/sync.ts`,
+      normally in the same run. 10 new tests (4 in `sync.test.ts` covering the
+      refusal, the on/before-anchor non-trigger, the no-manual-history no-op,
+      and — added by the ship coverage audit — the asset-account non-trigger
+      confirming the guard is cards-only; 6 in the new module's own unit
+      test), 2098 total pass, `tsc --noEmit` clean.
+      (`src/lib/simplefin/sync.ts`,
       `src/lib/accounts/hasPreExistingManualCardHistory.ts`)
 - [x] **P1 — HISTORICAL TEXT BELOW, kept per this file's own practice of not
       deleting a closed entry's reasoning.** a card's PRE-EXISTING manual history (before it was ever linked

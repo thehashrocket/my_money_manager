@@ -375,12 +375,13 @@ export function MonthEditor(props: MonthEditorProps) {
     // half of the same argument — a later commit re-dirties the counter for
     // whichever revalidate call comes after this one.
     const inFlight = Array.from(pendingCommitsRef.current);
-    // The allocations this flushes were committed by `commitAllocationAction`
-    // long before this fires — so a `revalidatePath` throw in here is by
-    // construction a throw after a durable write. `revalidateBudgetSurfacesAction`
-    // catches it and hands back a warning; surfacing it is what keeps a user
-    // who then navigates to `/goals` and sees the old total from concluding the
-    // allocation never saved.
+    // Awaiting `inFlight` above is what makes this true now — every allocation
+    // this flushes has COMMITTED by the time the line below runs, so a
+    // `revalidatePath` throw here is by construction a throw after a durable
+    // write. `revalidateBudgetSurfacesAction` catches it and hands back a
+    // warning; surfacing it is what keeps a user who then navigates to
+    // `/goals` and sees the old total from concluding the allocation never
+    // saved.
     //
     // `Promise.allSettled`, not `Promise.all`: a REJECTED commit promise
     // (the round trip itself failing, not a refused write) must not skip the
