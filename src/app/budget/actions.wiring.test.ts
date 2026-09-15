@@ -25,9 +25,12 @@ const copyPreviousMonthMock = vi.hoisted(() => vi.fn());
 const redirectMock = vi.hoisted(() => vi.fn());
 const revalidatePathMock = vi.hoisted(() => vi.fn());
 const createCategoryMock = vi.hoisted(() => vi.fn());
+const createCategoryGroupMock = vi.hoisted(() => vi.fn());
 const renameCategoryMock = vi.hoisted(() => vi.fn());
+const setCarryoverPolicyMock = vi.hoisted(() => vi.fn());
 const moveCategoryMock = vi.hoisted(() => vi.fn());
 const archiveCategoryMock = vi.hoisted(() => vi.fn());
+const unarchiveCategoryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("next/cache", () => ({
   revalidatePath: revalidatePathMock,
@@ -70,14 +73,16 @@ vi.mock("@/lib/budget/manageCategories", async (importOriginal) => {
   return {
     ...actual,
     createCategory: createCategoryMock,
+    createCategoryGroup: createCategoryGroupMock,
     renameCategory: renameCategoryMock,
+    setCarryoverPolicy: setCarryoverPolicyMock,
     moveCategory: moveCategoryMock,
   };
 });
 
 vi.mock("@/lib/budget/archiveCategory", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/budget/archiveCategory")>();
-  return { ...actual, archiveCategory: archiveCategoryMock };
+  return { ...actual, archiveCategory: archiveCategoryMock, unarchiveCategory: unarchiveCategoryMock };
 });
 
 const {
@@ -86,8 +91,11 @@ const {
   copyPreviousMonthAction,
   revalidateBudgetSurfacesAction,
   createCategoryAction,
+  createCategoryGroupAction,
   renameCategoryAction,
+  setCarryoverPolicyAction,
   archiveCategoryAction,
+  unarchiveCategoryAction,
   moveCategoryAction,
 } = await import("./actions");
 const { REFRESH_FAILED_WARNING } = await import("@/lib/revalidateAfterWrite");
@@ -102,9 +110,12 @@ beforeEach(() => {
   copyPreviousMonthMock.mockReset();
   redirectMock.mockReset();
   createCategoryMock.mockReset();
+  createCategoryGroupMock.mockReset();
   renameCategoryMock.mockReset();
+  setCarryoverPolicyMock.mockReset();
   moveCategoryMock.mockReset();
   archiveCategoryMock.mockReset();
+  unarchiveCategoryMock.mockReset();
   // mockRESET, not mockClear: the refresh-failure block below installs a
   // THROWING implementation, and `mockClear` only wipes call history — leaving
   // it in place would make every later test in this file fail for a reason that
@@ -384,5 +395,113 @@ describe("post-commit refresh failures come back as warnings, never as failures"
       expect.any(Error),
     );
     logged.mockRestore();
+  });
+});
+
+/**
+ * `/` renders `loadMonthView(db, currentMonth)`'s "This month" summary and
+ * "Closest to limit" tile — the same read every budget-surface write below
+ * can change. `setCategoryKindAction` already revalidated it; these four
+ * call sites (the inline allocate dialog, the inline editor's own flush, copy
+ * month, and the shared category-CRUD helper behind
+ * create/rename/archive/unarchive/set-carryover-policy) did not, so the
+ * dashboard could serve stale figures after almost any budget edit until
+ * this test started pinning it. `moveCategoryAction` is deliberately NOT in
+ * that list — it never called the shared helper (it has its own narrower
+ * `guardRefresh`, unchanged here) and still does not revalidate `/`, since a
+ * reorder changes neither the category set nor any name/kind/allocation
+ * `loadMonthView` reads.
+ */
+describe("every budget-surface write revalidates '/', not just /budget", () => {
+  it("upsertBudgetAllocationAction", async () => {
+    await upsertBudgetAllocationAction(
+      formData({ categoryId: "7", year: "2026", month: "4", allocatedDollars: "40.00" }),
+    );
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("revalidateBudgetSurfacesAction", async () => {
+    await revalidateBudgetSurfacesAction();
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("copyPreviousMonthAction", async () => {
+    copyPreviousMonthMock.mockReturnValue({ copied: 5, skipped: 1, skippedArchived: 0 });
+
+    await copyPreviousMonthAction(2026, 4);
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("createCategoryAction — revalidateCategorySurfaces, shared by rename/archive/unarchive/set-carryover-policy too", async () => {
+    createCategoryMock.mockReturnValue({ id: 12, name: "Groceries" });
+
+    await createCategoryAction({ name: "Groceries", kind: "expense", parentId: null });
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  // The three siblings below never had ANY wiring coverage in this file
+  // before this describe block — not just for "/". They share the exact
+  // same `revalidateCategorySurfaces()` call as `createCategoryAction`
+  // above (no per-caller branching inside it), so a passing test here is
+  // pinning the same shared function; it is not exercising a second
+  // independent code path. Included anyway because each is a distinct
+  // Server Action a stale tab could hit directly, and none was previously
+  // proven to reach the shared helper at all.
+
+  it("setCarryoverPolicyAction", async () => {
+    setCarryoverPolicyMock.mockReturnValue({ categoryId: 3, carryoverPolicy: "rollover" });
+
+    await setCarryoverPolicyAction(3, "rollover");
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("unarchiveCategoryAction", async () => {
+    unarchiveCategoryMock.mockReturnValue({ categoryId: 9, categoryName: "Old" });
+
+    await unarchiveCategoryAction(9);
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("createCategoryGroupAction", async () => {
+    createCategoryGroupMock.mockReturnValue({ id: 20, name: "Housing", kind: "expense", parentId: null, sortOrder: 0 });
+
+    await createCategoryGroupAction("Housing");
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  // renameCategoryAction and archiveCategoryAction share the same
+  // revalidateCategorySurfaces() call as the four above — the "post-commit
+  // refresh failures" block already reaches them (it throws on ANY
+  // revalidatePath call), but that only proves guardRefresh runs, not that
+  // "/" specifically is in the list a future per-caller branch could drop.
+  it("renameCategoryAction", async () => {
+    renameCategoryMock.mockReturnValue({ id: 4, name: "Rent" });
+
+    await renameCategoryAction(4, "Rent");
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("archiveCategoryAction", async () => {
+    archiveCategoryMock.mockReturnValue({ categoryId: 9, categoryName: "Old" });
+
+    await archiveCategoryAction(9);
+
+    expect(revalidatePathMock).toHaveBeenCalledWith("/");
+  });
+
+  it("moveCategoryAction does NOT revalidate '/' — it never called the shared helper, before or after this change", async () => {
+    moveCategoryMock.mockReturnValue({ categoryId: 4, swappedWithId: 5, newPosition: 2, siblingCount: 5 });
+
+    await moveCategoryAction(4, "up");
+
+    expect(revalidatePathMock).not.toHaveBeenCalledWith("/");
   });
 });

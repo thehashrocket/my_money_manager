@@ -102,6 +102,11 @@ export async function upsertBudgetAllocationAction(
     // read), but Next still has those later months cached, and the literal form
     // would only ever revalidate the one month just submitted.
     revalidatePath("/budget/[year]/[month]", "page");
+    // `/` renders `loadMonthView(db, currentMonth)`'s "This month" summary and
+    // "Closest to limit" tile — the same read `setCategoryKindAction` above
+    // already revalidates for. This is the OTHER writer of that same data
+    // (an allocation, not a kind change) that had been left off the list.
+    revalidatePath("/");
   });
   // OUTSIDE the guard. `redirect` signals by THROWING, and `guardRefresh`
   // calls `unstable_rethrow` before it decides anything — so a `redirect()`
@@ -271,6 +276,12 @@ export async function revalidateBudgetSurfacesAction(): Promise<string | undefin
     // the one band where rollover is a first-class choice.
     revalidatePath("/budget/[year]/[month]", "page");
     revalidatePath("/goals");
+    // `/` reads `loadMonthView(db, currentMonth)` for its "This month" summary
+    // and "Closest to limit" tile — an inline allocate through `<MonthEditor>`
+    // is the PATH the FUNDS band uses to be funded at all, and it never told
+    // the dashboard. Same gap as `upsertBudgetAllocationAction` above; this is
+    // the hot-path sibling that flushes 40 commits/session as one revalidate.
+    revalidatePath("/");
   });
 }
 
@@ -316,6 +327,9 @@ export async function copyPreviousMonthAction(
     // this file, the stale read is in `loadGoals.ts`, and neither is wrong on
     // its own — see `setCategoryKindAction` above, which carries the same note.
     revalidatePath("/goals");
+    // `/` reads the same `loadMonthView` this copy just changed — same gap as
+    // `upsertBudgetAllocationAction` above, sixth instance of the shape.
+    revalidatePath("/");
   });
   return { ...result, warning };
 }
@@ -356,6 +370,14 @@ function revalidateCategorySurfaces(): string | undefined {
     revalidatePath("/transactions");
     revalidatePath("/categorize");
     revalidatePath("/goals");
+    // `/` reads `loadMonthView` too, and every caller of this helper (archive,
+    // unarchive, rename, create a category or group, set carryover policy —
+    // NOT moveCategoryAction, which has its own narrower guardRefresh below
+    // and deliberately skips this helper: a reorder changes neither the
+    // category set nor any name/kind/allocation `loadMonthView` reads) can
+    // change what it renders — archiving the category behind "Closest to
+    // limit", say. Same gap as `upsertBudgetAllocationAction` above.
+    revalidatePath("/");
   });
 }
 
