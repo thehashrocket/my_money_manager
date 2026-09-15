@@ -11,7 +11,7 @@ import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
-import { classifyKeyTrainability } from "@/lib/categorize/keyTrainability";
+import { classifyKeyTrainability, describeRuleAction } from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
@@ -82,6 +82,27 @@ export function MerchantRow({
   const merchant = group.normalizedMerchant;
 
   /**
+   * Ship review, cycle 2 (Codex adversarial, second pass — P2): unlike
+   * `_transaction-row.tsx`, this component had NO reset at all when `group`
+   * refreshes from a revalidation — a `remember` tick given against one
+   * `filedCategoryIds`/`existingRule` snapshot survived unchanged into a
+   * DIFFERENT snapshot with fresh props, not just a stale one: park a pick,
+   * tick Remember while trainable, then let a sibling merchant's write (or
+   * this same merchant's own row list changing) revalidate `/categorize` —
+   * the mask (`checked={remember && ruleAction.kind !== "none"}`) can hide a
+   * stale tick from the screen without ever clearing the state underneath
+   * it, exactly the class of bug `handlePick`'s own clear-not-mask comment
+   * already names for the picker-change case. The stored pick is
+   * deliberately NOT reset here (T11/D19 — it has to survive navigation),
+   * only the consent to write a rule from it.
+   */
+  const [prevGroup, setPrevGroup] = useState(group);
+  if (prevGroup !== group) {
+    setPrevGroup(group);
+    setRemember(false);
+  }
+
+  /**
    * T11/D19 — `sessionStorage` IS this field's state, not a copy of it.
    *
    * The pick has to survive following "See all N transactions" and coming
@@ -102,21 +123,30 @@ export function MerchantRow({
   const handlePick = (next: string) => {
     writePendingPick(merchant, next);
     /* CLEAR the tick rather than only masking it. `checked={remember &&
-       trainable}` un-ticks the box on screen, but `remember` stays true, so
-       picking a trainable category again resurrected a tick the user had not
-       re-made — and on that submit a rule really would be written. The mask
-       stays as well, because the verdict can also change from underneath a
-       stale page. */
-    if (
-      !classifyKeyTrainability(
-        merchant,
-        group.filedCategoryIds,
-        next === "" ? null : Number(next),
-      ).trainable
-    ) {
+       ruleAction.kind !== "none"}` un-ticks the box on screen, but `remember`
+       stays true, so picking a category that again makes SOME action possible
+       (train, or remove-conflicting) resurrected a tick the user had not
+       re-made — and on that submit a rule really would be written or removed.
+       The mask stays as well, because the verdict can also change from
+       underneath a stale page.
+
+       Ship review, cycle 2 (Codex adversarial, second pass — P1): clearing
+       only on a transition TO "none" was not enough. Tick Remember while the
+       action is "train", then repick to a category where it becomes
+       "remove-conflicting" (or the reverse) — the checkbox relabels to a
+       DIFFERENT operation than the one just consented to, and submitting
+       does that different operation. Consent has to be re-made whenever the
+       OPERATION changes, not only when it disappears — compared against
+       `ruleAction.kind` below, this render's action, not the next one. */
+    const nextPending = next === "" ? null : Number(next);
+    const nextVerdict = classifyKeyTrainability(merchant, group.filedCategoryIds, nextPending);
+    const nextAction = describeRuleAction(merchant, nextVerdict, group.existingRule, nextPending);
+    if (nextAction.kind !== ruleAction.kind) {
       setRemember(false);
     }
   };
+
+  const pendingCategoryId = categoryId === "" ? null : Number(categoryId);
 
   /**
    * Whether "Remember" may write a rule for this key, evaluated against the
@@ -134,8 +164,32 @@ export function MerchantRow({
   const trainability = classifyKeyTrainability(
     merchant,
     group.filedCategoryIds,
-    categoryId === "" ? null : Number(categoryId),
+    pendingCategoryId,
   );
+
+  /**
+   * `trainable === false` is not the whole story — see `describeRuleAction`'s
+   * own docstring (ship review, Codex adversarial + structured, cross-model).
+   * A refusal that CONTRADICTS an existing rule still does something useful
+   * on submit: it removes that rule. The checkbox stays enabled for that
+   * case, with a different explanation than a flat refusal.
+   */
+  const ruleAction = describeRuleAction(
+    merchant,
+    trainability,
+    group.existingRule,
+    pendingCategoryId,
+  );
+  const ruleActionEnabled = ruleAction.kind !== "none";
+  // Same sentence either way that submitting Remember does nothing OR does
+  // something other than train — "why is this checked/checkable" needs one
+  // answer whether it's a flat refusal or a rule about to be removed.
+  const ruleActionMessage =
+    ruleAction.kind === "remove-conflicting"
+      ? ruleAction.message
+      : !trainability.trainable
+        ? trainability.message
+        : undefined;
 
   /* ONE `useId` base, and both ids on this row derive from it.
      `id={`cat-${merchant}`}` was the previous spelling for the combobox, and
@@ -230,9 +284,9 @@ export function MerchantRow({
         />
         <label
           className={`flex min-h-11 items-center gap-1.5 text-xs ${
-            trainability.trainable ? "text-ink-2" : "cursor-not-allowed text-ink-3"
+            ruleActionEnabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
           }`}
-          title={trainability.trainable ? undefined : trainability.message}
+          title={ruleActionMessage}
         >
           <input
             type="checkbox"
@@ -240,23 +294,21 @@ export function MerchantRow({
             value="true"
             /* Never `checked={remember}` alone: the verdict moves with the
                category picked above, so a box ticked while the key still
-               looked trainable has to un-tick itself when the pick makes it
-               untrainable — otherwise the form posts a Remember the server
-               will refuse, and the user is told after the fact instead of
-               before. */
-            checked={remember && trainability.trainable}
-            disabled={!trainability.trainable}
+               offered SOME action has to un-tick itself when the pick makes
+               it a true no-op — otherwise the form posts a Remember the
+               server will refuse, and the user is told after the fact
+               instead of before. */
+            checked={remember && ruleActionEnabled}
+            disabled={!ruleActionEnabled}
             /* The reason is the checkbox's accessible description, not just
                text that happens to sit nearby: `basis-full` puts it on its
                own line below the Submit button, so proximity alone does not
                connect the two. */
-            aria-describedby={
-              trainability.trainable ? undefined : reasonId
-            }
+            aria-describedby={ruleActionMessage === undefined ? undefined : reasonId}
             onChange={(e) => setRemember(e.target.checked)}
             className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
           />
-          Remember
+          {ruleAction.kind === "remove-conflicting" ? "Remove conflicting rule" : "Remember"}
         </label>
         <button
           type="submit"
@@ -270,7 +322,7 @@ export function MerchantRow({
             keyboard and unreliable to screen readers. `basis-full` puts it on
             its own line inside the same flex row rather than adding a grid
             cell the `ColumnHeaders` template would then have to know about. */}
-        {trainability.trainable ? null : (
+        {ruleActionMessage === undefined ? null : (
           /* `sm:text-right`, not `text-right`: the row it belongs to only
              right-aligns above `sm` (`sm:justify-end` on the wrapper), so a
              hard right-align left a stray right-edge sentence under a
@@ -282,7 +334,7 @@ export function MerchantRow({
             id={reasonId}
             className="basis-full text-xs text-ink-3 sm:text-right"
           >
-            {trainability.message}
+            {ruleActionMessage}
           </p>
         )}
       </div>
