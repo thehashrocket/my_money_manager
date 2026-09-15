@@ -2311,6 +2311,59 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
       outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
     expect(allWarnings.some((w) => w.includes("hand-entered"))).toBe(false);
   });
+
+  it("does NOT block an ASSET account with the exact same manual-history shape — CARDS ONLY", async () => {
+    // `cutoverAnchor` is `isCard ? account.startingBalanceDate : null`, so the
+    // guard can never even be asked about a checking/savings account — its
+    // pre-anchor (and post-anchor) history is legitimate, ordinary ledger
+    // content, not a double-count risk. Same manual-row shape as the very
+    // first test in this block (a hand-entered row dated after the anchor),
+    // on an account type where the guard must be structurally unreachable
+    // rather than merely undertriggered.
+    const checking = seedAccount({
+      simplefinAccountId: "ACT-CHECKING",
+      name: "Everyday Checking",
+      type: "checking",
+      startingBalanceCents: 100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: checking.id,
+      batchId: manualBatch.id,
+      amountCents: -7_341,
+      rawMemo: "Costco",
+      date: "2026-08-15",
+      source: "manual",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHECKING",
+          name: "EVERYDAY CHECKING",
+          balance: "926.59",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [{ ...feedTxn("CHK-SEP", "-50.00", "TARGET"), posted: 1789041600 }], // 2026-09-10T12:00Z
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, checking.id))
+      .all();
+    // The old manual row plus the newly-imported feed row — nothing withheld.
+    expect(rows).toHaveLength(2);
+    expect(rows.some((r) => r.externalId === "CHK-SEP")).toBe(true);
+    const allWarnings =
+      outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
+    expect(allWarnings.some((w) => w.includes("hand-entered"))).toBe(false);
+  });
 });
 
 /**
