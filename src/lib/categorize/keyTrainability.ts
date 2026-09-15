@@ -24,13 +24,17 @@
  * it changes. Lossy cannot be read from the data (the discarded text is gone by
  * the time the key exists), so it is a curated set.
  *
- * ZERO IMPORTS, on purpose — same constraint as `limits.ts` and
+ * ZERO RUNTIME IMPORTS, on purpose — same constraint as `limits.ts` and
  * `merchantLabel.ts`. `/categorize` evaluates this predicate client-side so the
  * Remember checkbox can disable itself against the category currently picked,
  * and importing anything with a module-scope drizzle or zod construct here
  * would drag it into that route's bundle (measured at +376 KB the last time
- * this happened). The database half lives in `resolveKeyTrainability.ts`.
+ * this happened). The database half lives in `resolveKeyTrainability.ts`. A
+ * `import type` (below, for `ExistingRule`) is exempt — it is fully erased at
+ * build time, the same reasoning `_submit-button.tsx`'s `satisfies keyof
+ * ResolveReversalInput` already relies on elsewhere in this app.
  */
+import type { ExistingRule } from "@/lib/rules";
 
 /**
  * Keys the normalizer produces when it had nothing to work with.
@@ -148,16 +152,38 @@ export function classifyKeyTrainability(
   return { trainable: true };
 }
 
-/** What ticking "Remember" would actually do, given the verdict above. */
+/**
+ * What ticking "Remember" would actually do, given the verdict above.
+ *
+ * `message` on EVERY non-`"train"` branch (PR review, type-design pass,
+ * finding A): the old shape left `"none"` bare, so both render sites had to
+ * keep the source `TrainabilityVerdict` alive next to this value and
+ * reconstruct the same six-line ternary by hand to get a message out of
+ * either branch — the exact hand-duplication class `loadExactRulesByMerchant`
+ * was extracted to stop elsewhere in this same PR. Every reader now needs
+ * only `RuleAction` itself.
+ *
+ * `reason` on `"remove-conflicting"` (same review pass, finding B) replaces
+ * `existingCategoryName`, which had zero production readers — the `message`
+ * already names the category. What DID need a field was which of the two
+ * removal grounds fired: a lossy key removes its rule unconditionally
+ * (nothing "conflicts"), while the other case is a genuine contradiction
+ * between the pick and the rule's target. A shared UI label built only from
+ * `kind` said "Remove conflicting rule" for the lossy case too — a false
+ * claim the `message` right below it was written specifically to avoid, and
+ * which `keyTrainability.test.ts`'s own coincidental-match test caught once
+ * put side by side.
+ */
 export type RuleAction =
   | { kind: "train" }
   | {
       kind: "remove-conflicting";
-      existingCategoryName: string;
+      /** Which of `shouldDelete`'s two grounds fired — drives the label text. */
+      reason: "lossy-key" | "contradicted";
       /** One sentence, rendered to the user verbatim — same convention as {@link TrainabilityVerdict}'s `message`. */
       message: string;
     }
-  | { kind: "none" };
+  | { kind: "none"; message: string };
 
 /**
  * Ship review (Codex adversarial + structured, cross-model, both flagged
@@ -178,26 +204,39 @@ export type RuleAction =
  * && (reason === "lossy-key" || existing.categoryId !== categoryId)`), read
  * from the client's own already-duplicated verdict rather than a new
  * derivation — `/categorize` and `/transactions` both already pass
- * `allowRuleRemoval: true` unconditionally (rule 6: "the Remember checkbox…
- * where the user chose the merchant and the category"), so that half of the
- * condition is a constant here and is not re-parameterized.
+ * `allowRuleRemoval: true` unconditionally (`applyRuleWrite`'s own docstring:
+ * "Removal is licensed only by a gesture that is a deliberate, per-merchant
+ * retrain of THIS key — the Remember checkbox on `/categorize` or on a
+ * `/transactions` row, where the user chose the merchant and the category"),
+ * so that half of the condition is a constant here and is not
+ * re-parameterized.
  *
- * `pendingCategoryId === null` (nothing picked yet) never returns
- * `"remove-conflicting"` — there is no pick to contradict anything with yet,
- * so offering to remove a rule before the user has said what they actually
- * want would be a guess, not a repair. (It can still return `"train"`: with
- * no pick, `classifyKeyTrainability` reports trainable whenever the key's
+ * `pendingCategoryId` failing {@link isRealCategoryId} — `null` (nothing
+ * picked yet), `0` (the combobox's empty-selection value through `Number("")`),
+ * or `NaN` (a corrupted parked pick, see the LOSSY section above) — never
+ * returns `"remove-conflicting"`. There is no real pick to contradict
+ * anything with in any of those cases, so offering to remove a rule would be
+ * a guess, not a repair. Before this check was added here (PR review, test
+ * coverage pass, finding 3), a `NaN` pending id reached the `!== pendingCategoryId`
+ * comparison below, which is true for every real category id — so a
+ * corrupted parked pick rendered "Remove conflicting rule" as ENABLED,
+ * diverging from `classifyKeyTrainability`, which already filters
+ * `pendingCategoryId` the same way for the exact same reason. (It can still
+ * return `"train"` on a null/invalid pick: with nothing real to compare
+ * against, `classifyKeyTrainability` reports trainable whenever the key's
  * history alone is not yet a contradiction — that branch is checked first
  * and returns before this one is reached.)
  */
 export function describeRuleAction(
   normalizedMerchant: string,
   verdict: TrainabilityVerdict,
-  existingRule: { categoryId: number; categoryName: string } | null,
+  existingRule: ExistingRule | null,
   pendingCategoryId: number | null,
 ): RuleAction {
   if (verdict.trainable) return { kind: "train" };
-  if (pendingCategoryId === null || existingRule === null) return { kind: "none" };
+  if (existingRule === null || !isRealCategoryId(pendingCategoryId)) {
+    return { kind: "none", message: verdict.message };
+  }
   // A lossy key removes its rule unconditionally (rule 6: "a LOSSY refusal
   // always removes it, because a lossy key cannot back a correct rule
   // pointing anywhere at all") — that is true even in the coincidental case
@@ -207,16 +246,32 @@ export function describeRuleAction(
   if (verdict.reason === "lossy-key") {
     return {
       kind: "remove-conflicting",
-      existingCategoryName: existingRule.categoryName,
+      reason: "lossy-key",
       message: `"${normalizedMerchant}" is too lossy a key to back any rule, so ticking Remember will remove its existing one (→ ${existingRule.categoryName}) instead of training a new one.`,
     };
   }
-  if (existingRule.categoryId === pendingCategoryId) return { kind: "none" };
+  if (existingRule.categoryId === pendingCategoryId) {
+    return { kind: "none", message: verdict.message };
+  }
   return {
     kind: "remove-conflicting",
-    existingCategoryName: existingRule.categoryName,
+    reason: "contradicted",
     message: `"${normalizedMerchant}" can't train a rule from this pick, but ticking Remember will still remove its existing rule (→ ${existingRule.categoryName}), which this pick contradicts.`,
   };
+}
+
+/**
+ * The checkbox label for a {@link RuleAction} — the ONE spelling, shared by
+ * `_merchant-row.tsx` and `_transaction-row.tsx` (PR review, type-design
+ * pass, finding A/B). A label built from `kind` alone said "Remove
+ * conflicting rule" for the LOSSY case too, directly contradicting the
+ * `message` shown right below it (which is written specifically to avoid
+ * blaming "this pick" when nothing about the pick is at fault) — `reason`
+ * is what lets the label agree with its own explanation.
+ */
+export function ruleActionLabel(action: RuleAction): string {
+  if (action.kind !== "remove-conflicting") return "Remember";
+  return action.reason === "lossy-key" ? "Remove unusable rule" : "Remove conflicting rule";
 }
 
 /**

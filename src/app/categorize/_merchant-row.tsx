@@ -11,7 +11,11 @@ import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
-import { classifyKeyTrainability, describeRuleAction } from "@/lib/categorize/keyTrainability";
+import {
+  classifyKeyTrainability,
+  describeRuleAction,
+  ruleActionLabel,
+} from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
 import {
@@ -181,15 +185,10 @@ export function MerchantRow({
     pendingCategoryId,
   );
   const ruleActionEnabled = ruleAction.kind !== "none";
-  // Same sentence either way that submitting Remember does nothing OR does
-  // something other than train — "why is this checked/checkable" needs one
-  // answer whether it's a flat refusal or a rule about to be removed.
-  const ruleActionMessage =
-    ruleAction.kind === "remove-conflicting"
-      ? ruleAction.message
-      : !trainability.trainable
-        ? trainability.message
-        : undefined;
+  // PR review, type-design pass (finding A): `RuleAction` now carries
+  // `message` on every non-"train" branch, so there is no need to keep
+  // `trainability` alive alongside `ruleAction` and rejoin them here.
+  const ruleActionMessage = ruleAction.kind === "train" ? undefined : ruleAction.message;
 
   /* ONE `useId` base, and both ids on this row derive from it.
      `id={`cat-${merchant}`}` was the previous spelling for the combobox, and
@@ -308,7 +307,7 @@ export function MerchantRow({
             onChange={(e) => setRemember(e.target.checked)}
             className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
           />
-          {ruleAction.kind === "remove-conflicting" ? "Remove conflicting rule" : "Remember"}
+          {ruleActionLabel(ruleAction)}
         </label>
         <button
           type="submit"

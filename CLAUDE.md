@@ -250,9 +250,10 @@ src/
                    category dropped when it is the sole contributor — count === 1 —
                    emulating the server's excludeTxnIds=[row.id] for the
                    retarget-in-place case) and existingRule (the merchant's current
-                   exact rule, if any), both from one batched query per page
-                   (loadFiledCategoryCountsByMerchant, loadExactRulesByMerchant)
-                   rather than one round trip per row. This is what lets
+                   exact rule, if any) — each from its OWN batched query per page
+                   (loadFiledCategoryCountsByMerchant for the first,
+                   loadExactRulesByMerchant for the second) rather than one round
+                   trip per row. This is what lets
                    TransactionRowForm disable "Remember" the way /categorize's
                    MerchantRow already did, instead of only warning in the toast
                    after a refused submit
@@ -287,20 +288,22 @@ src/
                    retarget, which makes the verdict the same on either side of the
                    caller's own UPDATE (it used to carry a "call me first" warning
                    instead). Also exports filedCategoryEvidenceWhere — the ONE spelling
-                   of "which filings count as evidence", shared by three readers now:
-                   loadFiledCategoryIds (one key), loadFiledCategoryCountsByMerchant
-                   (batched over a page's merchants, WITH per-category counts — what
-                   lets loadTransactions self-exclude a row's OWN sole-contributed
-                   category from its own evidence, emulating excludeTxnIds=[row.id]
-                   for every row on the page without a per-row query), and
-                   loadFiledCategoryIdsByMerchant (the same batch with counts dropped,
-                   for loadMerchantGroups, which has no single row to self-exclude —
-                   every row it groups is category_id IS NULL already). Each takes
-                   the merchant condition as a parameter because eq() vs inArray() is
-                   the only part that legitimately differs; the batched query was
-                   hand-duplicated between loadMerchantGroups and loadTransactions
-                   until the v1.3.0 client-disable work pulled it here, and a parity
-                   test still pins the callers against each other
+                   of "which filings count as evidence", shared by its two DIRECT
+                   callers: loadFiledCategoryIds (one key) and
+                   loadFiledCategoryCountsByMerchant (batched over a page's
+                   merchants, WITH per-category counts — what lets loadTransactions
+                   self-exclude a row's OWN sole-contributed category from its own
+                   evidence, emulating excludeTxnIds=[row.id] for every row on the
+                   page without a per-row query). loadFiledCategoryIdsByMerchant is
+                   NOT a third direct caller — it reaches the predicate only THROUGH
+                   loadFiledCategoryCountsByMerchant, with the counts dropped, for
+                   loadMerchantGroups, which has no single row to self-exclude —
+                   every row it groups is category_id IS NULL already. The two direct
+                   callers take the merchant condition as a parameter because eq() vs
+                   inArray() is the only part that legitimately differs between them;
+                   the batched query was hand-duplicated between loadMerchantGroups
+                   and loadTransactions until the v1.3.0 client-disable work pulled it
+                   here, and a parity test still pins the callers against each other
                    applyRuleWrite — the ONLY place that decides what happens to a key's
                    exact rule: upsert, withhold, or withhold AND remove. Shared by all three
                    categorize write paths; the two that predate it ran hand-maintained

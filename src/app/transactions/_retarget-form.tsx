@@ -50,17 +50,24 @@ type Props = {
  *
  * ## Why Remember has no client-side disable
  *
- * `/categorize` disables its checkbox up front by running
- * `classifyKeyTrainability` in the browser against `filedCategoryIds`. This
- * form deliberately does not, even though it holds a filing history and could
- * fake one: `filedCategoryEvidenceWhere` also skips rows whose category is
- * ARCHIVED, and `summarizeByCategory` — which feeds `filed` — does not. A
- * client verdict built from this list would be stricter than the server's on
- * exactly the merchants that have an archived category in their past,
- * disabling a checkbox the server would have honoured. A second, subtly
- * disagreeing copy of the verdict is worse than answering a beat late, so the
- * server decides and the toast reports, which is also what the row form on
- * this same page does and for a related reason.
+ * `/categorize` and the row form directly below this one (`TransactionRowForm`)
+ * both disable their checkbox up front by running `classifyKeyTrainability`
+ * (and, since the ship review that added rule-removal, `describeRuleAction`)
+ * against a `filedCategoryIds` read that goes through the shared
+ * `filedCategoryEvidenceWhere` predicate. This form deliberately still does
+ * not, even though it holds a filing history and could fake one: `filed`
+ * comes from `summarizeByCategory`, which — unlike `filedCategoryEvidenceWhere`
+ * — does NOT skip rows whose category is ARCHIVED. A client verdict built
+ * from `filed` would be stricter than the server's on exactly the merchants
+ * that have an archived category in their past, disabling a checkbox the
+ * server would have honoured. A second, subtly disagreeing copy of the
+ * verdict is worse than answering a beat late, so the server decides and the
+ * toast reports — this form is now the one place on `/transactions` where
+ * that is still true, not because the reasoning stopped applying elsewhere,
+ * but because `filed` specifically is the wrong evidence source to build a
+ * client verdict from. Wiring this form onto the same
+ * `filedCategoryEvidenceWhere`-based read the other two use is a real gap,
+ * not a design choice — see TODOS.md.
  *
  * A `<details>` disclosure, matching the app's pattern for secondary content
  * (`BudgetHelpPanel`, `/goals`): this is a repair, not the page's main verb,

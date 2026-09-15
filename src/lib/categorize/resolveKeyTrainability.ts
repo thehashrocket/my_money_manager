@@ -14,11 +14,13 @@ import {
 /**
  * "Which already-made filings count as evidence about this key" — the ONE
  * spelling, shared by `loadFiledCategoryIds` (below) and the batched
- * `loadFiledCategoryIdsByMerchant` (further below).
+ * `loadFiledCategoryCountsByMerchant` (further below). `loadFiledCategoryIdsByMerchant`
+ * reaches it only THROUGH that counts version (it is the counts dropped, for
+ * `/categorize`) — never call it a third caller of this predicate.
  *
  * It takes the merchant condition rather than building it, because the two
- * callers need different ones: `eq()` for a single key here, `inArray()` for a
- * page's worth of groups or rows there. Everything else has to be identical,
+ * DIRECT callers need different ones: `eq()` for a single key here, `inArray()`
+ * for a page's worth of merchants there. Everything else has to be identical,
  * and it was previously hand-duplicated and held together by comments plus
  * one parity test. A divergence renders the checkbox enabled and then has the
  * server refuse the submit, which is precisely the surprise this guard exists

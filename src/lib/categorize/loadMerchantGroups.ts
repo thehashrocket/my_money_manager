@@ -5,8 +5,6 @@ import { loadFiledCategoryIdsByMerchant } from "./resolveKeyTrainability";
 
 type Db = typeof defaultDb;
 
-export type { ExistingRule };
-
 /** Up to this many distinct bank memos are shown per group (D16). */
 const MAX_SAMPLE_MEMOS = 3;
 

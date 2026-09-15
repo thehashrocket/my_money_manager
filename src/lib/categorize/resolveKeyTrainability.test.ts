@@ -489,11 +489,17 @@ describe("loadFiledCategoryIdsByMerchant", () => {
   });
 
   /* Testing specialist (ship review): the "conservative-only, never
-     permissive" claim in loadFiledCategoryIdsByMerchant's own docstring was
-     unpinned — nothing would fail if a future change flipped it, which would
-     silently render the Remember checkbox enabled for a write the server
-     refuses (the exact class of bug this file exists to prevent). */
-  it("is conservative, never permissive, relative to the server's own excludeTxnIds verdict", () => {
+     permissive" claim now lives on loadFiledCategoryCountsByMerchant's
+     docstring — this pins it against loadFiledCategoryIdsByMerchant
+     specifically, the non-self-excluding projection `/categorize` still
+     uses (`/transactions` self-excludes via the counts version directly,
+     see `loadTransactions.test.ts`'s own self-exclusion tests; that surface
+     is not conservative-only anymore, it agrees with the server exactly).
+     Nothing would fail here if a future change flipped this direction on
+     the `/categorize` path, which would silently render its checkbox
+     enabled for a write the server refuses (the exact class of bug this
+     file exists to prevent). */
+  it("loadFiledCategoryIdsByMerchant (the /categorize projection) is conservative, never permissive, relative to the server's own excludeTxnIds verdict", () => {
     const a = seedAccount();
     const b = seedBatch();
     const groceries = seedCategory("Groceries");
@@ -506,9 +512,9 @@ describe("loadFiledCategoryIdsByMerchant", () => {
       categoryId: groceries.id,
     });
 
-    // Batched (client) read has no excludeTxnIds: the row about to move still
-    // counts as evidence, so retargeting it to a different category reads as
-    // untrainable.
+    // The /categorize projection has no excludeTxnIds: the row about to move
+    // still counts as evidence, so retargeting it to a different category
+    // reads as untrainable.
     const batched = loadFiledCategoryIdsByMerchant(handle.db, ["SOLO MARKET"]);
     const clientVerdict = classifyKeyTrainability(
       "SOLO MARKET",
@@ -524,14 +530,37 @@ describe("loadFiledCategoryIdsByMerchant", () => {
     ]);
     expect(serverVerdict.trainable).toBe(true);
 
-    // The direction that matters: the client is never MORE permissive than
-    // the server. A future change that made loadFiledCategoryIdsByMerchant
-    // exclude the retargeted row too would make BOTH verdicts trainable,
-    // which is fine; the reverse (client trainable, server not) is what
-    // would actually reopen the bug and is asserted against directly.
-    if (clientVerdict.trainable) {
-      expect(serverVerdict.trainable).toBe(true);
-    }
+    // The invariant that actually matters, asserted UNCONDITIONALLY. Ship
+    // review, test-coverage pass (finding 2): a prior version of this check
+    // lived inside `if (clientVerdict.trainable) {...}`, which the
+    // `expect(clientVerdict.trainable).toBe(false)` two lines up makes DEAD
+    // CODE — the body never runs, so a future change that made the client
+    // MORE permissive than the server (the actual bug this pins against)
+    // would pass silently. `!(client && !server)` is `client ⟹ server`,
+    // evaluated every run regardless of which branch `clientVerdict` lands in.
+    expect(clientVerdict.trainable && !serverVerdict.trainable).toBe(false);
+  });
+
+  it("the never-permissive check above is not vacuous — it also holds where the client verdict really is trainable", () => {
+    // Proves the previous test's assertion is exercised with a TRUE
+    // clientVerdict at least once in this suite, not only the
+    // always-false case above (which is what made the original dead `if`
+    // invisible: every existing test happened to leave it unevaluated).
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "FRESH MARKET", amountCents: -1000 });
+
+    const batched = loadFiledCategoryIdsByMerchant(handle.db, ["FRESH MARKET"]);
+    const clientVerdict = classifyKeyTrainability(
+      "FRESH MARKET",
+      batched.get("FRESH MARKET") ?? [],
+      groceries.id,
+    );
+    expect(clientVerdict.trainable).toBe(true);
+
+    const serverVerdict = resolveKeyTrainability(handle.db, "FRESH MARKET", groceries.id);
+    expect(clientVerdict.trainable && !serverVerdict.trainable).toBe(false);
   });
 });
 

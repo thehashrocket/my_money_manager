@@ -114,11 +114,20 @@ export type TransactionRow = {
    * query over the page's distinct merchants rather than a per-row round
    * trip.
    *
+   * The self-exclusion is only exact for a row `TransactionRowForm` can
+   * actually render a categorize form for — a transfer-paired row (rendered
+   * through the separate `TransferRowItem`, no Remember checkbox at all)
+   * would over-exclude if it ever reached this filter, since it never
+   * contributes to the count in the first place (`filedCategoryEvidenceWhere`
+   * excludes it); see `loadFiledCategoryCountsByMerchant`'s own docstring for
+   * why that case and the archived-category case both stay inert rather than
+   * needing their own guard here.
+   *
    * Lets `TransactionRowForm` disable "Remember" the way `_merchant-row.tsx`
    * already does, instead of only warning in the toast after a submit the
    * server refused to train a rule from.
    */
-  filedCategoryIds: number[];
+  filedCategoryIds: readonly number[];
   /**
    * The exact-match rule currently held for this row's merchant key, if any —
    * `describeRuleAction`'s (`keyTrainability.ts`) other input, needed

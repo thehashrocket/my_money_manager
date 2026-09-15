@@ -4,7 +4,11 @@ import Link from "next/link";
 import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
-import { classifyKeyTrainability, describeRuleAction } from "@/lib/categorize/keyTrainability";
+import {
+  classifyKeyTrainability,
+  describeRuleAction,
+  ruleActionLabel,
+} from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
@@ -138,13 +142,16 @@ export function TransactionRowForm({
     }
     /* Ship review (Codex adversarial + structured, cross-model): `remember`
        was cleared only inside `handlePick`, a user-driven picker change —
-       never here. A fresh `row.filedCategoryIds` from an unrelated sibling
-       row's write can retroactively make the CURRENT pick untrainable
-       (masking the box, but leaving `remember` internally true), and if the
-       user then repicks to a category that fresh evidence happens to make
-       trainable again, `handlePick` sees trainable=true and never fires its
-       own clear — so a tick given for one combination silently carries over
-       and trains a rule for a combination the user never actually ticked.
+       never here. `handlePick` now also clears whenever the ACTION KIND
+       changes (train vs remove-conflicting vs none, round 2's own fix), but
+       that only runs when the user actually repicks. A fresh
+       `row.existingRule` or `row.filedCategoryIds` from an unrelated
+       sibling row's write can change what the SAME kind of action would
+       even mean — e.g. `remove-conflicting` for "the rule points at
+       Groceries" silently becoming `remove-conflicting` for "the rule
+       points at Dining" — while the pick itself never moves, so
+       `handlePick` never runs at all (matches `_merchant-row.tsx`'s own
+       `prevGroup` reset, added for the identical reason on that surface).
        Any revalidation-driven prop change clears it, same as `pickerValue`
        resyncs above, so a tick always has to be re-made against the data
        actually being submitted. */
@@ -185,12 +192,13 @@ export function TransactionRowForm({
     pendingCategoryId,
   );
   const ruleActionEnabled = ruleAction.kind !== "none";
-  const ruleActionMessage =
-    ruleAction.kind === "remove-conflicting"
-      ? ruleAction.message
-      : !trainability.trainable
-        ? trainability.message
-        : undefined;
+  // PR review, type-design pass (finding A): `RuleAction` now carries
+  // `message` on every non-"train" branch, so there is no need to keep
+  // `trainability` alive alongside `ruleAction` and rejoin them here.
+  const ruleActionMessage = ruleAction.kind === "train" ? undefined : ruleAction.message;
+  // See the Save button's own comment (PR review, code-reviewer pass,
+  // finding 2) for why the escape hatch needs this.
+  const pickIsSelectable = leafCategories.some((c) => String(c.id) === pickerValue);
 
   const handlePick = (next: string) => {
     setPickerValue(next);
@@ -367,7 +375,7 @@ export function TransactionRowForm({
               onChange={(e) => setRemember(e.target.checked)}
               className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            {ruleAction.kind === "remove-conflicting" ? "Remove conflicting rule" : "Remember"}
+            {ruleActionLabel(ruleAction)}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-ink-2">
             <input
@@ -392,10 +400,27 @@ export function TransactionRowForm({
           // rule" on an already-correctly-filed row had no way to actually
           // submit: the only route to the checkbox's own action would have
           // been to temporarily miscategorize the row and change it back.
+          //
+          // `pickIsSelectable` (PR review, code-reviewer pass, finding 2):
+          // a row filed under a category that was archived (or turned into
+          // a parent) AFTER the fact keeps that id as its stored
+          // `categoryId` — `leafCategories` excludes it by default
+          // (`listLeafCategories`'s `includeArchived: false`), so the
+          // combobox renders BLANK while `pickerValue` still holds that
+          // unselectable id. Before this escape hatch existed that row was
+          // simply unsubmittable (Save was always disabled on an unchanged
+          // pick), which hid the mismatch. The escape hatch alone would have
+          // let ticking "Remove conflicting rule" submit that stale id
+          // straight to `assertAssignableCategory`, which refuses it —
+          // aborting the whole write (categorize AND the rule removal) with
+          // a generic "Categorize failed." toast. Requiring the pick to be
+          // one `leafCategories` can actually render keeps the escape hatch
+          // scoped to rows the picker could have produced.
           disabled={
             isPending ||
             !pickerValue ||
-            (pickerValue === String(currentCategoryId) && !(remember && ruleActionEnabled))
+            (pickerValue === String(currentCategoryId) &&
+              !(remember && ruleActionEnabled && pickIsSelectable))
           }
           className={`h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
         >

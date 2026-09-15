@@ -178,27 +178,55 @@ describe("describeRuleAction", () => {
     expect(action).toEqual({ kind: "train" });
   });
 
-  it("returns none when untrainable and there is no existing rule to remove", () => {
+  it("returns none (with the verdict's message) when untrainable and there is no existing rule to remove", () => {
     const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], 3);
     expect(verdict.trainable).toBe(false);
+    if (verdict.trainable) return;
     const action = describeRuleAction("SAFEWAY", verdict, null, 3);
-    expect(action).toEqual({ kind: "none" });
+    expect(action).toEqual({ kind: "none", message: verdict.message });
   });
 
   it("returns none before any category is picked, even with a contradicted existing rule", () => {
     // pendingCategoryId === null: there is no pick to contradict anything
     // with yet, so offering removal would be a guess.
     const verdict = classifyKeyTrainability("ONLINE", [], null);
+    expect(verdict.trainable).toBe(false);
+    if (verdict.trainable) return;
     const action = describeRuleAction(
       "ONLINE",
       verdict,
       { categoryId: 9, categoryName: "Gas" },
       null,
     );
-    expect(action).toEqual({ kind: "none" });
+    expect(action).toEqual({ kind: "none", message: verdict.message });
   });
 
-  it("returns remove-conflicting for a lossy key with an existing rule, even one pointing at the same pick", () => {
+  // PR review, test-coverage pass (finding 3): a corrupted sessionStorage
+  // parked pick (`_pending-pick.ts`) arrives here as NaN, same as it does at
+  // `classifyKeyTrainability`'s own `pendingCategoryId` — this function has
+  // to reject it the identical way, or a corrupted pick renders "Remove
+  // conflicting rule" as ENABLED with no real pick behind it.
+  it.each([Number.NaN, 0, -1])(
+    "returns none for a non-real pendingCategoryId (%s), even with a contradicted existing rule",
+    (badPending) => {
+      // filed=[3, 9] (multi-category) refuses regardless of pending, so the
+      // verdict is reliably untrainable for every bad `badPending` value —
+      // isolating what's under test: does describeRuleAction itself reject
+      // a non-real pending id, the same way classifyKeyTrainability does.
+      const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], badPending);
+      expect(verdict.trainable).toBe(false);
+      if (verdict.trainable) return;
+      const action = describeRuleAction(
+        "SAFEWAY",
+        verdict,
+        { categoryId: 9, categoryName: "Gas" },
+        badPending,
+      );
+      expect(action).toEqual({ kind: "none", message: verdict.message });
+    },
+  );
+
+  it("returns remove-conflicting (reason: lossy-key) for a lossy key with an existing rule, even one pointing at the same pick", () => {
     // `applyRuleWrite`'s shouldDelete is `reason === "lossy-key" || ...` — the
     // OR short-circuits, so a lossy key removes its rule unconditionally,
     // even in the coincidental case where the existing rule already points
@@ -217,7 +245,7 @@ describe("describeRuleAction", () => {
     );
     expect(action.kind).toBe("remove-conflicting");
     if (action.kind !== "remove-conflicting") return;
-    expect(action.existingCategoryName).toBe("Gas");
+    expect(action.reason).toBe("lossy-key");
     // Ship review, cycle 2 (Codex adversarial, second pass): the existing
     // rule already points at the category being picked (9 === 9) — the
     // pick does NOT contradict it. The message must blame the LOSSY key,
@@ -226,7 +254,7 @@ describe("describeRuleAction", () => {
     expect(action.message).not.toContain("contradicts");
   });
 
-  it("returns remove-conflicting for multi-category when the existing rule points somewhere else", () => {
+  it("returns remove-conflicting (reason: contradicted) for multi-category when the existing rule points somewhere else", () => {
     const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], 3);
     expect(verdict).toEqual({
       trainable: false,
@@ -240,6 +268,8 @@ describe("describeRuleAction", () => {
       3,
     );
     expect(action.kind).toBe("remove-conflicting");
+    if (action.kind !== "remove-conflicting") return;
+    expect(action.reason).toBe("contradicted");
   });
 
   it("returns none for multi-category when the existing rule already points at the current pick — confirming, not contradicting", () => {
@@ -248,16 +278,17 @@ describe("describeRuleAction", () => {
     // row uncategorized — strictly worse than the rule."
     const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], 9);
     expect(verdict.trainable).toBe(false);
+    if (verdict.trainable) return;
     const action = describeRuleAction(
       "SAFEWAY",
       verdict,
       { categoryId: 9, categoryName: "Gas" },
       9,
     );
-    expect(action).toEqual({ kind: "none" });
+    expect(action).toEqual({ kind: "none", message: verdict.message });
   });
 
-  it("names the existing rule's category in the remove-conflicting message", () => {
+  it("names the merchant and the existing rule's category in the remove-conflicting message", () => {
     const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], 3);
     const action = describeRuleAction(
       "SAFEWAY",

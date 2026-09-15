@@ -978,10 +978,20 @@ describe("loadTransactions — importSource", () => {
 /**
  * `filedCategoryIds` — TODOS.md's "`/transactions` still cannot disable the
  * Remember checkbox the way `/categorize` does" follow-up. Backed by
- * `loadFiledCategoryIdsByMerchant`, the same batched query
- * `loadMerchantGroups` uses, so the two cannot drift on which filings count
- * as evidence — a divergence here is exactly what lets the checkbox render
- * enabled and then have the server refuse the submit.
+ * `loadFiledCategoryCountsByMerchant` (the same shared predicate
+ * `loadMerchantGroups` reads through `loadFiledCategoryIdsByMerchant`), so
+ * the two share ONE spelling of "which filings count as evidence" — a
+ * divergence THERE is exactly what would let the checkbox render enabled and
+ * then have the server refuse the submit.
+ *
+ * This is deliberately NOT "the two figures always agree": a categorized
+ * `/transactions` row self-excludes its own sole-contributed category from
+ * its own `filedCategoryIds` (see the field's docstring in
+ * `loadTransactions.ts`), which `/categorize`'s group-level figure has no
+ * row to do for. The parity block in `resolveKeyTrainability.test.ts` pins
+ * exactly where the two are expected to diverge and warns that re-agreement
+ * would be the regression — read that one first if this comment and that one
+ * seem to disagree.
  */
 describe("loadTransactions — filedCategoryIds", () => {
   it("is empty for a merchant key nothing has been filed under yet", () => {
