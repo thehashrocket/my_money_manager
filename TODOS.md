@@ -2522,8 +2522,26 @@ tests across 117 files.
       `/pr-review-toolkit` section at the end of this file. Kept rather than
       deleted because "we thought it was inference" is the useful part.
 
-- [ ] **P2** — **`/accounts` has ONE status line and `_charge-dialog.tsx`
-      renders a second one by hand.** `src/app/accounts/_status.tsx` was
+- [x] **P2 — SUPERSEDED same day (2026-09-09) by v0.27.0's `action-status.tsx`
+      consolidation, verified against the current code during the 2026-09-15
+      `/plan-eng-review` triage.** `src/app/accounts/_status.tsx` (named below)
+      no longer exists — it was replaced by the shared
+      `src/components/ledger/action-status.tsx`, whose own docblock names
+      `_charge-dialog.tsx` explicitly and states the split this entry called a
+      problem is the DESIGNED exception: "`_charge-dialog.tsx` does not render
+      it [`<ActionStatus>`] at all: it CLOSES on success, so it imports
+      `statusRole`/`warningOf` and sends the warning to a toast." That is
+      exactly the second of the two ways out this entry proposed — export the
+      message/role primitives so the dialog cannot re-derive them differently
+      — already taken. The dialog's own markup still exists (it needs DS56's
+      "Reconcile instead →" action button inline with the refusal, which
+      `<ActionStatus>` does not support), but it is built from the SAME
+      `statusRole`/`warningOf` functions the shared component uses internally,
+      not a second derivation of the rule. Left as history rather than
+      deleted, per this file's own header: this is exactly the class of entry
+      the 2026-09-09 audit warns can flatter the backlog by staying open after
+      the code has already moved past it.
+- [x] **P2 — SUPERSEDED, historical text below.** `src/app/accounts/_status.tsx` was
       extracted on this branch precisely because `_balance-forms.tsx` and
       `_card-terms-form.tsx` carried byte-identical private copies, and its
       docblock argues the rules at length: `role="alert"` for a refusal AND for
