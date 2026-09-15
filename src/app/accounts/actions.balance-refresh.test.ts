@@ -315,6 +315,39 @@ describe("refreshLiabilityBalanceAction", () => {
     expect(refreshLiabilityBalancesOnlyMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * Ship's pre-landing review (cycle 2) found this action had weaker
+   * coercion coverage than its `readPositiveIntField` siblings
+   * (`markAsCardPaymentAction`, `linkCardPaymentAction` in
+   * `actions.wiring.test.ts`) for the exact defect class cycle 1's fix
+   * addressed — this action used to parse `accountId` with a bare `Number()`
+   * and was switched to the shared helper, but only the "abc" case above was
+   * ever pinned for it. Mirrors that file's own case table rather than
+   * inventing a new one.
+   */
+  it.each([
+    ["zero", "0"],
+    ["a negative integer", "-1"],
+    ["hex notation", "0x10"],
+    ["exponential notation", "1e3"],
+    ["a decimal", "3.5"],
+    ["whitespace only", "   "],
+    ["a plus-signed integer", "+7"],
+  ])("REFUSES accountId=%s, matching readPositiveIntField's contract", async (_label, raw) => {
+    const state = await refreshLiabilityBalanceAction(IDLE, refreshForm(raw));
+
+    expect(state).toMatchObject({ status: "error" });
+    expect(hasAnyTransactionRowsMock).not.toHaveBeenCalled();
+    expect(refreshLiabilityBalancesOnlyMock).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES an absent accountId field", async () => {
+    const state = await refreshLiabilityBalanceAction(IDLE, new FormData());
+
+    expect(state).toMatchObject({ status: "error" });
+    expect(refreshLiabilityBalancesOnlyMock).not.toHaveBeenCalled();
+  });
+
   it("REFUSES when the account no longer exists", async () => {
     accountRowMock.current = null;
 
