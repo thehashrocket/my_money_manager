@@ -58,38 +58,47 @@ afterEach(() => handle.close());
 describe("hasPreExistingManualCardHistory", () => {
   it("is false for a card with no rows at all", () => {
     const id = makeAccount("2026-08-01");
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(false);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(false);
   });
 
-  it("is true for a manual row dated strictly AFTER the anchor", () => {
+  it("is true for a manual row dated AFTER the anchor", () => {
     const id = makeAccount("2026-08-01");
     makeRow({ accountId: id, date: "2026-08-15", source: "manual", hash: "h1" });
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(true);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(true);
   });
 
-  it("is false for a manual row dated ON the anchor — rule 1's strict `>`", () => {
+  /**
+   * NOT scoped to the anchor, deliberately — see the function's own
+   * docstring. A manual row on or before the anchor is just as capable of
+   * colliding with a late-settling bank duplicate as one after it, because
+   * the bank's OWN posted date (not the account's anchor) decides whether
+   * the collision reaches the ledger. `/ship`'s adversarial review found a
+   * live repro of exactly this: reconciling the anchor past a manual row's
+   * date did not stop the bank's later-settling duplicate from importing.
+   */
+  it("is true for a manual row dated ON the anchor — the anchor is not a safe boundary here", () => {
     const id = makeAccount("2026-08-01");
     makeRow({ accountId: id, date: "2026-08-01", source: "manual", hash: "h1" });
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(false);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(true);
   });
 
-  it("is false for a manual row dated BEFORE the anchor", () => {
+  it("is true for a manual row dated BEFORE the anchor", () => {
     const id = makeAccount("2026-08-01");
     makeRow({ accountId: id, date: "2026-07-01", source: "manual", hash: "h1" });
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(false);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(true);
   });
 
-  it("ignores a CSV or SimpleFIN row after the anchor — only MANUAL provenance counts", () => {
+  it("ignores a CSV or SimpleFIN row — only MANUAL provenance counts", () => {
     const id = makeAccount("2026-08-01");
     makeRow({ accountId: id, date: "2026-08-15", source: "csv", hash: "h1" });
     makeRow({ accountId: id, date: "2026-08-16", source: "simplefin", hash: "h2" });
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(false);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(false);
   });
 
   it("is scoped to the account — a manual row on a DIFFERENT card does not block this one", () => {
     const id = makeAccount("2026-08-01");
     const other = makeAccount("2026-08-01");
     makeRow({ accountId: other, date: "2026-08-15", source: "manual", hash: "h1" });
-    expect(hasPreExistingManualCardHistory(id, "2026-08-01", handle.db)).toBe(false);
+    expect(hasPreExistingManualCardHistory(id, handle.db)).toBe(false);
   });
 });

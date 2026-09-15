@@ -352,6 +352,20 @@ export function MonthEditor(props: MonthEditorProps) {
    * in flight at once — tab quickly through several allocations before
    * blurring the whole island, and every one of them has to land before the
    * refresh is safe to fire.
+   *
+   * ACCEPTED RESIDUAL (found by `/ship`'s adversarial review, 2026-09-15):
+   * a `commitAllocationAction` call that never settles at all — a dropped
+   * connection with no error, a wedged dev server — stays in this `Set`
+   * forever, since removal happens in `commit`'s own `finally`. Every later
+   * `revalidate()` on this island (including the unmount cleanup) then
+   * `Promise.allSettled`s the whole `Set`, so a truly hung request stalls
+   * every SUBSEQUENT successful edit's refresh, not just its own. Traded
+   * deliberately: the alternative (an `AbortSignal`/timeout on every commit)
+   * adds real complexity to close a failure mode this app's own driver
+   * (a synchronous local better-sqlite3 call inside a Server Action) does
+   * not produce in practice, and the stall is self-healing on a page reload
+   * — this ref is recreated per mount, not persisted. Revisit only if a
+   * hung commit is ever observed for real, not preemptively.
    */
   const pendingCommitsRef = useRef<Set<Promise<unknown>>>(new Set());
 

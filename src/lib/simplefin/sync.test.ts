@@ -2231,10 +2231,22 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
     expect(allWarnings.some((w) => w.includes("Citi") && w.includes("hand-entered"))).toBe(true);
   });
 
-  it("does NOT block a card whose manual history sits ON or BEFORE the anchor", async () => {
-    // Rule 1's strict `>`: a row on the anchor date already contributes
-    // nothing to the balance sum, and the cutover already drops a feed row
-    // there — so it cannot collide with one, and the guard must not fire.
+  /**
+   * CORRECTED 2026-09-15 by `/ship`'s own adversarial review. This test used
+   * to assert the OPPOSITE — that a manual row on or before the anchor was
+   * safe to import over, on the theory that rule 1's `>` and the D8.1
+   * cutover already exclude it from colliding. That theory is false: the
+   * bank's own SETTLEMENT date (not the account's anchor) decides whether a
+   * same-event duplicate imports, and a manual row's hand-typed purchase
+   * date routinely predates the bank's posted date by a day or more. The
+   * live repro that found this: reconcile the anchor to the day after a
+   * manual row's date, and the bank can still post its duplicate of that
+   * SAME event a day or two later — after the new anchor, so the D8.1
+   * cutover does not drop it, and content dedup does not match it (different
+   * memo). The guard is therefore unconditional on manual history, not
+   * anchor-relative — see `hasPreExistingManualCardHistory`'s own docstring.
+   */
+  it("blocks a card whose manual history sits ON or BEFORE the anchor too — the anchor is not a safe boundary", async () => {
     const card = seedAccount({
       simplefinAccountId: "ACT-CITI",
       name: "Citi",
@@ -2265,6 +2277,72 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
       ],
     } satisfies SimpleFinResponse);
 
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    // Only the pre-existing manual row — the September charge never stages.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("manual");
+    const allWarnings =
+      outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
+    expect(allWarnings.some((w) => w.includes("Citi") && w.includes("hand-entered"))).toBe(true);
+  });
+
+  /**
+   * The Codex adversarial finding, reproduced directly: "Reconcile past it"
+   * is NOT a valid remedy for this warning, unlike every other guard in this
+   * file that offers Reconcile as an escape hatch. The only thing that lifts
+   * the block is removing the manual row.
+   */
+  it("REMAINS blocked after reconciling the anchor past the manual row's date — reconciling is not a valid remedy", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: manualBatch.id,
+      amountCents: -73_41,
+      rawMemo: "Costco",
+      date: "2026-08-15",
+      source: "manual",
+    });
+
+    // The user follows the (now-corrected) advice's ONLY safe half by NOT
+    // deleting the row, and instead — as a real user plausibly would before
+    // this fix shipped — reconciles the anchor to the day after the manual
+    // charge, believing that resolves it.
+    handle.db
+      .update(schema.accounts)
+      .set({ startingBalanceDate: "2026-08-16" })
+      .where(eq(schema.accounts.id, card.id))
+      .run();
+
+    // The bank's own settlement date lands two days after the purchase date
+    // the user hand-typed — after the new anchor, so nothing else drops it.
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1073.41",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            { ...feedTxn("CITI-COSTCO", "-73.41", "COSTCO WHSE #123"), posted: 1786968000 }, // 2026-08-17T12:00Z (after the new anchor, before "now")
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
     await syncSimpleFin({ now: NOW }, handle.db);
 
     const rows = handle.db
@@ -2272,9 +2350,9 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
       .from(schema.transactions)
       .where(eq(schema.transactions.accountId, card.id))
       .all();
-    // The old manual row plus the newly-imported September charge.
-    expect(rows).toHaveLength(2);
-    expect(rows.some((r) => r.externalId === "CITI-SEP")).toBe(true);
+    // Still just the one manual row — reconciling did not open the door.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("manual");
   });
 
   it("does NOT block an unrelated card that has no manual history at all", async () => {
@@ -2313,13 +2391,12 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
   });
 
   it("does NOT block an ASSET account with the exact same manual-history shape — CARDS ONLY", async () => {
-    // `cutoverAnchor` is `isCard ? account.startingBalanceDate : null`, so the
-    // guard can never even be asked about a checking/savings account — its
-    // pre-anchor (and post-anchor) history is legitimate, ordinary ledger
-    // content, not a double-count risk. Same manual-row shape as the very
-    // first test in this block (a hand-entered row dated after the anchor),
-    // on an account type where the guard must be structurally unreachable
-    // rather than merely undertriggered.
+    // `blockedByManualHistory` is `isCard && hasPreExistingManualCardHistory(...)`,
+    // so the guard can never even be asked about a checking/savings account —
+    // its manual history is legitimate, ordinary ledger content, not a
+    // double-count risk. Same manual-row shape as the very first test in this
+    // block, on an account type where the guard must be structurally
+    // unreachable rather than merely undertriggered.
     const checking = seedAccount({
       simplefinAccountId: "ACT-CHECKING",
       name: "Everyday Checking",
@@ -2363,6 +2440,55 @@ describe("syncSimpleFin — refuses to stage a card with pre-existing manual his
     const allWarnings =
       outcome.status === "up-to-date" || outcome.status === "synced" ? outcome.warnings : [];
     expect(allWarnings.some((w) => w.includes("hand-entered"))).toBe(false);
+  });
+
+  /**
+   * Claude adversarial finding (`/ship`, 2026-09-15): every OTHER withheld-
+   * account case in this file (link-dropped, unlinked, re-pointed) nulls
+   * `reportedBalanceCents`/`availableBalanceCents`/`balanceDate` before
+   * `finaliseBalances` runs, specifically so a real bank figure sitting
+   * beside a ledger this run deliberately left untouched cannot manufacture
+   * a non-null `driftCents` — rule 1's "a row is missing" signal, fabricated.
+   * The manual-history block did not, until this test pinned it.
+   */
+  it("does not report a real feed balance for a blocked card — nothing was verified against it", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const manualBatch = seedBatch("manual");
+    seedTxn({
+      accountId: card.id,
+      batchId: manualBatch.id,
+      amountCents: -20_00,
+      rawMemo: "Old charge",
+      date: "2026-08-15",
+      source: "manual",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1050.00",
+          "available-balance": "-1050.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [{ ...feedTxn("CITI-SEP", "-50.00", "TARGET"), posted: 1789041600 }],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    const citiSummary =
+      outcome.status === "up-to-date" || outcome.status === "synced"
+        ? outcome.accounts.find((a) => a.accountId === card.id)
+        : undefined;
+    expect(citiSummary?.driftCents).toBeNull();
   });
 });
 

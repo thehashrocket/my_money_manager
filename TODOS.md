@@ -2889,28 +2889,45 @@ per the plan's own "residuals" section.
       one-line patch, so not done here. (`src/app/accounts/_balance-forms.tsx`,
       `src/app/accounts/actions.ts`, `src/lib/accounts/resolveBalanceAction.ts`)
 
-- [x] **P1 — DONE (2026-09-15).** The design decision named below was made
-      (refuse-to-stage, matching D8.3's own posture, over warn-and-acknowledge
-      — no new UI surface, reuses the existing per-account `/sync` warning
-      channel every other withheld-account case already renders through).
-      `hasPreExistingManualCardHistory` (`src/lib/accounts/`) checks, once per
-      sync per card, whether any `import_source='manual'` row exists dated
-      STRICTLY AFTER the account's own anchor. Needs no re-check inside the
-      write transaction the way rule 11's guards do: D8.3 refuses a NEW
-      manual write the instant `importsTransactions(account)` is true,
-      checked live from the moment the account is linked — so this
-      population can only ever SHRINK once linked, never grow, and is a
-      stable precondition rather than a race. When it finds one, the staging
-      loop treats the feed's transactions for that account as empty for this
-      run (same shape as `skippedPending`/`skippedBeforeAnchor` — the account
-      still gets a `counts` entry with `insertedCount: 0`) and pushes a
-      warning naming the account and the remedy (remove the old manual rows,
-      or Reconcile past them). Every other linked account still imports
-      normally in the same run. 10 new tests (4 in `sync.test.ts` covering the
-      refusal, the on/before-anchor non-trigger, the no-manual-history no-op,
-      and — added by the ship coverage audit — the asset-account non-trigger
-      confirming the guard is cards-only; 6 in the new module's own unit
-      test), 2098 total pass, `tsc --noEmit` clean.
+- [x] **P1 — DONE (2026-09-15), CORRECTED same day by `/ship`'s own
+      adversarial review before this branch ever merged.** The design
+      decision named below was made (refuse-to-stage, matching D8.3's own
+      posture, over warn-and-acknowledge — no new UI surface, reuses the
+      existing per-account `/sync` warning channel every other
+      withheld-account case already renders through). The FIRST version of
+      this fix scoped `hasPreExistingManualCardHistory` to manual rows dated
+      strictly after the account's anchor, and its remedy text offered
+      Reconcile as an alternative to deleting the row. Both were wrong, and
+      Codex's adversarial pass reproduced why against production functions:
+      Star One's `posted` date is a SETTLEMENT date, routinely a day or more
+      after a hand-typed purchase date, so reconciling the anchor to "the day
+      after the manual entry's date" does not stop the bank's own duplicate
+      from posting even LATER — after the new anchor, past both the D8.1
+      cutover and content dedup (different memo) — landing a real,
+      warning-free double-count. The same review found the anchor read was
+      also rule 11's exact "read before await, used after" shape: taken
+      before `await fetchAccounts(...)` and never re-verified, so an Undo
+      landing mid-fetch could move the TRUE anchor while the stale one still
+      gated the check.
+      **The fix for both: the guard is not anchor-relative at all.**
+      `hasPreExistingManualCardHistory(accountId, db)` now checks for ANY
+      manual row on the account, full stop — the only remedy that actually
+      closes the hole is removing the row (`removeCardActivity`), which is
+      also now the ONLY remedy the warning names. Dropping the anchor
+      comparison closes the race too: there is no anchor value left to read,
+      so nothing can go stale across the fetch. `finaliseBalances` also no
+      longer receives a real `reportedBalanceCents`/`availableBalanceCents`/
+      `balanceDate` for a blocked card (a Claude adversarial finding in the
+      same pass) — left in place, they would have manufactured a non-null
+      `driftCents` for an account this run deliberately left unverified,
+      matching the exact fabricated-signal class rule 1 already names for
+      every OTHER withheld-account case in this file. 12 tests in
+      `sync.test.ts`'s guard block (the anchor-relative "does NOT block
+      ON/BEFORE the anchor" case is now INVERTED — it blocks there too — plus
+      new regression tests reproducing both Codex findings directly: manual
+      history on/before the anchor still blocks, and reconciling forward does
+      NOT lift the block) and 6 in the new module's own unit test (anchor
+      dropped from every case), 2108 total pass, `tsc --noEmit` clean.
       (`src/lib/simplefin/sync.ts`,
       `src/lib/accounts/hasPreExistingManualCardHistory.ts`)
 - [x] **P1 — HISTORICAL TEXT BELOW, kept per this file's own practice of not
