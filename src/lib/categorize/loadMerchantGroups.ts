@@ -1,13 +1,11 @@
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { filedCategoryEvidenceWhere } from "./resolveKeyTrainability";
+import { loadExactRulesByMerchant, type ExistingRule } from "@/lib/rules";
+import { loadFiledCategoryIdsByMerchant } from "./resolveKeyTrainability";
 
 type Db = typeof defaultDb;
 
-export type ExistingRule = {
-  categoryId: number;
-  categoryName: string;
-};
+export type { ExistingRule };
 
 /** Up to this many distinct bank memos are shown per group (D16). */
 const MAX_SAMPLE_MEMOS = 3;
@@ -50,8 +48,10 @@ export type MerchantGroup = {
    * here would disagree with the server the moment the user chooses a category
    * this key has never been filed to.
    *
-   * Same predicate as `loadFiledCategoryIds` — a divergence between the two
-   * would let the checkbox render enabled and then be refused on submit.
+   * Computed by `loadFiledCategoryIdsByMerchant`, shared with
+   * `loadTransactions`' equivalent per-row field — the same query rather than
+   * two spellings of it, since a divergence would let the checkbox render
+   * enabled and then be refused on submit.
    */
   filedCategoryIds: number[];
 };
@@ -94,36 +94,11 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
   if (rows.length === 0) return [];
 
   const merchants = rows.map((r) => r.normalizedMerchant);
-  const rules = db
-    .select({
-      merchant: schema.categoryRules.matchValue,
-      categoryId: schema.categoryRules.categoryId,
-      categoryName: schema.categories.name,
-    })
-    .from(schema.categoryRules)
-    .innerJoin(
-      schema.categories,
-      eq(schema.categoryRules.categoryId, schema.categories.id),
-    )
-    .where(
-      and(
-        eq(schema.categoryRules.matchType, "exact"),
-        inArray(schema.categoryRules.matchValue, merchants),
-      ),
-    )
-    .all();
+  const ruleByMerchant = loadExactRulesByMerchant(db, merchants);
 
   const sampleMemosByMerchant = loadSampleMemos(db, merchants);
   const totalRowCountByMerchant = loadTotalRowCounts(db, merchants);
-  const filedCategoriesByMerchant = loadFiledCategories(db, merchants);
-
-  const ruleByMerchant = new Map<string, ExistingRule>();
-  for (const rule of rules) {
-    ruleByMerchant.set(rule.merchant, {
-      categoryId: rule.categoryId,
-      categoryName: rule.categoryName,
-    });
-  }
+  const filedCategoriesByMerchant = loadFiledCategoryIdsByMerchant(db, merchants);
 
   const groups: MerchantGroup[] = rows.map((r) => ({
     normalizedMerchant: r.normalizedMerchant,
@@ -152,48 +127,6 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
   });
 
   return groups;
-}
-
-/**
- * Distinct categories each merchant's ALREADY-FILED rows carry.
- *
- * The WHERE comes from `filedCategoryEvidenceWhere`, shared with
- * `loadFiledCategoryIds` — the two used to be independent spellings of the same
- * predicate, and a divergence lets the checkbox render enabled and then be
- * refused on submit. Only the merchant condition differs (`inArray` for a page
- * of groups here, `eq` for one key there), which is exactly why that is the
- * parameter. `resolveKeyTrainability.test.ts` still pins them against each other.
- *
- * Note it is the only query in this file that requires `category_id IS NOT NULL`:
- * the main group query and `loadSampleMemos` read the uncategorized backlog, and
- * `loadTotalRowCounts` drops the category predicate entirely.
- */
-function loadFiledCategories(db: Db, merchants: string[]): Map<string, number[]> {
-  const rows = db
-    .selectDistinct({
-      normalizedMerchant: schema.transactions.normalizedMerchant,
-      categoryId: schema.transactions.categoryId,
-    })
-    .from(schema.transactions)
-    .innerJoin(
-      schema.categories,
-      eq(schema.transactions.categoryId, schema.categories.id),
-    )
-    .where(
-      filedCategoryEvidenceWhere(
-        inArray(schema.transactions.normalizedMerchant, merchants),
-      ),
-    )
-    .all();
-
-  const byMerchant = new Map<string, number[]>();
-  for (const row of rows) {
-    if (row.categoryId === null) continue;
-    const existing = byMerchant.get(row.normalizedMerchant);
-    if (existing === undefined) byMerchant.set(row.normalizedMerchant, [row.categoryId]);
-    else existing.push(row.categoryId);
-  }
-  return byMerchant;
 }
 
 /**

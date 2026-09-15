@@ -6,6 +6,7 @@ import {
   buildRuleMatcher,
   createOrUpdateRule,
   deleteExactRule,
+  loadExactRulesByMerchant,
   readExactRule,
 } from "./rules";
 import { createTestDb, type TestDbHandle } from "./test/db";
@@ -620,6 +621,45 @@ describe("readExactRule", () => {
 
   it("returns undefined for a key with no rules at all", () => {
     expect(readExactRule(handle.db, "TAQUERIA NO RULE")).toBeUndefined();
+  });
+});
+
+describe("loadExactRulesByMerchant", () => {
+  it("returns an empty map for an empty merchant list, with no query", () => {
+    expect(loadExactRulesByMerchant(handle.db, [])).toEqual(new Map());
+  });
+
+  it("agrees with readExactRule per merchant — one batched query, same answers", () => {
+    const groceries = seedCategory("Groceries");
+    const gas = seedCategory("Gas");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SHELL",
+      categoryId: gas.id,
+      source: "manual",
+    });
+
+    const batched = loadExactRulesByMerchant(handle.db, ["SAFEWAY", "SHELL", "NEWPLACE"]);
+
+    expect(batched.get("SAFEWAY")).toEqual({ categoryId: groceries.id, categoryName: groceries.name });
+    expect(batched.get("SHELL")).toEqual({ categoryId: gas.id, categoryName: gas.name });
+    // A merchant with no exact rule gets no map entry at all.
+    expect(batched.has("NEWPLACE")).toBe(false);
+
+    for (const merchant of ["SAFEWAY", "SHELL", "NEWPLACE"]) {
+      const single = readExactRule(handle.db, merchant);
+      const expected = single ? { categoryId: single.categoryId, categoryName: expect.any(String) } : undefined;
+      expect(batched.get(merchant)).toEqual(expected);
+    }
+  });
+
+  it("never returns a contains rule carrying the same match_value", () => {
+    seededContainsRule("AMAZON PRIME");
+    expect(loadExactRulesByMerchant(handle.db, ["AMAZON PRIME"]).has("AMAZON PRIME")).toBe(false);
   });
 });
 

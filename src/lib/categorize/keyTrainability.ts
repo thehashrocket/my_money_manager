@@ -148,6 +148,77 @@ export function classifyKeyTrainability(
   return { trainable: true };
 }
 
+/** What ticking "Remember" would actually do, given the verdict above. */
+export type RuleAction =
+  | { kind: "train" }
+  | {
+      kind: "remove-conflicting";
+      existingCategoryName: string;
+      /** One sentence, rendered to the user verbatim — same convention as {@link TrainabilityVerdict}'s `message`. */
+      message: string;
+    }
+  | { kind: "none" };
+
+/**
+ * Ship review (Codex adversarial + structured, cross-model, both flagged
+ * this independently): `trainable === false` used to mean the checkbox is
+ * simply disabled, full stop — but `applyRuleWrite` does something on a
+ * refusal too, when an exact rule already exists and the pick CONTRADICTS
+ * it: it deletes that rule (rule 6's "a refusal MAY also delete the exact
+ * rule the key already had"). Disabling the checkbox unconditionally on
+ * `!trainable` meant `rememberMerchant` could never reach the server as
+ * `true` for that case either, so the ONE gesture rule 6 documents as the
+ * repair path for a poisoned rule became unreachable through either
+ * `/categorize` or `/transactions` — a contradicted rule just kept
+ * auto-filing future imports, silently, with no way back short of hand-editing
+ * the database.
+ *
+ * This is the exact same three-way split `applyRuleWrite`'s `shouldDelete`
+ * already computes server-side (`allowRuleRemoval && existing !== undefined
+ * && (reason === "lossy-key" || existing.categoryId !== categoryId)`), read
+ * from the client's own already-duplicated verdict rather than a new
+ * derivation — `/categorize` and `/transactions` both already pass
+ * `allowRuleRemoval: true` unconditionally (rule 6: "the Remember checkbox…
+ * where the user chose the merchant and the category"), so that half of the
+ * condition is a constant here and is not re-parameterized.
+ *
+ * `pendingCategoryId === null` (nothing picked yet) never returns
+ * `"remove-conflicting"` — there is no pick to contradict anything with yet,
+ * so offering to remove a rule before the user has said what they actually
+ * want would be a guess, not a repair. (It can still return `"train"`: with
+ * no pick, `classifyKeyTrainability` reports trainable whenever the key's
+ * history alone is not yet a contradiction — that branch is checked first
+ * and returns before this one is reached.)
+ */
+export function describeRuleAction(
+  normalizedMerchant: string,
+  verdict: TrainabilityVerdict,
+  existingRule: { categoryId: number; categoryName: string } | null,
+  pendingCategoryId: number | null,
+): RuleAction {
+  if (verdict.trainable) return { kind: "train" };
+  if (pendingCategoryId === null || existingRule === null) return { kind: "none" };
+  // A lossy key removes its rule unconditionally (rule 6: "a LOSSY refusal
+  // always removes it, because a lossy key cannot back a correct rule
+  // pointing anywhere at all") — that is true even in the coincidental case
+  // where the existing rule already points at the category being picked, so
+  // the message must not blame "this pick" for a removal the key's own
+  // shape already demanded on its own.
+  if (verdict.reason === "lossy-key") {
+    return {
+      kind: "remove-conflicting",
+      existingCategoryName: existingRule.categoryName,
+      message: `"${normalizedMerchant}" is too lossy a key to back any rule, so ticking Remember will remove its existing one (→ ${existingRule.categoryName}) instead of training a new one.`,
+    };
+  }
+  if (existingRule.categoryId === pendingCategoryId) return { kind: "none" };
+  return {
+    kind: "remove-conflicting",
+    existingCategoryName: existingRule.categoryName,
+    message: `"${normalizedMerchant}" can't train a rule from this pick, but ticking Remember will still remove its existing rule (→ ${existingRule.categoryName}), which this pick contradicts.`,
+  };
+}
+
 /**
  * Is this a category id at all?
  *

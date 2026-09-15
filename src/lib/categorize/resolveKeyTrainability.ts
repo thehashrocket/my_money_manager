@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull, notInArray, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import {
   classifyKeyTrainability,
@@ -13,14 +13,16 @@ import {
 
 /**
  * "Which already-made filings count as evidence about this key" — the ONE
- * spelling, shared with `loadMerchantGroups`' batched `loadFiledCategories`.
+ * spelling, shared by `loadFiledCategoryIds` (below) and the batched
+ * `loadFiledCategoryIdsByMerchant` (further below).
  *
  * It takes the merchant condition rather than building it, because the two
  * callers need different ones: `eq()` for a single key here, `inArray()` for a
- * page's worth of groups there. Everything else has to be identical, and it was
- * previously hand-duplicated and held together by comments plus one parity test.
- * A divergence renders the checkbox enabled and then has the server refuse the
- * submit, which is precisely the surprise this guard exists to prevent.
+ * page's worth of groups or rows there. Everything else has to be identical,
+ * and it was previously hand-duplicated and held together by comments plus
+ * one parity test. A divergence renders the checkbox enabled and then has the
+ * server refuse the submit, which is precisely the surprise this guard exists
+ * to prevent.
  *
  * Three clauses, each for its own reason:
  *
@@ -82,6 +84,87 @@ export function loadFiledCategoryIds(
     )
     .all();
   return rows.map((r) => r.categoryId).filter((id): id is number => id !== null);
+}
+
+/** A merchant's filed evidence for one category, WITH how many rows carry it. */
+export type FiledCategoryCount = { categoryId: number; count: number };
+
+/**
+ * How many of `merchants`' already-filed rows carry each category, batched
+ * over the whole set in one query rather than one round trip per merchant.
+ * Predicate per {@link filedCategoryEvidenceWhere}.
+ *
+ * The count is what lets `loadTransactions` emulate `excludeTxnIds=[row.id]`
+ * for EACH row without a per-row query (ship review, Codex adversarial +
+ * structured, cross-model agreement — P1/P2): a row's own current category
+ * can be dropped from ITS OWN evidence set exactly when this row is the sole
+ * contributor (`count === 1`), which is mathematically identical to what
+ * `resolveKeyTrainability(db, merchant, categoryId, [row.id])` would compute,
+ * for every row this app can reach through `/transactions`' categorize form —
+ * a transfer-paired row is refused by `categorizeTransaction` before this
+ * verdict would ever matter, and a row whose OWN category is archived is
+ * already excluded from every count by `filedCategoryEvidenceWhere` itself,
+ * so there is nothing to over-exclude in either case. This replaced an
+ * earlier version that returned no counts at all and read every row's OWN
+ * evidence as if it belonged to some other row — provably conservative-only
+ * relative to a naive client read, but not to the single-row retarget case
+ * this docstring now closes exactly.
+ */
+export function loadFiledCategoryCountsByMerchant(
+  db: AnyDb,
+  merchants: readonly string[],
+): Map<string, FiledCategoryCount[]> {
+  if (merchants.length === 0) return new Map();
+  const rows = db
+    .select({
+      normalizedMerchant: schema.transactions.normalizedMerchant,
+      categoryId: schema.transactions.categoryId,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(schema.transactions)
+    .innerJoin(
+      schema.categories,
+      eq(schema.transactions.categoryId, schema.categories.id),
+    )
+    .where(
+      filedCategoryEvidenceWhere(
+        inArray(schema.transactions.normalizedMerchant, [...merchants]),
+      ),
+    )
+    .groupBy(schema.transactions.normalizedMerchant, schema.transactions.categoryId)
+    .all();
+
+  const byMerchant = new Map<string, FiledCategoryCount[]>();
+  for (const row of rows) {
+    if (row.categoryId === null) continue;
+    const entry: FiledCategoryCount = { categoryId: row.categoryId, count: Number(row.count) };
+    const existing = byMerchant.get(row.normalizedMerchant);
+    if (existing === undefined) byMerchant.set(row.normalizedMerchant, [entry]);
+    else existing.push(entry);
+  }
+  return byMerchant;
+}
+
+/**
+ * Distinct category ids each of `merchants`' already-filed rows carries —
+ * {@link loadFiledCategoryCountsByMerchant} with the counts dropped, for
+ * `loadMerchantGroups`, which is already grouped by merchant and has no
+ * single row to self-exclude (every row it groups is `categoryId IS NULL`,
+ * which the shared predicate already skips as evidence).
+ */
+export function loadFiledCategoryIdsByMerchant(
+  db: AnyDb,
+  merchants: readonly string[],
+): Map<string, number[]> {
+  const counts = loadFiledCategoryCountsByMerchant(db, merchants);
+  const byMerchant = new Map<string, number[]>();
+  for (const [merchant, entries] of counts) {
+    byMerchant.set(
+      merchant,
+      entries.map((e) => e.categoryId),
+    );
+  }
+  return byMerchant;
 }
 
 /**

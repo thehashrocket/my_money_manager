@@ -4,8 +4,10 @@ import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { classifyKeyTrainability } from "./keyTrainability";
 import { loadMerchantGroups } from "./loadMerchantGroups";
+import { loadTransactions } from "./loadTransactions";
 import {
   loadFiledCategoryIds,
+  loadFiledCategoryIdsByMerchant,
   resolveKeyTrainability,
 } from "./resolveKeyTrainability";
 
@@ -452,5 +454,142 @@ describe("resolveKeyTrainability — agrees with what /categorize renders", () =
         });
       }
     }
+  });
+});
+
+describe("loadFiledCategoryIdsByMerchant", () => {
+  it("returns an empty map for an empty merchant list, with no query", () => {
+    expect(loadFiledCategoryIdsByMerchant(handle.db, [])).toEqual(new Map());
+  });
+
+  it("agrees with loadFiledCategoryIds per merchant — one query, same answer", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000, categoryId: groceries.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -2000, categoryId: dining.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", amountCents: -3000, categoryId: groceries.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWPLACE", amountCents: -500 });
+
+    const batched = loadFiledCategoryIdsByMerchant(handle.db, ["AMAZON", "SHELL", "NEWPLACE"]);
+
+    expect(new Set(batched.get("AMAZON"))).toEqual(new Set([groceries.id, dining.id]));
+    expect(batched.get("SHELL")).toEqual([groceries.id]);
+    // A merchant with no filed evidence gets no map entry at all — callers
+    // read that through `?? []`, matching `loadMerchantGroups`' own note that
+    // the absent-entry case is not a fallback, it is the common answer.
+    expect(batched.has("NEWPLACE")).toBe(false);
+
+    for (const merchant of ["AMAZON", "SHELL", "NEWPLACE"]) {
+      expect(new Set(batched.get(merchant) ?? [])).toEqual(
+        new Set(loadFiledCategoryIds(handle.db, merchant)),
+      );
+    }
+  });
+
+  /* Testing specialist (ship review): the "conservative-only, never
+     permissive" claim in loadFiledCategoryIdsByMerchant's own docstring was
+     unpinned — nothing would fail if a future change flipped it, which would
+     silently render the Remember checkbox enabled for a write the server
+     refuses (the exact class of bug this file exists to prevent). */
+  it("is conservative, never permissive, relative to the server's own excludeTxnIds verdict", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    const onlyFiledRow = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SOLO MARKET",
+      amountCents: -1500,
+      categoryId: groceries.id,
+    });
+
+    // Batched (client) read has no excludeTxnIds: the row about to move still
+    // counts as evidence, so retargeting it to a different category reads as
+    // untrainable.
+    const batched = loadFiledCategoryIdsByMerchant(handle.db, ["SOLO MARKET"]);
+    const clientVerdict = classifyKeyTrainability(
+      "SOLO MARKET",
+      batched.get("SOLO MARKET") ?? [],
+      dining.id,
+    );
+    expect(clientVerdict.trainable).toBe(false);
+
+    // The server excludes exactly this row (it is the one being retargeted),
+    // so the identical retarget is allowed.
+    const serverVerdict = resolveKeyTrainability(handle.db, "SOLO MARKET", dining.id, [
+      onlyFiledRow.id,
+    ]);
+    expect(serverVerdict.trainable).toBe(true);
+
+    // The direction that matters: the client is never MORE permissive than
+    // the server. A future change that made loadFiledCategoryIdsByMerchant
+    // exclude the retargeted row too would make BOTH verdicts trainable,
+    // which is fine; the reverse (client trainable, server not) is what
+    // would actually reopen the bug and is asserted against directly.
+    if (clientVerdict.trainable) {
+      expect(serverVerdict.trainable).toBe(true);
+    }
+  });
+});
+
+/**
+ * Cross-surface parity — `/categorize`'s `loadMerchantGroups` and
+ * `/transactions`' `loadTransactions` both derive `filedCategoryIds` from
+ * `loadFiledCategoryCountsByMerchant`, but through two different shapes: a
+ * merchant group (`/categorize`, always `categoryId IS NULL`, nothing of its
+ * own to self-exclude) versus an individual row (`/transactions`, which CAN
+ * be an already-categorized row being retargeted, and self-excludes its own
+ * sole-contributed category — see `filedCategoryIds`' docstring in
+ * `loadTransactions.ts`). Parity holds for the UNCATEGORIZED case, which is
+ * the only case `/categorize` ever renders; a categorized `/transactions` row
+ * is EXPECTED to diverge from the group figure by exactly its own
+ * self-excluded category, and that divergence is the fix, not a bug — a
+ * silent regression back to the old, non-excluding behavior would make this
+ * test agree again while reopening the retarget-blocking gap.
+ */
+describe("filedCategoryIds — parity between /categorize and /transactions", () => {
+  it("an uncategorized /transactions row agrees with loadMerchantGroups exactly", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000, categoryId: groceries.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -2000, categoryId: dining.id });
+    const uncategorized = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -900 });
+
+    const groups = loadMerchantGroups(handle.db);
+    const amazonGroup = groups.find((g) => g.normalizedMerchant === "AMAZON");
+    expect(amazonGroup).toBeDefined();
+
+    const { rows } = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const row = rows.find((r) => r.id === uncategorized.id);
+    expect(new Set(row?.filedCategoryIds)).toEqual(new Set(amazonGroup?.filedCategoryIds));
+  });
+
+  it("a categorized /transactions row self-excludes its own sole-contributed category, unlike the group figure", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    const groceriesRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1000, categoryId: groceries.id });
+    const diningRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -2000, categoryId: dining.id });
+
+    const groups = loadMerchantGroups(handle.db);
+    const amazonGroup = groups.find((g) => g.normalizedMerchant === "AMAZON");
+    // Neither row is uncategorized, so /categorize's own backlog query never
+    // groups this merchant at all — the group-level check above only exists
+    // when there is an uncategorized row. Confirms the setup, not the fix.
+    expect(amazonGroup).toBeUndefined();
+
+    const { rows } = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const groceriesTxnRow = rows.find((r) => r.id === groceriesRow.id);
+    const diningTxnRow = rows.find((r) => r.id === diningRow.id);
+    // Each row sees the OTHER category as evidence, never its own — matching
+    // `resolveKeyTrainability`'s own `excludeTxnIds=[row.id]` exactly.
+    expect(groceriesTxnRow?.filedCategoryIds).toEqual([dining.id]);
+    expect(diningTxnRow?.filedCategoryIds).toEqual([groceries.id]);
   });
 });

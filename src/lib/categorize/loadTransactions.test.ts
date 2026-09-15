@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
+import { createOrUpdateRule } from "@/lib/rules";
 import { escapeLikePattern, loadTransactions, summarizeByCategory } from "./loadTransactions";
 
 let handle: TestDbHandle;
@@ -971,5 +972,174 @@ describe("loadTransactions — importSource", () => {
     // Neither bank path may masquerade as hand-entered.
     expect(byMerchant.get("FROM-CSV")).toBe("csv");
     expect(byMerchant.get("FROM-FEED")).toBe("simplefin");
+  });
+});
+
+/**
+ * `filedCategoryIds` — TODOS.md's "`/transactions` still cannot disable the
+ * Remember checkbox the way `/categorize` does" follow-up. Backed by
+ * `loadFiledCategoryIdsByMerchant`, the same batched query
+ * `loadMerchantGroups` uses, so the two cannot drift on which filings count
+ * as evidence — a divergence here is exactly what lets the checkbox render
+ * enabled and then have the server refuse the submit.
+ */
+describe("loadTransactions — filedCategoryIds", () => {
+  it("is empty for a merchant key nothing has been filed under yet", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const row = seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWPLACE" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === row.id)?.filedCategoryIds).toEqual([]);
+  });
+
+  it("carries the category of another row sharing the same merchant key", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "SAFEWAY",
+      categoryId: groceries.id,
+    });
+    const uncategorized = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === uncategorized.id)?.filedCategoryIds).toEqual([
+      groceries.id,
+    ]);
+  });
+
+  it("carries every distinct category the key has been filed under, across rows on the page", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", categoryId: groceries.id });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", categoryId: dining.id });
+    const uncategorized = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const ids = r.rows.find((x) => x.id === uncategorized.id)?.filedCategoryIds ?? [];
+    expect(new Set(ids)).toEqual(new Set([groceries.id, dining.id]));
+  });
+
+  it("does not count a filing under an archived category, matching /categorize's predicate", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const retired = seedCategory("Retired");
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: new Date("2026-06-01T00:00:00.000Z") })
+      .where(eq(schema.categories.id, retired.id))
+      .run();
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "OLDPLACE", categoryId: retired.id });
+    const uncategorized = seedTxn({ accountId: a.id, batchId: b.id, merchant: "OLDPLACE" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === uncategorized.id)?.filedCategoryIds).toEqual([]);
+  });
+
+  it("does not count a filing on a transfer-paired row — /categorize never shows it", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const dining = seedCategory("Dining");
+    const partner = seedTxn({ accountId: a.id, batchId: b.id, merchant: "PARTNER", amountCents: 4000 });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "CHIPOTLE",
+      categoryId: dining.id,
+      transferPairId: partner.id,
+    });
+    const uncategorized = seedTxn({ accountId: a.id, batchId: b.id, merchant: "CHIPOTLE" });
+
+    const r = loadTransactions(handle.db, {
+      page: 1,
+      pageSize: 50,
+      includeTransfers: true,
+    });
+    expect(r.rows.find((x) => x.id === uncategorized.id)?.filedCategoryIds).toEqual([]);
+  });
+
+  it("batches correctly across several distinct merchants on one page, each keeping its own set", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const gas = seedCategory("Gas");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", categoryId: groceries.id });
+    const amazonRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL", categoryId: gas.id });
+    const shellRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL" });
+    const freshRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWPLACE" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const byId = new Map(r.rows.map((row) => [row.id, row.filedCategoryIds]));
+    expect(byId.get(amazonRow.id)).toEqual([groceries.id]);
+    expect(byId.get(shellRow.id)).toEqual([gas.id]);
+    expect(byId.get(freshRow.id)).toEqual([]);
+  });
+});
+
+/**
+ * `existingRule` — the other half of the ship-review fix (Codex adversarial +
+ * structured, cross-model): `describeRuleAction` (`keyTrainability.ts`) needs
+ * this alongside `filedCategoryIds` to tell "genuinely nothing to do" apart
+ * from "can't train, but ticking Remember would still remove a rule this
+ * pick contradicts."
+ */
+describe("loadTransactions — existingRule", () => {
+  it("is null for a merchant with no exact rule", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const row = seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWPLACE" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === row.id)?.existingRule).toBeNull();
+  });
+
+  it("carries the exact rule's category and name", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+    const row = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === row.id)?.existingRule).toEqual({
+      categoryId: groceries.id,
+      categoryName: groceries.name,
+    });
+  });
+
+  it("batches correctly across several distinct merchants on one page", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const gas = seedCategory("Gas");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "AMAZON",
+      categoryId: groceries.id,
+      source: "manual",
+    });
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "SHELL",
+      categoryId: gas.id,
+      source: "manual",
+    });
+    const amazonRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON" });
+    const shellRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SHELL" });
+    const freshRow = seedTxn({ accountId: a.id, batchId: b.id, merchant: "NEWPLACE" });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    const byId = new Map(r.rows.map((row) => [row.id, row.existingRule]));
+    expect(byId.get(amazonRow.id)).toEqual({ categoryId: groceries.id, categoryName: groceries.name });
+    expect(byId.get(shellRow.id)).toEqual({ categoryId: gas.id, categoryName: gas.name });
+    expect(byId.get(freshRow.id)).toBeNull();
   });
 });
