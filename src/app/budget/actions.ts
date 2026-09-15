@@ -138,7 +138,7 @@ const setCategoryKindInputSchema = z.object({
  */
 export type SetCategoryKindActionState =
   | { status: "idle" }
-  | { status: "ok"; categoryId: number; warning?: string }
+  | { status: "ok"; categoryId: number; warning: string | undefined }
   | { status: "error"; message: string };
 
 export async function setCategoryKindAction(
@@ -300,7 +300,7 @@ const copyPreviousMonthInputSchema = z.object({
 export type CopyPreviousMonthActionResult = CopyPreviousMonthResult & {
   /** Present only when the post-commit refresh failed; the counts are real
    * either way. See `guardRefresh`. */
-  warning?: string;
+  warning: string | undefined;
 };
 
 export async function copyPreviousMonthAction(
@@ -388,7 +388,7 @@ const categoryNameSchema = z
   .max(80, "Name must be 80 characters or fewer");
 
 export type CreateCategoryActionResult =
-  | { status: "ok"; category: CreatedCategory; warning?: string }
+  | { status: "ok"; category: CreatedCategory; warning: string | undefined }
   | { status: "error"; message: string };
 
 export async function createCategoryGroupAction(name: string): Promise<CreateCategoryActionResult> {
@@ -436,7 +436,7 @@ export async function createCategoryAction(params: {
 }
 
 export type RenameCategoryActionResult =
-  | { status: "ok"; categoryId: number; name: string; warning?: string }
+  | { status: "ok"; categoryId: number; name: string; warning: string | undefined }
   | { status: "error"; message: string };
 
 export async function renameCategoryAction(categoryId: number, name: string): Promise<RenameCategoryActionResult> {
@@ -457,7 +457,7 @@ export async function renameCategoryAction(categoryId: number, name: string): Pr
 }
 
 export type SetCarryoverPolicyActionResult =
-  | { status: "ok"; categoryId: number; carryoverPolicy: "none" | "rollover" | "reset"; warning?: string }
+  | { status: "ok"; categoryId: number; carryoverPolicy: "none" | "rollover" | "reset"; warning: string | undefined }
   | { status: "error"; message: string };
 
 const setCarryoverPolicyInputSchema = z.object({
@@ -494,7 +494,7 @@ export async function setCarryoverPolicyAction(
 }
 
 export type ArchiveCategoryActionResult =
-  | { status: "ok"; categoryId: number; categoryName: string; warning?: string }
+  | { status: "ok"; categoryId: number; categoryName: string; warning: string | undefined }
   | { status: "error"; message: string };
 
 export async function archiveCategoryAction(categoryId: number): Promise<ArchiveCategoryActionResult> {
@@ -527,7 +527,7 @@ export async function unarchiveCategoryAction(categoryId: number): Promise<Archi
 }
 
 export type MoveCategoryActionResult =
-  | { status: "ok"; result: MoveCategoryResult; warning?: string }
+  | { status: "ok"; result: MoveCategoryResult; warning: string | undefined }
   | { status: "error"; message: string };
 
 const moveCategoryInputSchema = z.object({

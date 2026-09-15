@@ -1,8 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { describeRuleRefusal } from "./refusalNotice";
+import { describeRuleRefusalPostCommit } from "./refusalNotice";
 import type { PriorRuleSnapshot } from "./priorRuleSnapshot";
+
+/**
+ * Exercised through {@link describeRuleRefusalPostCommit} rather than the
+ * module-private `describeRuleRefusal` it wraps — that IS the production
+ * path (every real caller sits after a commit), and it degrades identically
+ * to the raw function whenever nothing throws, which is every case below.
+ */
+function describeRuleRefusal(
+  db: Parameters<typeof describeRuleRefusalPostCommit>[0],
+  refusal: NonNullable<Parameters<typeof describeRuleRefusalPostCommit>[2]>,
+) {
+  const notice = describeRuleRefusalPostCommit(db, "test", refusal);
+  if (notice === null) throw new Error("unreachable — refusal was non-null");
+  return notice;
+}
 
 let handle: TestDbHandle;
 

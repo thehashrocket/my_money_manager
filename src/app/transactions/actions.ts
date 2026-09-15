@@ -158,12 +158,14 @@ export async function undoCategorizeTransactionAction(
  * `tsc` and to vitest. Types are erased, so they are safe.
  */
 export type BulkRetargetActionResult =
-  | (Extract<BulkRetargetRunResult, { status: "ok" }> & { warning?: string })
+  | (Extract<BulkRetargetRunResult, { status: "ok" }> & {
+      warning: string | undefined;
+    })
   | Extract<BulkRetargetRunResult, { status: "error" }>;
 
 export type UndoBulkRetargetActionResult =
   | (Extract<UndoBulkRetargetRunResult, { status: "ok" }> & {
-      warning?: string;
+      warning: string | undefined;
     })
   | Extract<UndoBulkRetargetRunResult, { status: "error" }>;
 

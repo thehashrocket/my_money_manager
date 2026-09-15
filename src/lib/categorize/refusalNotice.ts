@@ -25,7 +25,19 @@ export type RuleRefusalNotice = {
   removedRule: boolean;
 };
 
-export function describeRuleRefusal(
+/**
+ * NOT EXPORTED, on purpose. This is the raw, unguarded read — every real
+ * caller sits after a COMMITTED write (see {@link describeRuleRefusalPostCommit}
+ * below), so a fourth caller reaching for this function directly would
+ * reintroduce exactly the hazard the guard exists to close, with nothing
+ * short of a docblock to stop it. Keeping it module-private makes that a
+ * compile error instead of a convention: a route file simply cannot import a
+ * symbol this module does not export. `refusalNotice.test.ts` exercises the
+ * message-composition logic through {@link describeRuleRefusalPostCommit}
+ * for the same reason — that IS the production path, and testing anything
+ * else would leave this guarantee covered by nothing.
+ */
+function describeRuleRefusal(
   db: AnyDb,
   refusal: RuleRefusalReport,
 ): RuleRefusalNotice {

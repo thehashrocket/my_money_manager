@@ -25,7 +25,7 @@ import {
  */
 
 const idle: ActionState = { status: "idle" };
-const ok: ActionState = { status: "ok", message: "Saved." };
+const ok: ActionState = { status: "ok", message: "Saved.", warning: undefined };
 const warned: ActionState = { status: "ok", message: "Saved.", warning: "Reload to see it." };
 const err: ActionState = { status: "error", message: "That didn't work." };
 

@@ -27,6 +27,7 @@ import {
 } from "@/lib/transferRejections";
 import { formatCents, parseAmountToCents } from "@/lib/money";
 import { hasAnyTransactionRows } from "@/lib/accounts/hasAnyTransactionRows";
+import { hasPreExistingManualCardHistory } from "@/lib/accounts/hasPreExistingManualCardHistory";
 import { importsTransactions } from "@/lib/accounts/importsTransactions";
 import type { AccountType } from "@/lib/accounts/loadAccountBalances";
 import { isAfterAnchor } from "@/lib/accounts/isAfterAnchor";
@@ -914,7 +915,26 @@ export async function syncSimpleFin(
     // it is scoped to cards.
     const expectedCardExternalIds: string[] = [];
 
-    for (const txn of remote?.transactions ?? []) {
+    // P1 (found across three independent adversarial reviews, 2026-09-09;
+    // fixed 2026-09-15; CORRECTED same day after `/ship`'s adversarial pass
+    // found the first version's own remedy reopened the hole it closed) —
+    // refuse to stage THIS card's rows at all when it carries ANY
+    // hand-entered history from before it was ever linked. D8.3 already
+    // makes it impossible to WRITE a new manual row once linked; this closes
+    // the other direction, where the bank's real row for an already-recorded
+    // event would otherwise import as a second, separate transaction. See
+    // `hasPreExistingManualCardHistory`'s own docstring for why this checks
+    // for ANY manual row rather than one dated after the anchor, and for why
+    // that makes this a stable precondition needing no re-check inside the
+    // write transaction.
+    const blockedByManualHistory = isCard && hasPreExistingManualCardHistory(account.id, db);
+    if (blockedByManualHistory) {
+      accountWarnings.push(
+        `"${account.name}" has hand-entered charges or payments from before it was linked — importing could count them twice. Remove those entries, then sync again.`,
+      );
+    }
+
+    for (const txn of blockedByManualHistory ? [] : (remote?.transactions ?? [])) {
       const row = mapTransaction(txn);
 
       // Enforce the invariant the design already depends on rather than
@@ -990,10 +1010,18 @@ export async function syncSimpleFin(
 
     staged.push({ account, feedId, rows: toInsert, accountWarnings, expectedCardExternalIds });
 
-    const reported = remote?.balance ? parseAmountToCents(remote.balance) : null;
-    const available = remote?.["available-balance"]
-      ? parseAmountToCents(remote["available-balance"]!)
-      : null;
+    // NULLED, not reported, when blocked — the same reasoning `finaliseBalances`
+    // documents for a link-dropped account (see the comment at its own
+    // `dropped` loop): a real bank balance sitting beside a ledger this run
+    // deliberately left untouched would let `finaliseBalances` compute a
+    // fabricated, non-null `driftCents` — rule 1's "a row is missing" signal,
+    // manufactured for an account whose warning already names the real cause.
+    const reported =
+      !blockedByManualHistory && remote?.balance ? parseAmountToCents(remote.balance) : null;
+    const available =
+      !blockedByManualHistory && remote?.["available-balance"]
+        ? parseAmountToCents(remote["available-balance"]!)
+        : null;
     counts.push({
       accountId: account.id,
       name: account.name,
@@ -1004,9 +1032,10 @@ export async function syncSimpleFin(
       skippedBeforeAnchor,
       reportedBalanceCents: reported,
       availableBalanceCents: available,
-      balanceDate: remote?.["balance-date"]
-        ? new Date(remote["balance-date"]! * 1000).toISOString()
-        : null,
+      balanceDate:
+        !blockedByManualHistory && remote?.["balance-date"]
+          ? new Date(remote["balance-date"]! * 1000).toISOString()
+          : null,
     });
   }
 

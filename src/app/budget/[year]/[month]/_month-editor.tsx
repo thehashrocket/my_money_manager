@@ -330,6 +330,45 @@ export function MonthEditor(props: MonthEditorProps) {
    */
   const dirtyRef = useRef(0);
 
+  /**
+   * The commits `revalidate` must wait for before it may fire
+   * `revalidateBudgetSurfacesAction`.
+   *
+   * `commit`'s `dirtyRef.current += 1` runs synchronously, before its
+   * `await commitAllocationAction(...)` — see that callback's own comment —
+   * which is what makes `dirtyRef` visible to `revalidate` inside the SAME
+   * bubbling `blur`/`focusout` dispatch. But `dirtyRef` only ever recorded
+   * that a write had STARTED, not that it had LANDED: `revalidate` read the
+   * counter and immediately fired a SECOND, independent Server Action call,
+   * with no ordering guarantee between it and the first one still in flight.
+   * Two concurrent requests to the same Next.js server have no guarantee
+   * `commitAllocationAction`'s write commits before `revalidateBudgetSurfacesAction`'s
+   * `revalidatePath` runs — and if it doesn't, the revalidated page is cached
+   * from BEFORE the write, so `/`'s "This month" summary and `/goals`' total
+   * can read the pre-edit figure with nothing to say so, until some later,
+   * unrelated write happens to revalidate again.
+   *
+   * A `Set`, not a single ref, because more than one cell's commit can be
+   * in flight at once — tab quickly through several allocations before
+   * blurring the whole island, and every one of them has to land before the
+   * refresh is safe to fire.
+   *
+   * ACCEPTED RESIDUAL (found by `/ship`'s adversarial review, 2026-09-15):
+   * a `commitAllocationAction` call that never settles at all — a dropped
+   * connection with no error, a wedged dev server — stays in this `Set`
+   * forever, since removal happens in `commit`'s own `finally`. Every later
+   * `revalidate()` on this island (including the unmount cleanup) then
+   * `Promise.allSettled`s the whole `Set`, so a truly hung request stalls
+   * every SUBSEQUENT successful edit's refresh, not just its own. Traded
+   * deliberately: the alternative (an `AbortSignal`/timeout on every commit)
+   * adds real complexity to close a failure mode this app's own driver
+   * (a synchronous local better-sqlite3 call inside a Server Action) does
+   * not produce in practice, and the stall is self-healing on a page reload
+   * — this ref is recreated per mount, not persisted. Revisit only if a
+   * hung commit is ever observed for real, not preemptively.
+   */
+  const pendingCommitsRef = useRef<Set<Promise<unknown>>>(new Set());
+
   // `year`/`month` are NOT read by this body any more — `revalidatePath` moved
   // to the pattern form, so the action takes no arguments. They stay in the
   // dependency array on purpose, and removing them is not the cleanup it looks
@@ -342,12 +381,27 @@ export function MonthEditor(props: MonthEditorProps) {
   const revalidate = useCallback(() => {
     if (dirtyRef.current === 0) return;
     dirtyRef.current = 0;
-    // The allocations this flushes were committed by `commitAllocationAction`
-    // long before this fires — so a `revalidatePath` throw in here is by
-    // construction a throw after a durable write. `revalidateBudgetSurfacesAction`
-    // catches it and hands back a warning; surfacing it is what keeps a user
-    // who then navigates to `/goals` and sees the old total from concluding the
-    // allocation never saved.
+    // Snapshotted, not read live inside the `.then` below: a NEW commit
+    // starting after this point (the wrapper losing focus does not stop
+    // further edits inside it — only leaving it entirely does) adds its own
+    // promise to the same `Set`, and that write is not this flush's
+    // responsibility. `dirtyRef`'s own reset above already carries that
+    // half of the same argument — a later commit re-dirties the counter for
+    // whichever revalidate call comes after this one.
+    const inFlight = Array.from(pendingCommitsRef.current);
+    // Awaiting `inFlight` above is what makes this true now — every allocation
+    // this flushes has COMMITTED by the time the line below runs, so a
+    // `revalidatePath` throw here is by construction a throw after a durable
+    // write. `revalidateBudgetSurfacesAction` catches it and hands back a
+    // warning; surfacing it is what keeps a user who then navigates to
+    // `/goals` and sees the old total from concluding the allocation never
+    // saved.
+    //
+    // `Promise.allSettled`, not `Promise.all`: a REJECTED commit promise
+    // (the round trip itself failing, not a refused write) must not skip the
+    // refresh for its SIBLINGS' successful, already-committed writes — the
+    // same "a refusal cannot cancel someone else's flush" argument `dirtyRef`
+    // documents above, extended to the promises themselves.
     //
     // The guard closes the `revalidatePath` throw INSIDE the action. It cannot
     // close a failure of the CALL — the Server Action round trip itself can
@@ -359,7 +413,8 @@ export function MonthEditor(props: MonthEditorProps) {
     // either way — the allocation is saved, this page is stale — and the
     // difference between "the refresh threw" and "the refresh call never
     // arrived" is not something they can act on.
-    void revalidateBudgetSurfacesAction()
+    void Promise.allSettled(inFlight)
+      .then(() => revalidateBudgetSurfacesAction())
       .then((warning) => {
         if (warning) toast.warning(warning);
       })
@@ -387,33 +442,48 @@ export function MonthEditor(props: MonthEditorProps) {
       // it was still `false` from before this write started, silently
       // skipping the revalidate this exact write existed to trigger.
       dirtyRef.current += 1;
-      const result = await commitAllocationAction(categoryId, year, month, cents);
-      if (result.status === "error") {
-        // NOTHING WAS COMMITTED, so the dirty flag must not survive. It is set
-        // before the await (see above) and was never cleared on the refusal
-        // path — so a rejected commit (a stale tab editing a category archived
-        // in another tab) left the flag standing, and the next blur ran the
-        // refresh anyway. Any failure there then reported "your change was
-        // saved, but this page couldn't refresh" and logged "after a committed
-        // write" about a write that never happened. Reporting a save that did
-        // not occur is the mirror image of the defect this whole branch closes,
-        // and it is the worse direction: the user stops trying.
-        //
-        // DECREMENT, never clear. The counter is shared by every row in the
-        // island, so assigning 0 here cancelled the pending flush for any
-        // sibling commit that had already SUCCEEDED — trading a false warning
-        // for a withheld refresh after a durable write, which is the same
-        // defect pointed the other way. Undoing this commit's own increment
-        // leaves exactly the siblings' work outstanding.
-        dirtyRef.current = Math.max(0, dirtyRef.current - 1);
-        return { ok: false, message: result.message };
+      // Registered BEFORE the await too, for the same reason: `revalidate`
+      // reads `pendingCommitsRef` in the same synchronous bubbling dispatch
+      // this callback started in, and it needs to see THIS write already
+      // there. Removed in `finally` — on refusal there is nothing this
+      // promise's resolution can tell `revalidate` (the write never landed),
+      // but leaving a settled promise in the set would make every later
+      // `revalidate` in this island's lifetime await an already-resolved
+      // no-op forever, which is harmless except as an unbounded `Set` that
+      // never shrinks.
+      const writePromise = commitAllocationAction(categoryId, year, month, cents);
+      pendingCommitsRef.current.add(writePromise);
+      try {
+        const result = await writePromise;
+        if (result.status === "error") {
+          // NOTHING WAS COMMITTED, so the dirty flag must not survive. It is set
+          // before the await (see above) and was never cleared on the refusal
+          // path — so a rejected commit (a stale tab editing a category archived
+          // in another tab) left the flag standing, and the next blur ran the
+          // refresh anyway. Any failure there then reported "your change was
+          // saved, but this page couldn't refresh" and logged "after a committed
+          // write" about a write that never happened. Reporting a save that did
+          // not occur is the mirror image of the defect this whole branch closes,
+          // and it is the worse direction: the user stops trying.
+          //
+          // DECREMENT, never clear. The counter is shared by every row in the
+          // island, so assigning 0 here cancelled the pending flush for any
+          // sibling commit that had already SUCCEEDED — trading a false warning
+          // for a withheld refresh after a durable write, which is the same
+          // defect pointed the other way. Undoing this commit's own increment
+          // leaves exactly the siblings' work outstanding.
+          dirtyRef.current = Math.max(0, dirtyRef.current - 1);
+          return { ok: false, message: result.message };
+        }
+        setAllocations((prev) => {
+          const next = new Map(prev);
+          next.set(categoryId, result.allocation);
+          return next;
+        });
+        return { ok: true };
+      } finally {
+        pendingCommitsRef.current.delete(writePromise);
       }
-      setAllocations((prev) => {
-        const next = new Map(prev);
-        next.set(categoryId, result.allocation);
-        return next;
-      });
-      return { ok: true };
     },
     [year, month],
   );

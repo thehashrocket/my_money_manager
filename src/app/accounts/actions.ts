@@ -240,7 +240,7 @@ export async function updateLiabilityBalanceAction(
       cents === account.startingBalanceCents &&
       startingBalanceDate === account.startingBalanceDate
     ) {
-      return { status: "ok", message: `${account.name} is unchanged.` };
+      return { status: "ok", message: `${account.name} is unchanged.`, warning: undefined };
     }
 
     db.update(schema.accounts)
@@ -432,8 +432,8 @@ export async function refreshLiabilityBalanceAction(
   formData: FormData,
 ): Promise<AccountsActionState> {
   try {
-    const accountId = Number(formData.get("accountId"));
-    if (!Number.isInteger(accountId) || accountId <= 0) {
+    const accountId = readPositiveIntField(formData, "accountId");
+    if (accountId === null) {
       return fail("That account no longer exists.");
     }
 

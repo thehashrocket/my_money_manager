@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.1] - 2026-09-15
+## [1.2.2] - 2026-09-15
+
+### Fixed
+- **A credit card charge you'd entered by hand before connecting the card to your bank could get counted twice.** Once a card starts importing its own transactions, the bank's own record of a charge you'd already typed in yourself could arrive as a second, separate entry — with no warning, because the two didn't look identical (different date, different description). Syncing that card now stops and tells you to remove the hand-entered charge first, instead of importing anything for it that run. This is a real gap for anyone hand-entering a card's activity before linking it, though on this app's own ledger it has never had a chance to happen.
+- **A quick edit to a budget category, followed immediately by leaving the page, could occasionally leave the dashboard and Goals showing figures from just before that edit.** The page was telling the dashboard to refresh itself before your change had actually finished saving. Now it waits for every change on the page to finish first.
+
+### Changed
+- **Tightened the safeguard that stops a "your change saved, but the page couldn't refresh" warning from silently going missing.** A handful of internal result types could previously drop that warning without anyone noticing until it mattered; that's no longer possible to do by accident. No visible change if everything was already working, which it was — this closes off a way it could have quietly stopped.
 
 ### Fixed
 - **The dashboard could show numbers from before your last budget edit.** Allocate money to a category, copy last month's budget forward, rename or archive a category, or change a rollover setting, then go Home — the "This month" summary and "Closest to limit" tile could still be showing the figures from before that change, until something unrelated happened to refresh them. Every one of those actions now tells the dashboard to catch up, so it reflects what you just did.

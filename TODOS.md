@@ -2522,8 +2522,26 @@ tests across 117 files.
       `/pr-review-toolkit` section at the end of this file. Kept rather than
       deleted because "we thought it was inference" is the useful part.
 
-- [ ] **P2** — **`/accounts` has ONE status line and `_charge-dialog.tsx`
-      renders a second one by hand.** `src/app/accounts/_status.tsx` was
+- [x] **P2 — SUPERSEDED same day (2026-09-09) by v0.27.0's `action-status.tsx`
+      consolidation, verified against the current code during the 2026-09-15
+      `/plan-eng-review` triage.** `src/app/accounts/_status.tsx` (named below)
+      no longer exists — it was replaced by the shared
+      `src/components/ledger/action-status.tsx`, whose own docblock names
+      `_charge-dialog.tsx` explicitly and states the split this entry called a
+      problem is the DESIGNED exception: "`_charge-dialog.tsx` does not render
+      it [`<ActionStatus>`] at all: it CLOSES on success, so it imports
+      `statusRole`/`warningOf` and sends the warning to a toast." That is
+      exactly the second of the two ways out this entry proposed — export the
+      message/role primitives so the dialog cannot re-derive them differently
+      — already taken. The dialog's own markup still exists (it needs DS56's
+      "Reconcile instead →" action button inline with the refusal, which
+      `<ActionStatus>` does not support), but it is built from the SAME
+      `statusRole`/`warningOf` functions the shared component uses internally,
+      not a second derivation of the rule. Left as history rather than
+      deleted, per this file's own header: this is exactly the class of entry
+      the 2026-09-09 audit warns can flatter the backlog by staying open after
+      the code has already moved past it.
+- [x] **P2 — SUPERSEDED, historical text below.** `src/app/accounts/_status.tsx` was
       extracted on this branch precisely because `_balance-forms.tsx` and
       `_card-terms-form.tsx` carried byte-identical private copies, and its
       docblock argues the rules at length: `role="alert"` for a refusal AND for
@@ -2871,7 +2889,49 @@ per the plan's own "residuals" section.
       one-line patch, so not done here. (`src/app/accounts/_balance-forms.tsx`,
       `src/app/accounts/actions.ts`, `src/lib/accounts/resolveBalanceAction.ts`)
 
-- [ ] **P1 — a card's PRE-EXISTING manual history (before it was ever linked
+- [x] **P1 — DONE (2026-09-15), CORRECTED same day by `/ship`'s own
+      adversarial review before this branch ever merged.** The design
+      decision named below was made (refuse-to-stage, matching D8.3's own
+      posture, over warn-and-acknowledge — no new UI surface, reuses the
+      existing per-account `/sync` warning channel every other
+      withheld-account case already renders through). The FIRST version of
+      this fix scoped `hasPreExistingManualCardHistory` to manual rows dated
+      strictly after the account's anchor, and its remedy text offered
+      Reconcile as an alternative to deleting the row. Both were wrong, and
+      Codex's adversarial pass reproduced why against production functions:
+      Star One's `posted` date is a SETTLEMENT date, routinely a day or more
+      after a hand-typed purchase date, so reconciling the anchor to "the day
+      after the manual entry's date" does not stop the bank's own duplicate
+      from posting even LATER — after the new anchor, past both the D8.1
+      cutover and content dedup (different memo) — landing a real,
+      warning-free double-count. The same review found the anchor read was
+      also rule 11's exact "read before await, used after" shape: taken
+      before `await fetchAccounts(...)` and never re-verified, so an Undo
+      landing mid-fetch could move the TRUE anchor while the stale one still
+      gated the check.
+      **The fix for both: the guard is not anchor-relative at all.**
+      `hasPreExistingManualCardHistory(accountId, db)` now checks for ANY
+      manual row on the account, full stop — the only remedy that actually
+      closes the hole is removing the row (`removeCardActivity`), which is
+      also now the ONLY remedy the warning names. Dropping the anchor
+      comparison closes the race too: there is no anchor value left to read,
+      so nothing can go stale across the fetch. `finaliseBalances` also no
+      longer receives a real `reportedBalanceCents`/`availableBalanceCents`/
+      `balanceDate` for a blocked card (a Claude adversarial finding in the
+      same pass) — left in place, they would have manufactured a non-null
+      `driftCents` for an account this run deliberately left unverified,
+      matching the exact fabricated-signal class rule 1 already names for
+      every OTHER withheld-account case in this file. 12 tests in
+      `sync.test.ts`'s guard block (the anchor-relative "does NOT block
+      ON/BEFORE the anchor" case is now INVERTED — it blocks there too — plus
+      new regression tests reproducing both Codex findings directly: manual
+      history on/before the anchor still blocks, and reconciling forward does
+      NOT lift the block) and 6 in the new module's own unit test (anchor
+      dropped from every case), 2108 total pass, `tsc --noEmit` clean.
+      (`src/lib/simplefin/sync.ts`,
+      `src/lib/accounts/hasPreExistingManualCardHistory.ts`)
+- [x] **P1 — HISTORICAL TEXT BELOW, kept per this file's own practice of not
+      deleting a closed entry's reasoning.** a card's PRE-EXISTING manual history (before it was ever linked
       to SimpleFIN) is not reconciled or guarded at the moment it starts
       importing, and would double-count silently if any exists (found
       independently by three adversarial review passes: a Claude subagent,

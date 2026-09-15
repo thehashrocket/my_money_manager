@@ -36,7 +36,7 @@ export type CreateAccountField =
  */
 export type CreateAccountState =
   | { status: "idle" }
-  | { status: "ok"; message: string; warning?: string }
+  | { status: "ok"; message: string; warning: string | undefined }
   | { status: "error"; message: string; field?: CreateAccountField };
 
 export const IDLE_CREATE_ACCOUNT: CreateAccountState = { status: "idle" };
