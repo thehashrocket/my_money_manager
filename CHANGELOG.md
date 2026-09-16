@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-09-15
+
+### Changed
+- **The "Remember" checkbox on the categorize and transactions pages now shares one implementation instead of two independently-maintained copies.** Both pages had grown their own hand-written version of "does this checkbox get to save or remove a category rule right now," and it had already drifted once — a fix landing on one page without the other. It's now one shared piece of logic both pages call.
+
+### Fixed
+- **A ticked "Remember" checkbox could silently re-arm after you'd already picked a different category and moved on.** Tick "Remove conflicting rule," change your mind and pick something else, then land back on a choice that would do the same thing — the checkbox could re-check itself with no new click. Consent is now cleared for good the moment what the checkbox would actually do changes, instead of just being hidden until you happen to return to the same choice.
+- **A ticked "Remember" checkbox could carry over to a different category or merchant than the one you confirmed.** If a bulk move changed which category a checked row would train, or a background merchant-name cleanup changed which merchant it would train against, the checkbox could stay checked and submit against the new target instead of the one you actually agreed to.
+
 ## [1.3.1] - 2026-09-15
 
 ### Fixed

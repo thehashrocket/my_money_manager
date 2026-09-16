@@ -4,17 +4,14 @@ import Link from "next/link";
 import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
-import {
-  classifyKeyTrainability,
-  describeRuleAction,
-  ruleActionLabel,
-} from "@/lib/categorize/keyTrainability";
+import { resolveRememberUi } from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
+import { useRememberConsent } from "@/components/ledger/use-remember-consent";
 import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
 import { buildHref, type TransactionsFilterValues } from "./_filter-bar";
@@ -106,7 +103,6 @@ export function TransactionRowForm({
   const [currentCategoryName, setCurrentCategoryName] = useState<string | null>(
     row.categoryName,
   );
-  const [remember, setRemember] = useState(false);
   const [applyToPast, setApplyToPast] = useState(false);
   const [isPending, startTransition] = useTransition();
 
@@ -140,22 +136,10 @@ export function TransactionRowForm({
     if (pickerUntouched) {
       setPickerValue(row.categoryId !== null ? String(row.categoryId) : "");
     }
-    /* Ship review (Codex adversarial + structured, cross-model): `remember`
-       was cleared only inside `handlePick`, a user-driven picker change —
-       never here. `handlePick` now also clears whenever the ACTION KIND
-       changes (train vs remove-conflicting vs none, round 2's own fix), but
-       that only runs when the user actually repicks. A fresh
-       `row.existingRule` or `row.filedCategoryIds` from an unrelated
-       sibling row's write can change what the SAME kind of action would
-       even mean — e.g. `remove-conflicting` for "the rule points at
-       Groceries" silently becoming `remove-conflicting` for "the rule
-       points at Dining" — while the pick itself never moves, so
-       `handlePick` never runs at all (matches `_merchant-row.tsx`'s own
-       `prevGroup` reset, added for the identical reason on that surface).
-       Any revalidation-driven prop change clears it, same as `pickerValue`
-       resyncs above, so a tick always has to be re-made against the data
-       actually being submitted. */
-    setRemember(false);
+    // No explicit reset needed for Remember here — `useRememberConsent`'s
+    // mask stops matching on its own the moment `row.existingRule` or
+    // `row.filedCategoryIds` changes underneath it (the exact case that used
+    // to need this comment), on this same render.
   }
 
   const merchantFiltered = filterValues.merchant !== undefined;
@@ -163,70 +147,32 @@ export function TransactionRowForm({
   const pendingCategoryId = pickerValue === "" ? null : Number(pickerValue);
 
   /**
-   * Whether "Remember" may write a rule for this row's merchant key,
-   * evaluated against the category currently picked — mirrors
-   * `_merchant-row.tsx`'s `trainability`, same two-argument call so this
-   * agrees with the server's `categorizeTransaction` (which excludes the row
-   * itself from the evidence, since it is the one about to move).
-   * `row.filedCategoryIds` already does that exclusion (see its own
-   * docstring in `loadTransactions.ts`), so this agrees with the server
-   * exactly, not just conservatively.
+   * Everything the checkbox needs, from one call — mirrors
+   * `_merchant-row.tsx`'s `rememberUi`, same three-argument call (plus the
+   * merchant key) so this agrees with the server's `categorizeTransaction`
+   * (which excludes the row itself from the evidence, since it is the one
+   * about to move — `row.filedCategoryIds` already does that exclusion, see
+   * its own docstring in `loadTransactions.ts`, so this agrees with the
+   * server exactly, not just conservatively).
    */
-  const trainability = classifyKeyTrainability(
+  const rememberUi = resolveRememberUi(
     row.normalizedMerchant,
     row.filedCategoryIds,
-    pendingCategoryId,
-  );
-
-  /**
-   * `trainable === false` is not the whole story — see `describeRuleAction`'s
-   * own docstring (ship review, Codex adversarial + structured, cross-model).
-   * A refusal that CONTRADICTS `row.existingRule` still does something useful
-   * on submit: it removes that rule. The checkbox stays enabled for that
-   * case, with a different explanation than a flat refusal.
-   */
-  const ruleAction = describeRuleAction(
-    row.normalizedMerchant,
-    trainability,
     row.existingRule,
     pendingCategoryId,
   );
-  const ruleActionEnabled = ruleAction.kind !== "none";
-  // PR review, type-design pass (finding A): `RuleAction` now carries
-  // `message` on every non-"train" branch, so there is no need to keep
-  // `trainability` alive alongside `ruleAction` and rejoin them here.
-  const ruleActionMessage = ruleAction.kind === "train" ? undefined : ruleAction.message;
+  // Shared with `_merchant-row.tsx` (`use-remember-consent.ts`,
+  // maintainability review finding) — see that hook's own docstring.
+  const remember = useRememberConsent(row.normalizedMerchant, rememberUi.action, pendingCategoryId);
   // See the Save button's own comment (PR review, code-reviewer pass,
   // finding 2) for why the escape hatch needs this.
   const pickIsSelectable = leafCategories.some((c) => String(c.id) === pickerValue);
 
   const handlePick = (next: string) => {
     setPickerValue(next);
-    // Same reasoning as `_merchant-row.tsx`'s `handlePick`: clear the tick,
-    // don't just mask it, or picking a category that again offers SOME
-    // action resurrects a tick the user never re-made.
-    //
-    // Ship review, cycle 2 (Codex adversarial, second pass — P1): clearing
-    // only on a transition TO "none" was not enough. Tick Remember while the
-    // action is "train", then repick to a category where it becomes
-    // "remove-conflicting" (or the reverse) — the OLD code kept `remember`
-    // true across that transition, because the new kind was never "none".
-    // The checkbox then relabels to a DIFFERENT operation than the one the
-    // user actually consented to, and submitting does that different
-    // operation (deletes a rule nobody asked to delete, or trains one nobody
-    // asked to train). Consent has to be re-made whenever the OPERATION
-    // changes, not only when it disappears.
-    const nextPending = next === "" ? null : Number(next);
-    const nextVerdict = classifyKeyTrainability(row.normalizedMerchant, row.filedCategoryIds, nextPending);
-    const nextAction = describeRuleAction(
-      row.normalizedMerchant,
-      nextVerdict,
-      row.existingRule,
-      nextPending,
-    );
-    if (nextAction.kind !== ruleAction.kind) {
-      setRemember(false);
-    }
+    // No consent to clear here — `consentedSignature` is a mask, so a
+    // repick that changes what Remember would do simply stops matching it
+    // on this same render. See the field's own docstring above.
   };
 
   const rowId = useId();
@@ -246,7 +192,7 @@ export function TransactionRowForm({
         const result = await categorizeTransactionAction(formData);
         setCurrentCategoryId(newCategoryId);
         setCurrentCategoryName(newCategoryName);
-        setRemember(false);
+        remember.reset();
         setApplyToPast(false);
         onCategorized(priorCategoryId, result.updatedCount);
 
@@ -313,7 +259,7 @@ export function TransactionRowForm({
          at that moment would otherwise render at 60% until they happened to
          be hovering the row. */
       className={`${TXN_ROW_GRID} transition-opacity ${
-        currentCategoryId !== null && !merchantFiltered && ruleActionMessage === undefined
+        currentCategoryId !== null && !merchantFiltered && rememberUi.message === undefined
           ? "opacity-60 hover:opacity-100"
           : ""
       }`}
@@ -357,25 +303,23 @@ export function TransactionRowForm({
         <div className="flex flex-col gap-0.5">
           <label
             className={`flex items-center gap-1.5 text-xs ${
-              ruleActionEnabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
+              rememberUi.enabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
             }`}
-            title={ruleActionMessage}
+            title={rememberUi.message}
           >
             <input
               type="checkbox"
               name="rememberMerchant"
               value="true"
-              // Never `checked={remember}` alone — see `handlePick` above;
-              // the verdict moves with the category picked, so a box ticked
-              // while the key still offered SOME action has to un-tick on
-              // screen the moment the pick makes it a true no-op.
-              checked={remember && ruleActionEnabled}
-              disabled={!ruleActionEnabled}
-              aria-describedby={ruleActionMessage === undefined ? undefined : reasonId}
-              onChange={(e) => setRemember(e.target.checked)}
+              // `checked={remember.checked}` is a MASK, not the raw click
+              // state — see `useRememberConsent`'s own docstring for why.
+              checked={remember.checked}
+              disabled={!rememberUi.enabled}
+              aria-describedby={rememberUi.message === undefined ? undefined : reasonId}
+              onChange={remember.onChange}
               className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            {ruleActionLabel(ruleAction)}
+            {rememberUi.label}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-ink-2">
             <input
@@ -420,7 +364,15 @@ export function TransactionRowForm({
             isPending ||
             !pickerValue ||
             (pickerValue === String(currentCategoryId) &&
-              !(remember && ruleActionEnabled && pickIsSelectable))
+              // `remember.checked` can only be true when `rememberUi.enabled`
+              // is (a disabled checkbox's `onChange` can never fire, so
+              // `consentedSignature` can never take on a "none" signature) —
+              // but that's a property of `ruleActionSignature` never
+              // colliding across `kind`s, not something this expression
+              // enforces on its own. The explicit conjunct is defense in
+              // depth (red-team pass) against a future `RuleAction` variant
+              // or signature format change silently breaking that property.
+              !(remember.checked && rememberUi.enabled && pickIsSelectable))
           }
           className={`h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
         >
@@ -441,7 +393,7 @@ export function TransactionRowForm({
           importingCards={importingCards}
           onChanged={onPairingChanged}
         />
-        {ruleActionMessage === undefined ? null : (
+        {rememberUi.message === undefined ? null : (
           // Not a `title=` alone — unreachable by keyboard, unreliable to
           // screen readers. `basis-full` puts it on its own line within the
           // same flex row, matching `_merchant-row.tsx`'s equivalent.
@@ -449,7 +401,7 @@ export function TransactionRowForm({
             id={reasonId}
             className="basis-full text-xs text-ink-3 sm:text-right"
           >
-            {ruleActionMessage}
+            {rememberUi.message}
           </p>
         )}
       </div>
