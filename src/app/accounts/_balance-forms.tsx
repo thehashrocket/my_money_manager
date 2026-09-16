@@ -190,8 +190,10 @@ export function ReconcileForm({
               setTouched(true);
               setDirection("owe");
             }}
-            className={`px-3 py-1.5 text-sm ${
-              direction === "owe" ? "bg-ink-1 text-background" : "bg-card text-ink-2"
+            className={`px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+              direction === "owe"
+                ? "bg-ink-1 text-background"
+                : "bg-card text-ink-2 hover:bg-muted"
             }`}
           >
             You owe
@@ -203,8 +205,10 @@ export function ReconcileForm({
               setTouched(true);
               setDirection("owed");
             }}
-            className={`border-l border-border px-3 py-1.5 text-sm ${
-              direction === "owed" ? "bg-ink-1 text-background" : "bg-card text-ink-2"
+            className={`border-l border-border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+              direction === "owed"
+                ? "bg-ink-1 text-background"
+                : "bg-card text-ink-2 hover:bg-muted"
             }`}
           >
             You&apos;re owed
