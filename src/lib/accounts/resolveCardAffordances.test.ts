@@ -27,11 +27,12 @@ const MORTGAGE = {
 };
 
 describe("resolveCardAffordances", () => {
-  it("offers all three affordances for an unlinked card anchored in the past", () => {
+  it("offers all four affordances for an unlinked card anchored in the past", () => {
     expect(resolveCardAffordances(UNLINKED_CARD, "reconcile", TODAY)).toEqual({
       canAddCharge: true,
       canEditTerms: true,
       showReconcile: true,
+      allowsPositiveBalance: true,
     });
   });
 
@@ -46,14 +47,16 @@ describe("resolveCardAffordances", () => {
       canAddCharge: false,
       canEditTerms: true,
       showReconcile: true,
+      allowsPositiveBalance: true,
     });
   });
 
-  it("withholds canAddCharge and canEditTerms for a long-term liability (the mortgage)", () => {
+  it("withholds canAddCharge, canEditTerms and allowsPositiveBalance for a long-term liability (the mortgage) — rule 9's sign guard", () => {
     expect(resolveCardAffordances(MORTGAGE, "reconcile", TODAY)).toEqual({
       canAddCharge: false,
       canEditTerms: false,
       showReconcile: true,
+      allowsPositiveBalance: false,
     });
   });
 

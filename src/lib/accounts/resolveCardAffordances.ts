@@ -8,6 +8,7 @@ export type CardAffordances = {
   canAddCharge: boolean;
   canEditTerms: boolean;
   showReconcile: boolean;
+  allowsPositiveBalance: boolean;
 };
 
 /**
@@ -54,6 +55,16 @@ export function resolveCardAffordances(
     // repair stays reachable on a card anchored today.
     canEditTerms: !longTerm,
     showReconcile: balanceAction === "reconcile",
+    // rule 9's sign guard, relayed to `ReconcileForm`: a loan can never
+    // legitimately hold a positive balance (unlike a card after an
+    // overpayment), so the "You owe"/"You're owed" toggle isn't offered at
+    // all for one (rule 8 — a control that can only ever refuse). This used
+    // to be a fourth hand-computed `!isLongTermLiability(account.type)` at
+    // the `_account-row.tsx` call site, outside this function's own
+    // unification of every other liability-row gate — found by Red Team
+    // during /ship's pre-landing review as the exact drift shape this
+    // function was written to close.
+    allowsPositiveBalance: !longTerm,
   };
 }
 

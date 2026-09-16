@@ -193,9 +193,13 @@ export function AccountRow({
           // can never legitimately hold a positive balance (unlike a card
           // after an overpayment), so the "You're owed" option isn't offered
           // at all here — the same discipline rule 8 already applies to a
-          // kind change the server would always refuse. `longTerm` is this
-          // row's own already-computed predicate; nothing re-derives it.
-          allowsPositiveBalance={!longTerm}
+          // kind change the server would always refuse. RELAYED from
+          // `resolveCardAffordances`, same as `canAddCharge`/`canEditTerms`/
+          // `showReconcile` above — a hand-computed `!longTerm` at this call
+          // site used to be a fourth gate agreeing with that function by
+          // hand, the exact drift shape it exists to prevent (found by Red
+          // Team during /ship's pre-landing review).
+          allowsPositiveBalance={affordances.allowsPositiveBalance}
           // D-ANCHOR — see `_balance-forms.tsx`'s `ReconcileForm`. Only an
           // IMPORTING card can have a feed row arrive dated before a hand
           // Reconcile that already moved the anchor past it; an unlinked or
