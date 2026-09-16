@@ -37,6 +37,23 @@ src/
                    only ride on SUCCESS" is spelled once: putting one on error sends a
                    committed write back down the failure branch, which is the whole
                    defect guardRefresh exists to prevent
+  components/ledger/use-remember-consent.ts
+                   useRememberConsent(normalizedMerchant, action, pendingCategoryId) —
+                   the "Remember" checkbox's consent state, as of v1.3.2 shared by
+                   /categorize's _merchant-row.tsx and /transactions'
+                   _transaction-row.tsx (the last verbatim-identical logic left
+                   between the two once resolveRememberUi absorbed the verdict
+                   derivation itself). Masks `checked` against
+                   ruleActionSignature (lib/categorize/keyTrainability.ts) and
+                   INVALIDATES on a mismatch rather than merely masking it — a
+                   mask-only first version let a re-pick land back on a signature
+                   the user had already consented to under a different rule state,
+                   silently re-checking the box with no new click (a real,
+                   no-crafted-input bug an adversarial review reproduced).
+                   consentedSignature is this hook's OWN per-call useState, never a
+                   module-level or shared store, so each row keeps its own
+                   independent consent exactly as the two components' local state
+                   already did — only the CODE moved here, not the state
   db/              Drizzle schema + client singleton
   lib/             Pure functions: parsers, normalizer, categorization, money, utils
   lib/accounts/    loadAccountBalances — live per-account balance queries
@@ -294,6 +311,42 @@ src/
                    extracted from loadMerchantGroups' own inline copy so /transactions
                    could get the same per-merchant rule /categorize's MerchantGroup
                    already carried, without a second hand-rolled copy of the join
+                   resolveRememberUi(normalizedMerchant, filedCategoryIds,
+                   existingRule, pendingCategoryId) — added in v1.3.2, folding
+                   classifyKeyTrainability + describeRuleAction + the
+                   enabled/message/label derivation each render site used to
+                   compute by hand into ONE call, returning
+                   {action, enabled, message, label}. Closes the one way
+                   describeRuleAction could be handed a verdict computed from a
+                   DIFFERENT key than its own normalizedMerchant argument — both
+                   are now derived from the same inputs in the same call. Replaced
+                   ~40 hand-duplicated lines each in _merchant-row.tsx and
+                   _transaction-row.tsx (TODOS.md, 2026-09-15 P2)
+                   ruleActionSignature(normalizedMerchant, action,
+                   pendingCategoryId) — a RuleAction's identity for consent
+                   invalidation, read by useRememberConsent
+                   (components/ledger/use-remember-consent.ts): two renders whose
+                   signatures match are consenting to the exact same write. `kind`
+                   ALONE is not enough — a `remove-conflicting` action can repoint
+                   WHICH rule it would remove while `kind` and the pick both stay
+                   put (a sibling row's write repoints the existing rule), so
+                   `message` is folded into the signature too, sound because
+                   `categories_name_unique` (src/db/schema.ts) pins one category
+                   per name. `pendingCategoryId` is REQUIRED even for "train",
+                   which carries no target in its own message — a bare "train"
+                   signature let stale consent survive an UNRELATED bulkRetarget
+                   silently resyncing the row's picker to a new category, with the
+                   box staying checked for a write the user never confirmed against
+                   the new target. `normalizedMerchant` is REQUIRED one layer up
+                   for the same reason: _transaction-row.tsx keys its rows by
+                   transaction id, not merchant, so a row's component instance
+                   SURVIVES pnpm db:backfill-merchants renaming its
+                   normalized_merchant in place (rule 10) — the one write path
+                   that changes a row's key without changing which row it is — and
+                   a ticked box would otherwise submit a rule for the NEW merchant
+                   under consent given for the OLD one. Both gaps were found by
+                   Codex structured/adversarial review after the signature-based
+                   consent mask itself had already shipped
                    resolveKeyTrainability — the drizzle half: loadFiledCategoryIds +
                    resolveKeyTrainability(db, key, pendingCategoryId, excludeTxnIds).
                    excludeTxnIds are the already-filed rows the caller is about to
