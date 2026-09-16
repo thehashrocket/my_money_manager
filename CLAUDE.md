@@ -37,13 +37,36 @@ src/
                    only ride on SUCCESS" is spelled once: putting one on error sends a
                    committed write back down the failure branch, which is the whole
                    defect guardRefresh exists to prevent
+  components/ledger/remember-checkbox.tsx
+                   RememberCheckbox({rememberUi, checked, onChange, reasonId,
+                   minTouchTarget?}) — added in v1.3.3, the checkbox `<input>`
+                   plus its wrapping `<label>`: the render half of the
+                   consolidation resolveRememberUi/useRememberConsent already
+                   did for the logic half. Shared by /categorize's
+                   _merchant-row.tsx, /transactions' _transaction-row.tsx and,
+                   as of the same release, _retarget-form.tsx — the three had
+                   already drifted into a third verbatim-structure copy of
+                   this exact sub-tree before the extraction. The reason `<p>`
+                   below it stays un-extracted on purpose: its layout
+                   genuinely differs per caller (a flex-wrap sibling needing
+                   `basis-full` on two surfaces, a plain block on the third),
+                   which is real per-context difference, not drift.
+                   `minTouchTarget` defaults to false rather than being
+                   unconditional — only /categorize's row currently gives this
+                   checkbox DS66's 44px touch floor (`min-h-11`);
+                   _transaction-row.tsx and _retarget-form.tsx don't yet, a
+                   pre-existing gap the extraction surfaced rather than
+                   introduced (TODOS.md)
   components/ledger/use-remember-consent.ts
                    useRememberConsent(normalizedMerchant, action, pendingCategoryId) —
-                   the "Remember" checkbox's consent state, as of v1.3.2 shared by
+                   the "Remember" checkbox's consent state, shared as of v1.3.2 by
                    /categorize's _merchant-row.tsx and /transactions'
-                   _transaction-row.tsx (the last verbatim-identical logic left
+                   _transaction-row.tsx (then the last verbatim-identical logic left
                    between the two once resolveRememberUi absorbed the verdict
-                   derivation itself). Masks `checked` against
+                   derivation itself), and as of v1.3.3 by _retarget-form.tsx too —
+                   closing TODOS.md's 2026-09-15 P2, where RetargetForm's checkbox
+                   had been the one Remember control on /transactions with no
+                   guard at all. Masks `checked` against
                    ruleActionSignature (lib/categorize/keyTrainability.ts) and
                    INVALIDATES on a mismatch rather than merely masking it — a
                    mask-only first version let a re-pick land back on a signature
@@ -52,7 +75,7 @@ src/
                    no-crafted-input bug an adversarial review reproduced).
                    consentedSignature is this hook's OWN per-call useState, never a
                    module-level or shared store, so each row keeps its own
-                   independent consent exactly as the two components' local state
+                   independent consent exactly as the three components' local state
                    already did — only the CODE moved here, not the state
   db/              Drizzle schema + client singleton
   lib/             Pure functions: parsers, normalizer, categorization, money, utils
@@ -347,6 +370,24 @@ src/
                    under consent given for the OLD one. Both gaps were found by
                    Codex structured/adversarial review after the signature-based
                    consent mask itself had already shipped
+                   filedCategoryIdsAfterMove(filedCategoryIds, movingFromCategoryId)
+                   — added in v1.3.3 for RetargetForm's Remember guard: what
+                   filedCategoryIds reads once every row filed under the FROM
+                   category has moved. bulkRetarget's matchingRows selects
+                   exactly (merchant, categoryId = fromCategoryId,
+                   transferPairId IS NULL), so dropping that id out of the
+                   list is mathematically identical to passing the whole
+                   moved set as resolveKeyTrainability's own excludeTxnIds,
+                   without RetargetForm needing the row ids client-side —
+                   pinned by a parity test in resolveKeyTrainability.test.ts
+                   against the real DB-backed exclusion, not just the claim.
+                   Closes TODOS.md's 2026-09-15 P2: RetargetForm had been the
+                   one Remember checkbox on /transactions with no guard at
+                   all (`filed` comes from summarizeByCategory, which unlike
+                   filedCategoryEvidenceWhere does not skip an archived
+                   category, so it was the wrong evidence source to build a
+                   client verdict from) — `page.tsx` now threads a separate
+                   filedCategoryIds prop from loadFiledCategoryIds instead
                    resolveKeyTrainability — the drizzle half: loadFiledCategoryIds +
                    resolveKeyTrainability(db, key, pendingCategoryId, excludeTxnIds).
                    excludeTxnIds are the already-filed rows the caller is about to
