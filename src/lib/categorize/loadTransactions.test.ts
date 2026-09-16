@@ -3,7 +3,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { createOrUpdateRule } from "@/lib/rules";
-import { escapeLikePattern, loadTransactions, summarizeByCategory } from "./loadTransactions";
+import {
+  escapeLikePattern,
+  filedBreakdownRows,
+  loadTransactions,
+  summarizeByCategory,
+  uncategorizedCount,
+  type CategoryBreakdownRow,
+} from "./loadTransactions";
 
 let handle: TestDbHandle;
 
@@ -782,6 +789,37 @@ describe("loadTransactions — merchant filter (D2)", () => {
         pageSize: 50,
       }).totalCount,
     ).toBe(2);
+  });
+});
+
+/**
+ * `MerchantSummary` (`/transactions/page.tsx`) reads exactly one bucket as
+ * "uncategorized" and the rest as "filed". These are pure over a
+ * `CategoryBreakdownRow[]`, extracted so the null-vs-non-null split is
+ * provably exercised — inlined, swapping which bucket is which passed the
+ * whole suite, which would have the header name a FILED category's count as
+ * the number left to categorize.
+ */
+describe("uncategorizedCount / filedBreakdownRows", () => {
+  const breakdown: CategoryBreakdownRow[] = [
+    { categoryId: null, categoryName: null, count: 5 },
+    { categoryId: 1, categoryName: "Gas", count: 49 },
+    { categoryId: 2, categoryName: "Groceries", count: 3 },
+  ];
+
+  it("uncategorizedCount reads only the null-category bucket", () => {
+    expect(uncategorizedCount(breakdown)).toBe(5);
+  });
+
+  it("uncategorizedCount is 0 when there is no null bucket at all", () => {
+    expect(uncategorizedCount(breakdown.filter((r) => r.categoryId !== null))).toBe(0);
+  });
+
+  it("filedBreakdownRows excludes the null-category bucket and nothing else", () => {
+    expect(filedBreakdownRows(breakdown)).toEqual([
+      { categoryId: 1, categoryName: "Gas", count: 49 },
+      { categoryId: 2, categoryName: "Groceries", count: 3 },
+    ]);
   });
 });
 

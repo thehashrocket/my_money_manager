@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   flatten,
+  isAmountRangeInverted,
+  isDateRangeInverted,
   MAX_PAGE_SIZE,
   MAX_SEARCH_LENGTH,
+  pendingFilterChipLabel,
   resolveIsPending,
   searchParamsSchema,
 } from "./searchParams";
@@ -235,5 +238,66 @@ describe("resolveIsPending", () => {
 
   it("an absent param does not filter on pending at all", () => {
     expect(resolveIsPending(undefined)).toBeUndefined();
+  });
+});
+
+describe("pendingFilterChipLabel", () => {
+  // Same union, same swapped-branches failure shape as `resolveIsPending`
+  // above — a wrong result on a filter chip, previously unreachable from a
+  // test while it lived as an inline if/else-if in `page.tsx`.
+  it('"posted" reads "Posted only"', () => {
+    expect(pendingFilterChipLabel("posted")).toBe("Posted only");
+  });
+
+  it('"pending" reads "Pending only"', () => {
+    expect(pendingFilterChipLabel("pending")).toBe("Pending only");
+  });
+
+  it('"all" renders no chip', () => {
+    expect(pendingFilterChipLabel("all")).toBeNull();
+  });
+
+  it("an absent param renders no chip", () => {
+    expect(pendingFilterChipLabel(undefined)).toBeNull();
+  });
+});
+
+describe("isDateRangeInverted", () => {
+  it("is true when dateFrom is strictly after dateTo", () => {
+    expect(isDateRangeInverted("2026-04-30", "2026-04-01")).toBe(true);
+  });
+
+  it("is false when the range is in order", () => {
+    expect(isDateRangeInverted("2026-04-01", "2026-04-30")).toBe(false);
+  });
+
+  it("is false for an equal bound — a one-day range is valid", () => {
+    expect(isDateRangeInverted("2026-04-01", "2026-04-01")).toBe(false);
+  });
+
+  it("is false when either bound is unset", () => {
+    expect(isDateRangeInverted(undefined, "2026-04-30")).toBe(false);
+    expect(isDateRangeInverted("2026-04-01", undefined)).toBe(false);
+    expect(isDateRangeInverted(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("isAmountRangeInverted", () => {
+  it("is true when amountMin is above amountMax", () => {
+    expect(isAmountRangeInverted(10000, 500)).toBe(true);
+  });
+
+  it("is false when the range is in order", () => {
+    expect(isAmountRangeInverted(500, 10000)).toBe(false);
+  });
+
+  it("is false for equal bounds — a single-amount range is valid", () => {
+    expect(isAmountRangeInverted(500, 500)).toBe(false);
+  });
+
+  it("is false when either bound is unset", () => {
+    expect(isAmountRangeInverted(undefined, 10000)).toBe(false);
+    expect(isAmountRangeInverted(500, undefined)).toBe(false);
+    expect(isAmountRangeInverted(undefined, undefined)).toBe(false);
   });
 });
