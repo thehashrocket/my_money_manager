@@ -367,6 +367,24 @@ export type CategoryBreakdownRow = {
 };
 
 /**
+ * The uncategorized count out of a `summarizeByCategory` breakdown.
+ *
+ * Extracted out of `MerchantSummary` (`/transactions/page.tsx`) so the
+ * null-vs-non-null bucket split is provably exercised: inlined, swapping
+ * which bucket `MerchantSummary` reads as "uncategorized" and which it reads
+ * as "filed" passed the whole test suite, which would have the header name a
+ * FILED category's count as the number left to categorize.
+ */
+export function uncategorizedCount(breakdown: CategoryBreakdownRow[]): number {
+  return breakdown.find((r) => r.categoryId === null)?.count ?? 0;
+}
+
+/** The complement of `uncategorizedCount` — every already-filed bucket. */
+export function filedBreakdownRows(breakdown: CategoryBreakdownRow[]): CategoryBreakdownRow[] {
+  return breakdown.filter((r) => r.categoryId !== null);
+}
+
+/**
  * T9/D18 — how the rows matching `filter` are already filed, biggest group
  * first.
  *

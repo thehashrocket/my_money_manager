@@ -133,3 +133,51 @@ export function resolveIsPending(
       return undefined;
   }
 }
+
+/**
+ * The `pending` filter's chip label — a second mapping of the same union,
+ * kept beside `resolveIsPending` because the failure shape is identical: a
+ * swapped pair of branches renders "Pending only" for a posted-filtered list,
+ * a wrong result on a filter chip, and while this lived as an inline
+ * if/else-if in `page.tsx`'s `FilterChips` no test could reach it (mutating
+ * the two branches passed the whole suite).
+ */
+export function pendingFilterChipLabel(
+  pending: "posted" | "pending" | "all" | undefined,
+): "Posted only" | "Pending only" | null {
+  switch (pending) {
+    case "posted":
+      return "Posted only";
+    case "pending":
+      return "Pending only";
+    default:
+      return null;
+  }
+}
+
+/**
+ * `dateFrom > dateTo` is a lexicographic comparison over `z.iso.date()`
+ * strings, which is only valid because the schema already rejects a
+ * calendar-invalid date. Extracted so `page.tsx`'s 404 guard is provably
+ * exercised: inlined, the comparison direction (`>` vs `<`) could be flipped
+ * with the whole suite staying green, silently accepting a range that
+ * excludes every row instead of rejecting the request.
+ */
+export function isDateRangeInverted(
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+): boolean {
+  return dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo;
+}
+
+/**
+ * Same shape as `isDateRangeInverted`, over the post-`Math.abs` magnitudes
+ * `amountSchema` produces (the sign is dropped, so both bounds are cents
+ * magnitudes, never signed amounts).
+ */
+export function isAmountRangeInverted(
+  amountMin: number | undefined,
+  amountMax: number | undefined,
+): boolean {
+  return amountMin !== undefined && amountMax !== undefined && amountMin > amountMax;
+}

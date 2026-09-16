@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
@@ -9,9 +11,11 @@ import {
 import {
   buildHref,
   CLEARED_FILTERS,
+  clearFiltersHref,
   filterValuesToSearchParams,
   hasNonMerchantFilters,
   merchantSearchRecoveryHref,
+  thisMonthHref,
   VISIBLE_FIELDS,
   type TransactionsFilterValues,
 } from "./_filter-bar";
@@ -99,6 +103,46 @@ describe("buildHref", () => {
     expect(url.searchParams.has("merchant")).toBe(false);
     expect(url.searchParams.get("dateFrom")).toBe("2026-04-01");
     expect(url.searchParams.get("dateTo")).toBe("2026-04-30");
+  });
+});
+
+/**
+ * `FilterBar`'s two quick links, extracted so each is pinned by its own
+ * test rather than only by rendering the page. Both were previously inline
+ * closures inside `FilterBar` — unreachable from `vitest` (`environment:
+ * "node"`) — and each has exactly one property worth proving: mutating
+ * `thisMonthHref` to drop the `...values` spread, or `clearFiltersHref` to
+ * `buildHref(CLEARED_FILTERS)` (dropping the `pageSize` carry-forward),
+ * previously passed the whole suite.
+ */
+describe("thisMonthHref", () => {
+  it("overrides the date range to the given month", () => {
+    const url = new URL(thisMonthHref(emptyValues, 2026, 4), "http://x");
+    expect(url.searchParams.get("dateFrom")).toBe("2026-04-01");
+    expect(url.searchParams.get("dateTo")).toBe("2026-04-30");
+  });
+
+  it("keeps every other active filter — the bug class this guards against", () => {
+    const url = new URL(
+      thisMonthHref({ ...emptyValues, merchant: "AMAZON", accountId: 3 }, 2026, 4),
+      "http://x",
+    );
+    expect(url.searchParams.get("merchant")).toBe("AMAZON");
+    expect(url.searchParams.get("accountId")).toBe("3");
+  });
+});
+
+describe("clearFiltersHref", () => {
+  it("clears every filter", () => {
+    const href = clearFiltersHref({ ...emptyValues, search: "amazon", accountId: 3 });
+    expect(href).toBe("/transactions");
+  });
+
+  it("keeps a deliberate pageSize — the bug class this guards against", () => {
+    const href = clearFiltersHref({ ...emptyValues, search: "amazon", pageSize: 200 });
+    const url = new URL(href, "http://x");
+    expect([...url.searchParams.keys()]).toEqual(["pageSize"]);
+    expect(url.searchParams.get("pageSize")).toBe("200");
   });
 });
 
@@ -380,6 +424,86 @@ describe("the form's visible/hidden field partition", () => {
       (name) => !VISIBLE_FIELDS.has(name),
     );
     expect(hidden.sort()).toEqual(["includeTransfers", "merchant", "pageSize"]);
+  });
+
+  /**
+   * The gate `VISIBLE_FIELDS` itself cannot close (see the docstring above
+   * this file's `VISIBLE_FIELDS` export). `vitest.config.mts` is
+   * `environment: "node"`, so nothing here can render `FilterBar` and read
+   * back the DOM's `name=` attributes — that would need a jsdom project this
+   * repo does not have (CLAUDE.md rules UI-component tests out of V1). A
+   * source-text scan closes the same gap without one: it reads `name="..."`
+   * string literals directly out of the component's own file, which is
+   * "the form's contract" as a fact about the source rather than about a
+   * render. `name={name}` (the generated hidden-input line) uses no string
+   * literal and is deliberately invisible to the `/name="([a-zA-Z]+)"/g`
+   * pattern below — it is the mechanism VISIBLE_FIELDS' complement already
+   * covers, not a second source of visible controls.
+   *
+   * Renaming `<select name="pending">` to `name="status"` while leaving
+   * `"pending"` in `VISIBLE_FIELDS` fails the first assertion: the set now
+   * names a control the file no longer has, which is exactly the case where
+   * "Apply filters" silently drops the Status filter on every submit.
+   *
+   * Scoped to the `<form>...</form>` block specifically — a red-team pass
+   * found the whole-file scan has a FALSE-NEGATIVE mode more consequential
+   * than the false-positive one above: a real control removed while a
+   * comment or docstring elsewhere in the file still happens to contain the
+   * quoted string `name="fieldName"` (leftover documentation, an example)
+   * would keep passing, masking exactly the silent-drop bug this test
+   * exists to catch.
+   *
+   * Two more bypasses, both reproduced in memory by a Codex adversarial pass
+   * before this shape existed:
+   *
+   *   1. `\bname="` matches inside `data-name="..."` too — `\b` fires on the
+   *      hyphen, which is a non-word character, so a control renamed to a
+   *      `data-name` attribute (not a real form field name at all) still
+   *      counted as "visible". `(?<![\w-])` in front of `name=` requires the
+   *      preceding character be neither a word character NOR a hyphen, which
+   *      rejects `data-name=` while still matching `name=` at the start of a
+   *      tag or preceded by whitespace.
+   *   2. Wrapping a whole control in a JSX comment (`{/* <select
+   *      name="pending">…</select> * /}`) leaves the literal string
+   *      `name="pending"` sitting in the source text untouched — commenting
+   *      out a control is indistinguishable from having it, to a scan that
+   *      never strips comments. Block comments are stripped from the scoped
+   *      form source before the regex runs, which is sufficient because JSX's
+   *      only comment syntax IS a block comment (`{/* … * /}`); there is no
+   *      line-comment equivalent inside JSX to strip.
+   *
+   * Renaming `<select name="pending">` to `name="status"` while leaving
+   * `"pending"` in `VISIBLE_FIELDS` still fails the first assertion: the set
+   * now names a control the file no longer has, which is exactly the case
+   * where "Apply filters" silently drops the Status filter on every submit.
+   *
+   * `[a-zA-Z0-9]+`, not `[a-zA-Z]+` (Claude adversarial pass, finding 2): a
+   * future field name carrying a digit would otherwise never be captured by
+   * the pattern at all, failing this test LOUDLY for a reason unrelated to
+   * the bug class it exists to catch — a maintenance trap, not a silent
+   * miss, but a cheap one to close.
+   *
+   * `formStart`/`formEnd` locate the FIRST textual occurrence of `<form`/
+   * `</form>` in the whole file (Claude adversarial pass, finding 3) — inert
+   * today (exactly one of each, verified by grep), but a future comment
+   * containing both literal substrings together (e.g. "here's what the old
+   * markup looked like") would misresolve the slice. Recorded as a known
+   * extension of the same root cause — a text scan rather than a real
+   * parse — not fixed here; closing it properly needs an actual JSX/AST
+   * read, which is more machinery than this one test warrants today.
+   */
+  it("VISIBLE_FIELDS names exactly the name=\"...\" literals actually in the file", () => {
+    const source = readFileSync(join(import.meta.dirname, "_filter-bar.tsx"), "utf8");
+    const formStart = source.indexOf("<form");
+    const formEnd = source.indexOf("</form>");
+    if (formStart === -1 || formEnd === -1) {
+      throw new Error("Could not locate the <form>...</form> block in _filter-bar.tsx");
+    }
+    const formSource = source.slice(formStart, formEnd).replace(/\/\*[\s\S]*?\*\//g, "");
+    const literalNames = new Set(
+      [...formSource.matchAll(/(?<![\w-])name="([a-zA-Z0-9]+)"/g)].map((m) => m[1]),
+    );
+    expect([...VISIBLE_FIELDS].sort()).toEqual([...literalNames].sort());
   });
 });
 

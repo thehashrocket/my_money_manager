@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **A ticked "Remember" checkbox could silently re-arm after you'd already picked a different category and moved on.** Tick "Remove conflicting rule," change your mind and pick something else, then land back on a choice that would do the same thing — the checkbox could re-check itself with no new click. Consent is now cleared for good the moment what the checkbox would actually do changes, instead of just being hidden until you happen to return to the same choice.
 - **A ticked "Remember" checkbox could carry over to a different category or merchant than the one you confirmed.** If a bulk move changed which category a checked row would train, or a background merchant-name cleanup changed which merchant it would train against, the checkbox could stay checked and submit against the new target instead of the one you actually agreed to.
 
+## [1.3.1] - 2026-09-15
+
+### Fixed
+- **The transactions page's filter header and quick-filter links had no test proving their logic couldn't silently invert.** A review pass found five comparisons and lookups — the date and amount range guards, the "Pending only"/"Posted only" label, and which count the header calls "uncategorized" vs "already filed" — that could all have their logic flipped and every existing test would still pass. They're now each pulled into their own tested function, so a future change that gets one of these backwards fails a test instead of silently mislabeling the page.
+- **The "This month" and "Clear filters" quick links on the transactions page had no test proving what they actually build.** The link-building logic itself was tested in isolation, but nothing checked that the page's own buttons called it correctly — dropping the page size or the current filters from one of those links would have passed every test. Both are now named, exported functions with their own tests.
+- **A renamed or removed filter field could silently stop being submitted, with nothing catching it.** The filter form's "which fields need a hidden input to survive a submit" list was tested against itself, but nothing checked that list against the actual form fields — so renaming a filter's input without updating the list would pass every test while quietly dropping that filter on every search. A new test reads the form's own source and checks the two agree.
+
 ## [1.3.0] - 2026-09-15
 
 ### Added
