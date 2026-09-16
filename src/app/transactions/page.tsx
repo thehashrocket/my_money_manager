@@ -12,8 +12,10 @@ import {
 import { loadCardPaymentCandidates } from "@/lib/accounts/loadCardPaymentCandidates";
 import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
 import {
+  filedBreakdownRows,
   loadTransactions,
   summarizeByCategory,
+  uncategorizedCount,
   type CategoryBreakdownRow,
   type FilterPredicateInput,
 } from "@/lib/categorize/loadTransactions";
@@ -22,6 +24,9 @@ import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import {
   DEFAULT_PAGE_SIZE,
   flatten,
+  isAmountRangeInverted,
+  isDateRangeInverted,
+  pendingFilterChipLabel,
   resolveIsPending,
   searchParamsSchema,
   type RawSearchParams,
@@ -110,7 +115,7 @@ export default async function TransactionsPage({
   // becomes 10000 and trips this guard. The user gets Next's stock 404 with no
   // field named. A date bound and a cents magnitude are schema-space, not
   // ledger content, so unlike a `search`/`merchant` value they are safe to log.
-  if (dateFrom !== undefined && dateTo !== undefined && dateFrom > dateTo) {
+  if (isDateRangeInverted(dateFrom, dateTo)) {
     console.error("[/transactions] rejected searchParams", {
       reason: "dateFrom is after dateTo",
       dateFrom,
@@ -118,7 +123,7 @@ export default async function TransactionsPage({
     });
     notFound();
   }
-  if (amountMin !== undefined && amountMax !== undefined && amountMin > amountMax) {
+  if (isAmountRangeInverted(amountMin, amountMax)) {
     console.error("[/transactions] rejected searchParams", {
       reason: "amountMin is above amountMax (both are magnitudes — the sign is dropped)",
       amountMinCents: amountMin,
@@ -378,8 +383,8 @@ function FilterChips({
     const max = values.amountMax !== undefined ? `$${centsToDollarString(values.amountMax)}` : "…";
     facts.push(`${min} – ${max}`);
   }
-  if (values.pending === "posted") facts.push("Posted only");
-  else if (values.pending === "pending") facts.push("Pending only");
+  const pendingLabel = pendingFilterChipLabel(values.pending);
+  if (pendingLabel !== null) facts.push(pendingLabel);
 
   if (values.merchant === undefined && facts.length === 0) {
     return <p className="text-sm text-ink-3">All transactions</p>;
@@ -466,8 +471,8 @@ function MerchantSummary({
    */
   scoped: boolean;
 }) {
-  const uncategorized = breakdown.find((r) => r.categoryId === null)?.count ?? 0;
-  const filed = breakdown.filter((r) => r.categoryId !== null).slice(0, 2);
+  const uncategorized = uncategorizedCount(breakdown);
+  const filed = filedBreakdownRows(breakdown).slice(0, 2);
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm text-ink-2">
       <p>

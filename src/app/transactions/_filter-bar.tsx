@@ -155,24 +155,6 @@ export function FilterBar({
   accounts: AccountOption[];
 }) {
   const { year, month } = currentMonth();
-  // `buildHref` carries `pageSize` itself now that it is a member of
-  // `TransactionsFilterValues`, so these two quick links need no special
-  // treatment — the `withPageSize` string-splicing helper that used to wrap
-  // them is gone. (It was a closure inside `FilterBar`, so no other file
-  // could reach it; exactly one other href builder — the transfers toggle —
-  // had to re-derive `pageSize` itself, and forgot.)
-  const thisMonthHref = buildHref({
-    ...values,
-    dateFrom: monthBoundary(year, month),
-    dateTo: lastDayOfMonth(year, month),
-  });
-  // "Clear filters" clears FILTERS. A page size is a display preference you
-  // set deliberately and can only change through the URL, so wiping it here
-  // would be one more silent reset — the class this whole field exists to fix.
-  const clearFiltersHref = buildHref({
-    ...CLEARED_FILTERS,
-    pageSize: values.pageSize,
-  });
 
   // A filter can name an id that isn't in the picker's own list — an
   // archived category (still reachable via an old /budget drilldown link)
@@ -320,10 +302,16 @@ export function FilterBar({
         >
           Apply filters
         </button>
-        <Link href={thisMonthHref} className={`text-muted-foreground underline-offset-4 hover:underline ${FOCUS_RING}`}>
+        <Link
+          href={thisMonthHref(values, year, month)}
+          className={`text-muted-foreground underline-offset-4 hover:underline ${FOCUS_RING}`}
+        >
           This month
         </Link>
-        <Link href={clearFiltersHref} className={`text-muted-foreground underline-offset-4 hover:underline ${FOCUS_RING}`}>
+        <Link
+          href={clearFiltersHref(values)}
+          className={`text-muted-foreground underline-offset-4 hover:underline ${FOCUS_RING}`}
+        >
           Clear filters
         </Link>
       </div>
@@ -371,6 +359,42 @@ export function filterValuesToSearchParams(values: TransactionsFilterValues): UR
 export function buildHref(values: TransactionsFilterValues): string {
   const qs = filterValuesToSearchParams(values).toString();
   return qs ? `/transactions?${qs}` : "/transactions";
+}
+
+/**
+ * The "This month" quick link — overrides the date range, keeps every other
+ * active filter. Extracted out of `FilterBar` (where it was an inline
+ * closure no test could reach) so the two properties that matter are each
+ * pinned by a direct test rather than only by rendering the page: mutating
+ * this to drop the `...values` spread — reverting to only the date override
+ * — passed the whole suite, which would silently clear the merchant filter
+ * (or any other active one) the moment this link is clicked.
+ */
+export function thisMonthHref(
+  values: TransactionsFilterValues,
+  year: number,
+  month: number,
+): string {
+  return buildHref({
+    ...values,
+    dateFrom: monthBoundary(year, month),
+    dateTo: lastDayOfMonth(year, month),
+  });
+}
+
+/**
+ * "Clear filters" clears FILTERS. A page size is a display preference set
+ * deliberately and reachable only through the URL, so wiping it here would be
+ * one more silent reset of the kind `pageSize`'s whole membership in
+ * `TransactionsFilterValues` exists to prevent. Extracted for the same reason
+ * as `thisMonthHref`: mutating this to `buildHref(CLEARED_FILTERS)` — dropping
+ * the `pageSize` carry-forward — passed the whole suite.
+ */
+export function clearFiltersHref(values: TransactionsFilterValues): string {
+  return buildHref({
+    ...CLEARED_FILTERS,
+    pageSize: values.pageSize,
+  });
 }
 
 /**
