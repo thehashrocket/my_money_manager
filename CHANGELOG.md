@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.2] - 2026-09-15
+## [1.3.3] - 2026-09-16
+
+### Fixed
+- **The "Move filed rows to another category" tool's Remember checkbox could promise something it wasn't going to do.** Like the other two Remember checkboxes in the app, this one now checks first whether training or removing a rule actually makes sense for the merchant — graying itself out and explaining why when it doesn't, instead of always offering "Remember" with no explanation.
+- **That same tool could show a confusing explanation.** A line telling you Remember would "retrain the merchant's rule" stayed on screen even when the checkbox was actually about to remove a rule instead — it's now only shown when training is really what will happen.
+
+### Changed
+- **The Remember checkbox now looks and behaves identically everywhere it appears** (individual transactions, the categorize page, and the bulk-move tool), sharing one implementation instead of three separately-maintained copies.
 
 ### Changed
 - **The "Remember" checkbox on the categorize and transactions pages now shares one implementation instead of two independently-maintained copies.** Both pages had grown their own hand-written version of "does this checkbox get to save or remove a category rule right now," and it had already drifted once — a fix landing on one page without the other. It's now one shared piece of logic both pages call.
