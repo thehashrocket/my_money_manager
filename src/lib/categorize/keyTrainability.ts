@@ -300,6 +300,124 @@ export function ruleActionLabel(action: RuleAction): string {
   }
 }
 
+/** Everything a Remember checkbox needs to render itself, from one call. */
+export type RememberUi = {
+  action: RuleAction;
+  /** Whether the checkbox may be ticked at all. */
+  enabled: boolean;
+  /** The reason line under the checkbox — `undefined` for a bare "train". */
+  message: string | undefined;
+  /** The checkbox's own visible label. */
+  label: string;
+};
+
+/**
+ * `classifyKeyTrainability` → `describeRuleAction` → the three values every
+ * render site derived from `RuleAction` by hand, folded into one call.
+ *
+ * TODOS.md (2026-09-15): `_merchant-row.tsx` and `_transaction-row.tsx` ran
+ * near-byte-identical copies of this four-step chain — confirmed by both the
+ * code-reviewer and type-design-analyzer passes independently, and it had
+ * already bitten the codebase once (a ship review found `MerchantRow`
+ * missing a consent-reset fix `TransactionRowForm` already had, precisely
+ * because the logic lived in two places and only one got updated). Folding
+ * it here means a future consumer of `RuleAction` gets `enabled`/`message`/
+ * `label` for free instead of re-deriving the same three lines a third time,
+ * and it removes the one way `describeRuleAction` could be handed a verdict
+ * computed from a DIFFERENT key than its own `normalizedMerchant` argument —
+ * the two are now always computed from the same inputs, in one place.
+ *
+ * Pairs with {@link ruleActionSignature} and a `consentedSignature`-masking
+ * pattern both render sites use for the checkbox's `checked` state (store
+ * the signature the user last ticked consent for, render
+ * `checked={consentedSignature === ruleActionSignature(action)}`) — that
+ * pattern is what actually closed the duplication in the four
+ * `remember`-clearing call sites this same TODO named; it lives in the two
+ * component files because it is React state, not a pure derivation.
+ */
+export function resolveRememberUi(
+  normalizedMerchant: string,
+  filedCategoryIds: readonly number[],
+  existingRule: ExistingRule | null,
+  pendingCategoryId: number | null,
+): RememberUi {
+  const verdict = classifyKeyTrainability(
+    normalizedMerchant,
+    filedCategoryIds,
+    pendingCategoryId,
+  );
+  const action = describeRuleAction(
+    normalizedMerchant,
+    verdict,
+    existingRule,
+    pendingCategoryId,
+  );
+  return {
+    action,
+    enabled: action.kind !== "none",
+    message: action.kind === "train" ? undefined : action.message,
+    label: ruleActionLabel(action),
+  };
+}
+
+/**
+ * A `RuleAction`'s identity for consent-invalidation — two renders whose
+ * `ruleActionSignature` values match are consenting to the exact same write.
+ * See `useRememberConsent` (`components/ledger/use-remember-consent.ts`) for
+ * why a MISMATCH must clear stored consent outright, not just mask it.
+ *
+ * `kind` ALONE is not enough, which is why this exists instead of comparing
+ * `action.kind` directly. A ship review found `remove-conflicting` staying
+ * `remove-conflicting` while a sibling row's write repoints WHICH rule it
+ * would remove — `existingRule` changes, the pick never moves, `handlePick`
+ * never runs, and a kind-only mask would keep the box checked straight
+ * through it. `message` is what names the target, so folding it in closes
+ * that gap for `remove-conflicting`/`none` for free instead of adding a
+ * second field to compare — currently sound because `categories_name_unique`
+ * (`src/db/schema.ts`) guarantees the name embedded in `message` maps to
+ * exactly one category; relaxing that constraint would need this to key off
+ * `existingRule`'s id instead.
+ *
+ * `pendingCategoryId` is REQUIRED, not folded into `message`, because
+ * `"train"` carries no target in its message at all — a Codex structured
+ * review (and, independently, a Claude adversarial pass) found the bare
+ * `"train"` signature this function shipped with FIRST let stale consent
+ * survive a target change with no new click: pick category A, tick Remember,
+ * then either re-pick to B by hand or have `_transaction-row.tsx`'s picker
+ * auto-resync to B after an UNRELATED `bulkRetarget` moved this merchant's
+ * rows — both renders are "train", both got the same bare signature, and the
+ * box stayed checked while the row about to submit had silently changed
+ * targets underneath it. The OLD boolean-plus-four-call-sites code closed
+ * the revalidation half of this by clearing on ANY prop-identity change,
+ * which this signature-mask refactor had narrowed away as an intentional
+ * improvement (TODOS.md) without noticing it was also the only thing
+ * defending this specific case. Embedding the pick in every branch's
+ * signature — not just `train`'s — closes both paths at once.
+ *
+ * `normalizedMerchant` is REQUIRED for the same reason, one layer up — a
+ * second Codex structured-review pass (re-verifying the `pendingCategoryId`
+ * fix above) found that `train:9` for merchant `AMAZON` and `train:9` for
+ * merchant `WALMART` were the same string. `_transaction-row.tsx` keys its
+ * rows by transaction id, not by merchant (`_transactions-ui.tsx`), so a
+ * row's component instance survives `pnpm db:backfill-merchants` renaming
+ * its `normalized_merchant` in place (rule 10) — the ONE write path that
+ * changes a row's merchant key without changing which row it is. A ticked
+ * box would submit a rule for the NEW merchant using consent given for the
+ * OLD one. The write itself is what `applyRuleWrite`/`categorizeTransaction`
+ * always trains — key + category — so the signature has to name the whole
+ * write, not just the half of it that happens to vary within one render.
+ */
+export function ruleActionSignature(
+  normalizedMerchant: string,
+  action: RuleAction,
+  pendingCategoryId: number | null,
+): string {
+  const target = pendingCategoryId === null ? "none" : String(pendingCategoryId);
+  return action.kind === "train"
+    ? `${normalizedMerchant}:train:${target}`
+    : `${normalizedMerchant}:${action.kind}:${target}:${action.message}`;
+}
+
 /**
  * Is this a category id at all?
  *

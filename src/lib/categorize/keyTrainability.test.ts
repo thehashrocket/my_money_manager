@@ -3,7 +3,10 @@ import {
   classifyKeyTrainability,
   describeRuleAction,
   LOSSY_MERCHANT_KEYS,
+  resolveRememberUi,
   ruleActionLabel,
+  ruleActionSignature,
+  type RuleAction,
 } from "./keyTrainability";
 
 describe("classifyKeyTrainability — lossy keys", () => {
@@ -327,5 +330,196 @@ describe("ruleActionLabel", () => {
       3,
     );
     expect(ruleActionLabel(action)).toBe("Remove conflicting rule");
+  });
+});
+
+describe("resolveRememberUi", () => {
+  it("composes a trainable pick into an enabled, message-less, Remember-labelled action", () => {
+    const ui = resolveRememberUi("SAFEWAY", [], null, 9);
+    expect(ui.action).toEqual({ kind: "train" });
+    expect(ui.enabled).toBe(true);
+    expect(ui.message).toBeUndefined();
+    expect(ui.label).toBe("Remember");
+  });
+
+  it("composes an untrainable pick with no existing rule into a disabled, message-carrying none", () => {
+    const ui = resolveRememberUi("ONLINE", [], null, null);
+    expect(ui.action.kind).toBe("none");
+    expect(ui.enabled).toBe(false);
+    expect(ui.message).toContain("ONLINE");
+    expect(ui.label).toBe("Remember");
+  });
+
+  it("composes a lossy key with an existing rule into an enabled removal, labelled and messaged for it", () => {
+    const ui = resolveRememberUi("ONLINE", [], { categoryId: 9, categoryName: "Gas" }, 9);
+    expect(ui.action).toEqual({
+      kind: "remove-conflicting",
+      reason: "lossy-key",
+      message: ui.message,
+    });
+    expect(ui.enabled).toBe(true);
+    expect(ui.message).toContain("Gas");
+    expect(ui.label).toBe("Remove unusable rule");
+  });
+
+  it("composes a contradicted multi-category pick into an enabled removal, labelled and messaged for it", () => {
+    const ui = resolveRememberUi("SAFEWAY", [3, 9], { categoryId: 9, categoryName: "Gas" }, 3);
+    expect(ui.action.kind).toBe("remove-conflicting");
+    expect(ui.enabled).toBe(true);
+    expect(ui.message).toContain("Gas");
+    expect(ui.label).toBe("Remove conflicting rule");
+  });
+
+  /**
+   * Testing specialist (ship review): both render sites now call
+   * `resolveRememberUi` exclusively rather than `describeRuleAction`
+   * directly — a non-real `pendingCategoryId` (0, NaN, negative) was already
+   * proven bug-prone at that lower layer (see the `it.each` block above), so
+   * the composition itself needs the same proof, not just its ingredients.
+   */
+  it.each([0, Number.NaN, -1])(
+    "never returns remove-conflicting for a non-real pendingCategoryId (%s), even with a contradicting existing rule",
+    (pendingCategoryId) => {
+      // filed=[3, 9] (multi-category) refuses regardless of pending, isolating
+      // what's under test: does the COMPOSITION reject a non-real pending id
+      // the same way `describeRuleAction` alone already does (see the
+      // `describeRuleAction` suite's own `it.each` of the same shape).
+      const ui = resolveRememberUi(
+        "SAFEWAY",
+        [3, 9],
+        { categoryId: 9, categoryName: "Gas" },
+        pendingCategoryId,
+      );
+      expect(ui.action.kind).toBe("none");
+    },
+  );
+
+  /**
+   * Testing specialist (ship review): the "confirming, not contradicting"
+   * path has its own dedicated `describeRuleAction` test, but was never
+   * exercised through `resolveRememberUi` — the function both components
+   * actually call.
+   */
+  it("composes a pick that agrees with the existing rule into a disabled, unmessaged none — confirming, not contradicting", () => {
+    const ui = resolveRememberUi("SAFEWAY", [3, 9], { categoryId: 9, categoryName: "Gas" }, 9);
+    expect(ui.action.kind).toBe("none");
+    expect(ui.enabled).toBe(false);
+    expect(ui.label).toBe("Remember");
+  });
+});
+
+describe("ruleActionSignature", () => {
+  it("gives the same train signature for the same merchant and pick", () => {
+    expect(ruleActionSignature("SAFEWAY", { kind: "train" }, 9)).toBe(
+      ruleActionSignature("SAFEWAY", { kind: "train" }, 9),
+    );
+  });
+
+  /**
+   * Codex structured review AND an independent Codex adversarial pass, both
+   * against the live PR: a bare `"train"` signature (no `pendingCategoryId`)
+   * let stale consent survive a target change with no new click — pick A,
+   * tick Remember, then have `_transaction-row.tsx`'s picker auto-resync to
+   * B after an unrelated `bulkRetarget` moved this merchant's rows, or
+   * simply repick to B by hand. Both renders were "train", so the signature
+   * never changed and the box stayed checked while about to submit a
+   * different target than the one consented to.
+   */
+  it("gives two train actions DIFFERENT signatures when the pick differs, even though `kind` stays identical", () => {
+    expect(ruleActionSignature("SAFEWAY", { kind: "train" }, 3)).not.toBe(
+      ruleActionSignature("SAFEWAY", { kind: "train" }, 9),
+    );
+  });
+
+  /**
+   * A second Codex structured-review pass, re-verifying the fix above:
+   * `pnpm db:backfill-merchants` (rule 10) renames a row's
+   * `normalized_merchant` in place, and `_transaction-row.tsx`'s
+   * transaction-id-keyed component survives that rename — the ONE write
+   * path that changes a row's merchant key without changing which row it
+   * is. `train:9` for two different merchants used to be the same string.
+   */
+  it("gives two train actions DIFFERENT signatures when the merchant differs, even with the same pick", () => {
+    expect(ruleActionSignature("AMAZON", { kind: "train" }, 9)).not.toBe(
+      ruleActionSignature("WALMART", { kind: "train" }, 9),
+    );
+  });
+
+  it("gives two remove-conflicting actions with the same merchant, message, AND pick the same signature", () => {
+    const a = describeRuleAction(
+      "SAFEWAY",
+      classifyKeyTrainability("SAFEWAY", [3, 9], 3),
+      { categoryId: 9, categoryName: "Gas" },
+      3,
+    );
+    const b = describeRuleAction(
+      "SAFEWAY",
+      classifyKeyTrainability("SAFEWAY", [3, 9], 3),
+      { categoryId: 9, categoryName: "Gas" },
+      3,
+    );
+    expect(ruleActionSignature("SAFEWAY", a, 3)).toBe(ruleActionSignature("SAFEWAY", b, 3));
+  });
+
+  it("gives two remove-conflicting actions DIFFERENT signatures when the target rule differs, even though `kind` stays identical — the exact bug this exists to catch", () => {
+    // Same merchant, same pick, but a sibling row's write repointed the
+    // existing rule at a different category — `kind` alone cannot tell
+    // these apart, which is exactly what let a stale consent silently
+    // survive a retargeted rule before `ruleActionSignature` folded in
+    // `message`.
+    const pointingAtGas = describeRuleAction(
+      "SAFEWAY",
+      classifyKeyTrainability("SAFEWAY", [3, 9], 3),
+      { categoryId: 9, categoryName: "Gas" },
+      3,
+    );
+    const pointingAtDining = describeRuleAction(
+      "SAFEWAY",
+      classifyKeyTrainability("SAFEWAY", [3, 12], 3),
+      { categoryId: 12, categoryName: "Dining" },
+      3,
+    );
+    expect(pointingAtGas.kind).toBe("remove-conflicting");
+    expect(pointingAtDining.kind).toBe("remove-conflicting");
+    expect(ruleActionSignature("SAFEWAY", pointingAtGas, 3)).not.toBe(
+      ruleActionSignature("SAFEWAY", pointingAtDining, 3),
+    );
+  });
+
+  it("gives two remove-conflicting actions DIFFERENT signatures when the merchant differs, even with the same message and pick", () => {
+    const action: RuleAction = {
+      kind: "remove-conflicting",
+      reason: "contradicted",
+      message: "→ Gas",
+    };
+    expect(ruleActionSignature("AMAZON", action, 3)).not.toBe(
+      ruleActionSignature("WALMART", action, 3),
+    );
+  });
+
+  it("never collides a train signature with a remove-conflicting or none signature", () => {
+    const train = ruleActionSignature("SAFEWAY", { kind: "train" }, 9);
+    const removeConflicting = ruleActionSignature(
+      "SAFEWAY",
+      { kind: "remove-conflicting", reason: "lossy-key", message: "train" },
+      9,
+    );
+    const none = ruleActionSignature("SAFEWAY", { kind: "none", message: "train" }, 9);
+    expect(new Set([train, removeConflicting, none]).size).toBe(3);
+  });
+
+  /**
+   * Testing specialist (ship review): the same rigor applied to
+   * `remove-conflicting` above, applied to `none` — harmless in practice
+   * today (a disabled checkbox's `onChange` can never fire, so a `"none"`
+   * signature can never actually be stored as `consentedSignature`), but the
+   * function's own contract is "every `RuleAction` variant gets a distinct
+   * signature for a distinct message", and `none` was the one variant never
+   * checked against itself.
+   */
+  it("gives two none actions with different messages different signatures", () => {
+    const a = ruleActionSignature("SAFEWAY", { kind: "none", message: "reason A" }, 9);
+    const b = ruleActionSignature("SAFEWAY", { kind: "none", message: "reason B" }, 9);
+    expect(a).not.toBe(b);
   });
 });
