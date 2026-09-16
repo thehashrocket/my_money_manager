@@ -14,7 +14,7 @@ Read `.context/notes.md` first if it is present. `.context/` is gitignored (it h
 - Vitest for categorization/parser tests
 - pnpm, Node 24 (pinned via `.nvmrc`, enforced via `engines` + `engine-strict`)
 
-Recharts (`^3.10.1`) is in, powering `src/components/ledger/trend-chart.tsx` as of v0.7.0. Envelope cards are still plain CSS.
+Recharts (`^3.10.1`) is in, powering `src/components/ledger/trend-chart.tsx` as of v0.7.0. Envelope progress bars are still plain CSS (Tailwind classes, `BAR_CLASS` in `_month-editor.tsx`) — the standalone `envelope-card.tsx` component this line used to name was deleted (D8), its bar-fill logic folded into the budget editor itself.
 
 Wrong-Node symptom: any `pnpm` command fails with `ERR_PNPM_UNSUPPORTED_ENGINE` (blocked by `engines` + `engine-strict=true`). Run `nvm use` in the workspace to pick up `.nvmrc`. If you bypass pnpm (e.g., invoke `vitest` directly on Node 22), `better-sqlite3` crashes with a `NODE_MODULE_VERSION` mismatch because its native binding is built against Node 24.
 
@@ -97,6 +97,13 @@ src/
                    any unlinked account. partitionLinkedAccounts, resolveBalanceAction
                    and markAsCardPayment's mirror refusal all read it rather than
                    re-deriving "linked and not a loan" independently
+                   deriveStartingBalance — the CSV anchor derivation itself
+                   (rule 1): only writes an anchor when the file's running
+                   `Balance` column forms a consistent chain, and only ever
+                   moves the anchor forward in time. Full mechanics — the
+                   same-day-nets-to-zero ambiguity, the bounds checks shared
+                   with validateCreateAccountInput/validateUpdateAnchorInput
+                   — are in rule 1, not repeated here
                    isAfterAnchor — the ONE spelling of rule 1's strict `>`, as of the
                    card-transaction-import plan. Three callers: createCardActivity's
                    before-anchor refusal, the sync accounting cutover (D8.1, card rows
@@ -506,6 +513,17 @@ src/
                    turned into the ONE sentence both surfaces render,
                    server-side because the fact that matters is the NAME of a
                    removed rule's category
+                   postCommitRead.ts — guardPostCommitRead, the sibling of
+                   guardRefresh (lib/revalidateAfterWrite.ts) for READS rather
+                   than revalidation: a lookup a write path does purely to
+                   describe what it just did (a category NAME behind an id)
+                   must not turn a committed write into a reported failure if
+                   the lookup itself throws (SQLITE_BUSY is live — WAL mode,
+                   VACUUM INTO snapshots and `pnpm db:export` all hold
+                   readers). Degrades to the caller's `fallback` and logs
+                   rather than swallows. refusalNotice.ts is its first
+                   caller; categorizeSubscriptions.ts (lib/subscriptions/)
+                   and /categorize's actions.ts also call it directly
                    describeRuleUndo — the matching clause for the undo toast, so a
                    restore, a no-op and an untouched rule stop reading identically
                    restorePriorRule — puts a priorRule snapshot back whether the original
@@ -592,7 +610,15 @@ src/
 drizzle/           Migration output (committed)
 data/             money.db + pre-import snapshots (gitignored)
 .context/         Design artifacts, CSV samples, deltas (gitignored)
-design_handoff_nav_and_design_system/  Live HTML design specimens + README
+DESIGN.md         Source of truth for visual decisions — Ledger Paper design
+                   system (fonts, color tokens, component specs). Living doc,
+                   updated alongside features; not a one-time handoff. See
+                   "When in doubt" below
+design_handoff_nav_and_design_system/  The ORIGINAL prototype handoff — two
+                   HTML/CSS/JS specimens (Design System.html, Nav Prototype.html)
+                   plus README. DESIGN.md was built from these and is what's
+                   current; this directory is a historical reference, not
+                   something to recreate against directly
 docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuild-bundled, gitignored)
 ```
 
@@ -602,6 +628,7 @@ docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuil
 - `pnpm test` / `test:watch` / `test:ui`
 - `pnpm db:generate` — generate Drizzle migration from `src/db/schema.ts`
 - `pnpm db:migrate` — apply pending migrations
+- `pnpm db:push` — `drizzle-kit push`, left over from initial scaffolding. **Do not use it.** It diffs the schema straight against the live DB with no migration file, no `scripts/migrate.mjs` wrapper, no pre-write snapshot, and no `foreign_keys=OFF` handling — the exact hazard rule 7 documents for a bare `drizzle-kit migrate`, in a more dangerous form (no migration file even gets produced). Always go through `pnpm db:generate` + `pnpm db:migrate`.
 - `pnpm db:studio` — Drizzle Studio GUI
 - `pnpm db:backfill-merchants` — renormalize `transactions.normalized_merchant` and rewrite the trained `category_rules` that key off it, after `src/lib/normalize.ts` changes. Dry run by default; `--apply` snapshots first and writes in one transaction. Two things refuse rather than warn, each with its own flag and its own exit code so they stay distinguishable: a collision whose rules disagree about the *category* needs `--resolve-conflicts` (exit 2), because that is the only part that moves money between envelopes; and a degraded snapshot needs `--allow-degraded-snapshot` (exit 3), because unlike `commitImport` this has no logical undo, so the snapshot is the only rollback path — usually the real fix is to stop the app container so nothing holds a read, not to pass the flag. Exit 1 is a post-write verification failure (`integrity_check`, `foreign_key_check`, empty keys, or any row whose stored key still moves under the normalizer). Runs inside the container (the live ledger is in the `mm_data` volume), so the image must be rebuilt from the branch carrying the normalizer change first. See rule 10.
 - `pnpm db:seed-dev` — dev-only fixture ledger (`scripts/seed-dev.mjs`), never imported by the app. Exists because ~15 tasks in the liability plan verify "manually, with a mortgage present" and a fresh ledger has nothing to look at. Two guards, both load-bearing: it refuses without an explicit `DATA_DIR` (`dbPath()` falls back to `./data`, which IS the real ledger), and it refuses again if any ledger table has rows — the second check runs **before** `migrate()`, not after, because this script calls drizzle's migrator directly rather than going through `scripts/migrate.mjs` (rule 7), so a mistyped `DATA_DIR` would otherwise have already run rebuild migrations against the real ledger by the time the refusal printed. Run it as `DATA_DIR=./.context/seed pnpm db:seed-dev`.
@@ -615,7 +642,7 @@ docker/           entrypoint.src.mjs (committed source) + entrypoint.mjs (esbuil
 - `pnpm db:seed-volume` — **run once, before the first `docker compose up`.** Copies `./data/money.db` into the (currently empty) volume via `createSnapshot`'s `VACUUM INTO`, never a bare `cp` — the host DB runs in WAL mode, and a plain copy can silently drop rows still in `money.db-wal`. Refuses (rather than overwrites) if the volume already has a `money.db`.
 - `pnpm db:export` — snapshots the running container's ledger (via `docker compose exec` + the bundled `scripts/snapshot-cli.mjs`) and copies the result to `./backups/`. Refuses to copy out a degraded (`consistent: false`) snapshot. Uses its own `EXPORT_PREFIX` (`src/lib/snapshot.ts`), not the pre-import prefix rule 5's automatic snapshots use — sharing a prefix would put a deliberate manual backup in the same retention-of-10 pool `commitImport`/`syncSimpleFin` auto-prune, so it could be silently evicted by ordinary use. Nothing prunes the export pool automatically.
 - `pnpm db:import <file>` — stops the container, restores a snapshot file (must have no `-wal` sidecar — see rule 5), restarts.
-- `docker/entrypoint.mjs`, `scripts/snapshot-cli.mjs` and `scripts/backfill-merchants.mjs` are gitignored **build artifacts**: the runner image has no `src/` tree and no devDependencies, so they can't stay thin wrappers around `src/lib/snapshot.ts`/`src/lib/paths.ts`/`src/lib/normalize.ts`. `scripts/build-docker-artifacts.mjs` (esbuild, `better-sqlite3` external) bundles `docker/entrypoint.src.mjs`, `scripts/snapshot-cli.src.mjs` and `scripts/backfill-merchants.src.mjs` into them during the Docker builder stage — edit the `.src.mjs` files, not the generated ones. A new bundled artifact means an image built before it exists cannot run its command; `db:backfill-merchants` detects that case and tells you to `docker compose build`.
+- `docker/entrypoint.mjs`, `scripts/snapshot-cli.mjs` and `scripts/backfill-merchants.mjs` are gitignored **build artifacts**: the runner image has no `src/` tree and no devDependencies, so they can't stay thin wrappers around `src/lib/snapshot.ts`/`src/lib/paths.ts`/`src/lib/normalize.ts`. `pnpm build:docker-artifacts` (`scripts/build-docker-artifacts.mjs`, esbuild, `better-sqlite3` external) bundles `docker/entrypoint.src.mjs`, `scripts/snapshot-cli.src.mjs` and `scripts/backfill-merchants.src.mjs` into them during the Docker builder stage — edit the `.src.mjs` files, not the generated ones. It's not meant to be run by hand outside that stage. A new bundled artifact means an image built before it exists cannot run its command; `db:backfill-merchants` detects that case and tells you to `docker compose build`.
 - The container refuses to boot without `TZ` set (`compose.yaml` sets `America/Los_Angeles`) — the app derives the current budget month from local time (`src/lib/now.ts`), and Docker's default `TZ=UTC` would silently compute the wrong month for part of every day.
 - The published port is loopback-only (`127.0.0.1:3000:3000`): this app has no auth, so binding `0.0.0.0` would make the ledger LAN-readable.
 - **On real Linux hosts (confirmed via CI, not just theorized), `./backups` needs its permissions fixed BEFORE the first `docker compose run`/`up` of any kind — including `pnpm db:seed-volume`, which starts one itself.** It's a bind mount, and Docker on native Linux auto-creates a missing bind-mount host directory as root-owned; the Dockerfile's `chown` only affects the image filesystem, which the bind mount then shadows. Without this, the container's unprivileged `node` user gets `EACCES` on its first snapshot write and never becomes healthy. Fix: `sudo mkdir -p ./backups && sudo chmod 777 ./backups` on the host, first — before `db:seed-volume`, not after. `chmod`, not `chown` to a single uid: two different principals need write access to this same host directory — the container's `node` user (uid 1000) writing snapshots, and `pnpm db:export` running on the **host** (a different user entirely) copying them out via `docker compose cp`.
@@ -783,7 +810,7 @@ A mortgage is still deliberately quiet: muted money weight, grouped under `LONG-
 
 **Automatic same-account reversal detection is out, permanently, and not for lack of effort (v0.19.0).** `/sync`'s reversal queue finds the candidates and links none of them; the pairing is always a human's call. Roughly 13% of the shape is coincidence on real data and a wrong link deletes real spending from every spending surface with no error, so there is no threshold at which auto-linking is the right trade here. Read rule 4 before proposing a heuristic for it.
 
-CI (lint + test + build on PR) is in via `.github/workflows/ci.yml` — gates merges into `main`.
+CI is in via `.github/workflows/ci.yml` — gates merges into `main`. Two jobs: `test` (lint + test + build) on every PR, and `docker` (compose build, seed a volume, boot the container, health-check it, round-trip `db:export`/`db:import`) — the latter is the evidence behind the Docker section's backups-chmod story above, confirmed on real Linux CI rather than theorized.
 
 ## Next.js 16 gotchas
 
@@ -793,44 +820,7 @@ For the better-sqlite3 + HMR case: wrap the DB client in a `globalThis`-cached s
 
 ## When in doubt
 
-1. Read `.context/notes.md` → design artifacts index.
-2. Read `.context/csv-format.md` → real-data-derived parser rules.
-3. Read `.context/design-updates.md` → deltas to the canonical doc (Updates 1–5).
-4. The canonical design doc is at `~/.gstack/projects/thehashrocket-my_money_manager/jasonshultz-thehashrocket-budgeting-app-design-20260416-173405.md` (outside the repo — don't duplicate into `docs/`).
-
-## GBrain Search Guidance (configured by /sync-gbrain)
-<!-- gstack-gbrain-search-guidance:start -->
-
-GBrain is set up and synced on this machine. The agent should prefer gbrain
-over Grep when the question is semantic or when you don't know the exact
-identifier yet.
-
-**This worktree is pinned to a worktree-scoped code source** via the
-`.gbrain-source` file in the repo root (kubectl-style context). Any
-`gbrain code-def`, `code-refs`, `code-callers`, `code-callees`, or `query`
-call from anywhere under this worktree routes to that source by default —
-no `--source` flag needed. Conductor sibling worktrees of the same repo
-each have their own pin and their own indexed pages, so semantic results
-match the actual code on disk in this worktree.
-
-Two indexed corpora available via the `gbrain` CLI:
-- This worktree's code (auto-pinned via `.gbrain-source`).
-- `~/.gstack/` curated memory (registered as `gstack-brain-<user>` source via
-  the existing federation pipeline).
-
-Prefer gbrain when:
-- "Where is X handled?" / semantic intent, no exact string yet:
-    `gbrain search "<terms>"` or `gbrain query "<question>"`
-- "Where is symbol Y defined?" / symbol-based code questions:
-    `gbrain code-def <symbol>` or `gbrain code-refs <symbol>`
-- "What calls Y?" / "What does Y depend on?":
-    `gbrain code-callers <symbol>` / `gbrain code-callees <symbol>`
-- "What did we decide last time?" / past plans, retros, learnings:
-    `gbrain search "<terms>" --source gstack-brain-<user>`
-
-Grep is still right for known exact strings, regex, multiline patterns, and
-file globs. Run `/sync-gbrain` after meaningful code changes; for ongoing
-auto-sync across all worktrees, run `gbrain autopilot --install` once per
-machine — gbrain's daemon handles incremental refresh on a schedule.
-
-<!-- gstack-gbrain-search-guidance:end -->
+1. **Design/visual questions** → read `DESIGN.md` (repo root) first. It's the current, git-tracked, living source of truth for the Ledger Paper design system — fonts, color tokens, component specs — updated alongside features, not a one-time handoff. `design_handoff_nav_and_design_system/` holds the ORIGINAL prototype specimens DESIGN.md was built from; read it for historical context, not as something to implement against directly. The doc this section used to send you to first — `~/.gstack/projects/thehashrocket-my_money_manager/jasonshultz-thehashrocket-budgeting-app-design-20260416-173405.md` — is the original canonical doc from before DESIGN.md existed; it predates months of subsequent design work and is historical only. Don't duplicate DESIGN.md's content into `docs/`.
+2. Read `.context/notes.md` → design artifacts index, if present.
+3. Read `.context/csv-format.md` → real-data-derived parser rules, if present.
+4. Read `.context/design-updates.md` → deltas recorded before `DESIGN.md` became the living doc (Updates 1–5); superseded going forward by DESIGN.md's own edit history.
