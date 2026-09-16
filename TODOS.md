@@ -1645,23 +1645,93 @@ Nine reviewers ran over this branch — six specialists, a red-team pass, and tw
 passes (Claude and Codex). Everything with a money consequence was fixed on the branch; these
 are what was deliberately left.
 
-- [ ] **P2** — `/sync`'s five forms lost progressive enhancement when `ActionForm` started
-      wrapping the Server Action in an inline client closure for `useActionState`. React's
-      server renderer emits a form's `action` attribute and its hidden `$ACTION_*` fields
-      only when the action carries `$$FORM_ACTION`, and `useActionState` propagates that
-      only from the action it was handed — a closure has none. So these forms now render
-      with no `action` and default to **GET on the current URL**: a submit before hydration
-      navigates to `/sync?batchId=7` (or `?aId=…&bId=…&intent=reject`), performs no
-      mutation, and reports nothing. `/sync` ignores `searchParams`, so it is a silent
-      no-op plus one extra live SimpleFIN round-trip, not a wrong write. Low impact on a
-      local single-user app that hydrates in milliseconds, which is why it was deferred
-      rather than fixed under time pressure — but it is a silent failure where none
-      existed, and it is the shape that gets rediscovered as "the undo button sometimes
-      just reloads the page". The fix is to keep the raw server action as
-      `useActionState`'s argument and move the `publish` call somewhere that does not sit
-      between the two — most likely into `ActionFeedbackProvider`, driven by the state
-      `ActionForm` already returns. Found by both adversarial reviewers during /ship.
-      (`src/app/sync/ActionForm.tsx`, `src/app/sync/_action-feedback.tsx`)
+- [x] **P2 → CLOSED AS NOT-A-BUG (2026-09-16), after a same-day fix was built,
+      shipped through review, and then reverted for being a regression.**
+      `/sync`'s five forms lost progressive enhancement when `ActionForm`
+      started wrapping the Server Action in an inline client closure for
+      `useActionState` — a closure carries no `$$FORM_ACTION`, so React's
+      server renderer falls back to `action="javascript:throw new
+      Error('React form unexpectedly submitted.')"` on all five. This entry
+      went through TWO rounds of "claimed limitations need evidence"
+      correction in one day, and the second one reverses the first:
+      **Round 1 (same session, verified by curl): "defaults to GET on the
+      current URL" was wrong** — the SSR'd HTML carries the poison-pill
+      `action` above, not an absent one, so a naive read of the fix ("keep
+      the raw action, move `publish()` elsewhere") looked sufficient, and a
+      hydration-gate fix (`PendingFieldset` disables on `!hydrated`, via a
+      `useHydrated()` hook shared with `_month-editor.tsx`'s existing
+      T24/DS17 instance) was built, tested (2188 passing, `tsc`/lint clean),
+      and taken through a full specialist review army (0 findings across
+      testing/maintainability/performance/simplification/design) plus a
+      Claude adversarial subagent (also 0 findings — it verified the fix's
+      *mechanics* were sound without questioning whether the underlying
+      premise still held).
+      **Round 2 (Codex adversarial challenge, `/ship` Step 11) found what
+      both rounds above missed: the poison-pill `action` string is not a
+      dead end, it's a HANDSHAKE.** React 19's Fizz SSR renderer injects an
+      inline bootstrap `<script>` — confirmed present verbatim in this app's
+      own `/sync` SSR output — that installs a document-level `submit`
+      listener recognizing exactly that placeholder string. When it fires,
+      the listener calls `preventDefault()` (so nothing navigates and
+      nothing throws), captures the submitter and a `FormData` built from
+      the form AND the specific button that fired (via a hidden-input
+      insert/remove trick so the submitter's own `name=value`, e.g.
+      `intent=reject`, survives), and queues `[form, submitter, formData]`
+      onto `document.$$reactFormReplay`. Once hydration attaches to that
+      exact `<form>` fiber, React reads `document.$$reactFormReplay`,
+      resolves the action from the form's CURRENT client props
+      (`formProps.action` — literally whatever function is attached, no
+      `$$FORM_ACTION` required for this half), and re-dispatches the
+      captured submission through it. **Verified empirically, not just by
+      reading the source:** built a minimal but faithful repro (real
+      `react-dom/server` + `react-dom/client` 19.2.8, the exact
+      `useActionState`-wrapped-closure shape `ActionForm.tsx` uses,
+      hydration deliberately delayed 4s) and clicked the submit button while
+      the page still read "idle" (pre-hydration). Four seconds later, once
+      hydration ran, the mutation fired correctly — `{"status":"ok","message":
+      "mutated! intent=reject"}` — with the exact submitter value the
+      pre-hydration click had captured. `window.location` never changed at
+      any point.
+      **This means the hydration-gate fix was a REGRESSION, not an
+      improvement, and has been reverted (not merged).** Before it: a
+      pre-hydration click was captured and self-healed once hydration
+      completed — worst case, delayed feedback on a local app that
+      "hydrates in milliseconds." After it: `PendingFieldset`'s
+      `<fieldset disabled>` makes the button natively un-clickable during
+      that exact window (a disabled control cannot fire a submit event at
+      all, so there is nothing for the replay listener to capture) — turning
+      a self-healing race into a true lost click that requires the user to
+      notice and click again. The fix would have shipped a worse bug than
+      the one it closed, and it passed a FULL specialist + adversarial
+      review army (testing, maintainability, performance, simplification,
+      design, and a Claude adversarial subagent) before Codex's structural
+      challenge caught it — none of those passes questioned whether the
+      "pre-hydration submit is lost" premise itself was still true, they all
+      accepted it as already-established ground truth from round 1's own
+      re-verification and reviewed the fix's mechanics on top of it. Reverted:
+      `src/app/sync/_submit-button.tsx`, `src/app/budget/[year]/[month]/_month-editor.tsx`
+      back to their pre-branch content; the extracted
+      `src/components/ledger/use-hydrated.ts` deleted (it existed only to
+      serve the second, now-reverted call site — the original T24/DS17 use
+      stays inline in `_month-editor.tsx` where it already was).
+      **Residual, recorded rather than chased further:** the replay queue
+      (`document.$$reactFormReplay`) is an array, not a single slot, so
+      multiple pre-hydration clicks on the SAME or DIFFERENT buttons before
+      hydration completes could all queue and all replay once it attaches —
+      not verified either way whether that could double-submit a mutation
+      this app's server actions don't already guard against (most of the
+      five already refuse on stale/duplicate state — see the sync doctrine's
+      "a no-op is never reported as a completed action" — but this specific
+      shape, N queued replays firing in sequence against a since-mutated
+      DB, was not tested). Also unverified: whether a form that legitimately
+      re-renders with a DIFFERENT action between the click and the replay
+      (none of these five do) would replay against the stale one. Both are
+      narrow, require deliberate rapid pre-hydration multi-clicking on a
+      local single-user app that hydrates in milliseconds, and are TRUE of
+      `main` today regardless of anything on this branch — nothing here
+      makes them worse or better. Not chased further under review pressure;
+      flagged for whoever next touches `ActionForm.tsx`.
+      (`src/app/sync/ActionForm.tsx`, `src/app/sync/_submit-button.tsx`)
 
 - [ ] **P3** — Keyboard focus drops to `<body>` on every `/sync` submit. `SubmitButton`
       sets `disabled={pending || disabled}` on the button the user just activated, and
