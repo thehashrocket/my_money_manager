@@ -50,7 +50,7 @@ v0.16.0: credit cards and loans are real account types — the app has always tr
 - **Tailwind v4** · **shadcn/ui** (base-nova style, Base UI primitives)
 - **better-sqlite3** + **Drizzle ORM** — local SQLite file at `./data/money.db`
 - **Recharts** for the dashboard trend chart (client-side only)
-- **Vitest** for parser/categorization/sync/accounts unit tests · GitHub Actions runs lint + test + build on every PR
+- **Vitest** for parser/categorization/sync/accounts unit tests · GitHub Actions runs two jobs on every PR: `test` (lint + test + build) and `docker` (compose build, boot the container, round-trip `db:export`/`db:import`)
 - **pnpm** · **Node 24** (pinned via `.nvmrc`)
 
 No auth. No Plaid. No cloud — this runs on your machine (or your own Docker host), and your ledger never leaves it. The one outbound call the app makes is a read-only pull from SimpleFIN, and what comes back is written to the local SQLite file.
