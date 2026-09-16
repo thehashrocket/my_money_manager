@@ -19,8 +19,10 @@ import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInpu
 import { validateCardTermsInput } from "@/lib/accounts/validateCardTermsInput";
 import {
   STARTING_BALANCE_DOLLARS_MAX,
+  isBalanceDirection,
   owedDollarsToSignedCents,
 } from "@/lib/import/accountAnchorFields";
+import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
 import { guardRefresh } from "@/lib/revalidateAfterWrite";
@@ -44,7 +46,7 @@ import { refreshLiabilityBalancesOnly } from "@/lib/simplefin/sync";
  * instead, and CLAUDE.md already wrote the rationale for it: "a throw would
  * take out the undo button and the balance check along with the page."
  */
-function fail(message: string, field?: "balance" | "date"): AccountsActionState {
+function fail(message: string, field?: "balance" | "date" | "direction"): AccountsActionState {
   return { status: "error", message, field };
 }
 
@@ -160,9 +162,13 @@ function revalidateCardActivitySurfaces(): string | undefined {
  * legal anchor across account creation, the /import repair form, CSV-derived
  * auto-anchoring and this.
  *
- * The user types a positive "Balance owed" and this negates it, exactly as
- * account creation does (DS64). The user never types a minus sign anywhere
- * in the app.
+ * The user types a positive "Balance owed" and a `balanceDirection` radio
+ * (`"owe"` | `"owed"`) says which sign that magnitude gets, so the user
+ * still never types a minus sign anywhere in the app. `"owed"` is the
+ * post-overpayment credit balance rule 9 already treats as real — before
+ * this, the ONLY way to write a positive liability balance was the feed's
+ * own sign guard; hand Reconcile silently negated every magnitude,
+ * including one the user was trying to enter as a credit.
  */
 export async function updateLiabilityBalanceAction(
   _prev: AccountsActionState,
@@ -181,12 +187,23 @@ export async function updateLiabilityBalanceAction(
     if (!Number.isFinite(owed) || owed < 0) {
       return fail("Enter what you owe as a positive number.", "balance");
     }
+    // The radio group always has exactly one option checked, so a lost
+    // field here means the request wasn't built by this form at all — fail
+    // rather than guess a sign, the same discipline rule 4's `intent` field
+    // uses for a same-account reversal's own two-branch choice. `raw.balanceDirection`
+    // is `FormDataEntryValue | undefined`, never proven a `BalanceDirection` by
+    // its type — `isBalanceDirection` is the one runtime check for it.
+    if (!isBalanceDirection(raw.balanceDirection)) {
+      return fail("Choose whether this is money you owe or money owed to you.", "direction");
+    }
+    const direction = raw.balanceDirection;
 
     // Re-shaped into what the shared validator expects: it takes a signed
     // dollar figure, because its other callers are asset accounts.
+    const signedOwed = direction === "owe" ? -owed : owed;
     const parsed = validateUpdateAnchorInput({
       accountId: raw.accountId,
-      startingBalance: owed === 0 ? 0 : -owed,
+      startingBalance: owed === 0 ? 0 : signedOwed,
       startingBalanceDate: raw.asOf,
     });
     if (!parsed.success) {
@@ -210,12 +227,20 @@ export async function updateLiabilityBalanceAction(
     if (accountClass(account.type) !== "liability") {
       return fail(`${account.name} is not a credit card or loan.`);
     }
+    // rule 9's sign guard, on the hand-entry path — `refreshLiabilityBalances`
+    // (`sync.ts`) already refuses a positive FEED balance for a loan for the
+    // same reason: a loan can never legitimately hold one, unlike a card
+    // after an overpayment. This form had no equivalent check, so "You're
+    // owed" was reachable (and rendered) on a mortgage or car loan too.
+    if (direction === "owed" && isLongTermLiability(account.type)) {
+      return fail(`${account.name} is a loan — it can't have a positive balance.`, "balance");
+    }
 
     // Shared with account creation, so the two paths cannot round a
     // half-cent in opposite directions. `startingBalance` is already the
-    // negated signed figure the validator bounds-checked, so re-derive the
-    // owed magnitude to hand the helper the positive number it expects.
-    const cents = owedDollarsToSignedCents(-startingBalance);
+    // signed figure the validator bounds-checked, so re-derive the owed
+    // magnitude to hand the helper the positive number it expects.
+    const cents = owedDollarsToSignedCents(Math.abs(startingBalance), direction);
 
     // NOTHING MOVED, SO DON'T SPEND THE UNDO ON IT.
     //

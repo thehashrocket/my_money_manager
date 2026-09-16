@@ -6,6 +6,10 @@ import { centsToDollarString } from "@/lib/money";
 import { formatMonthDay } from "@/lib/now";
 import { IDLE } from "./action-state";
 import { ActionStatus } from "@/components/ledger/action-status";
+// `import type` only — `accountAnchorFields.ts` imports `zod`, and this is a
+// client component. The type is erased at build time, so it never pulls zod
+// into the browser bundle (the measured +376 KB `limits.ts` shape).
+import type { BalanceDirection } from "@/lib/import/accountAnchorFields";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -37,6 +41,8 @@ export function ReconcileDisclosure(props: {
   today: string;
   /** DS56 — arrive open and focused, from "Reconcile instead →". */
   startOpen?: boolean;
+  /** rule 9's sign guard — see `ReconcileForm`. */
+  allowsPositiveBalance?: boolean;
   /** D-ANCHOR — see `ReconcileForm`. */
   importsFromFeed?: boolean;
 }) {
@@ -70,6 +76,7 @@ export function ReconcileForm({
   balanceCents,
   today,
   autoFocus = false,
+  allowsPositiveBalance = true,
   importsFromFeed = false,
 }: {
   accountId: number;
@@ -77,6 +84,17 @@ export function ReconcileForm({
   balanceCents: number;
   today: string;
   autoFocus?: boolean;
+  /**
+   * rule 9's sign guard: `false` for a loan or mortgage, which can never
+   * legitimately hold a positive balance (unlike a card after an
+   * overpayment). When false, the "You owe" / "You're owed" toggle is not
+   * rendered at all — a control that can only ever refuse is the thing
+   * rule 8 already argues against — and the hidden `balanceDirection` field
+   * is fixed at `"owe"`, matching what this form always submitted before the
+   * toggle existed. Defaults to `true` (cards) since that's every existing
+   * caller's actual case; `ReconcileDisclosure`'s own default matches.
+   */
+  allowsPositiveBalance?: boolean;
   /**
    * D-ANCHOR — this account's balance is (also) maintained by an ongoing
    * feed import (`importsTransactions`). Reconciling moves the anchor
@@ -102,6 +120,13 @@ export function ReconcileForm({
   // card-terms forms were fixed for; these two were missed.
   const [balanceOwed, setBalanceOwed] = useState(centsToDollarString(Math.abs(balanceCents)));
   const [asOf, setAsOf] = useState(today);
+  // The user never types a minus sign (DS64) — this radio carries the sign
+  // instead. Defaults from the account's CURRENT balance so opening
+  // Reconcile on an already-credit-balance card doesn't require flipping it
+  // just to re-confirm the same figure.
+  const [direction, setDirection] = useState<BalanceDirection>(
+    allowsPositiveBalance && balanceCents > 0 ? "owed" : "owe",
+  );
 
   // RESYNC WHEN THE BALANCE MOVES UNDERNEATH AN UNTOUCHED FIELD.
   //
@@ -127,7 +152,10 @@ export function ReconcileForm({
   const [seenBalanceCents, setSeenBalanceCents] = useState(balanceCents);
   if (balanceCents !== seenBalanceCents) {
     setSeenBalanceCents(balanceCents);
-    if (!touched) setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
+    if (!touched) {
+      setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
+      setDirection(allowsPositiveBalance && balanceCents > 0 ? "owed" : "owe");
+    }
   }
   const balanceId = useId();
   const dateId = useId();
@@ -148,12 +176,104 @@ export function ReconcileForm({
       className="mt-2 flex w-full flex-wrap items-end gap-3"
     >
       <input type="hidden" name="accountId" value={accountId} />
+      {/*
+        A radio pair here (checked+onChange) LOOKS controlled but isn't
+        reset-safe: React 19's native `form.reset()` after a function-action
+        submit reverts every radio to its ATTRIBUTE-level `defaultChecked`
+        (baked in at first server render — "owe", since a card almost always
+        starts in debt), and React's reconciler skips reasserting `checked`
+        on the next render because its *own* state value ("owed") didn't
+        change, even though the DOM's `.checked` property just got mutated
+        out from under it. Reproduced live: save once as "You're owed",
+        then Save again with nothing touched — the second save silently
+        wrote a NEGATIVE balance, the exact sign-flip bug this whole form
+        exists to close, from a different mechanism. A hidden `value`-typed
+        input doesn't have this failure mode (it's the same controlled
+        pattern already proven for `balanceOwed`/`asOf` below), so the
+        toggle is two plain buttons driving one hidden field instead of a
+        native radio group.
+      */}
+      <input type="hidden" name="balanceDirection" value={direction} />
       <div>
+        {allowsPositiveBalance ? (
+          <>
+            <span className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3">
+              This balance is
+            </span>
+            <div
+              // A missing/invalid `balanceDirection` refuses with its OWN
+              // `field` ("direction"), distinct from "balance" — found by
+              // both the red-team and the Claude adversarial passes during
+              // /ship: the refusal used to share "balance"'s field, so the
+              // amount input (which was fine) lit up while the error text
+              // talked about this toggle. `role="group"` doesn't support the
+              // `aria-invalid` ARIA property (jsx-a11y's
+              // role-supports-aria-props), so the border/ring cue below is a
+              // plain conditional class rather than the `aria-invalid:`
+              // Tailwind variant the input fields use — the actual error
+              // TEXT (via `ActionStatus`'s `role="alert"`) is still what
+              // tells a screen-reader user what's wrong.
+              className={`mb-1 flex w-fit overflow-hidden rounded-md border ${
+                state.status === "error" && state.field === "direction"
+                  ? "border-destructive ring-3 ring-destructive/20"
+                  : "border-border"
+              }`}
+              role="group"
+              aria-label={`Is this money ${accountName} owes, or money owed to ${accountName}?`}
+            >
+              <button
+                type="button"
+                aria-pressed={direction === "owe"}
+                onClick={() => {
+                  // Codex adversarial review (during /ship) caught this: an
+                  // unconditional `setTouched(true)` marked the form dirty
+                  // even on a no-op re-click of the ALREADY-selected
+                  // direction, which permanently disables the
+                  // resync-when-the-balance-moves-underneath-an-untouched-
+                  // field effect above for the rest of this mount — silently
+                  // freezing `balanceOwed` at a stale figure the next time a
+                  // charge lands on this account while the form is left
+                  // open. Only a REAL change should touch the form, same
+                  // discipline the amount/date `onChange` handlers already
+                  // follow.
+                  if (direction !== "owe") {
+                    setTouched(true);
+                    setDirection("owe");
+                  }
+                }}
+                className={`px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+                  direction === "owe"
+                    ? "bg-ink-1 text-background"
+                    : "bg-card text-ink-2 hover:bg-muted"
+                }`}
+              >
+                You owe
+              </button>
+              <button
+                type="button"
+                aria-pressed={direction === "owed"}
+                onClick={() => {
+                  if (direction !== "owed") {
+                    setTouched(true);
+                    setDirection("owed");
+                  }
+                }}
+                className={`border-l border-border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+                  direction === "owed"
+                    ? "bg-ink-1 text-background"
+                    : "bg-card text-ink-2 hover:bg-muted"
+                }`}
+              >
+                You&apos;re owed
+              </button>
+            </div>
+          </>
+        ) : null}
         <label
           className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3"
           htmlFor={balanceId}
         >
-          Balance owed
+          Amount
         </label>
         <input
           ref={balanceRef}
@@ -163,14 +283,20 @@ export function ReconcileForm({
           step="0.01"
           min="0"
           required
-          // The user never types a minus sign. The stored value is negative;
-          // this field shows and takes the magnitude (DS64, DS61).
+          // The user never types a minus sign. The radio above carries the
+          // sign; this field always takes a magnitude (DS64, DS61).
           value={balanceOwed}
           onChange={(e) => {
             setTouched(true);
             setBalanceOwed(e.target.value);
           }}
-          aria-label={`Balance owed on ${accountName}`}
+          // Codex structured review (during /ship) caught this inverted: "owed
+          // by"/"owed to" had the debtor and creditor swapped relative to what
+          // the toggle actually means — "owe" is money the user owes TO this
+          // account, "owed" is money this account owes TO the user. A screen
+          // reader landing on this field heard the opposite of what the
+          // visible toggle said.
+          aria-label={`Amount ${direction === "owe" ? "you owe" : "owed to you by"} ${accountName}`}
           aria-invalid={state.status === "error" && state.field === "balance"}
           className="w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]"
         />

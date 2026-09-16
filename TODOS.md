@@ -2348,23 +2348,31 @@ burn-down rate forward.
 
 ### Still open
 
-- [ ] **P2** — **`revalidateBudgetSurfacesAction` was two bugs; half two is now
-      fixed (2026-09-15), half one needs its own look.** (Merged 2026-09-09:
-      this was filed three times — twice as separate P2/P3 entries in the
-      2026-09-09 `/ship` section, once here. One entry, both halves.)
+- [x] **P2 → CLOSED (2026-09-16, verified by re-reading the code and git
+      history — no new fix needed, both halves were already shipped).**
+      `revalidateBudgetSurfacesAction` was two bugs; this entry's own text
+      correctly flagged half one as unverified rather than claiming it was
+      still broken, and that re-check is what this closure records.
       **Half one — it can fire before the write it is flushing has landed —
-      STILL OPEN, NOT TOUCHED HERE.** `CurrencyInput`'s `commitIfDirty()` runs
-      on blur/Enter without the wrapping island's `onBlur` awaiting it.
-      `_month-editor.tsx`'s `dirtyRef` did get reworked since this entry was
-      written — it's a counter now, incremented synchronously before the
-      `await commitAllocationAction(...)` inside `commit` so a same-tick
-      re-entrant blur sees it already dirty (see that file's own comment on
-      `dirtyRef`) — but `revalidate()` still does not await `commit`'s own
-      in-flight promise before calling `revalidateBudgetSurfacesAction()`; it
-      only checks the counter. Whether that still lets the revalidate's fetch
-      resolve on the server before `commitAllocationAction`'s write does is
-      unverified — re-check before believing either "still broken" or
-      "already fixed" here.
+      was CLOSED in v1.2.2 (`18d1109`, 2026-09-15), three days before this
+      entry's own "half two" verification pass, which never circled back to
+      update half one's status.** `_month-editor.tsx` gained
+      `pendingCommitsRef` (a `Set<Promise<unknown>>`) in that commit: `commit`
+      registers its `commitAllocationAction` promise into the set BEFORE its
+      own `await`, in the same synchronous bubbling `blur`/`focusout`
+      dispatch `dirtyRef` already relied on, and `revalidate()` now does
+      `await Promise.allSettled(inFlight)` — snapshotting the set — BEFORE
+      calling `revalidateBudgetSurfacesAction()`, not just checking the
+      `dirtyRef` counter as this entry originally described. That closes the
+      exact gap named above: the revalidation call can no longer race ahead
+      of the write it is flushing. `CHANGELOG.md`'s 1.2.2 entry documents the
+      user-visible fix ("Now it waits for every change on the page to finish
+      first"). No new component test exists for it — this app's own
+      exclusions rule out UI-component tests (categorization logic only), so
+      this was verified live per that release's own process, not by a test
+      this pass could re-run; the closure here rests on reading the current
+      `_month-editor.tsx` mechanism directly, which is sufficient to confirm
+      the race the original text describes is gone.
       **Half two — no budget write revalidates `/` at all — FIXED.** Verified
       2026-09-15 directly against the code, not just this file's prose:
       `upsertBudgetAllocationAction`, `revalidateBudgetSurfacesAction`,
@@ -2914,32 +2922,85 @@ per the plan's own "residuals" section.
       would be exactly the kind of unrequested robustness this repo's own
       reuse-ladder discipline argues against. (`src/lib/simplefin/sync.ts`)
 
-- [ ] **P2 — the Reconcile form cannot represent a POSITIVE credit-card
-      balance, and D9.2 makes it the ONLY path for every importing card
-      regardless of row count (Codex structured review).** Pre-existing, not
-      newly introduced: an unlinked card with a genuine credit balance
-      (rule 9: "a card genuinely can carry a credit balance after an
-      overpayment... `summarizeBalances` treats that as real") already had
-      only Reconcile as its control, and `updateLiabilityBalanceAction`
-      refuses a negative `balanceOwed` input (line ~180) then unconditionally
-      negates whatever is typed — there was never a way to submit a positive
-      stored value through this form. What D9.2 changes: a LINKED, ZERO-ROW
-      card used to get REFRESH in that state, and `refreshLiabilityBalances`'s
-      sign guard already correctly WRITES a positive feed-reported balance
-      for a card (rule 9). That worked. Now every importing card — including
-      at the moment of first linking, which is exactly when D9.1's required
-      manual reconcile (T6) happens — resolves to Reconcile unconditionally,
-      so if a card happens to be in a credit-balance state at cutover, the
-      one action the plan requires the user to perform cannot enter the
-      correct sign; it silently accepts a positive "owed" figure and stores
-      it negative. Verified Citi's actual measured state throughout this
-      plan's development was a debt, never a credit balance, so this does
-      not bite THIS rollout — but the gap is real and independent of card
-      import. Fix means letting the Reconcile form represent both signs
-      (a toggle, or reading the CURRENT balance's sign as the default and
-      accepting a matching signed input) — a real UX decision, not a
-      one-line patch, so not done here. (`src/app/accounts/_balance-forms.tsx`,
-      `src/app/accounts/actions.ts`, `src/lib/accounts/resolveBalanceAction.ts`)
+- [x] **P2 → CLOSED (2026-09-16). The Reconcile form can now represent a
+      POSITIVE credit-card balance.** (Codex structured review.) Was:
+      pre-existing, not newly introduced by D9.2 — an unlinked card with a
+      genuine credit balance (rule 9: "a card genuinely can carry a credit
+      balance after an overpayment... `summarizeBalances` treats that as
+      real") already had only Reconcile as its control, and
+      `updateLiabilityBalanceAction` refused a negative `balanceOwed` input
+      then unconditionally negated whatever WAS typed — there was never a
+      way to submit a positive stored value through this form, even though
+      the feed's own `refreshLiabilityBalances` sign guard could already
+      WRITE one (rule 9). D9.2 made this reachable at the one moment D9.1
+      requires a manual reconcile (T6): a card in a credit-balance state at
+      first linking would have its correct sign silently discarded.
+      **Fix taken: option 2 from the two named here — a two-button toggle
+      ("You owe" / "You're owed") defaulting from the account's CURRENT
+      balance sign, next to the existing magnitude field.** The user still
+      never types a minus sign (DS64 unchanged). `owedDollarsToSignedCents`
+      gained an optional `direction: "owe" | "owed" = "owe"` parameter
+      (default preserves every pre-existing caller — account creation never
+      offers "owed") rather than a sibling function, keeping rule 9's
+      "round first, flip sign second, in ONE place" property intact.
+      `updateLiabilityBalanceAction` now requires a `balanceDirection` field
+      and refuses rather than guesses when it's missing or invalid — the
+      same discipline rule 4's `intent` field uses, since absence must never
+      be the affirmative signal for which sign a write takes.
+      **A real, verified regression surfaced and was fixed in the same
+      session, from a different mechanism than the bug this entry names:**
+      a native HTML `<input type="radio">` pair (`checked`/`onChange`)
+      LOOKED controlled but wasn't reset-safe. React 19's `form.reset()`
+      after a function-action submit (documented earlier in this same file
+      for the `balanceOwed`/`asOf` fields) reverts every radio to its
+      ATTRIBUTE-level `defaultChecked` — baked in at first server render, so
+      always "owe" for a card that started in debt — and React's reconciler
+      skipped reasserting `checked` on the next render because its own
+      state value hadn't changed, even though the DOM's `.checked` property
+      had just been mutated out from under it by the native reset.
+      Reproduced live in a browser against a scratch `pnpm db:seed-dev`
+      ledger: save once as "You're owed", then Save again with nothing
+      touched — the second save silently wrote a NEGATIVE balance, the
+      exact sign-flip class this whole entry exists to close, one layer
+      up. Fixed by not using a native radio group at all: two plain
+      `type="button"` toggles driving one `<input type="hidden"
+      name="balanceDirection">`, the same controlled-`value` pattern
+      already proven reset-safe for the magnitude and date fields. Verified
+      interactively (toggle survives repeated saves in both directions, the
+      no-op guard still fires correctly for an unchanged owed-direction
+      balance, Undo restores the prior anchor, and a fresh page load
+      re-defaults the toggle from the account's current sign). 2196 tests
+      pass (10 new), `tsc --noEmit` clean, lint clean.
+      (`src/lib/import/accountAnchorFields.ts`, `src/app/accounts/actions.ts`,
+      `src/app/accounts/_balance-forms.tsx`,
+      `src/lib/import/accountAnchorFields.test.ts`,
+      `src/app/accounts/actions.test.ts`, `src/app/accounts/actions.wiring.test.ts`,
+      `src/app/accounts/actions.balance-refresh.test.ts`)
+      **Three more real bugs surfaced by `/ship`'s own pre-landing + adversarial
+      review, all fixed before this branch ever merged.** (1) The toggle had no
+      guard against a LOAN: `updateLiabilityBalanceAction` checked only
+      `accountClass(...) !== "liability"`, true for both a card and a loan, so
+      "You're owed" could be hand-set on a mortgage — the exact state
+      `refreshLiabilityBalances` (`sync.ts`) already refuses for a feed-reported
+      balance, for the same rule-9 reason. Fixed by adding the missing
+      `isLongTermLiability` check server-side, and by threading a new
+      `allowsPositiveBalance` boolean through `resolveCardAffordances` (T7's
+      existing per-row-gate unification, not a fourth hand-derived boolean) so
+      the toggle isn't rendered at all for a loan — rule 8's "don't offer a
+      control that can only ever refuse." (2) Re-clicking the ALREADY-selected
+      direction called `setTouched(true)` unconditionally, permanently
+      disabling the sibling resync-on-external-balance-change effect for the
+      rest of the form's mount — reproduced live (open Reconcile, click the
+      active toggle, add a charge via "Add a charge" while the form stays
+      open: the amount field stayed frozen at the pre-charge figure instead of
+      picking up the new balance). Fixed by only touching state on an actual
+      direction change. (3) The amount field's `aria-label` had "owed
+      by"/"owed to" backwards relative to what the toggle means, confirmed by
+      Codex structured review as `[P2]`. A related, doubly-confirmed a11y gap
+      (a missing/invalid `balanceDirection` refusal shared `field: "balance"`
+      with the amount input, so the wrong control lit up) also closed: the
+      refusal now carries its own `"direction"` field value.
+      (`src/lib/accounts/resolveCardAffordances.ts`, `src/app/accounts/_account-row.tsx`)
 
 - [x] **P1 — DONE (2026-09-15), CORRECTED same day by `/ship`'s own
       adversarial review before this branch ever merged.** The design

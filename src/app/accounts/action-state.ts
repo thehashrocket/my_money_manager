@@ -21,7 +21,7 @@ import type { ManualRefusalReason } from "@/lib/accounts/manualTransaction";
 export type AccountsActionState =
   | { status: "idle" }
   | { status: "ok"; message: string; warning: string | undefined }
-  | { status: "error"; message: string; field?: "balance" | "date" };
+  | { status: "error"; message: string; field?: "balance" | "date" | "direction" };
 
 export const IDLE: AccountsActionState = { status: "idle" };
 

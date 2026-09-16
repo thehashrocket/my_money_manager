@@ -48,6 +48,23 @@ describe("owedDollarsToSignedCents", () => {
     // explicit zero rather than producing -0 by arithmetic.
     expect(Object.is(owedDollarsToSignedCents(0.001), -0)).toBe(false);
   });
+
+  it("defaults to negating, so every pre-existing caller is unaffected", () => {
+    expect(owedDollarsToSignedCents(2000)).toBe(owedDollarsToSignedCents(2000, "owe"));
+  });
+
+  it("'owed' stores a POSITIVE cents figure — the post-overpayment credit balance", () => {
+    expect(owedDollarsToSignedCents(2000, "owed")).toBe(200_000);
+    expect(owedDollarsToSignedCents(0.125, "owed")).toBe(13);
+  });
+
+  it("'owed' also rounds BEFORE applying the (no-op) sign, for symmetry with 'owe'", () => {
+    expect(owedDollarsToSignedCents(0.135, "owed")).toBe(14);
+  });
+
+  it("'owed' returns +0 for a paid-off card, same as 'owe'", () => {
+    expect(Object.is(owedDollarsToSignedCents(0, "owed"), -0)).toBe(false);
+  });
 });
 
 describe("startingBalanceDateSchema", () => {

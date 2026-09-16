@@ -153,7 +153,12 @@ describe("updateLiabilityBalanceAction — guards that run before any query", ()
     // input is how a form highlights something the user got right.
     const state = await updateLiabilityBalanceAction(
       IDLE,
-      formData({ accountId: "1", balanceOwed: "2148.32", asOf: "2999-01-01" }),
+      formData({
+        accountId: "1",
+        balanceOwed: "2148.32",
+        balanceDirection: "owe",
+        asOf: "2999-01-01",
+      }),
     );
     expect(state.status).toBe("error");
     expect(state).toMatchObject({ field: "date" });
@@ -162,10 +167,40 @@ describe("updateLiabilityBalanceAction — guards that run before any query", ()
   it("refuses a calendar-invalid anchor date", async () => {
     const state = await updateLiabilityBalanceAction(
       IDLE,
-      formData({ accountId: "1", balanceOwed: "2148.32", asOf: "2026-13-40" }),
+      formData({
+        accountId: "1",
+        balanceOwed: "2148.32",
+        balanceDirection: "owe",
+        asOf: "2026-13-40",
+      }),
     );
     expect(state.status).toBe("error");
     expect(state).toMatchObject({ field: "date" });
+  });
+
+  it("refuses a missing 'balanceDirection' rather than guessing a sign", async () => {
+    const state = await updateLiabilityBalanceAction(
+      IDLE,
+      formData({ accountId: "1", balanceOwed: "500", asOf: "2026-09-06" }),
+    );
+    expect(state).toMatchObject({
+      status: "error",
+      field: "direction",
+      message: "Choose whether this is money you owe or money owed to you.",
+    });
+  });
+
+  it("refuses an invalid 'balanceDirection'", async () => {
+    const state = await updateLiabilityBalanceAction(
+      IDLE,
+      formData({
+        accountId: "1",
+        balanceOwed: "500",
+        balanceDirection: "sideways",
+        asOf: "2026-09-06",
+      }),
+    );
+    expect(state).toMatchObject({ status: "error", field: "direction" });
   });
 });
 

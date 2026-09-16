@@ -110,6 +110,7 @@ function reconcileForm(fields: Record<string, string> = {}): FormData {
   const fd = new FormData();
   fd.set("accountId", "1");
   fd.set("balanceOwed", "1900.00");
+  fd.set("balanceDirection", "owe");
   fd.set("asOf", "2026-09-06");
   for (const [k, v] of Object.entries(fields)) fd.set(k, v);
   return fd;

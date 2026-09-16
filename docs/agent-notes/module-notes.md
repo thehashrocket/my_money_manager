@@ -133,7 +133,13 @@ src/
                    of three separately-computed booleans agreeing by hand — the same
                    three-gate combination that regressed twice inside v0.27.0's own
                    review cycles. showReconcile is a straight RELAY of
-                   resolveBalanceAction's answer, never a second derivation of it. The
+                   resolveBalanceAction's answer, never a second derivation of it. As of
+                   v1.3.4 the same function also returns allowsPositiveBalance (!longTerm)
+                   — rule 9's sign guard for the Reconcile form's "You owe"/"You're owed"
+                   toggle, relayed through _account-row.tsx/_card-controls.tsx rather than
+                   a fourth hand-computed !isLongTermLiability agreeing with this module by
+                   hand, the exact drift shape it exists to prevent (found by /ship's
+                   pre-landing review). The
                    same module carries D4.1's pairingWarnsOnCategorized (should linking
                    a checking payment to a real card row warn rather than proceed
                    silently — yes, once the source row is already categorized, because

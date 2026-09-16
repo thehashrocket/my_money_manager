@@ -58,10 +58,42 @@ export function isStartingBalanceCentsInBounds(cents: number): boolean {
  * which is not `Object.is`-equal to 0. SQLite stores it as 0 either way, but
  * it survives in memory long enough to fail an equality assertion downstream
  * for a reason nobody would guess.
+ *
+ * `direction` defaults to `"owe"` (the historical, always-negate behavior)
+ * because account creation never offers the other direction. `"owed"` is
+ * reconcile's escape hatch for the genuine post-overpayment credit balance
+ * rule 9 already treats as real (`summarizeBalances`) but which this
+ * function used to have no way to produce — every typed magnitude was
+ * unconditionally negated, so a positive balance owed TO the user could
+ * only ever be entered by the feed's own sign guard, never by hand.
+ *
+ * `BalanceDirection` is declared here (the ONE spelling) and consumed two
+ * ways, mirroring `validateSyncInputs.ts`'s `ResolveIntent`/`LINK_INTENT`
+ * precedent for the same failure mode: a client literal and a server literal
+ * for the same field, with nothing tying them together, is how the two drift
+ * without either side's compiler noticing. `updateLiabilityBalanceAction`
+ * (server) imports `isBalanceDirection` — a real runtime guard, since the
+ * value arrives from `FormData` and is not proven a `BalanceDirection` by any
+ * type. `ReconcileForm` (`_balance-forms.tsx`, "use client") imports only the
+ * TYPE (`import type`), erased at build time, so this file's own `zod` import
+ * never reaches the client bundle — the same client-graph constraint
+ * `limits.ts`/`merchantLabel.ts`/`kindsImplyUsed.ts` document elsewhere.
  */
-export function owedDollarsToSignedCents(owedDollars: number): number {
+export const BALANCE_DIRECTIONS = ["owe", "owed"] as const;
+
+export type BalanceDirection = (typeof BALANCE_DIRECTIONS)[number];
+
+export function isBalanceDirection(value: unknown): value is BalanceDirection {
+  return typeof value === "string" && (BALANCE_DIRECTIONS as readonly string[]).includes(value);
+}
+
+export function owedDollarsToSignedCents(
+  owedDollars: number,
+  direction: BalanceDirection = "owe",
+): number {
   const magnitude = Math.round(owedDollars * 100);
-  return magnitude === 0 ? 0 : -magnitude;
+  if (magnitude === 0) return 0;
+  return direction === "owe" ? -magnitude : magnitude;
 }
 
 /**
