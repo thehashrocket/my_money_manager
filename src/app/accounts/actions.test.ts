@@ -58,15 +58,30 @@ function fail(message: string, field?: "balance" | "date"): AccountsActionState 
 }
 
 /** The exact chain `updateLiabilityBalanceAction` runs, against the test db. */
-function reconcile(raw: { accountId: unknown; balanceOwed: unknown; asOf: unknown }) {
+function reconcile(raw: {
+  accountId: unknown;
+  balanceOwed: unknown;
+  asOf: unknown;
+  /**
+   * Defaults to "owe" so every pre-existing call site below is unaffected.
+   * `unknown`, not the narrowed union — a crafted/stale request can post
+   * anything, same as `raw.balanceOwed` above.
+   */
+  balanceDirection?: unknown;
+}) {
   const owed = Number(raw.balanceOwed);
   if (!Number.isFinite(owed) || owed < 0) {
     return fail("Enter what you owe as a positive number.", "balance");
   }
+  const direction = raw.balanceDirection === undefined ? "owe" : raw.balanceDirection;
+  if (direction !== "owe" && direction !== "owed") {
+    return fail("Choose whether this is money you owe or money owed to you.", "balance");
+  }
 
+  const signedOwed = direction === "owe" ? -owed : owed;
   const parsed = validateUpdateAnchorInput({
     accountId: raw.accountId,
-    startingBalance: owed === 0 ? 0 : -owed,
+    startingBalance: owed === 0 ? 0 : signedOwed,
     startingBalanceDate: raw.asOf,
   });
   if (!parsed.success) {
@@ -98,7 +113,7 @@ function reconcile(raw: { accountId: unknown; balanceOwed: unknown; asOf: unknow
   // the bug it was written to guard: `owed = 0.125` produced -12 here and -13
   // in production, and the negation test below would have passed unchanged if
   // `actions.ts` had reverted to its own local copy.
-  const cents = owedDollarsToSignedCents(-startingBalance);
+  const cents = owedDollarsToSignedCents(Math.abs(startingBalance), direction);
 
   // The no-op guard, mirrored from the action. Without it, Save-with-no-edits
   // overwrites the single `prior_starting_balance_*` slot with the current
@@ -154,6 +169,49 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
     const after = reload(visa.id);
     expect(after?.startingBalanceCents).toBe(-214_832);
     expect(after?.startingBalanceDate).toBe("2026-09-06");
+  });
+
+  it("'owed' stores a POSITIVE cents figure — the credit-balance bug this pipeline used to have", () => {
+    // Before `balanceDirection` existed, EVERY typed magnitude was negated —
+    // there was no way to hand-reconcile a card into the genuine
+    // post-overpayment credit balance rule 9 treats as real. This is that
+    // fix's own regression test.
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -20_000,
+      anchor: "2026-08-01",
+    });
+    const state = reconcile({
+      accountId: visa.id,
+      balanceOwed: "50.00",
+      asOf: "2026-09-06",
+      balanceDirection: "owed",
+    });
+    expect(state.status).toBe("ok");
+    expect(reload(visa.id)?.startingBalanceCents).toBe(5_000);
+  });
+
+  it("refuses a missing or invalid 'balanceDirection' rather than guessing a sign", () => {
+    const visa = seedAccount({
+      name: "Visa",
+      type: "credit",
+      cents: -200_000,
+      anchor: "2026-08-01",
+    });
+    const state = reconcile({
+      accountId: visa.id,
+      balanceOwed: "500",
+      asOf: "2026-09-06",
+      balanceDirection: "sideways",
+    });
+    expect(state).toEqual({
+      status: "error",
+      message: "Choose whether this is money you owe or money owed to you.",
+      field: "balance",
+    });
+    // Untouched: a refusal never reaches the UPDATE.
+    expect(reload(visa.id)?.startingBalanceCents).toBe(-200_000);
   });
 
   it("stores a paid-off card as 0, never -0", () => {

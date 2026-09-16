@@ -58,10 +58,22 @@ export function isStartingBalanceCentsInBounds(cents: number): boolean {
  * which is not `Object.is`-equal to 0. SQLite stores it as 0 either way, but
  * it survives in memory long enough to fail an equality assertion downstream
  * for a reason nobody would guess.
+ *
+ * `direction` defaults to `"owe"` (the historical, always-negate behavior)
+ * because account creation never offers the other direction. `"owed"` is
+ * reconcile's escape hatch for the genuine post-overpayment credit balance
+ * rule 9 already treats as real (`summarizeBalances`) but which this
+ * function used to have no way to produce — every typed magnitude was
+ * unconditionally negated, so a positive balance owed TO the user could
+ * only ever be entered by the feed's own sign guard, never by hand.
  */
-export function owedDollarsToSignedCents(owedDollars: number): number {
+export function owedDollarsToSignedCents(
+  owedDollars: number,
+  direction: "owe" | "owed" = "owe",
+): number {
   const magnitude = Math.round(owedDollars * 100);
-  return magnitude === 0 ? 0 : -magnitude;
+  if (magnitude === 0) return 0;
+  return direction === "owe" ? -magnitude : magnitude;
 }
 
 /**

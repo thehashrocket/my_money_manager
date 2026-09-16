@@ -102,6 +102,11 @@ export function ReconcileForm({
   // card-terms forms were fixed for; these two were missed.
   const [balanceOwed, setBalanceOwed] = useState(centsToDollarString(Math.abs(balanceCents)));
   const [asOf, setAsOf] = useState(today);
+  // The user never types a minus sign (DS64) — this radio carries the sign
+  // instead. Defaults from the account's CURRENT balance so opening
+  // Reconcile on an already-credit-balance card doesn't require flipping it
+  // just to re-confirm the same figure.
+  const [direction, setDirection] = useState<"owe" | "owed">(balanceCents > 0 ? "owed" : "owe");
 
   // RESYNC WHEN THE BALANCE MOVES UNDERNEATH AN UNTOUCHED FIELD.
   //
@@ -127,7 +132,10 @@ export function ReconcileForm({
   const [seenBalanceCents, setSeenBalanceCents] = useState(balanceCents);
   if (balanceCents !== seenBalanceCents) {
     setSeenBalanceCents(balanceCents);
-    if (!touched) setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
+    if (!touched) {
+      setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
+      setDirection(balanceCents > 0 ? "owed" : "owe");
+    }
   }
   const balanceId = useId();
   const dateId = useId();
@@ -148,12 +156,65 @@ export function ReconcileForm({
       className="mt-2 flex w-full flex-wrap items-end gap-3"
     >
       <input type="hidden" name="accountId" value={accountId} />
+      {/*
+        A radio pair here (checked+onChange) LOOKS controlled but isn't
+        reset-safe: React 19's native `form.reset()` after a function-action
+        submit reverts every radio to its ATTRIBUTE-level `defaultChecked`
+        (baked in at first server render — "owe", since a card almost always
+        starts in debt), and React's reconciler skips reasserting `checked`
+        on the next render because its *own* state value ("owed") didn't
+        change, even though the DOM's `.checked` property just got mutated
+        out from under it. Reproduced live: save once as "You're owed",
+        then Save again with nothing touched — the second save silently
+        wrote a NEGATIVE balance, the exact sign-flip bug this whole form
+        exists to close, from a different mechanism. A hidden `value`-typed
+        input doesn't have this failure mode (it's the same controlled
+        pattern already proven for `balanceOwed`/`asOf` below), so the
+        toggle is two plain buttons driving one hidden field instead of a
+        native radio group.
+      */}
+      <input type="hidden" name="balanceDirection" value={direction} />
       <div>
+        <span className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3">
+          This balance is
+        </span>
+        <div
+          className="mb-1 flex w-fit overflow-hidden rounded-md border border-border"
+          role="group"
+          aria-label={`Is this money ${accountName} owes, or money owed to ${accountName}?`}
+        >
+          <button
+            type="button"
+            aria-pressed={direction === "owe"}
+            onClick={() => {
+              setTouched(true);
+              setDirection("owe");
+            }}
+            className={`px-3 py-1.5 text-sm ${
+              direction === "owe" ? "bg-ink-1 text-background" : "bg-card text-ink-2"
+            }`}
+          >
+            You owe
+          </button>
+          <button
+            type="button"
+            aria-pressed={direction === "owed"}
+            onClick={() => {
+              setTouched(true);
+              setDirection("owed");
+            }}
+            className={`border-l border-border px-3 py-1.5 text-sm ${
+              direction === "owed" ? "bg-ink-1 text-background" : "bg-card text-ink-2"
+            }`}
+          >
+            You&apos;re owed
+          </button>
+        </div>
         <label
           className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3"
           htmlFor={balanceId}
         >
-          Balance owed
+          Amount
         </label>
         <input
           ref={balanceRef}
@@ -163,14 +224,14 @@ export function ReconcileForm({
           step="0.01"
           min="0"
           required
-          // The user never types a minus sign. The stored value is negative;
-          // this field shows and takes the magnitude (DS64, DS61).
+          // The user never types a minus sign. The radio above carries the
+          // sign; this field always takes a magnitude (DS64, DS61).
           value={balanceOwed}
           onChange={(e) => {
             setTouched(true);
             setBalanceOwed(e.target.value);
           }}
-          aria-label={`Balance owed on ${accountName}`}
+          aria-label={`Amount ${direction === "owe" ? "owed by" : "owed to"} ${accountName}`}
           aria-invalid={state.status === "error" && state.field === "balance"}
           className="w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]"
         />
