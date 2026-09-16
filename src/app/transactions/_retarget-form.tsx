@@ -1,12 +1,19 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
+import { RememberCheckbox } from "@/components/ledger/remember-checkbox";
+import { useRememberConsent } from "@/components/ledger/use-remember-consent";
 import type { LeafCategory } from "@/lib/categories";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
+import {
+  filedCategoryIdsAfterMove,
+  resolveRememberUi,
+} from "@/lib/categorize/keyTrainability";
+import type { ExistingRule } from "@/lib/rules";
 import { merchantLabel } from "@/lib/transactions/merchantLabel";
 import { bulkRetargetAction, undoBulkRetargetAction } from "./actions";
 
@@ -32,6 +39,16 @@ type Props = {
    * one.
    */
   filed: FiledCategory[];
+  /**
+   * This merchant's LIVE filed-evidence category ids — `filedCategoryEvidenceWhere`
+   * (excludes archived categories and transfer-paired rows), the same read
+   * `/categorize` and `TransactionRowForm` use for their own Remember guard.
+   * Deliberately not derived from `filed` above — see the Remember-guard
+   * section of this component's docstring.
+   */
+  filedCategoryIds: number[];
+  /** This merchant's current exact rule, if any — same source as the row form's. */
+  existingRule: ExistingRule | null;
   leafCategories: LeafCategory[];
 };
 
@@ -48,26 +65,30 @@ type Props = {
  * the rows. `/categorize`'s own "See all N transactions →" link already lands
  * here, so the path existed before the control did.
  *
- * ## Why Remember has no client-side disable
+ * ## The Remember guard
  *
  * `/categorize` and the row form directly below this one (`TransactionRowForm`)
  * both disable their checkbox up front by running `classifyKeyTrainability`
  * (and, since the ship review that added rule-removal, `describeRuleAction`)
  * against a `filedCategoryIds` read that goes through the shared
- * `filedCategoryEvidenceWhere` predicate. This form deliberately still does
- * not, even though it holds a filing history and could fake one: `filed`
- * comes from `summarizeByCategory`, which — unlike `filedCategoryEvidenceWhere`
- * — does NOT skip rows whose category is ARCHIVED. A client verdict built
- * from `filed` would be stricter than the server's on exactly the merchants
- * that have an archived category in their past, disabling a checkbox the
- * server would have honoured. A second, subtly disagreeing copy of the
- * verdict is worse than answering a beat late, so the server decides and the
- * toast reports — this form is now the one place on `/transactions` where
- * that is still true, not because the reasoning stopped applying elsewhere,
- * but because `filed` specifically is the wrong evidence source to build a
- * client verdict from. Wiring this form onto the same
- * `filedCategoryEvidenceWhere`-based read the other two use is a real gap,
- * not a design choice — see TODOS.md.
+ * `filedCategoryEvidenceWhere` predicate. This form now does too, via the
+ * same `resolveRememberUi`/`useRememberConsent` pair — but against a
+ * DIFFERENT prop than `filed`. `filed` comes from `summarizeByCategory`,
+ * which — unlike `filedCategoryEvidenceWhere` — does NOT skip rows whose
+ * category is ARCHIVED, so a verdict built from it would be stricter than
+ * the server's on exactly the merchants that have an archived category in
+ * their past. `filedCategoryIds` (a separate prop, sourced from
+ * `loadFiledCategoryIds` in `page.tsx`) is the correct evidence instead.
+ *
+ * The verdict also has to describe the ledger AS IT WILL BE after the move,
+ * the same "exclude what's about to change" doctrine `resolveKeyTrainability`
+ * documents for a single-row retarget. `bulkRetarget` moves EVERY row filed
+ * as `fromCategoryId` for this merchant — the whole category's contribution,
+ * not a subset — so dropping `effective.categoryId` out of `filedCategoryIds`
+ * before evaluating the verdict is mathematically identical to passing the
+ * whole moved set as `excludeTxnIds`, without needing the moved rows' own
+ * ids. `pendingCategoryId` is `toId` — the destination the user is about to
+ * file all of them under.
  *
  * A `<details>` disclosure, matching the app's pattern for secondary content
  * (`BudgetHelpPanel`, `/goals`): this is a repair, not the page's main verb,
@@ -76,16 +97,14 @@ type Props = {
 export function RetargetForm({
   normalizedMerchant,
   filed,
+  filedCategoryIds,
+  existingRule,
   leafCategories,
 }: Props) {
   const [fromChoice, setFromChoice] = useState("");
   const [toValue, setToValue] = useState("");
-  const [remember, setRemember] = useState(false);
   const [isPending, startTransition] = useTransition();
-
-  // After the hooks, never before them. The caller already gates on this, so
-  // it is a second belt rather than the mechanism.
-  if (filed.length === 0) return null;
+  const reasonId = useId();
 
   /* Derived, not synced. `filed` changes under us on every revalidation — a
      completed move empties the category that was selected — and deriving the
@@ -100,12 +119,37 @@ export function RetargetForm({
      a category they never named, and with Remember ticked retrained the rule
      against that set instead. The server refuses this exact condition
      (`NoRowsToRetargetError`), so the client was the laxer of the two. Now it
-     refuses too, and says which choice evaporated. */
+     refuses too, and says which choice evaporated.
+
+     Computed unconditionally, ahead of the `filed.length === 0` early return
+     below — `filed[0]` on an empty array is `undefined`, which `effective`
+     already treats as a valid state, and `useRememberConsent` (a hook) needs
+     `pendingCategoryId` before any conditional return can run. */
   const from = filed.find((f) => String(f.categoryId) === fromChoice);
   const chosenIsGone = fromChoice !== "" && from === undefined;
   const effective = from ?? (fromChoice === "" ? filed[0] : undefined);
 
   const toId = toValue === "" ? null : Number(toValue);
+
+  // See "The Remember guard" above: `filedCategoryIds` minus the category
+  // being moved AWAY from is "the ledger as it will be" — every one of that
+  // category's rows for this merchant is the moved set.
+  const filedForVerdict = filedCategoryIdsAfterMove(
+    filedCategoryIds,
+    effective?.categoryId,
+  );
+  const rememberUi = resolveRememberUi(
+    normalizedMerchant,
+    filedForVerdict,
+    existingRule,
+    toId,
+  );
+  const remember = useRememberConsent(normalizedMerchant, rememberUi.action, toId);
+
+  // After the hooks, never before them. The caller already gates on this, so
+  // it is a second belt rather than the mechanism.
+  if (filed.length === 0) return null;
+
   const canSubmit =
     !isPending &&
     effective !== undefined &&
@@ -134,7 +178,7 @@ export function RetargetForm({
         toast.error(result.message);
         return;
       }
-      setRemember(false);
+      remember.reset();
       setToValue("");
       /* `fromChoice` MUST be cleared here, and it is the success path that
          needs it. A complete move empties the source out of `filed` —
@@ -257,17 +301,12 @@ export function RetargetForm({
               className="min-w-[10rem]"
             />
           </div>
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
-            <input
-              type="checkbox"
-              name="rememberMerchant"
-              value="true"
-              checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4"
-            />
-            Remember
-          </label>
+          <RememberCheckbox
+            rememberUi={rememberUi}
+            checked={remember.checked}
+            onChange={remember.onChange}
+            reasonId={reasonId}
+          />
           <button
             type="submit"
             disabled={!canSubmit}
@@ -290,8 +329,19 @@ export function RetargetForm({
           <p className="text-xs text-ink-3">
             Moves every non-transfer row for this merchant that is filed as{" "}
             {effective?.categoryName} — the whole merchant, not just the rows
-            matching the filters above. Ticking Remember retrains the
-            merchant&apos;s rule to follow them.
+            matching the filters above.
+            {rememberUi.action.kind === "train"
+              ? " Ticking Remember retrains the merchant's rule to follow them."
+              : null}
+          </p>
+        )}
+        {/* Rendered regardless of `chosenIsGone` — the checkbox's
+            `aria-describedby` points at `reasonId` whenever `rememberUi.message`
+            is defined, and that is independent of whether the source category
+            has vanished (Codex design review, outside voice). */}
+        {rememberUi.message === undefined ? null : (
+          <p id={reasonId} className="text-xs text-ink-3">
+            {rememberUi.message}
           </p>
         )}
       </form>

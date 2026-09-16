@@ -10,6 +10,7 @@ import type { LeafCategory } from "@/lib/categories";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
+import { RememberCheckbox } from "@/components/ledger/remember-checkbox";
 import { useRememberConsent } from "@/components/ledger/use-remember-consent";
 import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel";
 import { resolveRememberUi } from "@/lib/categorize/keyTrainability";
@@ -229,30 +230,13 @@ export function MerchantRow({
           required
           className="min-w-[10rem]"
         />
-        <label
-          className={`flex min-h-11 items-center gap-1.5 text-xs ${
-            rememberUi.enabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
-          }`}
-          title={rememberUi.message}
-        >
-          <input
-            type="checkbox"
-            name="rememberMerchant"
-            value="true"
-            // `checked={remember.checked}` is a MASK, not the raw click
-            // state — see `useRememberConsent`'s own docstring for why.
-            checked={remember.checked}
-            disabled={!rememberUi.enabled}
-            /* The reason is the checkbox's accessible description, not just
-               text that happens to sit nearby: `basis-full` puts it on its
-               own line below the Submit button, so proximity alone does not
-               connect the two. */
-            aria-describedby={rememberUi.message === undefined ? undefined : reasonId}
-            onChange={remember.onChange}
-            className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
-          />
-          {rememberUi.label}
-        </label>
+        <RememberCheckbox
+          rememberUi={rememberUi}
+          checked={remember.checked}
+          onChange={remember.onChange}
+          reasonId={reasonId}
+          minTouchTarget
+        />
         <button
           type="submit"
           disabled={isPending || !categoryId}
