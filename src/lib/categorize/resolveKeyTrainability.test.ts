@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
-import { classifyKeyTrainability } from "./keyTrainability";
+import { classifyKeyTrainability, filedCategoryIdsAfterMove } from "./keyTrainability";
 import { loadMerchantGroups } from "./loadMerchantGroups";
 import { loadTransactions } from "./loadTransactions";
 import {
@@ -454,6 +454,122 @@ describe("resolveKeyTrainability — agrees with what /categorize renders", () =
         });
       }
     }
+  });
+});
+
+describe("filedCategoryIdsAfterMove — parity with resolveKeyTrainability's excludeTxnIds", () => {
+  // RetargetForm derives its verdict by dropping the FROM category's id out
+  // of `filedCategoryIds` (`filedCategoryIdsAfterMove`) rather than passing
+  // the moved rows' own ids as `excludeTxnIds` — the claim (keyTrainability.ts's
+  // own docstring) is that these are mathematically identical, because
+  // `bulkRetarget` moves EVERY non-transfer row filed under that category for
+  // the merchant. This proves the claim against the real DB-backed exclusion
+  // instead of leaving it as an unverified assertion in a comment.
+  it("agrees with excludeTxnIds when the merchant stays split after the move", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+    const other = seedCategory("Other");
+
+    const moving = [
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "AMAZON",
+        amountCents: -4000,
+        categoryId: groceries.id,
+      }),
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "AMAZON",
+        amountCents: -1500,
+        categoryId: groceries.id,
+      }),
+    ];
+    // Stays behind — the merchant is still split after the move.
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -900,
+      categoryId: other.id,
+    });
+
+    const filedCategoryIds = loadFiledCategoryIds(handle.db, "AMAZON");
+    const client = classifyKeyTrainability(
+      "AMAZON",
+      filedCategoryIdsAfterMove(filedCategoryIds, groceries.id),
+      dining.id,
+    );
+    const server = resolveKeyTrainability(
+      handle.db,
+      "AMAZON",
+      dining.id,
+      moving.map((row) => row.id),
+    );
+
+    expect(client).toEqual(server);
+    expect(client.trainable).toBe(false);
+    if (client.trainable) return;
+    expect(client.reason).toBe("multi-category");
+  });
+
+  it("agrees with excludeTxnIds when the move makes the key unanimous", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+
+    // Every row for this merchant is filed under the category being moved
+    // away from — nothing stays behind.
+    const moving = [
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "SAFEWAY",
+        amountCents: -4000,
+        categoryId: groceries.id,
+      }),
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "SAFEWAY",
+        amountCents: -1500,
+        categoryId: groceries.id,
+      }),
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "SAFEWAY",
+        amountCents: -900,
+        categoryId: groceries.id,
+      }),
+    ];
+
+    const filedCategoryIds = loadFiledCategoryIds(handle.db, "SAFEWAY");
+    const client = classifyKeyTrainability(
+      "SAFEWAY",
+      filedCategoryIdsAfterMove(filedCategoryIds, groceries.id),
+      dining.id,
+    );
+    const server = resolveKeyTrainability(
+      handle.db,
+      "SAFEWAY",
+      dining.id,
+      moving.map((row) => row.id),
+    );
+
+    expect(client).toEqual(server);
+    expect(client.trainable).toBe(true);
+  });
+
+  it("is a no-op when nothing has been picked as the source yet", () => {
+    const filedCategoryIds = [3, 7, 9];
+    expect(filedCategoryIdsAfterMove(filedCategoryIds, undefined)).toEqual([
+      3, 7, 9,
+    ]);
   });
 });
 

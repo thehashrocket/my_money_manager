@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyKeyTrainability,
   describeRuleAction,
+  filedCategoryIdsAfterMove,
   LOSSY_MERCHANT_KEYS,
   resolveRememberUi,
   ruleActionLabel,
@@ -521,5 +522,26 @@ describe("ruleActionSignature", () => {
     const a = ruleActionSignature("SAFEWAY", { kind: "none", message: "reason A" }, 9);
     const b = ruleActionSignature("SAFEWAY", { kind: "none", message: "reason B" }, 9);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("filedCategoryIdsAfterMove", () => {
+  it("drops the category being moved away from", () => {
+    expect(filedCategoryIdsAfterMove([3, 7, 9], 7)).toEqual([3, 9]);
+  });
+
+  it("is a no-op when the category isn't in the list at all", () => {
+    expect(filedCategoryIdsAfterMove([3, 9], 7)).toEqual([3, 9]);
+  });
+
+  it("is a no-op when nothing has been picked as the source yet", () => {
+    expect(filedCategoryIdsAfterMove([3, 7, 9], undefined)).toEqual([3, 7, 9]);
+  });
+
+  it("drops every matching entry, not just the first", () => {
+    // Not reachable through `loadFiledCategoryIds` today (it's DISTINCT per
+    // category), but the function's own contract is a plain filter, not
+    // "remove the first match" — pin that directly.
+    expect(filedCategoryIdsAfterMove([7, 3, 7, 9], 7)).toEqual([3, 9]);
   });
 });

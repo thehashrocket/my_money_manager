@@ -419,6 +419,31 @@ export function ruleActionSignature(
 }
 
 /**
+ * `filedCategoryIds` as they will read once every row currently filed under
+ * `movingFromCategoryId` has moved elsewhere — i.e. with that category's own
+ * contribution dropped out.
+ *
+ * `RetargetForm`'s `bulkRetarget` server action moves EVERY non-transfer row
+ * filed under one category for a merchant key (`bulkRetarget.ts`'s
+ * `matchingRows` query: `merchant, categoryId = fromCategoryId,
+ * transferPairId IS NULL`), so dropping the category id here is exactly
+ * equivalent to passing that whole moved set as `excludeTxnIds` to
+ * {@link resolveKeyTrainability}, without needing the row ids client-side.
+ * Pinned by a parity test in `resolveKeyTrainability.test.ts` against the
+ * real DB-backed exclusion, not just this claim.
+ *
+ * `movingFromCategoryId` is `undefined` (not filtered) when nothing has been
+ * picked as the source yet — `RetargetForm`'s own `effective` can be
+ * `undefined` when the previously-picked source category has vanished.
+ */
+export function filedCategoryIdsAfterMove(
+  filedCategoryIds: readonly number[],
+  movingFromCategoryId: number | undefined,
+): number[] {
+  return filedCategoryIds.filter((id) => id !== movingFromCategoryId);
+}
+
+/**
  * Is this a category id at all?
  *
  * The client passes the combobox's raw string through `Number()`, where an
