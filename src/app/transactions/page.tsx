@@ -19,6 +19,8 @@ import {
   type CategoryBreakdownRow,
   type FilterPredicateInput,
 } from "@/lib/categorize/loadTransactions";
+import { loadFiledCategoryIds } from "@/lib/categorize/resolveKeyTrainability";
+import { loadExactRulesByMerchant } from "@/lib/rules";
 import { centsToDollarString } from "@/lib/money";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import {
@@ -188,6 +190,20 @@ export default async function TransactionsPage({
             : [{ categoryId: row.categoryId, categoryName: row.categoryName, count: row.count }],
         );
 
+  // The SAME `filedCategoryEvidenceWhere`-based read `/categorize` and this
+  // page's own row form already use for their Remember guard — not
+  // `merchantWideBreakdown` above, which comes from `summarizeByCategory` and
+  // (unlike this predicate) does not skip a filing under an ARCHIVED
+  // category. `RetargetForm` derives its own verdict by excluding the
+  // category being moved AWAY from (every one of its rows is the moved set,
+  // so that is `excludeTxnIds` without needing the row ids), which is why no
+  // exclusion is passed here — the form applies it after the fact, once it
+  // knows which category the user picked to move rows out of. See TODOS.md.
+  const retargetFiledCategoryIds =
+    merchant !== undefined ? loadFiledCategoryIds(db, merchant) : [];
+  const retargetExistingRule =
+    merchant !== undefined ? (loadExactRulesByMerchant(db, [merchant]).get(merchant) ?? null) : null;
+
   // X3/B7: the picker excludes archived categories (you can't re-file a
   // transaction into one), but a `?categoryId=` filter can point at a
   // category that's since been archived — e.g. a `/budget` row link
@@ -249,6 +265,8 @@ export default async function TransactionsPage({
         <RetargetForm
           normalizedMerchant={merchant}
           filed={filedCategories}
+          filedCategoryIds={retargetFiledCategoryIds}
+          existingRule={retargetExistingRule}
           leafCategories={leafCategories}
         />
       ) : null}

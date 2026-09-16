@@ -11,6 +11,7 @@ import { formatCents } from "@/lib/money";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
+import { RememberCheckbox } from "@/components/ledger/remember-checkbox";
 import { useRememberConsent } from "@/components/ledger/use-remember-consent";
 import { hasMerchantName, NO_MERCHANT_NAME } from "@/lib/transactions/merchantLabel";
 import type { AccountOption } from "@/lib/accounts/listAccounts";
@@ -301,26 +302,12 @@ export function TransactionRowForm({
             labels in a column are the same height as the memo line beside
             them, so the new second line costs the list no extra height. */}
         <div className="flex flex-col gap-0.5">
-          <label
-            className={`flex items-center gap-1.5 text-xs ${
-              rememberUi.enabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
-            }`}
-            title={rememberUi.message}
-          >
-            <input
-              type="checkbox"
-              name="rememberMerchant"
-              value="true"
-              // `checked={remember.checked}` is a MASK, not the raw click
-              // state — see `useRememberConsent`'s own docstring for why.
-              checked={remember.checked}
-              disabled={!rememberUi.enabled}
-              aria-describedby={rememberUi.message === undefined ? undefined : reasonId}
-              onChange={remember.onChange}
-              className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            {rememberUi.label}
-          </label>
+          <RememberCheckbox
+            rememberUi={rememberUi}
+            checked={remember.checked}
+            onChange={remember.onChange}
+            reasonId={reasonId}
+          />
           <label className="flex items-center gap-1.5 text-xs text-ink-2">
             <input
               type="checkbox"

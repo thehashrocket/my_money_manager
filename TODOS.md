@@ -2987,7 +2987,77 @@ Four specialists (code-reviewer, pr-test-analyzer, comment-analyzer, type-design
 
 Deferred, all recorded rather than fixed under continued review pressure:
 
-- [ ] **P2 — `_retarget-form.tsx`'s "Remember" checkbox is a THIRD surface with `allowRuleRemoval: true` (via `runBulkRetarget`) that this whole branch never touched, and it still only warns after a refused submit — no client-side disable, no "Remove conflicting rule" relabeling.** Found by code-reviewer: `/transactions?merchant=…` renders `RetargetForm` directly above the row list, so a user can see one checkbox that greys itself out with a reason (the row below) sitting next to one that doesn't (the retarget form above), for what reads as the same feature. The form's own docstring already explains why this was deliberate at the time it was written — `filed` comes from `summarizeByCategory`, which (unlike `filedCategoryEvidenceWhere`) does NOT skip archived-category rows, so a client verdict built from `filed` would be stricter than the server's on exactly the merchants with an archived category in their past. That reasoning is still correct and the docstring has been corrected in this pass to state it precisely (it no longer claims parity with the row form, which round 2 made false). Closing the gap for real means wiring `RetargetForm` onto the SAME `filedCategoryEvidenceWhere`-based read (`loadFiledCategoryIdsByMerchant`/`loadExactRulesByMerchant`) the other two surfaces use instead of `summarizeByCategory`'s looser one — a real feature addition (new data threaded through `page.tsx` into `RetargetForm`'s props), not a one-line fix, and reviewers agreed it does not belong bolted onto an already-large PR. (`src/app/transactions/_retarget-form.tsx`, `src/app/transactions/page.tsx`)
+- [x] **P2 → CLOSED (2026-09-16). `_retarget-form.tsx`'s "Remember" checkbox is
+      now the same guard as the other two surfaces, not a silent third copy.**
+      `page.tsx` now loads `loadFiledCategoryIds(db, merchant)` (the
+      `filedCategoryEvidenceWhere`-based read, archived categories and
+      transfer-paired rows already excluded) and
+      `loadExactRulesByMerchant(db, [merchant])` for the retarget merchant,
+      and passes both down as new `filedCategoryIds`/`existingRule` props —
+      deliberately NOT derived from the existing `filed` prop, which comes
+      from `summarizeByCategory` and does not skip an archived category, the
+      exact over-strictness this entry originally flagged as a reason NOT to
+      reuse it. `RetargetForm` derives its verdict from `filedCategoryIds`
+      with the FROM category's id dropped (every one of that category's
+      non-transfer rows for this merchant is the moved set — verified
+      against `bulkRetarget`'s own `matchingRows` query, which selects
+      exactly `(merchant, categoryId = fromCategoryId, transferPairId IS
+      NULL)` — so dropping the id is mathematically identical to passing the
+      whole moved set as `excludeTxnIds`, without needing the row ids
+      client-side) and `toId` as `pendingCategoryId`, through the same
+      `resolveRememberUi`/`useRememberConsent` pair `TransactionRowForm`
+      already uses. The checkbox now disables and relabels
+      ("Remove unusable rule" / "Remove conflicting rule") exactly like its
+      sibling below it. No escape-hatch was needed here (unlike the row
+      form's Save button): `canSubmit` already requires an actual move to a
+      different category, so there is no same-category "removal-only"
+      submission to unblock.
+      **`/ship`'s coverage audit (2026-09-16) flagged the one genuinely new
+      line of logic — dropping the FROM category's id out of
+      `filedCategoryIds` — as verified only by hand against `bulkRetarget`'s
+      query, with no automated pin.** Extracted into
+      `filedCategoryIdsAfterMove` (`keyTrainability.ts`) and proved against
+      the real DB-backed exclusion in a new
+      `"filedCategoryIdsAfterMove — parity with resolveKeyTrainability's
+      excludeTxnIds"` block in `resolveKeyTrainability.test.ts` (both the
+      still-split-after-the-move and made-unanimous-by-the-move cases,
+      asserting the client verdict computed from the filtered category list
+      equals `resolveKeyTrainability`'s own DB-backed
+      `excludeTxnIds`-computed verdict) plus 4 pure unit tests in
+      `keyTrainability.test.ts`.
+      **`/ship`'s pre-landing review (Codex outside design voice) also found
+      two real bugs in the render, both fixed:** the "Ticking Remember
+      retrains the merchant's rule" sentence used to render unconditionally,
+      contradicting the checkbox's own label when the actual action was
+      "Remove conflicting rule"/"Remove unusable rule" — now shown only when
+      `rememberUi.action.kind === "train"`; and the reason `<p id={reasonId}>`
+      only rendered outside the `chosenIsGone` branch while the checkbox's
+      `aria-describedby` pointed at `reasonId` independent of `chosenIsGone`,
+      so a stale-source-category state could leave a dangling ARIA
+      reference — the reason paragraph now renders unconditionally whenever
+      `rememberUi.message` is defined.
+      **The maintainability specialist also caught the new checkbox render
+      becoming a THIRD verbatim-structure copy of the exact same block in
+      `_merchant-row.tsx` and `_transaction-row.tsx` — the render half of a
+      consolidation `resolveRememberUi`/`useRememberConsent` already did for
+      the logic half.** Extracted a shared `RememberCheckbox` component
+      (`src/components/ledger/remember-checkbox.tsx`, taking `{rememberUi,
+      checked, onChange, reasonId, minTouchTarget?}`) and updated all three
+      call sites. The reason `<p>` stays un-extracted on purpose — its layout
+      genuinely differs per caller (a flex-wrap sibling needing `basis-full`
+      on two surfaces, a plain block on the third), which is real per-context
+      difference, not drift. Verified interactively in a browser on both
+      `/categorize` and `/transactions?merchant=…` (checkbox ticks, disables,
+      and relabels identically to before the extraction; no console errors).
+      2186 tests pass (2179 + 7 new), `tsc --noEmit` clean, lint clean.
+      (`src/app/transactions/_retarget-form.tsx`,
+      `src/app/transactions/page.tsx`,
+      `src/app/categorize/_merchant-row.tsx`,
+      `src/app/transactions/_transaction-row.tsx`,
+      `src/components/ledger/remember-checkbox.tsx`,
+      `src/lib/categorize/keyTrainability.ts`,
+      `src/lib/categorize/keyTrainability.test.ts`,
+      `src/lib/categorize/resolveKeyTrainability.test.ts`)
 
 - [x] **P2 → CLOSED (2026-09-15).** **The per-component decision logic (`pendingCategoryId`, `trainability`, `ruleAction`, `ruleActionEnabled`, the `handlePick` consent-reset lookahead, the `<p id={reasonId}>` reason block) was hand-duplicated across `_merchant-row.tsx` and `_transaction-row.tsx`.** Both proposed shapes landed, with one refinement to (b): `resolveRememberUi(normalizedMerchant, filedCategoryIds, existingRule, pendingCategoryId) → {action, enabled, message, label}` (`keyTrainability.ts`) folds `classifyKeyTrainability` + `describeRuleAction` + the enabled/message/label derivation into one call, so `describeRuleAction` can no longer be handed a verdict computed from a different key than its own argument. For (b), a plain `consentedKind === action.kind` mask (as this entry originally specced) turned out to be insufficient and was verified so BEFORE shipping: `kind` alone cannot tell `remove-conflicting` (pointing at Gas) apart from `remove-conflicting` (pointing at Dining) after a sibling row's write repoints the existing rule with the pick never moving — exactly the bug the four hand-written clearing call sites existed to prevent. `ruleActionSignature(action)` folds `message` in for that reason (`"train"` stays a bare, uncomposed signature, since it has no target to name), and a new mutation-tested regression case in `keyTrainability.test.ts` proves a kind-only signature fails it (confirmed by hand, then reverted). Both render sites now store a `consentedSignature: string | null` and mask `checked` against it, which is what let ALL FOUR clearing call sites (two `handlePick`s, two `prevRow`/`prevGroup` prop-reset blocks) — and, in `_merchant-row.tsx`, the entire `prevGroup` tracking state, which existed for no other purpose — be deleted rather than merely consolidated. 2171 tests pass (was 2163), `tsc --noEmit` clean, lint clean. (`src/lib/categorize/keyTrainability.ts`, `src/app/categorize/_merchant-row.tsx`, `src/app/transactions/_transaction-row.tsx`, `src/lib/categorize/keyTrainability.test.ts`)
 
@@ -3012,3 +3082,14 @@ Deferred, all Suggestion-tier and explicitly assessed as low-risk by the reviewi
 
 - [ ] **P4 — `loadFiledCategoryCountsByMerchant` and `loadExactRulesByMerchant` have no test exercising the empty-string merchant key.** (pr-test-analyzer, finding 3.) Rule 6 is explicit that `""` is a real stored key with no `.min(1)` guard anywhere, and a blank Memo cell genuinely normalizes to it — so a `/transactions` page can legitimately put `""` into both new batched `inArray` lists. The reviewer's own assessment: "almost certainly fine," one seeded row in each describe block would pin it. (`src/lib/categorize/resolveKeyTrainability.test.ts`, `src/lib/rules.test.ts`)
 - [ ] **P4 — no test exercises a full `MAX_PAGE_SIZE` (500-row) page binding 500 parameters into the two new batched `inArray` queries.** (pr-test-analyzer, finding 4.) better-sqlite3's SQLite build caps bound variables at 32766, so this is safe today by a wide margin — nothing records that the bound was considered, and both the page-size constant and the driver are things that move over the project's lifetime. Informational; no test proposed as urgent.
+
+## Follow-ups from the `/ship` pre-landing review (2026-09-16, RememberCheckbox extraction)
+
+- [ ] **P4 — Neither `_transaction-row.tsx`'s nor `_retarget-form.tsx`'s "Remember" checkbox meets DS66's 44px touch floor; only `/categorize`'s does.** Red-team review, verified directly: `_merchant-row.tsx` gives its checkbox's wrapping `<label>` a `min-h-11` no other call site has — `_transaction-row.tsx`'s checkbox sits in a plain `flex flex-col` next to a 20px `applyToPast` checkbox, and `_retarget-form.tsx`'s sits among only h-8 (32px) controls (the `<details>` summary above it has its own `py-2.5 -my-2.5` DS66 fix, which does not extend to this row). Pre-existing on `/transactions`' row form; newly true of `_retarget-form.tsx` since it did not have a Remember checkbox before this pass. Not fixed here — the shared `RememberCheckbox` component (`src/components/ledger/remember-checkbox.tsx`) now takes a `minTouchTarget` prop for exactly this, so closing the gap on the other two surfaces is a one-line change per call site whenever someone picks it up; deliberately not bundled into a "third checkbox copy" consolidation PR under ship pressure. (`src/app/transactions/_transaction-row.tsx`, `src/app/transactions/_retarget-form.tsx`, `src/components/ledger/remember-checkbox.tsx`)
+
+## Follow-ups from the `/ship` adversarial review (2026-09-16, RememberCheckbox extraction)
+
+Claude adversarial subagent, Codex adversarial challenge, and Codex structured review (`codex review --base main`) all ran clean — no actionable production regressions, no P1/P2/P3 findings. The client-side Remember verdict in `RetargetForm` was confirmed provably non-authoritative: `bulkRetarget` → `applyRuleWrite` independently re-queries the real moved-row set and re-derives the train/remove-conflicting decision transactionally, so a wrong client guess can mis-render the checkbox but cannot mis-file or wrongly delete a rule. Two low-severity INVESTIGATE findings recorded rather than fixed under review pressure:
+
+- [ ] **P4 — When the previously-picked source category has vanished (`chosenIsGone`) AND the remaining filed-category evidence still yields a Remember-guard message, `RetargetForm` shows BOTH the "category you picked no longer has rows…" banner and the Remember-guard reason sentence in the same render.** Claude adversarial finding: the two `<p>` blocks are siblings, not mutually exclusive — the accessibility fix (rendering the reason `<p>` unconditionally, closing the dangling `aria-describedby`) removed the `chosenIsGone` guard that used to suppress it, but didn't account for the two messages now being able to co-render. Not reachable as a money-safety issue: `canSubmit` requires `effective !== undefined`, so the Move button stays disabled in this state regardless of what the checkbox shows. Pure display-quality overlap — narrow (needs both `chosenIsGone` AND a multi-category/lossy verdict on the *remaining* filed evidence at once). (`src/app/transactions/_retarget-form.tsx`)
+- [ ] **P4 — `RetargetForm` is not keyed by `normalizedMerchant`, so `fromChoice`/`toValue` (plain `useState`, unlike the Remember checkbox's signature-masked consent) could carry a stale category id across a `?merchant=A` → `?merchant=B` searchParam-only navigation if the App Router reuses the same client component instance in that tree position without remounting.** Claude adversarial finding, pre-existing pattern (not introduced by this diff — `RetargetForm`'s state shape was unchanged; only new props were added). Confirmed this cannot cause a wrong *rule write*: the write path re-verifies everything server-side, and the Remember checkbox's own consent already invalidates on merchant change via `ruleActionSignature`. Blast radius, if reachable at all, is a misleading UI default (a numerically-coincidental category id pre-selected as the new merchant's "from" choice) — not data corruption. Worth confirming whether this route actually remounts on a searchParam-only navigation before deciding whether `key={normalizedMerchant}` on `<RetargetForm>` is needed; not fixed blind. (`src/app/transactions/_retarget-form.tsx`, `src/app/transactions/page.tsx`)
