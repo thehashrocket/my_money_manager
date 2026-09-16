@@ -46,7 +46,7 @@ import { refreshLiabilityBalancesOnly } from "@/lib/simplefin/sync";
  * instead, and CLAUDE.md already wrote the rationale for it: "a throw would
  * take out the undo button and the balance check along with the page."
  */
-function fail(message: string, field?: "balance" | "date"): AccountsActionState {
+function fail(message: string, field?: "balance" | "date" | "direction"): AccountsActionState {
   return { status: "error", message, field };
 }
 
@@ -194,7 +194,7 @@ export async function updateLiabilityBalanceAction(
     // is `FormDataEntryValue | undefined`, never proven a `BalanceDirection` by
     // its type — `isBalanceDirection` is the one runtime check for it.
     if (!isBalanceDirection(raw.balanceDirection)) {
-      return fail("Choose whether this is money you owe or money owed to you.", "balance");
+      return fail("Choose whether this is money you owe or money owed to you.", "direction");
     }
     const direction = raw.balanceDirection;
 

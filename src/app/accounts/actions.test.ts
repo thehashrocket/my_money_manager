@@ -54,7 +54,7 @@ function seedAccount(opts: {
   return row;
 }
 
-function fail(message: string, field?: "balance" | "date"): AccountsActionState {
+function fail(message: string, field?: "balance" | "date" | "direction"): AccountsActionState {
   return { status: "error", message, field };
 }
 
@@ -81,7 +81,7 @@ function reconcile(raw: {
     return fail("Enter what you owe as a positive number.", "balance");
   }
   if (!isBalanceDirection(raw.balanceDirection)) {
-    return fail("Choose whether this is money you owe or money owed to you.", "balance");
+    return fail("Choose whether this is money you owe or money owed to you.", "direction");
   }
   const direction = raw.balanceDirection;
 
@@ -221,7 +221,7 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
     expect(state).toEqual({
       status: "error",
       message: "Choose whether this is money you owe or money owed to you.",
-      field: "balance",
+      field: "direction",
     });
     // Untouched: a refusal never reaches the UPDATE.
     expect(reload(visa.id)?.startingBalanceCents).toBe(-200_000);

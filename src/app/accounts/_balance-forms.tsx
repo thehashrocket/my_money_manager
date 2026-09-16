@@ -201,7 +201,23 @@ export function ReconcileForm({
               This balance is
             </span>
             <div
-              className="mb-1 flex w-fit overflow-hidden rounded-md border border-border"
+              // A missing/invalid `balanceDirection` refuses with its OWN
+              // `field` ("direction"), distinct from "balance" — found by
+              // both the red-team and the Claude adversarial passes during
+              // /ship: the refusal used to share "balance"'s field, so the
+              // amount input (which was fine) lit up while the error text
+              // talked about this toggle. `role="group"` doesn't support the
+              // `aria-invalid` ARIA property (jsx-a11y's
+              // role-supports-aria-props), so the border/ring cue below is a
+              // plain conditional class rather than the `aria-invalid:`
+              // Tailwind variant the input fields use — the actual error
+              // TEXT (via `ActionStatus`'s `role="alert"`) is still what
+              // tells a screen-reader user what's wrong.
+              className={`mb-1 flex w-fit overflow-hidden rounded-md border ${
+                state.status === "error" && state.field === "direction"
+                  ? "border-destructive ring-3 ring-destructive/20"
+                  : "border-border"
+              }`}
               role="group"
               aria-label={`Is this money ${accountName} owes, or money owed to ${accountName}?`}
             >
@@ -209,8 +225,21 @@ export function ReconcileForm({
                 type="button"
                 aria-pressed={direction === "owe"}
                 onClick={() => {
-                  setTouched(true);
-                  setDirection("owe");
+                  // Codex adversarial review (during /ship) caught this: an
+                  // unconditional `setTouched(true)` marked the form dirty
+                  // even on a no-op re-click of the ALREADY-selected
+                  // direction, which permanently disables the
+                  // resync-when-the-balance-moves-underneath-an-untouched-
+                  // field effect above for the rest of this mount — silently
+                  // freezing `balanceOwed` at a stale figure the next time a
+                  // charge lands on this account while the form is left
+                  // open. Only a REAL change should touch the form, same
+                  // discipline the amount/date `onChange` handlers already
+                  // follow.
+                  if (direction !== "owe") {
+                    setTouched(true);
+                    setDirection("owe");
+                  }
                 }}
                 className={`px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
                   direction === "owe"
@@ -224,8 +253,10 @@ export function ReconcileForm({
                 type="button"
                 aria-pressed={direction === "owed"}
                 onClick={() => {
-                  setTouched(true);
-                  setDirection("owed");
+                  if (direction !== "owed") {
+                    setTouched(true);
+                    setDirection("owed");
+                  }
                 }}
                 className={`border-l border-border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
                   direction === "owed"

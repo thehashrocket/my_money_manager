@@ -185,7 +185,7 @@ describe("updateLiabilityBalanceAction — guards that run before any query", ()
     );
     expect(state).toMatchObject({
       status: "error",
-      field: "balance",
+      field: "direction",
       message: "Choose whether this is money you owe or money owed to you.",
     });
   });
@@ -200,7 +200,7 @@ describe("updateLiabilityBalanceAction — guards that run before any query", ()
         asOf: "2026-09-06",
       }),
     );
-    expect(state).toMatchObject({ status: "error", field: "balance" });
+    expect(state).toMatchObject({ status: "error", field: "direction" });
   });
 });
 
