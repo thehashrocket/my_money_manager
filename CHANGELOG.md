@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-09-16
+
+### Fixed
+- **Reconciling a credit card to a positive balance (money owed to you, after an overpayment) silently stored it as a negative balance instead.** The Reconcile form had no way to say which direction a typed amount went — it always assumed you owed money. A "You owe" / "You're owed" toggle now sits next to the amount, defaulting from the account's current balance.
+- **That toggle could silently flip back to "You owe" on a second save, discarding your pick.** Found while fixing the bug above: browser form resets after a save reverted the toggle's on-screen state even though nothing was touched. Fixed by using two buttons instead of native radio inputs, the same pattern already used for the amount and date fields on this form.
+
 ## [1.3.3] - 2026-09-16
 
 ### Fixed
