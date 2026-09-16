@@ -2348,23 +2348,31 @@ burn-down rate forward.
 
 ### Still open
 
-- [ ] **P2** — **`revalidateBudgetSurfacesAction` was two bugs; half two is now
-      fixed (2026-09-15), half one needs its own look.** (Merged 2026-09-09:
-      this was filed three times — twice as separate P2/P3 entries in the
-      2026-09-09 `/ship` section, once here. One entry, both halves.)
+- [x] **P2 → CLOSED (2026-09-16, verified by re-reading the code and git
+      history — no new fix needed, both halves were already shipped).**
+      `revalidateBudgetSurfacesAction` was two bugs; this entry's own text
+      correctly flagged half one as unverified rather than claiming it was
+      still broken, and that re-check is what this closure records.
       **Half one — it can fire before the write it is flushing has landed —
-      STILL OPEN, NOT TOUCHED HERE.** `CurrencyInput`'s `commitIfDirty()` runs
-      on blur/Enter without the wrapping island's `onBlur` awaiting it.
-      `_month-editor.tsx`'s `dirtyRef` did get reworked since this entry was
-      written — it's a counter now, incremented synchronously before the
-      `await commitAllocationAction(...)` inside `commit` so a same-tick
-      re-entrant blur sees it already dirty (see that file's own comment on
-      `dirtyRef`) — but `revalidate()` still does not await `commit`'s own
-      in-flight promise before calling `revalidateBudgetSurfacesAction()`; it
-      only checks the counter. Whether that still lets the revalidate's fetch
-      resolve on the server before `commitAllocationAction`'s write does is
-      unverified — re-check before believing either "still broken" or
-      "already fixed" here.
+      was CLOSED in v1.2.2 (`18d1109`, 2026-09-15), three days before this
+      entry's own "half two" verification pass, which never circled back to
+      update half one's status.** `_month-editor.tsx` gained
+      `pendingCommitsRef` (a `Set<Promise<unknown>>`) in that commit: `commit`
+      registers its `commitAllocationAction` promise into the set BEFORE its
+      own `await`, in the same synchronous bubbling `blur`/`focusout`
+      dispatch `dirtyRef` already relied on, and `revalidate()` now does
+      `await Promise.allSettled(inFlight)` — snapshotting the set — BEFORE
+      calling `revalidateBudgetSurfacesAction()`, not just checking the
+      `dirtyRef` counter as this entry originally described. That closes the
+      exact gap named above: the revalidation call can no longer race ahead
+      of the write it is flushing. `CHANGELOG.md`'s 1.2.2 entry documents the
+      user-visible fix ("Now it waits for every change on the page to finish
+      first"). No new component test exists for it — this app's own
+      exclusions rule out UI-component tests (categorization logic only), so
+      this was verified live per that release's own process, not by a test
+      this pass could re-run; the closure here rests on reading the current
+      `_month-editor.tsx` mechanism directly, which is sufficient to confirm
+      the race the original text describes is gone.
       **Half two — no budget write revalidates `/` at all — FIXED.** Verified
       2026-09-15 directly against the code, not just this file's prose:
       `upsertBudgetAllocationAction`, `revalidateBudgetSurfacesAction`,
