@@ -244,27 +244,78 @@ src/
                    It is what lets the row menu tell an app-created pair
                    (markAsCardPayment's mirror, or T9's linkCardPayment) apart from an
                    ordinary bank-to-bank transfer the automatic matcher paired, so
-                   "Not a card payment" is offered only where it can do something
+                   "Not a card payment" is offered only where it can do something.
+                   As of v1.3.0 a row also carries filedCategoryIds (this row's
+                   merchant key's already-filed categories, with the row's OWN
+                   category dropped when it is the sole contributor — count === 1 —
+                   emulating the server's excludeTxnIds=[row.id] for the
+                   retarget-in-place case) and existingRule (the merchant's current
+                   exact rule, if any) — each from its OWN batched query per page
+                   (loadFiledCategoryCountsByMerchant for the first,
+                   loadExactRulesByMerchant for the second) rather than one round
+                   trip per row. This is what lets
+                   TransactionRowForm disable "Remember" the way /categorize's
+                   MerchantRow already did, instead of only warning in the toast
+                   after a refused submit
                    keyTrainability — the "Remember" guard's PURE half:
                    classifyKeyTrainability(key, filedCategoryIds, pendingCategoryId)
                    + LOSSY_MERCHANT_KEYS. The pick is a SEPARATE parameter, not
                    pre-unioned by the caller: the verdict needs the union, the message
                    must not have it, and this is where a non-id (0 from an empty select,
                    NaN from a corrupt parked pick) is filtered out once for both sides.
-                   ZERO imports, same client-graph constraint as limits.ts and
-                   merchantLabel.ts, because /categorize evaluates the verdict in the
-                   browser to disable the checkbox against the category currently picked
+                   ZERO RUNTIME IMPORTS (an `import type` for `ExistingRule` is erased
+                   at build time), same client-graph constraint as limits.ts and
+                   merchantLabel.ts, because /categorize AND /transactions both evaluate
+                   the verdict in the browser to disable the checkbox against the
+                   category currently picked.
+                   describeRuleAction(key, verdict, existingRule, pendingCategoryId) —
+                   added in v1.3.0 as the client-side mirror of applyRuleWrite's
+                   shouldDelete formula (rule 6). Disabling the checkbox flatly on
+                   `!trainable` also disabled the ONE repair path rule 6 documents for
+                   a poisoned rule: a refusal that CONTRADICTS an existing exact rule
+                   still deletes it server-side, but a disabled checkbox can never
+                   submit rememberMerchant=true to reach that branch. Returns
+                   {kind: "train"|"remove-conflicting"|"none"}; "remove-conflicting"
+                   also carries a reason: "lossy-key"|"contradicted", and
+                   ruleActionLabel(action) (the ONE shared spelling, read by both
+                   _transaction-row.tsx and _merchant-row.tsx) relabels the checkbox
+                   from it rather than from kind alone — "Remove unusable rule" for
+                   lossy-key, "Remove conflicting rule" for contradicted, because a
+                   lossy key's removal is not a conflict with the pick (the pre-reason
+                   version said "conflicting" for both, which was wrong for the
+                   coincidental-match case: a lossy key whose pick happens to already
+                   match the rule it's about to remove). Either reason keeps the
+                   checkbox ENABLED even though no new rule will be trained.
+                   No non-real pendingCategoryId (null, 0, NaN, negative — the same
+                   isRealCategoryId guard classifyKeyTrainability uses) ever returns
+                   "remove-conflicting" — there is no real pick yet to contradict
+                   anything with. Its existingRule
+                   input comes from loadExactRulesByMerchant (src/lib/rules.ts),
+                   extracted from loadMerchantGroups' own inline copy so /transactions
+                   could get the same per-merchant rule /categorize's MerchantGroup
+                   already carried, without a second hand-rolled copy of the join
                    resolveKeyTrainability — the drizzle half: loadFiledCategoryIds +
                    resolveKeyTrainability(db, key, pendingCategoryId, excludeTxnIds).
                    excludeTxnIds are the already-filed rows the caller is about to
                    retarget, which makes the verdict the same on either side of the
                    caller's own UPDATE (it used to carry a "call me first" warning
                    instead). Also exports filedCategoryEvidenceWhere — the ONE spelling
-                   of "which filings count as evidence", shared with
-                   loadMerchantGroups' loadFiledCategories, which takes the merchant
-                   condition as a parameter because eq() vs inArray() is the only part
-                   that legitimately differs. It was hand-duplicated in both until
-                   v0.20.0; a parity test still pins the two callers against each other
+                   of "which filings count as evidence", shared by its two DIRECT
+                   callers: loadFiledCategoryIds (one key) and
+                   loadFiledCategoryCountsByMerchant (batched over a page's
+                   merchants, WITH per-category counts — what lets loadTransactions
+                   self-exclude a row's OWN sole-contributed category from its own
+                   evidence, emulating excludeTxnIds=[row.id] for every row on the
+                   page without a per-row query). loadFiledCategoryIdsByMerchant is
+                   NOT a third direct caller — it reaches the predicate only THROUGH
+                   loadFiledCategoryCountsByMerchant, with the counts dropped, for
+                   loadMerchantGroups, which has no single row to self-exclude —
+                   every row it groups is category_id IS NULL already. The two direct
+                   callers take the merchant condition as a parameter because eq() vs
+                   inArray() is the only part that legitimately differs between them;
+                   the batched query was hand-duplicated between loadMerchantGroups
+                   and loadTransactions until the v1.3.0 client-disable work pulled it
+                   here, and a parity test still pins the callers against each other
                    applyRuleWrite — the ONLY place that decides what happens to a key's
                    exact rule: upsert, withhold, or withhold AND remove. Shared by all three
                    categorize write paths; the two that predate it ran hand-maintained

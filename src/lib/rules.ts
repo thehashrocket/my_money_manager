@@ -1,6 +1,12 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { schema, type AnyDb } from "@/db";
 import type { CategoryRule } from "@/db/schema";
+
+/** An exact-match rule's target, as `/categorize` and `/transactions` need it. */
+export type ExistingRule = {
+  categoryId: number;
+  categoryName: string;
+};
 
 /**
  * Resolve a normalized merchant string to a category via the rules table.
@@ -147,6 +153,51 @@ export function readExactRule(
       ),
     )
     .get();
+}
+
+/**
+ * The exact rule each of `merchants` currently holds, batched over the whole
+ * set in one query — the read half of {@link readExactRule} for a page of
+ * merchants rather than one key, so `/categorize` and `/transactions` don't
+ * each hand-roll their own copy of "join category_rules to categories, filter
+ * to exact, inArray the merchant list."
+ *
+ * `/categorize`'s `loadMerchantGroups` carried this query inline until the
+ * ship review that added `describeRuleAction` (keyTrainability.ts):
+ * `/transactions` needed the identical shape to decide whether ticking
+ * "Remember" on an untrainable pick would still remove a conflicting rule,
+ * and a second hand-rolled copy is exactly the drift class this file's other
+ * exports already exist to prevent.
+ */
+export function loadExactRulesByMerchant(
+  db: AnyDb,
+  merchants: readonly string[],
+): Map<string, ExistingRule> {
+  if (merchants.length === 0) return new Map();
+  const rows = db
+    .select({
+      merchant: schema.categoryRules.matchValue,
+      categoryId: schema.categoryRules.categoryId,
+      categoryName: schema.categories.name,
+    })
+    .from(schema.categoryRules)
+    .innerJoin(
+      schema.categories,
+      eq(schema.categoryRules.categoryId, schema.categories.id),
+    )
+    .where(
+      and(
+        eq(schema.categoryRules.matchType, "exact"),
+        inArray(schema.categoryRules.matchValue, [...merchants]),
+      ),
+    )
+    .all();
+
+  const byMerchant = new Map<string, ExistingRule>();
+  for (const row of rows) {
+    byMerchant.set(row.merchant, { categoryId: row.categoryId, categoryName: row.categoryName });
+  }
+  return byMerchant;
 }
 
 /**

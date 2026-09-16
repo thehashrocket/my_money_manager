@@ -1,9 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 import type { LeafCategory } from "@/lib/categories";
+import {
+  classifyKeyTrainability,
+  describeRuleAction,
+  ruleActionLabel,
+} from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import type { TransactionRow } from "@/lib/categorize/loadTransactions";
 import { formatCents } from "@/lib/money";
@@ -135,9 +140,97 @@ export function TransactionRowForm({
     if (pickerUntouched) {
       setPickerValue(row.categoryId !== null ? String(row.categoryId) : "");
     }
+    /* Ship review (Codex adversarial + structured, cross-model): `remember`
+       was cleared only inside `handlePick`, a user-driven picker change —
+       never here. `handlePick` now also clears whenever the ACTION KIND
+       changes (train vs remove-conflicting vs none, round 2's own fix), but
+       that only runs when the user actually repicks. A fresh
+       `row.existingRule` or `row.filedCategoryIds` from an unrelated
+       sibling row's write can change what the SAME kind of action would
+       even mean — e.g. `remove-conflicting` for "the rule points at
+       Groceries" silently becoming `remove-conflicting` for "the rule
+       points at Dining" — while the pick itself never moves, so
+       `handlePick` never runs at all (matches `_merchant-row.tsx`'s own
+       `prevGroup` reset, added for the identical reason on that surface).
+       Any revalidation-driven prop change clears it, same as `pickerValue`
+       resyncs above, so a tick always has to be re-made against the data
+       actually being submitted. */
+    setRemember(false);
   }
 
   const merchantFiltered = filterValues.merchant !== undefined;
+
+  const pendingCategoryId = pickerValue === "" ? null : Number(pickerValue);
+
+  /**
+   * Whether "Remember" may write a rule for this row's merchant key,
+   * evaluated against the category currently picked — mirrors
+   * `_merchant-row.tsx`'s `trainability`, same two-argument call so this
+   * agrees with the server's `categorizeTransaction` (which excludes the row
+   * itself from the evidence, since it is the one about to move).
+   * `row.filedCategoryIds` already does that exclusion (see its own
+   * docstring in `loadTransactions.ts`), so this agrees with the server
+   * exactly, not just conservatively.
+   */
+  const trainability = classifyKeyTrainability(
+    row.normalizedMerchant,
+    row.filedCategoryIds,
+    pendingCategoryId,
+  );
+
+  /**
+   * `trainable === false` is not the whole story — see `describeRuleAction`'s
+   * own docstring (ship review, Codex adversarial + structured, cross-model).
+   * A refusal that CONTRADICTS `row.existingRule` still does something useful
+   * on submit: it removes that rule. The checkbox stays enabled for that
+   * case, with a different explanation than a flat refusal.
+   */
+  const ruleAction = describeRuleAction(
+    row.normalizedMerchant,
+    trainability,
+    row.existingRule,
+    pendingCategoryId,
+  );
+  const ruleActionEnabled = ruleAction.kind !== "none";
+  // PR review, type-design pass (finding A): `RuleAction` now carries
+  // `message` on every non-"train" branch, so there is no need to keep
+  // `trainability` alive alongside `ruleAction` and rejoin them here.
+  const ruleActionMessage = ruleAction.kind === "train" ? undefined : ruleAction.message;
+  // See the Save button's own comment (PR review, code-reviewer pass,
+  // finding 2) for why the escape hatch needs this.
+  const pickIsSelectable = leafCategories.some((c) => String(c.id) === pickerValue);
+
+  const handlePick = (next: string) => {
+    setPickerValue(next);
+    // Same reasoning as `_merchant-row.tsx`'s `handlePick`: clear the tick,
+    // don't just mask it, or picking a category that again offers SOME
+    // action resurrects a tick the user never re-made.
+    //
+    // Ship review, cycle 2 (Codex adversarial, second pass — P1): clearing
+    // only on a transition TO "none" was not enough. Tick Remember while the
+    // action is "train", then repick to a category where it becomes
+    // "remove-conflicting" (or the reverse) — the OLD code kept `remember`
+    // true across that transition, because the new kind was never "none".
+    // The checkbox then relabels to a DIFFERENT operation than the one the
+    // user actually consented to, and submitting does that different
+    // operation (deletes a rule nobody asked to delete, or trains one nobody
+    // asked to train). Consent has to be re-made whenever the OPERATION
+    // changes, not only when it disappears.
+    const nextPending = next === "" ? null : Number(next);
+    const nextVerdict = classifyKeyTrainability(row.normalizedMerchant, row.filedCategoryIds, nextPending);
+    const nextAction = describeRuleAction(
+      row.normalizedMerchant,
+      nextVerdict,
+      row.existingRule,
+      nextPending,
+    );
+    if (nextAction.kind !== ruleAction.kind) {
+      setRemember(false);
+    }
+  };
+
+  const rowId = useId();
+  const reasonId = `${rowId}-reason`;
 
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -164,10 +257,10 @@ export function TransactionRowForm({
            `notifyWrite`'s docstring; this was one of the three hand-copies it
            replaced.
 
-           What is specific to THIS row: it cannot disable its Remember
-           checkbox up front the way `/categorize` does, because the list
-           carries no per-key filing history to check against — so the toast is
-           the only channel a refusal has here. */
+           The Remember checkbox below is disabled up front against
+           `row.filedCategoryIds`, the same as `/categorize`'s — so this toast
+           is the second channel for a refusal (catching the verdict moving
+           under a stale page), not the only one anymore. */
         const filed = `Categorized ${result.updatedCount} row${result.updatedCount === 1 ? "" : "s"} as ${result.categoryName}.`;
         notifyWrite(filed, [result.ruleRefusal?.message, result.warning], {
           onUndo: async () => {
@@ -213,9 +306,14 @@ export function TransactionRowForm({
          under a merchant filter the filed rows are the whole point (D3 shows
          all of a merchant's history because "49 already filed as Gas" is the
          answer), so dimming them would leave the one row you already knew
-         about as the only thing at full contrast. */
+         about as the only thing at full contrast. Also excluded whenever
+         there is a reason line to show (Codex design pass, ship review): CSS
+         opacity composites the whole subtree, so a child `<p>` cannot opt
+         back to full contrast on its own — the one line the user most needs
+         at that moment would otherwise render at 60% until they happened to
+         be hovering the row. */
       className={`${TXN_ROW_GRID} transition-opacity ${
-        currentCategoryId !== null && !merchantFiltered
+        currentCategoryId !== null && !merchantFiltered && ruleActionMessage === undefined
           ? "opacity-60 hover:opacity-100"
           : ""
       }`}
@@ -248,7 +346,7 @@ export function TransactionRowForm({
           id={`cat-${row.id}`}
           name="categoryId"
           value={pickerValue}
-          onValueChange={setPickerValue}
+          onValueChange={handlePick}
           categories={leafCategories}
           required
           className="min-w-[10rem]"
@@ -257,16 +355,27 @@ export function TransactionRowForm({
             labels in a column are the same height as the memo line beside
             them, so the new second line costs the list no extra height. */}
         <div className="flex flex-col gap-0.5">
-          <label className="flex items-center gap-1.5 text-xs text-ink-2">
+          <label
+            className={`flex items-center gap-1.5 text-xs ${
+              ruleActionEnabled ? "text-ink-2" : "cursor-not-allowed text-ink-3"
+            }`}
+            title={ruleActionMessage}
+          >
             <input
               type="checkbox"
               name="rememberMerchant"
               value="true"
-              checked={remember}
+              // Never `checked={remember}` alone — see `handlePick` above;
+              // the verdict moves with the category picked, so a box ticked
+              // while the key still offered SOME action has to un-tick on
+              // screen the moment the pick makes it a true no-op.
+              checked={remember && ruleActionEnabled}
+              disabled={!ruleActionEnabled}
+              aria-describedby={ruleActionMessage === undefined ? undefined : reasonId}
               onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4"
+              className="h-4 w-4 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            Remember
+            {ruleActionLabel(ruleAction)}
           </label>
           <label className="flex items-center gap-1.5 text-xs text-ink-2">
             <input
@@ -282,7 +391,37 @@ export function TransactionRowForm({
         </div>
         <button
           type="submit"
-          disabled={isPending || !pickerValue || pickerValue === String(currentCategoryId)}
+          // Ship review, cycle 2 (Codex structured, second pass): an
+          // unchanged pick used to always disable Save, but a lossy key
+          // (e.g. `ONLINE`) offers `remove-conflicting` REGARDLESS of
+          // whether the pick changed — `applyRuleWrite`'s own
+          // `reason === "lossy-key"` branch removes such a rule
+          // unconditionally. Without this, ticking "Remove conflicting
+          // rule" on an already-correctly-filed row had no way to actually
+          // submit: the only route to the checkbox's own action would have
+          // been to temporarily miscategorize the row and change it back.
+          //
+          // `pickIsSelectable` (PR review, code-reviewer pass, finding 2):
+          // a row filed under a category that was archived (or turned into
+          // a parent) AFTER the fact keeps that id as its stored
+          // `categoryId` — `leafCategories` excludes it by default
+          // (`listLeafCategories`'s `includeArchived: false`), so the
+          // combobox renders BLANK while `pickerValue` still holds that
+          // unselectable id. Before this escape hatch existed that row was
+          // simply unsubmittable (Save was always disabled on an unchanged
+          // pick), which hid the mismatch. The escape hatch alone would have
+          // let ticking "Remove conflicting rule" submit that stale id
+          // straight to `assertAssignableCategory`, which refuses it —
+          // aborting the whole write (categorize AND the rule removal) with
+          // a generic "Categorize failed." toast. Requiring the pick to be
+          // one `leafCategories` can actually render keeps the escape hatch
+          // scoped to rows the picker could have produced.
+          disabled={
+            isPending ||
+            !pickerValue ||
+            (pickerValue === String(currentCategoryId) &&
+              !(remember && ruleActionEnabled && pickIsSelectable))
+          }
           className={`h-8 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:bg-primary/80 disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`}
         >
           {isPending ? "Saving…" : "Save"}
@@ -302,6 +441,17 @@ export function TransactionRowForm({
           importingCards={importingCards}
           onChanged={onPairingChanged}
         />
+        {ruleActionMessage === undefined ? null : (
+          // Not a `title=` alone — unreachable by keyboard, unreliable to
+          // screen readers. `basis-full` puts it on its own line within the
+          // same flex row, matching `_merchant-row.tsx`'s equivalent.
+          <p
+            id={reasonId}
+            className="basis-full text-xs text-ink-3 sm:text-right"
+          >
+            {ruleActionMessage}
+          </p>
+        )}
       </div>
     </form>
   );

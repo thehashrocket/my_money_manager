@@ -1,6 +1,8 @@
 import { and, desc, eq, gte, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { isAppCreatedCardPaymentPair } from "@/lib/accounts/resolveCardAffordances";
+import { loadExactRulesByMerchant, type ExistingRule } from "@/lib/rules";
+import { loadFiledCategoryCountsByMerchant } from "./resolveKeyTrainability";
 
 type Db = typeof defaultDb;
 
@@ -94,6 +96,52 @@ export type TransactionRow = {
    * menu stops offering the item that always says so.
    */
   pairIsAppCreated: boolean;
+  /**
+   * Distinct categories this row's merchant key is already filed under,
+   * elsewhere on the page or off it, with THIS row's own current category
+   * excluded when it is the sole contributor — the client half of the
+   * Remember guard, and the one row-specific reason `/transactions` cannot
+   * just reuse `/categorize`'s per-merchant `filedCategoryIds` verbatim.
+   * `/categorize` has no row to self-exclude (every group it renders is
+   * `categoryId IS NULL`); `/transactions` renders already-categorized rows
+   * being RETARGETED, so a merchant whose only filed evidence is the row in
+   * front of you must read as trainable here the same way the server's own
+   * `excludeTxnIds=[row.id]` already treats it (ship review, Codex
+   * adversarial + structured, cross-model — the first version of this field
+   * did not self-exclude and silently blocked that retarget).
+   *
+   * Computed from `loadFiledCategoryCountsByMerchant`, a single batched
+   * query over the page's distinct merchants rather than a per-row round
+   * trip.
+   *
+   * A transfer-paired row is excluded from the self-exclusion test itself
+   * (below), not just left to the `TransferRowItem` routing that keeps it
+   * off-screen (PR review, test-analyzer pass): `filedCategoryEvidenceWhere`
+   * already drops a paired row from the COUNTS, so a paired row never
+   * contributed to its own `count`, and applying the `count === 1` test to it
+   * anyway can excise a category that a genuinely sole DIFFERENT contributor
+   * supplied — a client verdict strictly more permissive than the server's.
+   * `TransferRowItem` having no Remember checkbox made that inert today, but
+   * it was a prose-defended property in a `.tsx` file rather than a
+   * structural one (rule 11's own warning), so it is guarded here instead.
+   * The archived-category case stays inert with no guard needed: an archived
+   * category contributes 0 to the counts, so there is no entry to
+   * over-exclude in the first place.
+   *
+   * Lets `TransactionRowForm` disable "Remember" the way `_merchant-row.tsx`
+   * already does, instead of only warning in the toast after a submit the
+   * server refused to train a rule from.
+   */
+  filedCategoryIds: readonly number[];
+  /**
+   * The exact-match rule currently held for this row's merchant key, if any —
+   * `describeRuleAction`'s (`keyTrainability.ts`) other input, needed
+   * alongside `filedCategoryIds` to tell "genuinely nothing to do" apart from
+   * "can't train, but ticking Remember would still remove a rule this pick
+   * contradicts" (ship review, Codex adversarial + structured, cross-model:
+   * the checkbox's own `disabled` used to make that second case unreachable).
+   */
+  existingRule: ExistingRule | null;
 };
 
 export type LoadTransactionsResult = {
@@ -262,6 +310,13 @@ export function loadTransactions(
       .offset(offset)
       .all();
 
+    // One batched query over the page's distinct merchants rather than one
+    // round trip per row — same shape as `loadMerchantGroups`' equivalent,
+    // but WITH counts, so each row can self-exclude (see the field's docstring).
+    const merchants = [...new Set(rows.map((r) => r.normalizedMerchant))];
+    const filedCountsByMerchant = loadFiledCategoryCountsByMerchant(tx, merchants);
+    const rulesByMerchant = loadExactRulesByMerchant(tx, merchants);
+
     return {
       rows: rows.map(({ partnerImportSource, partnerCategoryId, ...row }) => ({
         ...row,
@@ -278,6 +333,26 @@ export function loadTransactions(
                 importSource: partnerImportSource,
                 categoryId: partnerCategoryId,
               }),
+        // Drop this row's OWN category from its own evidence when it is the
+        // sole contributor (count === 1) — emulates the server's
+        // `excludeTxnIds=[row.id]` without a per-row query. Gated on
+        // `transferPairId === null`: a paired row never contributed to the
+        // count in the first place (`filedCategoryEvidenceWhere` excludes
+        // it), so applying this test to one anyway could excise evidence a
+        // different, genuinely sole contributor supplied (see the field's
+        // own docstring above).
+        filedCategoryIds: (filedCountsByMerchant.get(row.normalizedMerchant) ?? [])
+          .filter(
+            (e) =>
+              !(
+                row.transferPairId === null &&
+                row.categoryId !== null &&
+                e.categoryId === row.categoryId &&
+                e.count === 1
+              ),
+          )
+          .map((e) => e.categoryId),
+        existingRule: rulesByMerchant.get(row.normalizedMerchant) ?? null,
       })),
       totalCount,
     };
