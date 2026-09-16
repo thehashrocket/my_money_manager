@@ -1616,7 +1616,7 @@ column).
       buttons live in client components that already hold a transition, where
       `useTransition` is the better fit and `useFormStatus` buys nothing — check each
       surface for `"use client"` first (`grep -rl '"use client"' src/app`). (2) None of
-      these routes has UI test coverage and CLAUDE.md line 308 says that stays true, so
+      these routes has UI test coverage and CLAUDE.md's "What's NOT in V1" section says that stays true, so
       every surface needs a manual pass. **Depends on:** the sync pending-state branch
       landing first, since it is what creates the component.
       (`src/app/sync/_submit-button.tsx`, `src/components/ledger/`, `DESIGN.md`)
