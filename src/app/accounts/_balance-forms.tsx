@@ -259,7 +259,13 @@ export function ReconcileForm({
             setTouched(true);
             setBalanceOwed(e.target.value);
           }}
-          aria-label={`Amount ${direction === "owe" ? "owed by" : "owed to"} ${accountName}`}
+          // Codex structured review (during /ship) caught this inverted: "owed
+          // by"/"owed to" had the debtor and creditor swapped relative to what
+          // the toggle actually means — "owe" is money the user owes TO this
+          // account, "owed" is money this account owes TO the user. A screen
+          // reader landing on this field heard the opposite of what the
+          // visible toggle said.
+          aria-label={`Amount ${direction === "owe" ? "you owe" : "owed to you by"} ${accountName}`}
           aria-invalid={state.status === "error" && state.field === "balance"}
           className="w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]"
         />
