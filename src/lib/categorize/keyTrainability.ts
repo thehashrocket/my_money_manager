@@ -25,11 +25,12 @@
  * the time the key exists), so it is a curated set.
  *
  * ZERO RUNTIME IMPORTS, on purpose — same constraint as `limits.ts` and
- * `merchantLabel.ts`. `/categorize` evaluates this predicate client-side so the
- * Remember checkbox can disable itself against the category currently picked,
- * and importing anything with a module-scope drizzle or zod construct here
- * would drag it into that route's bundle (measured at +376 KB the last time
- * this happened). The database half lives in `resolveKeyTrainability.ts`. A
+ * `merchantLabel.ts`. `/categorize` and `/transactions` both evaluate this
+ * predicate client-side so the Remember checkbox can disable itself against
+ * the category currently picked, and importing anything with a module-scope
+ * drizzle or zod construct here would drag it into those routes' bundles
+ * (measured at +376 KB the last time this happened). The database half lives
+ * in `resolveKeyTrainability.ts`. A
  * `import type` (below, for `ExistingRule`) is exempt — it is fully erased at
  * build time, the same reasoning `_submit-button.tsx`'s `satisfies keyof
  * ResolveReversalInput` already relies on elsewhere in this app.
@@ -268,10 +269,35 @@ export function describeRuleAction(
  * `message` shown right below it (which is written specifically to avoid
  * blaming "this pick" when nothing about the pick is at fault) — `reason`
  * is what lets the label agree with its own explanation.
+ *
+ * Both switches are exhaustive rather than `if`/ternary chains (PR review,
+ * type-design pass, finding I2) — this is the one function that has to make
+ * a statement to the USER about which operation Remember is about to
+ * perform, so a `RuleAction` or `reason` variant with no label decision
+ * should be a build error, the same discipline `accountClass.ts`,
+ * `isCreditCard.ts` and four other modules already apply to this shape.
  */
 export function ruleActionLabel(action: RuleAction): string {
-  if (action.kind !== "remove-conflicting") return "Remember";
-  return action.reason === "lossy-key" ? "Remove unusable rule" : "Remove conflicting rule";
+  switch (action.kind) {
+    case "train":
+    case "none":
+      return "Remember";
+    case "remove-conflicting":
+      switch (action.reason) {
+        case "lossy-key":
+          return "Remove unusable rule";
+        case "contradicted":
+          return "Remove conflicting rule";
+        default: {
+          const unreachable: never = action.reason;
+          return unreachable;
+        }
+      }
+    default: {
+      const unreachable: never = action;
+      return unreachable;
+    }
+  }
 }
 
 /**

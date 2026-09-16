@@ -263,9 +263,11 @@ src/
                    pre-unioned by the caller: the verdict needs the union, the message
                    must not have it, and this is where a non-id (0 from an empty select,
                    NaN from a corrupt parked pick) is filtered out once for both sides.
-                   ZERO imports, same client-graph constraint as limits.ts and
-                   merchantLabel.ts, because /categorize evaluates the verdict in the
-                   browser to disable the checkbox against the category currently picked.
+                   ZERO RUNTIME IMPORTS (an `import type` for `ExistingRule` is erased
+                   at build time), same client-graph constraint as limits.ts and
+                   merchantLabel.ts, because /categorize AND /transactions both evaluate
+                   the verdict in the browser to disable the checkbox against the
+                   category currently picked.
                    describeRuleAction(key, verdict, existingRule, pendingCategoryId) —
                    added in v1.3.0 as the client-side mirror of applyRuleWrite's
                    shouldDelete formula (rule 6). Disabling the checkbox flatly on
@@ -274,10 +276,20 @@ src/
                    still deletes it server-side, but a disabled checkbox can never
                    submit rememberMerchant=true to reach that branch. Returns
                    {kind: "train"|"remove-conflicting"|"none"}; "remove-conflicting"
-                   relabels the checkbox to "Remove conflicting rule" and keeps it
-                   ENABLED even though no new rule will be trained.
-                   pendingCategoryId === null never returns "remove-conflicting" —
-                   there is no pick yet to contradict anything with. Its existingRule
+                   also carries a reason: "lossy-key"|"contradicted", and
+                   ruleActionLabel(action) (the ONE shared spelling, read by both
+                   _transaction-row.tsx and _merchant-row.tsx) relabels the checkbox
+                   from it rather than from kind alone — "Remove unusable rule" for
+                   lossy-key, "Remove conflicting rule" for contradicted, because a
+                   lossy key's removal is not a conflict with the pick (the pre-reason
+                   version said "conflicting" for both, which was wrong for the
+                   coincidental-match case: a lossy key whose pick happens to already
+                   match the rule it's about to remove). Either reason keeps the
+                   checkbox ENABLED even though no new rule will be trained.
+                   No non-real pendingCategoryId (null, 0, NaN, negative — the same
+                   isRealCategoryId guard classifyKeyTrainability uses) ever returns
+                   "remove-conflicting" — there is no real pick yet to contradict
+                   anything with. Its existingRule
                    input comes from loadExactRulesByMerchant (src/lib/rules.ts),
                    extracted from loadMerchantGroups' own inline copy so /transactions
                    could get the same per-merchant rule /categorize's MerchantGroup

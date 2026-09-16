@@ -114,14 +114,19 @@ export type TransactionRow = {
    * query over the page's distinct merchants rather than a per-row round
    * trip.
    *
-   * The self-exclusion is only exact for a row `TransactionRowForm` can
-   * actually render a categorize form for — a transfer-paired row (rendered
-   * through the separate `TransferRowItem`, no Remember checkbox at all)
-   * would over-exclude if it ever reached this filter, since it never
-   * contributes to the count in the first place (`filedCategoryEvidenceWhere`
-   * excludes it); see `loadFiledCategoryCountsByMerchant`'s own docstring for
-   * why that case and the archived-category case both stay inert rather than
-   * needing their own guard here.
+   * A transfer-paired row is excluded from the self-exclusion test itself
+   * (below), not just left to the `TransferRowItem` routing that keeps it
+   * off-screen (PR review, test-analyzer pass): `filedCategoryEvidenceWhere`
+   * already drops a paired row from the COUNTS, so a paired row never
+   * contributed to its own `count`, and applying the `count === 1` test to it
+   * anyway can excise a category that a genuinely sole DIFFERENT contributor
+   * supplied — a client verdict strictly more permissive than the server's.
+   * `TransferRowItem` having no Remember checkbox made that inert today, but
+   * it was a prose-defended property in a `.tsx` file rather than a
+   * structural one (rule 11's own warning), so it is guarded here instead.
+   * The archived-category case stays inert with no guard needed: an archived
+   * category contributes 0 to the counts, so there is no entry to
+   * over-exclude in the first place.
    *
    * Lets `TransactionRowForm` disable "Remember" the way `_merchant-row.tsx`
    * already does, instead of only warning in the toast after a submit the
@@ -330,10 +335,21 @@ export function loadTransactions(
               }),
         // Drop this row's OWN category from its own evidence when it is the
         // sole contributor (count === 1) — emulates the server's
-        // `excludeTxnIds=[row.id]` without a per-row query.
+        // `excludeTxnIds=[row.id]` without a per-row query. Gated on
+        // `transferPairId === null`: a paired row never contributed to the
+        // count in the first place (`filedCategoryEvidenceWhere` excludes
+        // it), so applying this test to one anyway could excise evidence a
+        // different, genuinely sole contributor supplied (see the field's
+        // own docstring above).
         filedCategoryIds: (filedCountsByMerchant.get(row.normalizedMerchant) ?? [])
           .filter(
-            (e) => !(row.categoryId !== null && e.categoryId === row.categoryId && e.count === 1),
+            (e) =>
+              !(
+                row.transferPairId === null &&
+                row.categoryId !== null &&
+                e.categoryId === row.categoryId &&
+                e.count === 1
+              ),
           )
           .map((e) => e.categoryId),
         existingRule: rulesByMerchant.get(row.normalizedMerchant) ?? null,

@@ -39,17 +39,21 @@ export type MerchantGroup = {
   /**
    * Distinct categories this key's already-filed, non-transfer rows carry.
    *
-   * Feeds the Remember guard (`keyTrainability.ts`) on the client, where it is
-   * unioned with the category the user has currently picked. Shipped as the
-   * ids rather than as a finished verdict for exactly that reason: the verdict
-   * depends on the pick, which only the row component knows, and computing it
-   * here would disagree with the server the moment the user chooses a category
-   * this key has never been filed to.
+   * Feeds the Remember guard (`keyTrainability.ts`) on the client, passed
+   * alongside the category the user has currently picked — never pre-unioned
+   * with it (see `classifyKeyTrainability`'s own docstring for why). Shipped
+   * as the ids rather than as a finished verdict for exactly that reason: the
+   * verdict depends on the pick, which only the row component knows, and
+   * computing it here would disagree with the server the moment the user
+   * chooses a category this key has never been filed to.
    *
-   * Computed by `loadFiledCategoryIdsByMerchant`, shared with
-   * `loadTransactions`' equivalent per-row field — the same query rather than
-   * two spellings of it, since a divergence would let the checkbox render
-   * enabled and then be refused on submit.
+   * Computed by `loadFiledCategoryIdsByMerchant`, which shares
+   * `filedCategoryEvidenceWhere` — and, through it, one query — with
+   * `loadTransactions`' per-row field. The PREDICATE cannot diverge between
+   * the two; the two PROJECTIONS deliberately do, because a `/transactions`
+   * row self-excludes its own sole-contributed category from its own
+   * evidence and a `/categorize` group has no single row to self-exclude for.
+   * See the parity block in `resolveKeyTrainability.test.ts`.
    */
   filedCategoryIds: number[];
 };

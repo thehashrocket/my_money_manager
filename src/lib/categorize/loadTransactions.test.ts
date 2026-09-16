@@ -1073,6 +1073,38 @@ describe("loadTransactions — filedCategoryIds", () => {
     expect(r.rows.find((x) => x.id === uncategorized.id)?.filedCategoryIds).toEqual([]);
   });
 
+  it("a transfer-paired row never self-excludes — it never contributed to the count, so it must not excise a sole DIFFERENT contributor's evidence", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const dining = seedCategory("Dining");
+    const partner = seedTxn({ accountId: a.id, batchId: b.id, merchant: "PARTNER", amountCents: 4000 });
+    const paired = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "CHIPOTLE",
+      categoryId: dining.id,
+      transferPairId: partner.id,
+    });
+    const soleContributor = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "CHIPOTLE",
+      categoryId: dining.id,
+    });
+
+    const r = loadTransactions(handle.db, {
+      page: 1,
+      pageSize: 50,
+      includeTransfers: true,
+    });
+    // `soleContributor` is the only row `filedCategoryEvidenceWhere` counts
+    // for CHIPOTLE, so count === 1 — but that count belongs to
+    // `soleContributor`, not to `paired`. Applying the sole-contributor test
+    // to `paired` anyway would wrongly excise the evidence.
+    expect(r.rows.find((x) => x.id === paired.id)?.filedCategoryIds).toEqual([dining.id]);
+    expect(r.rows.find((x) => x.id === soleContributor.id)?.filedCategoryIds).toEqual([]);
+  });
+
   it("batches correctly across several distinct merchants on one page, each keeping its own set", () => {
     const a = seedAccount();
     const b = seedBatch();
@@ -1089,6 +1121,43 @@ describe("loadTransactions — filedCategoryIds", () => {
     expect(byId.get(amazonRow.id)).toEqual([groceries.id]);
     expect(byId.get(shellRow.id)).toEqual([gas.id]);
     expect(byId.get(freshRow.id)).toEqual([]);
+  });
+
+  it("self-excludes a categorized row's own category when it is the sole contributor", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const onlyRow = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "TRADER JOES",
+      categoryId: groceries.id,
+    });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === onlyRow.id)?.filedCategoryIds).toEqual([]);
+  });
+
+  it("does NOT self-exclude when a sibling row shares the same category — count >= 2", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const first = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "TRADER JOES",
+      categoryId: groceries.id,
+    });
+    const second = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "TRADER JOES",
+      categoryId: groceries.id,
+    });
+
+    const r = loadTransactions(handle.db, { page: 1, pageSize: 50 });
+    expect(r.rows.find((x) => x.id === first.id)?.filedCategoryIds).toEqual([groceries.id]);
+    expect(r.rows.find((x) => x.id === second.id)?.filedCategoryIds).toEqual([groceries.id]);
   });
 });
 

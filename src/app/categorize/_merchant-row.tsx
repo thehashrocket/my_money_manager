@@ -93,7 +93,7 @@ export function MerchantRow({
    * DIFFERENT snapshot with fresh props, not just a stale one: park a pick,
    * tick Remember while trainable, then let a sibling merchant's write (or
    * this same merchant's own row list changing) revalidate `/categorize` —
-   * the mask (`checked={remember && ruleAction.kind !== "none"}`) can hide a
+   * the mask (`checked={remember && ruleActionEnabled}`) can hide a
    * stale tick from the screen without ever clearing the state underneath
    * it, exactly the class of bug `handlePick`'s own clear-not-mask comment
    * already names for the picker-change case. The stored pick is
@@ -127,7 +127,7 @@ export function MerchantRow({
   const handlePick = (next: string) => {
     writePendingPick(merchant, next);
     /* CLEAR the tick rather than only masking it. `checked={remember &&
-       ruleAction.kind !== "none"}` un-ticks the box on screen, but `remember`
+       ruleActionEnabled}` un-ticks the box on screen, but `remember`
        stays true, so picking a category that again makes SOME action possible
        (train, or remove-conflicting) resurrected a tick the user had not
        re-made — and on that submit a rule really would be written or removed.

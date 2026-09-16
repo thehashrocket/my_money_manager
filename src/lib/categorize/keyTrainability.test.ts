@@ -3,6 +3,7 @@ import {
   classifyKeyTrainability,
   describeRuleAction,
   LOSSY_MERCHANT_KEYS,
+  ruleActionLabel,
 } from "./keyTrainability";
 
 describe("classifyKeyTrainability — lossy keys", () => {
@@ -186,7 +187,7 @@ describe("describeRuleAction", () => {
     expect(action).toEqual({ kind: "none", message: verdict.message });
   });
 
-  it("returns none before any category is picked, even with a contradicted existing rule", () => {
+  it("returns none before any category is picked, even with an existing rule pointing elsewhere", () => {
     // pendingCategoryId === null: there is no pick to contradict anything
     // with yet, so offering removal would be a guess.
     const verdict = classifyKeyTrainability("ONLINE", [], null);
@@ -207,7 +208,7 @@ describe("describeRuleAction", () => {
   // to reject it the identical way, or a corrupted pick renders "Remove
   // conflicting rule" as ENABLED with no real pick behind it.
   it.each([Number.NaN, 0, -1])(
-    "returns none for a non-real pendingCategoryId (%s), even with a contradicted existing rule",
+    "returns none for a non-real pendingCategoryId (%s), even with an existing rule pointing elsewhere",
     (badPending) => {
       // filed=[3, 9] (multi-category) refuses regardless of pending, so the
       // verdict is reliably untrainable for every bad `badPending` value —
@@ -299,5 +300,32 @@ describe("describeRuleAction", () => {
     if (action.kind !== "remove-conflicting") throw new Error("expected remove-conflicting");
     expect(action.message).toContain("Gas");
     expect(action.message).toContain("SAFEWAY");
+  });
+});
+
+describe("ruleActionLabel", () => {
+  it('labels "train" as Remember', () => {
+    expect(ruleActionLabel({ kind: "train" })).toBe("Remember");
+  });
+
+  it('labels "none" as Remember', () => {
+    expect(ruleActionLabel({ kind: "none", message: "unused" })).toBe("Remember");
+  });
+
+  it('labels remove-conflicting/lossy-key as "Remove unusable rule", never "conflicting" — the label this function was extracted to fix', () => {
+    const verdict = classifyKeyTrainability("ONLINE", [], 9);
+    const action = describeRuleAction("ONLINE", verdict, { categoryId: 9, categoryName: "Gas" }, 9);
+    expect(ruleActionLabel(action)).toBe("Remove unusable rule");
+  });
+
+  it('labels remove-conflicting/contradicted as "Remove conflicting rule"', () => {
+    const verdict = classifyKeyTrainability("SAFEWAY", [3, 9], 3);
+    const action = describeRuleAction(
+      "SAFEWAY",
+      verdict,
+      { categoryId: 9, categoryName: "Gas" },
+      3,
+    );
+    expect(ruleActionLabel(action)).toBe("Remove conflicting rule");
   });
 });
