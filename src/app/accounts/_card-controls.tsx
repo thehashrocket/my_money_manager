@@ -30,6 +30,7 @@ export function CardControls({
   canAddCharge,
   canEditTerms,
   showReconcile,
+  allowsPositiveBalance,
   importsFromFeed,
 }: {
   accountId: number;
@@ -74,6 +75,15 @@ export function CardControls({
    */
   showReconcile: boolean;
   /**
+   * rule 9's sign guard, relayed rather than re-derived: `false` for a loan
+   * or mortgage, which can never legitimately hold a positive balance (unlike
+   * a card after an overpayment). Passed straight to `ReconcileForm`, which
+   * uses it to decide whether the "You owe" / "You're owed" toggle is offered
+   * at all — the same rule 8 discipline against a control that can only ever
+   * refuse.
+   */
+  allowsPositiveBalance: boolean;
+  /**
    * D-ANCHOR — whether this card's balance is being maintained by an
    * ongoing feed import (`importsTransactions`). Relayed to `ReconcileForm`
    * so it can warn: reconciling moves the anchor FORWARD, and any feed row
@@ -110,6 +120,7 @@ export function CardControls({
           balanceCents={balanceCents}
           today={today}
           startOpen={handoff > 0}
+          allowsPositiveBalance={allowsPositiveBalance}
           importsFromFeed={importsFromFeed}
         />
       ) : null}

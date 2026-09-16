@@ -189,6 +189,13 @@ export function AccountRow({
           // control renders — `resolveCardAffordances` only RELAYS it here,
           // never re-derives it.
           showReconcile={affordances.showReconcile}
+          // rule 9's sign guard, on the Reconcile form's own toggle: a loan
+          // can never legitimately hold a positive balance (unlike a card
+          // after an overpayment), so the "You're owed" option isn't offered
+          // at all here — the same discipline rule 8 already applies to a
+          // kind change the server would always refuse. `longTerm` is this
+          // row's own already-computed predicate; nothing re-derives it.
+          allowsPositiveBalance={!longTerm}
           // D-ANCHOR — see `_balance-forms.tsx`'s `ReconcileForm`. Only an
           // IMPORTING card can have a feed row arrive dated before a hand
           // Reconcile that already moved the anchor past it; an unlinked or

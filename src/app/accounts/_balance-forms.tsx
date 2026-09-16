@@ -6,6 +6,10 @@ import { centsToDollarString } from "@/lib/money";
 import { formatMonthDay } from "@/lib/now";
 import { IDLE } from "./action-state";
 import { ActionStatus } from "@/components/ledger/action-status";
+// `import type` only — `accountAnchorFields.ts` imports `zod`, and this is a
+// client component. The type is erased at build time, so it never pulls zod
+// into the browser bundle (the measured +376 KB `limits.ts` shape).
+import type { BalanceDirection } from "@/lib/import/accountAnchorFields";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -37,6 +41,8 @@ export function ReconcileDisclosure(props: {
   today: string;
   /** DS56 — arrive open and focused, from "Reconcile instead →". */
   startOpen?: boolean;
+  /** rule 9's sign guard — see `ReconcileForm`. */
+  allowsPositiveBalance?: boolean;
   /** D-ANCHOR — see `ReconcileForm`. */
   importsFromFeed?: boolean;
 }) {
@@ -70,6 +76,7 @@ export function ReconcileForm({
   balanceCents,
   today,
   autoFocus = false,
+  allowsPositiveBalance = true,
   importsFromFeed = false,
 }: {
   accountId: number;
@@ -77,6 +84,17 @@ export function ReconcileForm({
   balanceCents: number;
   today: string;
   autoFocus?: boolean;
+  /**
+   * rule 9's sign guard: `false` for a loan or mortgage, which can never
+   * legitimately hold a positive balance (unlike a card after an
+   * overpayment). When false, the "You owe" / "You're owed" toggle is not
+   * rendered at all — a control that can only ever refuse is the thing
+   * rule 8 already argues against — and the hidden `balanceDirection` field
+   * is fixed at `"owe"`, matching what this form always submitted before the
+   * toggle existed. Defaults to `true` (cards) since that's every existing
+   * caller's actual case; `ReconcileDisclosure`'s own default matches.
+   */
+  allowsPositiveBalance?: boolean;
   /**
    * D-ANCHOR — this account's balance is (also) maintained by an ongoing
    * feed import (`importsTransactions`). Reconciling moves the anchor
@@ -106,7 +124,9 @@ export function ReconcileForm({
   // instead. Defaults from the account's CURRENT balance so opening
   // Reconcile on an already-credit-balance card doesn't require flipping it
   // just to re-confirm the same figure.
-  const [direction, setDirection] = useState<"owe" | "owed">(balanceCents > 0 ? "owed" : "owe");
+  const [direction, setDirection] = useState<BalanceDirection>(
+    allowsPositiveBalance && balanceCents > 0 ? "owed" : "owe",
+  );
 
   // RESYNC WHEN THE BALANCE MOVES UNDERNEATH AN UNTOUCHED FIELD.
   //
@@ -134,7 +154,7 @@ export function ReconcileForm({
     setSeenBalanceCents(balanceCents);
     if (!touched) {
       setBalanceOwed(centsToDollarString(Math.abs(balanceCents)));
-      setDirection(balanceCents > 0 ? "owed" : "owe");
+      setDirection(allowsPositiveBalance && balanceCents > 0 ? "owed" : "owe");
     }
   }
   const balanceId = useId();
@@ -175,45 +195,49 @@ export function ReconcileForm({
       */}
       <input type="hidden" name="balanceDirection" value={direction} />
       <div>
-        <span className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3">
-          This balance is
-        </span>
-        <div
-          className="mb-1 flex w-fit overflow-hidden rounded-md border border-border"
-          role="group"
-          aria-label={`Is this money ${accountName} owes, or money owed to ${accountName}?`}
-        >
-          <button
-            type="button"
-            aria-pressed={direction === "owe"}
-            onClick={() => {
-              setTouched(true);
-              setDirection("owe");
-            }}
-            className={`px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
-              direction === "owe"
-                ? "bg-ink-1 text-background"
-                : "bg-card text-ink-2 hover:bg-muted"
-            }`}
-          >
-            You owe
-          </button>
-          <button
-            type="button"
-            aria-pressed={direction === "owed"}
-            onClick={() => {
-              setTouched(true);
-              setDirection("owed");
-            }}
-            className={`border-l border-border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
-              direction === "owed"
-                ? "bg-ink-1 text-background"
-                : "bg-card text-ink-2 hover:bg-muted"
-            }`}
-          >
-            You&apos;re owed
-          </button>
-        </div>
+        {allowsPositiveBalance ? (
+          <>
+            <span className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3">
+              This balance is
+            </span>
+            <div
+              className="mb-1 flex w-fit overflow-hidden rounded-md border border-border"
+              role="group"
+              aria-label={`Is this money ${accountName} owes, or money owed to ${accountName}?`}
+            >
+              <button
+                type="button"
+                aria-pressed={direction === "owe"}
+                onClick={() => {
+                  setTouched(true);
+                  setDirection("owe");
+                }}
+                className={`px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+                  direction === "owe"
+                    ? "bg-ink-1 text-background"
+                    : "bg-card text-ink-2 hover:bg-muted"
+                }`}
+              >
+                You owe
+              </button>
+              <button
+                type="button"
+                aria-pressed={direction === "owed"}
+                onClick={() => {
+                  setTouched(true);
+                  setDirection("owed");
+                }}
+                className={`border-l border-border px-3 py-1.5 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background ${
+                  direction === "owed"
+                    ? "bg-ink-1 text-background"
+                    : "bg-card text-ink-2 hover:bg-muted"
+                }`}
+              >
+                You&apos;re owed
+              </button>
+            </div>
+          </>
+        ) : null}
         <label
           className="mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3"
           htmlFor={balanceId}

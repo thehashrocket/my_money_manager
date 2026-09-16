@@ -19,8 +19,10 @@ import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInpu
 import { validateCardTermsInput } from "@/lib/accounts/validateCardTermsInput";
 import {
   STARTING_BALANCE_DOLLARS_MAX,
+  isBalanceDirection,
   owedDollarsToSignedCents,
 } from "@/lib/import/accountAnchorFields";
+import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import { formatCents } from "@/lib/money";
 import { todayIso } from "@/lib/now";
 import { guardRefresh } from "@/lib/revalidateAfterWrite";
@@ -188,8 +190,10 @@ export async function updateLiabilityBalanceAction(
     // The radio group always has exactly one option checked, so a lost
     // field here means the request wasn't built by this form at all — fail
     // rather than guess a sign, the same discipline rule 4's `intent` field
-    // uses for a same-account reversal's own two-branch choice.
-    if (raw.balanceDirection !== "owe" && raw.balanceDirection !== "owed") {
+    // uses for a same-account reversal's own two-branch choice. `raw.balanceDirection`
+    // is `FormDataEntryValue | undefined`, never proven a `BalanceDirection` by
+    // its type — `isBalanceDirection` is the one runtime check for it.
+    if (!isBalanceDirection(raw.balanceDirection)) {
       return fail("Choose whether this is money you owe or money owed to you.", "balance");
     }
     const direction = raw.balanceDirection;
@@ -222,6 +226,14 @@ export async function updateLiabilityBalanceAction(
     if (!account) return fail("That account no longer exists.");
     if (accountClass(account.type) !== "liability") {
       return fail(`${account.name} is not a credit card or loan.`);
+    }
+    // rule 9's sign guard, on the hand-entry path — `refreshLiabilityBalances`
+    // (`sync.ts`) already refuses a positive FEED balance for a loan for the
+    // same reason: a loan can never legitimately hold one, unlike a card
+    // after an overpayment. This form had no equivalent check, so "You're
+    // owed" was reachable (and rendered) on a mortgage or car loan too.
+    if (direction === "owed" && isLongTermLiability(account.type)) {
+      return fail(`${account.name} is a loan — it can't have a positive balance.`, "balance");
     }
 
     // Shared with account creation, so the two paths cannot round a

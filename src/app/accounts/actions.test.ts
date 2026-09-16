@@ -3,8 +3,9 @@ import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import { createTestDb, type TestDbHandle } from "@/lib/test/db";
 import { accountClass } from "@/lib/accounts/accountClass";
+import { isLongTermLiability } from "@/lib/accounts/isLongTermLiability";
 import { validateUpdateAnchorInput } from "@/lib/import/validateUpdateAnchorInput";
-import { owedDollarsToSignedCents } from "@/lib/import/accountAnchorFields";
+import { isBalanceDirection, owedDollarsToSignedCents } from "@/lib/import/accountAnchorFields";
 import type { AccountsActionState } from "./action-state";
 
 /**
@@ -57,26 +58,32 @@ function fail(message: string, field?: "balance" | "date"): AccountsActionState 
   return { status: "error", message, field };
 }
 
-/** The exact chain `updateLiabilityBalanceAction` runs, against the test db. */
+/**
+ * The exact chain `updateLiabilityBalanceAction` runs, against the test db.
+ *
+ * `balanceDirection` is REQUIRED (not optional/defaulted) — a hand-mirror
+ * that silently defaulted a missing field to "owe" would keep every
+ * pre-existing call site passing while production refused, which is exactly
+ * what let the missing `isLongTermLiability` guard below go uncaught (a
+ * maintainability finding on this same session's diff). Every call site
+ * passes it explicitly now.
+ */
 function reconcile(raw: {
   accountId: unknown;
   balanceOwed: unknown;
   asOf: unknown;
-  /**
-   * Defaults to "owe" so every pre-existing call site below is unaffected.
-   * `unknown`, not the narrowed union — a crafted/stale request can post
-   * anything, same as `raw.balanceOwed` above.
-   */
-  balanceDirection?: unknown;
+  /** `unknown`, not the narrowed union — a crafted/stale request can post
+   *  anything, same as `raw.balanceOwed` above. */
+  balanceDirection: unknown;
 }) {
   const owed = Number(raw.balanceOwed);
   if (!Number.isFinite(owed) || owed < 0) {
     return fail("Enter what you owe as a positive number.", "balance");
   }
-  const direction = raw.balanceDirection === undefined ? "owe" : raw.balanceDirection;
-  if (direction !== "owe" && direction !== "owed") {
+  if (!isBalanceDirection(raw.balanceDirection)) {
     return fail("Choose whether this is money you owe or money owed to you.", "balance");
   }
+  const direction = raw.balanceDirection;
 
   const signedOwed = direction === "owe" ? -owed : owed;
   const parsed = validateUpdateAnchorInput({
@@ -104,6 +111,11 @@ function reconcile(raw: {
   if (!account) return fail("That account no longer exists.");
   if (accountClass(account.type) !== "liability") {
     return fail(`${account.name} is not a credit card or loan.`);
+  }
+  // rule 9's sign guard: a loan can never legitimately hold a positive
+  // balance, unlike a card after an overpayment.
+  if (direction === "owed" && isLongTermLiability(account.type)) {
+    return fail(`${account.name} is a loan — it can't have a positive balance.`, "balance");
   }
 
   // THE SHARED HELPER, not a local copy. This line used to read
@@ -163,6 +175,7 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       accountId: String(visa.id),
       balanceOwed: "2148.32",
       asOf: "2026-09-06",
+      balanceDirection: "owe",
     });
     expect(state.status).toBe("ok");
 
@@ -214,6 +227,33 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
     expect(reload(visa.id)?.startingBalanceCents).toBe(-200_000);
   });
 
+  it("refuses a positive ('owed') balance on a loan — a loan can never legitimately hold one (rule 9)", () => {
+    // `refreshLiabilityBalances` (sync.ts) already refuses this exact state
+    // for a FEED-reported balance; this pipeline had no equivalent guard for
+    // a HAND-reconciled one, so "You're owed" was reachable (and rendered) on
+    // a mortgage or car loan too. Found by the testing specialist during
+    // /ship's pre-landing review.
+    const loan = seedAccount({
+      name: "Mortgage",
+      type: "loan",
+      cents: -30_000_000,
+      anchor: "2026-08-01",
+    });
+    const state = reconcile({
+      accountId: loan.id,
+      balanceOwed: "500",
+      asOf: "2026-09-06",
+      balanceDirection: "owed",
+    });
+    expect(state).toEqual({
+      status: "error",
+      message: "Mortgage is a loan — it can't have a positive balance.",
+      field: "balance",
+    });
+    // Untouched: a refusal never reaches the UPDATE.
+    expect(reload(loan.id)?.startingBalanceCents).toBe(-30_000_000);
+  });
+
   it("stores a paid-off card as 0, never -0", () => {
     const visa = seedAccount({
       name: "Visa",
@@ -221,9 +261,14 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    expect(reconcile({ accountId: visa.id, balanceOwed: "0", asOf: "2026-09-06" }).status).toBe(
-      "ok",
-    );
+    expect(
+      reconcile({
+        accountId: visa.id,
+        balanceOwed: "0",
+        asOf: "2026-09-06",
+        balanceDirection: "owe",
+      }).status,
+    ).toBe("ok");
     const after = reload(visa.id);
     expect(after?.startingBalanceCents).toBe(0);
     expect(Object.is(after?.startingBalanceCents, -0)).toBe(false);
@@ -236,7 +281,12 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    reconcile({ accountId: visa.id, balanceOwed: "500", asOf: "2026-09-06" });
+    reconcile({
+      accountId: visa.id,
+      balanceOwed: "500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
 
     const after = reload(visa.id);
     expect(after?.priorStartingBalanceCents).toBe(-200_000);
@@ -257,7 +307,12 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       .where(eq(schema.accounts.id, loan.id))
       .run();
 
-    reconcile({ accountId: loan.id, balanceOwed: "299000", asOf: "2026-09-06" });
+    reconcile({
+      accountId: loan.id,
+      balanceOwed: "299000",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
 
     const after = reload(loan.id);
     expect(after?.balanceSource).toBe("manual");
@@ -271,7 +326,12 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    const state = reconcile({ accountId: visa.id, balanceOwed: "-500", asOf: "2026-09-06" });
+    const state = reconcile({
+      accountId: visa.id,
+      balanceOwed: "-500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     expect(state).toEqual({
       status: "error",
       message: "Enter what you owe as a positive number.",
@@ -288,7 +348,12 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    const state = reconcile({ accountId: visa.id, balanceOwed: "500", asOf: "2099-01-01" });
+    const state = reconcile({
+      accountId: visa.id,
+      balanceOwed: "500",
+      asOf: "2099-01-01",
+      balanceDirection: "owe",
+    });
     expect(state).toEqual({
       status: "error",
       message: "That date is in the future. Use today or earlier.",
@@ -308,13 +373,19 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       accountId: visa.id,
       balanceOwed: "999999999",
       asOf: "2026-09-06",
+      balanceDirection: "owe",
     });
     expect(state.status).toBe("error");
     if (state.status === "error") expect(state.field).toBe("balance");
   });
 
   it("refuses an account id that no longer exists — reachable from a stale tab", () => {
-    const state = reconcile({ accountId: 999_999, balanceOwed: "500", asOf: "2026-09-06" });
+    const state = reconcile({
+      accountId: 999_999,
+      balanceOwed: "500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     expect(state).toEqual({
       status: "error",
       message: "That account no longer exists.",
@@ -329,7 +400,12 @@ describe("updateLiabilityBalanceAction — the reconcile pipeline (D10 path 3)",
       cents: 500_000,
       anchor: "2026-08-01",
     });
-    const state = reconcile({ accountId: checking.id, balanceOwed: "500", asOf: "2026-09-06" });
+    const state = reconcile({
+      accountId: checking.id,
+      balanceOwed: "500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     expect(state.status).toBe("error");
     if (state.status === "error") expect(state.message).toContain("not a credit card or loan");
     // The asset's positive anchor survives — this is the guard that stops a
@@ -383,7 +459,12 @@ describe("revertLiabilityBalanceAction (E19)", () => {
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    reconcile({ accountId: visa.id, balanceOwed: "2500", asOf: "2026-09-06" });
+    reconcile({
+      accountId: visa.id,
+      balanceOwed: "2500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     expect(reload(visa.id)?.startingBalanceCents).toBe(-250_000);
 
     expect(revert({ accountId: visa.id }).status).toBe("ok");
@@ -399,7 +480,12 @@ describe("revertLiabilityBalanceAction (E19)", () => {
       cents: -200_000,
       anchor: "2026-08-01",
     });
-    reconcile({ accountId: visa.id, balanceOwed: "2500", asOf: "2026-09-06" });
+    reconcile({
+      accountId: visa.id,
+      balanceOwed: "2500",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     revert({ accountId: visa.id });
 
     // A mis-clicked undo costs one more click, not the figure just typed.
@@ -439,7 +525,12 @@ describe("revertLiabilityBalanceAction (E19)", () => {
       cents: -1_000_000,
       anchor: "2026-08-01",
     });
-    reconcile({ accountId: loan.id, balanceOwed: "9000", asOf: "2026-09-06" });
+    reconcile({
+      accountId: loan.id,
+      balanceOwed: "9000",
+      asOf: "2026-09-06",
+      balanceDirection: "owe",
+    });
     revert({ accountId: loan.id });
 
     const after = reload(loan.id);
@@ -477,6 +568,7 @@ describe("updateLiabilityBalanceAction — a no-op must not spend the undo", () 
       accountId: String(visa.id),
       balanceOwed: "2000.00",
       asOf: "2026-08-01",
+      balanceDirection: "owe",
     });
 
     expect(state.status).toBe("ok");
@@ -500,6 +592,7 @@ describe("updateLiabilityBalanceAction — a no-op must not spend the undo", () 
       accountId: String(visa.id),
       balanceOwed: "2148.32",
       asOf: "2026-08-01",
+      balanceDirection: "owe",
     });
 
     expect(state.status).toBe("ok");
@@ -522,6 +615,7 @@ describe("updateLiabilityBalanceAction — a no-op must not spend the undo", () 
       accountId: String(visa.id),
       balanceOwed: "2000.00",
       asOf: "2026-09-06",
+      balanceDirection: "owe",
     });
 
     expect(state.status).toBe("ok");
