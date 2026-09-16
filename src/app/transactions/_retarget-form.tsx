@@ -68,9 +68,10 @@ type Props = {
  * ## The Remember guard
  *
  * `/categorize` and the row form directly below this one (`TransactionRowForm`)
- * both disable their checkbox up front by running `classifyKeyTrainability`
- * (and, since the ship review that added rule-removal, `describeRuleAction`)
- * against a `filedCategoryIds` read that goes through the shared
+ * both disable their checkbox up front via the shared `resolveRememberUi`
+ * (which runs `classifyKeyTrainability` and, since the ship review that
+ * added rule-removal, `describeRuleAction`, internally) against a
+ * `filedCategoryIds` read that goes through the shared
  * `filedCategoryEvidenceWhere` predicate. This form now does too, via the
  * same `resolveRememberUi`/`useRememberConsent` pair — but against a
  * DIFFERENT prop than `filed`. `filed` comes from `summarizeByCategory`,
@@ -136,7 +137,7 @@ export function RetargetForm({
   // category's rows for this merchant is the moved set.
   const filedForVerdict = filedCategoryIdsAfterMove(
     filedCategoryIds,
-    effective?.categoryId,
+    effective?.categoryId ?? null,
   );
   const rememberUi = resolveRememberUi(
     normalizedMerchant,

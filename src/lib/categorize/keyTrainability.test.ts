@@ -535,7 +535,7 @@ describe("filedCategoryIdsAfterMove", () => {
   });
 
   it("is a no-op when nothing has been picked as the source yet", () => {
-    expect(filedCategoryIdsAfterMove([3, 7, 9], undefined)).toEqual([3, 7, 9]);
+    expect(filedCategoryIdsAfterMove([3, 7, 9], null)).toEqual([3, 7, 9]);
   });
 
   it("drops every matching entry, not just the first", () => {

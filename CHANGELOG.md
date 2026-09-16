@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - **The Remember checkbox now looks and behaves identically everywhere it appears** (individual transactions, the categorize page, and the bulk-move tool), sharing one implementation instead of three separately-maintained copies.
 
+## [1.3.2] - 2026-09-15
+
 ### Changed
 - **The "Remember" checkbox on the categorize and transactions pages now shares one implementation instead of two independently-maintained copies.** Both pages had grown their own hand-written version of "does this checkbox get to save or remove a category rule right now," and it had already drifted once — a fix landing on one page without the other. It's now one shared piece of logic both pages call.
 

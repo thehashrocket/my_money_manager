@@ -567,9 +567,110 @@ describe("filedCategoryIdsAfterMove — parity with resolveKeyTrainability's exc
 
   it("is a no-op when nothing has been picked as the source yet", () => {
     const filedCategoryIds = [3, 7, 9];
-    expect(filedCategoryIdsAfterMove(filedCategoryIds, undefined)).toEqual([
+    expect(filedCategoryIdsAfterMove(filedCategoryIds, null)).toEqual([
       3, 7, 9,
     ]);
+  });
+
+  // pr-test-analyzer (PR #61 review): the equivalence claim above was only
+  // proven for a merchant with no archived-category or transfer-paired rows
+  // in play — exactly the interaction `_retarget-form.tsx`'s own docstring
+  // cites as the REASON `filedCategoryIds` had to be a separate prop from
+  // `filed` in the first place (an archived category's rows are invisible to
+  // `filedCategoryEvidenceWhere` but `bulkRetarget` still lets you move rows
+  // OUT of one). Hand-traced to hold (both exclusions apply independently of
+  // `excludeTxnIds`, so a row invisible to `filedCategoryIds` for either
+  // reason contributes zero evidence either way) — pinned here rather than
+  // left as a traced-but-unproven claim, matching this file's own bar for
+  // every other consumer of `filedCategoryEvidenceWhere` (see the "archived
+  // categories" and transfer-paired describe blocks above).
+  it("agrees with excludeTxnIds when the FROM category is archived", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const archived = seedCategory("Old Category");
+    handle.db
+      .update(schema.categories)
+      .set({ archivedAt: new Date() })
+      .where(eq(schema.categories.id, archived.id))
+      .run();
+    const dining = seedCategory("Dining");
+
+    const moving = [
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "AMAZON",
+        amountCents: -4000,
+        categoryId: archived.id,
+      }),
+    ];
+
+    const filedCategoryIds = loadFiledCategoryIds(handle.db, "AMAZON");
+    const client = classifyKeyTrainability(
+      "AMAZON",
+      filedCategoryIdsAfterMove(filedCategoryIds, archived.id),
+      dining.id,
+    );
+    const server = resolveKeyTrainability(
+      handle.db,
+      "AMAZON",
+      dining.id,
+      moving.map((row) => row.id),
+    );
+
+    expect(client).toEqual(server);
+    expect(client.trainable).toBe(true);
+  });
+
+  it("agrees with excludeTxnIds when a row in the FROM category is transfer-paired", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const dining = seedCategory("Dining");
+
+    const moving = [
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "AMAZON",
+        amountCents: -4000,
+        categoryId: groceries.id,
+      }),
+    ];
+    // Filed under the same FROM category but transfer-paired — bulkRetarget's
+    // own `matchingRows` query excludes it (isNull(transferPairId)), so it is
+    // left behind by the move and must not count as still-filed evidence
+    // either way.
+    const partner = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "PARTNER",
+      amountCents: 4000,
+    });
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: groceries.id,
+      transferPairId: partner.id,
+    });
+
+    const filedCategoryIds = loadFiledCategoryIds(handle.db, "AMAZON");
+    const client = classifyKeyTrainability(
+      "AMAZON",
+      filedCategoryIdsAfterMove(filedCategoryIds, groceries.id),
+      dining.id,
+    );
+    const server = resolveKeyTrainability(
+      handle.db,
+      "AMAZON",
+      dining.id,
+      moving.map((row) => row.id),
+    );
+
+    expect(client).toEqual(server);
+    expect(client.trainable).toBe(true);
   });
 });
 

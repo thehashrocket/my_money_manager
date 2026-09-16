@@ -432,13 +432,22 @@ export function ruleActionSignature(
  * Pinned by a parity test in `resolveKeyTrainability.test.ts` against the
  * real DB-backed exclusion, not just this claim.
  *
- * `movingFromCategoryId` is `undefined` (not filtered) when nothing has been
- * picked as the source yet — `RetargetForm`'s own `effective` can be
- * `undefined` when the previously-picked source category has vanished.
+ * `movingFromCategoryId` is `number | null` — this module's one spelling of
+ * "no category id here" everywhere else (`classifyKeyTrainability`,
+ * `describeRuleAction`, `resolveRememberUi`, `ruleActionSignature` all take
+ * `pendingCategoryId: number | null`) — not `| undefined`, even though its
+ * one caller's value is naturally optional-chained (`RetargetForm`'s
+ * `effective?.categoryId`, `undefined` when the previously-picked source
+ * category has vanished). The call site converts with `?? null` rather than
+ * this function taking `undefined`, so a second caller never has to
+ * remember which spelling this one function uses (type-design review, PR
+ * #61). `null` is filtered exactly like any other missing value — no filter
+ * applied, which is also correct when nothing has been picked as the source
+ * yet.
  */
 export function filedCategoryIdsAfterMove(
   filedCategoryIds: readonly number[],
-  movingFromCategoryId: number | undefined,
+  movingFromCategoryId: number | null,
 ): number[] {
   return filedCategoryIds.filter((id) => id !== movingFromCategoryId);
 }
