@@ -2976,6 +2976,31 @@ per the plan's own "residuals" section.
       `src/lib/import/accountAnchorFields.test.ts`,
       `src/app/accounts/actions.test.ts`, `src/app/accounts/actions.wiring.test.ts`,
       `src/app/accounts/actions.balance-refresh.test.ts`)
+      **Three more real bugs surfaced by `/ship`'s own pre-landing + adversarial
+      review, all fixed before this branch ever merged.** (1) The toggle had no
+      guard against a LOAN: `updateLiabilityBalanceAction` checked only
+      `accountClass(...) !== "liability"`, true for both a card and a loan, so
+      "You're owed" could be hand-set on a mortgage — the exact state
+      `refreshLiabilityBalances` (`sync.ts`) already refuses for a feed-reported
+      balance, for the same rule-9 reason. Fixed by adding the missing
+      `isLongTermLiability` check server-side, and by threading a new
+      `allowsPositiveBalance` boolean through `resolveCardAffordances` (T7's
+      existing per-row-gate unification, not a fourth hand-derived boolean) so
+      the toggle isn't rendered at all for a loan — rule 8's "don't offer a
+      control that can only ever refuse." (2) Re-clicking the ALREADY-selected
+      direction called `setTouched(true)` unconditionally, permanently
+      disabling the sibling resync-on-external-balance-change effect for the
+      rest of the form's mount — reproduced live (open Reconcile, click the
+      active toggle, add a charge via "Add a charge" while the form stays
+      open: the amount field stayed frozen at the pre-charge figure instead of
+      picking up the new balance). Fixed by only touching state on an actual
+      direction change. (3) The amount field's `aria-label` had "owed
+      by"/"owed to" backwards relative to what the toggle means, confirmed by
+      Codex structured review as `[P2]`. A related, doubly-confirmed a11y gap
+      (a missing/invalid `balanceDirection` refusal shared `field: "balance"`
+      with the amount input, so the wrong control lit up) also closed: the
+      refusal now carries its own `"direction"` field value.
+      (`src/lib/accounts/resolveCardAffordances.ts`, `src/app/accounts/_account-row.tsx`)
 
 - [x] **P1 — DONE (2026-09-15), CORRECTED same day by `/ship`'s own
       adversarial review before this branch ever merged.** The design
