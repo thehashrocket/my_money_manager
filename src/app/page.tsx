@@ -9,7 +9,7 @@ import {
 import { paidDownCents } from "@/lib/accounts/paidDownCents";
 import { summarizeBalances } from "@/lib/accounts/summarizeBalances";
 import { loadMonthView, type MonthViewSummary, type UncategorizedBacklog } from "@/lib/budget/loadMonthView";
-import { monthPhase } from "@/lib/budget/monthOfIso";
+import { monthLabel, monthPhase } from "@/lib/budget/monthOfIso";
 import { rankByProximity, type ProximityRow } from "@/lib/budget/rankByProximity";
 import { TONE_CLASS } from "@/lib/budget/resolveRowDisplay";
 import { NetWorthRow, SubtotalRow } from "@/components/ledger/balance-list";
@@ -27,12 +27,6 @@ export default async function Home() {
   const accounts = loadAccountBalancesForRequest();
   const view = loadMonthView(db, year, month);
   const trends = loadMonthlyTrends(db);
-
-  const monthLabel = new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 
   if (accounts.length === 0) {
     return <EmptyState />;
@@ -58,7 +52,7 @@ export default async function Home() {
         <BacklogBanner backlog={view.uncategorizedBacklog} variant="budget" />
       ) : null}
 
-      <h1 className="font-display text-xl font-semibold">{monthLabel}</h1>
+      <h1 className="font-display text-xl font-semibold">{monthLabel(year, month)}</h1>
 
       <BalanceSection
         assets={assets}

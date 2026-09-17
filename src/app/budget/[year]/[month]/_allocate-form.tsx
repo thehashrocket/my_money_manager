@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { formatCents } from "@/lib/money";
 import { upsertBudgetAllocationAction } from "../../actions";
 import type { LeafAllocation } from "@/lib/budget/loadMonthView";
+import { monthLabel } from "@/lib/budget/monthOfIso";
 
 type AllocateFormTriggerProps = {
   categoryId: number;
@@ -180,10 +181,3 @@ function computeLiveEffectiveCents(
   return Math.round(dollars * 100) + rolloverCents;
 }
 
-function monthLabel(year: number, month: number): string {
-  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-}

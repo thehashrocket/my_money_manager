@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { MerchantGroup } from "@/lib/categorize/loadMerchantGroups";
 import type { LeafCategory } from "@/lib/categories";
 import type { UncategorizedBacklog } from "@/lib/budget/loadMonthView";
+import type { YearMonth } from "@/lib/budget/monthOfIso";
 import { formatCents } from "@/lib/money";
 import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
@@ -16,7 +17,25 @@ type Props = {
   initialGroups: MerchantGroup[];
   leafCategories: LeafCategory[];
   initialBacklog: UncategorizedBacklog;
+  /** `undefined` means all-time — see `page.tsx`'s `parseScopeParams`. */
+  scope: YearMonth | undefined;
 };
+
+/**
+ * Codex structured review, following up on the cross-scope-contamination fix
+ * below: two DIFFERENT scope keys are not necessarily disjoint. "all-time"
+ * contains every month, so a write issued under a specific month and applied
+ * while viewing "all-time" (or the reverse) genuinely affects what is
+ * displayed and must NOT be skipped — only two DIFFERENT specific months
+ * are provably disjoint (a transaction cannot be dated in both). Skipping
+ * the all-time/month pairing was the exact bug this review comment caught:
+ * categorize two September rows, switch to all-time, Undo the still-visible
+ * toast — the DB write is correct either way, but a same-key-only guard
+ * left the all-time header undercounting what its own row list showed.
+ */
+function scopeKeysCanOverlap(a: string, b: string): boolean {
+  return a === b || a === "all-time" || b === "all-time";
+}
 
 /**
  * Client island wrapper for `/categorize`. Owns two pieces of local state:
@@ -48,6 +67,7 @@ export function CategorizeUi({
   initialGroups,
   leafCategories,
   initialBacklog,
+  scope,
 }: Props) {
   const [count, setCount] = useState(initialBacklog.count);
   const [done, setDone] = useState<ReadonlySet<string>>(new Set());
@@ -63,18 +83,88 @@ export function CategorizeUi({
     setHidden(new Set());
   }
 
+  // A scope change (ScopeNav to a different month, or to/from all-time) is a
+  // NAVIGATION, not a same-page revalidation — `CategorizeUi` stays mounted
+  // across it (same tree position, no `key` change), so `done`'s `useState`
+  // initializer never re-runs and would otherwise keep showing the PREVIOUS
+  // scope's progress under the new scope's rows and labels. `done` resets
+  // here (`hidden` already resets above on every new `initialGroups`
+  // reference, which a scope change also produces); `count`'s own resync is
+  // keyed off `initialBacklog` instead, below — see that block for why scope
+  // alone is not the right trigger for it. An ordinary same-scope submit
+  // (Categorize/Undo) does NOT go through this branch — `scopeKey` is
+  // unchanged, so `done`'s cross-submit progress count survives exactly as
+  // before.
+  const scopeKey = scope ? `${scope.year}-${scope.month}` : "all-time";
+  const [renderedScopeKey, setRenderedScopeKey] = useState(scopeKey);
+  if (renderedScopeKey !== scopeKey) {
+    setRenderedScopeKey(scopeKey);
+    setDone(new Set());
+  }
+
+  // Codex structured review, re-run after the cross-scope-contamination fix
+  // below: gating `count`'s resync on `scopeKey` alone left it wrong even
+  // WITHIN one scope. `onOptimisticSubmit`/`onUndo` apply a delta rather
+  // than the true count for any write whose scope overlaps but doesn't
+  // match the currently-viewed one (submit under all-time, Undo while
+  // viewing September restores 25 rows but only 2 were September's) — a
+  // real number, not just an unlikely race, and `revalidatePath`'s own
+  // fresh `initialBacklog` was being silently discarded because nothing
+  // resynced `count` to it outside a scope change. `page.tsx` computes a
+  // fresh `{count, totalCents}` object on every render, so a reference
+  // change here means "the server sent a new answer for the CURRENT scope,"
+  // whether that arrived via navigation or via this same action's own
+  // revalidation — the authoritative source arriving is reason enough to
+  // trust it over whatever the optimistic delta guessed.
+  const [renderedBacklog, setRenderedBacklog] = useState(initialBacklog);
+  if (renderedBacklog !== initialBacklog) {
+    setRenderedBacklog(initialBacklog);
+    setCount(initialBacklog.count);
+  }
+
+  // Cross-model adversarial review (Claude subagent + Codex, independently):
+  // `CategorizeUi` staying mounted across a `ScopeNav` navigation — the fix
+  // above — opened a SECOND, subtler gap. `MerchantRow`'s submit is an
+  // in-flight `startTransition` promise; if the user clicks a `ScopeNav`
+  // arrow before it resolves, the callback still fires once it does, against
+  // whatever scope is CURRENTLY mounted, not the scope it was issued for.
+  // Worst case: a merchant recurring in both scopes gets marked `done` in
+  // the NEWLY-viewed month from a submit that actually happened in the OLD
+  // one — hiding a row with real uncategorized backlog with no error, no
+  // click, just ordinary network latency plus a quick navigation. A ref, not
+  // `scopeKey` itself: the callback fires from a closure captured at request
+  // time and needs to compare against the LATEST value, which only a ref
+  // (read, never subscribed to) can give it without re-creating the row's
+  // handler on every keystroke-unrelated render.
+  const scopeKeyRef = useRef(scopeKey);
+  useEffect(() => {
+    scopeKeyRef.current = scopeKey;
+  }, [scopeKey]);
+
   const groups = useMemo(
     () => initialGroups.filter((g) => !hidden.has(g.normalizedMerchant)),
     [initialGroups, hidden],
   );
 
   // A pick parked for a merchant this page no longer lists is finished
-  // business — see `prunePendingPicks`.
+  // business — see `prunePendingPicks`. That equivalence only holds
+  // ALL-TIME: `initialGroups` scoped to one month is a subset, so a merchant
+  // "not listed" can mean "outside this month" rather than "no uncategorized
+  // rows anywhere" (Codex adversarial review). Pruning on a scoped payload
+  // would delete a still-relevant pick for every merchant with backlog
+  // outside the viewed month — narrowing when this runs, not reworking what
+  // it decides, keeps the original all-time guarantee intact.
   useEffect(() => {
+    if (scope) return;
     prunePendingPicks(initialGroups.map((g) => g.normalizedMerchant));
-  }, [initialGroups]);
+  }, [initialGroups, scope]);
 
-  const onDismissedChange = (merchant: string, isDismissed: boolean) => {
+  const onDismissedChange = (
+    merchant: string,
+    isDismissed: boolean,
+    atScopeKey: string,
+  ) => {
+    if (!scopeKeysCanOverlap(atScopeKey, scopeKeyRef.current)) return;
     const apply = (prev: ReadonlySet<string>) => {
       const next = new Set(prev);
       if (isDismissed) next.add(merchant);
@@ -139,8 +229,15 @@ export function CategorizeUi({
                 <MerchantRow
                   group={group}
                   leafCategories={leafCategories}
-                  onOptimisticSubmit={(n) => setCount((c) => Math.max(0, c - n))}
-                  onUndo={(n) => setCount((c) => c + n)}
+                  scope={scope}
+                  onOptimisticSubmit={(n, atScopeKey) => {
+                    if (!scopeKeysCanOverlap(atScopeKey, scopeKeyRef.current)) return;
+                    setCount((c) => Math.max(0, c - n));
+                  }}
+                  onUndo={(n, atScopeKey) => {
+                    if (!scopeKeysCanOverlap(atScopeKey, scopeKeyRef.current)) return;
+                    setCount((c) => c + n);
+                  }}
                   onDismissedChange={onDismissedChange}
                 />
               </li>

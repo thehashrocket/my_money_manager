@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   lastDayOfMonth,
   monthBoundary,
+  monthLabel,
   monthPhase,
   nextMonthOf,
   nMonthsBack,
@@ -36,6 +37,17 @@ describe("nextMonthOf", () => {
 
   it("rolls the year forward at December", () => {
     expect(nextMonthOf(2026, 12)).toEqual({ year: 2027, month: 1 });
+  });
+});
+
+describe("monthLabel", () => {
+  it("renders the long-form month + year", () => {
+    expect(monthLabel(2026, 9)).toBe("September 2026");
+  });
+
+  it("is stable across a UTC-negative timezone (Date.UTC anchoring)", () => {
+    setTz("America/Los_Angeles");
+    expect(monthLabel(2026, 1)).toBe("January 2026");
   });
 });
 

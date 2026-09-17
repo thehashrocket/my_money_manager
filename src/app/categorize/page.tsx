@@ -4,22 +4,38 @@ import { db } from "@/db";
 import { loadMerchantGroups } from "@/lib/categorize/loadMerchantGroups";
 import { listLeafCategories } from "@/lib/categories";
 import { loadUncategorizedBacklog } from "@/lib/budget/loadUncategorizedBacklog";
+import { parseScopeParams } from "@/lib/categorize/scopeParams";
+import { currentMonth } from "@/lib/now";
 import { CategorizeUi } from "./_categorize-ui";
+import { ScopeNav } from "./_scope-nav";
+
+type RawSearchParams = Record<string, string | string[] | undefined>;
 
 /**
  * `/categorize` — bulk-by-merchant view.
  *
  * Server renders the initial grouped list + leaf dropdown options; the client
  * island (`CategorizeUi`) holds the live backlog counter + per-row submit
- * state for Sonner toast + Undo. E5: calls `loadUncategorizedBacklog`
- * directly (unscoped — all-time, matching this page's existing behavior)
- * instead of building and discarding a full `loadMonthView` for one COUNT(*).
+ * state for Sonner toast + Undo.
+ *
+ * `?year=&month=` (parsed by `parseScopeParams`) narrows both the list AND
+ * the counter to one calendar month — "categorize September, leave the rest
+ * for later" — TODOS.md's long-open "no month-scoped BULK categorize
+ * screen" item. No params (the default, and the only state this page had
+ * before this) means all-time, matching E5's original choice exactly:
+ * `loadUncategorizedBacklog` is still called directly rather than through a
+ * full `loadMonthView`, just with `scope` threaded through when present.
  */
-export default async function CategorizePage() {
+export default async function CategorizePage({
+  searchParams,
+}: {
+  searchParams: Promise<RawSearchParams>;
+}) {
   await connection();
-  const groups = loadMerchantGroups(db);
+  const scope = parseScopeParams(await searchParams);
+  const groups = loadMerchantGroups(db, scope);
   const leafCategories = listLeafCategories(db);
-  const uncategorizedBacklog = loadUncategorizedBacklog(db);
+  const uncategorizedBacklog = loadUncategorizedBacklog(db, scope);
 
   return (
     <main className="mx-auto max-w-4xl p-5 space-y-7">
@@ -44,10 +60,13 @@ export default async function CategorizePage() {
         </p>
       </header>
 
+      <ScopeNav scope={scope} thisMonth={currentMonth()} />
+
       <CategorizeUi
         initialGroups={groups}
         leafCategories={leafCategories}
         initialBacklog={uncategorizedBacklog}
+        scope={scope}
       />
     </main>
   );

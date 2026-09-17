@@ -35,6 +35,22 @@ export function monthBoundary(year: number, month: number): string {
 }
 
 /**
+ * `2026-09` → "September 2026". The long-form label, byte-identical across
+ * three call sites (`page.tsx`, `_month-editor.tsx`, `_allocate-form.tsx`)
+ * before this extraction — the same drift this file's own docstring already
+ * names for month arithmetic. `loadMonthlyTrends.ts` keeps its own
+ * short-form ("Sep 2026") copy: a chart axis label is a real variant, not
+ * drift, so it is not folded in here.
+ */
+export function monthLabel(year: number, month: number): string {
+  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
  * The ISO date of the last day of (year, month), leap years included.
  *
  * `Date.UTC(year, month, 0)` lands on "day 0" of the following month, which

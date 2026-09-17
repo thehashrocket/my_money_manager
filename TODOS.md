@@ -439,33 +439,55 @@ The two P1 defects that pass found are **not** listed here — they are the plan
 T6 in that plan corrects the stale `[x]` on line 38 of this file and `CHANGELOG.md:292`,
 both of which document auto-categorize-at-commit as shipped behavior that does not exist.
 
-- [ ] **P2** — **There is no month-scoped BULK categorize screen.** `loadMerchantGroups`
-  (`src/lib/categorize/loadMerchantGroups.ts`) queries the whole ledger and takes no
-  `(year, month)` argument, so "categorize the current month, leave the history for
-  later" — the only sane way to start using a ledger that has gone stale — cannot be
-  expressed on the one surface built for the head of the distribution. The month-scoped
-  path that does exist, `/transactions`, is row-by-row, which is the wrong tool for it.
-  **CORRECTED 2026-09-09: the banner half of this entry has LANDED and the entry still
-  claimed it was open.** X4's `(year, month)` scope option shipped on
-  `loadUncategorizedBacklog`, and `loadMonthView` calls it month-scoped — so both the
-  `/budget` banner and the dashboard tile (which reads `view.uncategorizedBacklog` from the
-  same call) already report the current month rather than all time. What remains is
-  `loadMerchantGroups` alone. Note `/categorize`'s and `/transactions`' own banners still
-  call `loadUncategorizedBacklog(db)` unscoped, which is correct for them — those pages ARE
-  all-time — but it means the same banner shows two different numbers depending on the
-  route, and that is worth a look when this is picked up.
-  **Why it stayed deferred, and why that reasoning expired.** The original "independent of
-  the zero-based equation" framing stopped being true at eng review round 2: once `/budget`
-  reports `received` per income category, an uncategorized paycheck makes the month's income
-  silently short. X4 pulled forward the narrow slice that fixed the signal; this is the
-  slice that makes "clear September's backlog so my budget is right" a thing you can do end
-  to end. Found by Codex during the outside-voice pass while checking an effort estimate
-  that had assumed a month-scoped bulk screen; it did not exist. Deferred out of
-  `load-the-ledger.md` deliberately — it is a new feature and that plan was a stabilization
-  pass. (An earlier amendment framed this as "lift the month picker into a shared filter
-  component"; that framing is moot — v0.15.0 gave `/transactions` a real filter bar and the
-  month picker it referred to no longer exists.) Depends on nothing.
-  (`src/lib/categorize/loadMerchantGroups.ts`, `src/app/categorize/page.tsx`)
+- [x] **P2 → CLOSED (2026-09-16).** **`/categorize` is now month-scopeable.**
+  `loadMerchantGroups(db, scope?)` takes an optional `{year, month}` and applies it
+  ONLY to the grouping query (`count`/`totalCents`, and therefore which merchants
+  appear at all) — `sampleMemos`, `totalRowCount`, `filedCategoryIds` and
+  `existingRule` stay all-time on purpose, the same D3 reasoning ("how a merchant
+  was filed before is the decision support") that already governed
+  `totalRowCount`. `page.tsx` parses `?year=&month=` via a new
+  `src/lib/categorize/scopeParams.ts` (lenient — an absent or unparseable value
+  degrades to "all time" rather than 404ing, unlike `/transactions`' `.strict()`
+  schema, since this is the page's first-ever query param with no second filter
+  it could silently drop alongside) and a `ScopeNav` component mirrors `/budget`'s
+  own `MonthNav` (prev/label/next as plain `Link`s, no client JS) rather than a
+  second pattern for the same idea.
+  **The write path is scoped too, not just the read — this was the actual
+  design decision, not a mechanical extension.** "Categorize all N →" on a
+  scoped page must file exactly N rows, never the merchant's whole history, or
+  the feature's whole premise ("clear September, leave history for later")
+  breaks the first time someone clicks it. `bulkCategorizeInputSchema` gained
+  optional `scopeYear`/`scopeMonth` (both-or-neither via `.refine()`, same
+  discipline as rule 4's `intent` field — a dropped one must never silently
+  widen a scoped submit into a full-history one), threaded as hidden form
+  fields from `MerchantRow`, and `bulkCategorize`'s own row-selection query
+  applies the same date predicate. The Remember/rule decision is UNAFFECTED by
+  scope: `applyRuleWrite` keys off `filedCategoryIds`, computed elsewhere from
+  the whole merchant history, not from the scoped batch — training or removing
+  a rule from a September-only submit reads exactly as if `/categorize` had no
+  scope at all.
+  **Resolved as part of this: the two-numbers-on-one-banner note above.** The
+  `/categorize` counter (`loadUncategorizedBacklog`, already scope-capable since
+  X4) now follows the page's own scope rather than staying hard-coded to
+  all-time — so "48 transactions" in the banner and "48" summed across the
+  scoped merchant rows never disagree. `/transactions`' own banner is untouched
+  and stays all-time, which remains correct for that page.
+  Verified live against the real ledger (via `pnpm dev` on the local, disposable
+  copy — not the running Docker container's ledger): scoping to a month with
+  real data narrowed a 25-row merchant to its 2 in-month rows, "Categorize all
+  2 →" filed exactly those 2 and left the other 23 untouched under the same
+  rule, and the all-time view immediately reflected the reduced count with the
+  rule and history intact. 2223 tests pass, `tsc --noEmit` clean, lint clean.
+  Also extracted `monthLabel` into `monthOfIso.ts` — it was
+  byte-identical across three call sites (`page.tsx`, `_month-editor.tsx`,
+  `_allocate-form.tsx`) before this branch needed a fourth copy for
+  `ScopeNav`; `loadMonthlyTrends.ts`'s own short-form copy is a real variant
+  (chart axis label) and was left alone.
+  (`src/lib/categorize/loadMerchantGroups.ts`, `src/lib/categorize/bulkCategorize.ts`,
+  `src/lib/categorize/validateBulkCategorizeInput.ts`, `src/lib/categorize/scopeParams.ts`,
+  `src/app/categorize/page.tsx`, `src/app/categorize/_scope-nav.tsx`,
+  `src/app/categorize/_categorize-ui.tsx`, `src/app/categorize/_merchant-row.tsx`,
+  `src/lib/budget/monthOfIso.ts`)
 
 - [x] **P3** — `scripts/db-paths.mjs` hardcoded cwd-relative `./data/money.db` and did not
   read `DATA_DIR`, while the app itself does (`src/lib/paths.ts:9`, `dataDir()`). The two
@@ -3224,3 +3246,19 @@ Claude adversarial subagent, Codex adversarial challenge, and Codex structured r
 
 - [ ] **P4 — When the previously-picked source category has vanished (`chosenIsGone`) AND the remaining filed-category evidence still yields a Remember-guard message, `RetargetForm` shows BOTH the "category you picked no longer has rows…" banner and the Remember-guard reason sentence in the same render.** Claude adversarial finding: the two `<p>` blocks are siblings, not mutually exclusive — the accessibility fix (rendering the reason `<p>` unconditionally, closing the dangling `aria-describedby`) removed the `chosenIsGone` guard that used to suppress it, but didn't account for the two messages now being able to co-render. Not reachable as a money-safety issue: `canSubmit` requires `effective !== undefined`, so the Move button stays disabled in this state regardless of what the checkbox shows. Pure display-quality overlap — narrow (needs both `chosenIsGone` AND a multi-category/lossy verdict on the *remaining* filed evidence at once). (`src/app/transactions/_retarget-form.tsx`)
 - [ ] **P4 — `RetargetForm` is not keyed by `normalizedMerchant`, so `fromChoice`/`toValue` (plain `useState`, unlike the Remember checkbox's signature-masked consent) could carry a stale category id across a `?merchant=A` → `?merchant=B` searchParam-only navigation if the App Router reuses the same client component instance in that tree position without remounting.** Claude adversarial finding, pre-existing pattern (not introduced by this diff — `RetargetForm`'s state shape was unchanged; only new props were added). Confirmed this cannot cause a wrong *rule write*: the write path re-verifies everything server-side, and the Remember checkbox's own consent already invalidates on merchant change via `ruleActionSignature`. Blast radius, if reachable at all, is a misleading UI default (a numerically-coincidental category id pre-selected as the new merchant's "from" choice) — not data corruption. Worth confirming whether this route actually remounts on a searchParam-only navigation before deciding whether `key={normalizedMerchant}` on `<RetargetForm>` is needed; not fixed blind. (`src/app/transactions/_retarget-form.tsx`, `src/app/transactions/page.tsx`)
+
+## Follow-ups from the `/ship` pre-landing + adversarial review (2026-09-17, categorize-month-scope)
+
+Design review (Codex outside voice), five specialists (testing, maintainability, security, performance, simplification) and a Red Team pass all ran against the month-scoped `/categorize` branch. Fixed same-session: `_categorize-ui.tsx`'s `count`/`done` state going stale across a `ScopeNav` navigation (the component stays mounted across a scope change, so a `useState` initializer never re-runs — now reset on a `scopeKey` change, mirroring the file's existing `renderedGroups` pattern); a 4th `monthLabel` duplicate the original extraction missed (`src/app/page.tsx`); three near-identical month-date-predicate implementations (`loadUncategorizedBacklog.ts`, `loadMerchantGroups.ts`, `bulkCategorize.ts`) consolidated into `src/lib/transactions/monthDatePredicates.ts`; `bulkCategorize`'s missing defense-in-depth against a caller constructing a partial `{scopeYear}`-only input by hand (bypassing the schema's `.refine()`) — now throws, with tests at both the pure-function and Server Action layers; `scopeYear`'s missing bound (asymmetric with its sibling `scopeMonth` and with the read-side `scopeParams.ts` schema) — now shares `SCOPE_YEAR_MIN`/`MAX` constants with three callers; `ScopeNav`'s unbounded prev/next arrows, which could generate a URL past `scopeParams.ts`'s own year bound and silently jump to all-time data with no explanation (Red Team) — now withheld at the boundary rather than offered; and a stale `loadUncategorizedBacklog` docstring claiming `/categorize` stays unscoped, which this branch made false. One Red Team finding deferred:
+
+- [ ] **P3 — `/categorize`'s `<AllCaughtUp>` empty state reads identically for "every merchant in this scope is filed" and "this scoped month has zero transactions at all" (e.g. a future month, or one before the ledger's earliest row).** Red Team finding: `initialGroups.length === 0` renders "All caught up. No uncategorized transactions left." in both cases, but the second case never had any uncategorized work to begin with — the message affirmatively claims completed work where there was none, the same class of conflated fact rule 6/8's doctrine elsewhere keeps distinct ("a no-op is never reported as a completed action"). Only reachable by navigating `ScopeNav`'s prev/next arrows to a month with zero transactions of ANY kind, which the app's own real ledger data makes narrow (`/sync`'s ~45-day feed window plus CSV history bounds the populated range). The honest fix needs a second fact `loadMerchantGroups`/the page doesn't currently compute — whether ANY transaction (not just uncategorized ones) falls in the scoped month — and two different empty-state messages, which is a design pass rather than a mechanical one. Blocked by: nothing urgent. (`src/app/categorize/_categorize-ui.tsx`)
+- [ ] **P4 — `ScopeNav`'s prev/this-month/next/all-time links don't meet DS66's 44px touch floor.** Codex design review: inherited verbatim from `/budget`'s own `MonthNav`, which this component deliberately mirrors rather than inventing a second pattern — so this is not a new gap this branch introduces, it's an existing one this branch's new surface also carries. Same class already tracked above for the Remember checkbox on `/transactions` and `_retarget-form.tsx`; worth a single pass over every bare-link nav control in the app (`MonthNav`, `ScopeNav`) rather than fixing one copy and leaving its sibling. (`src/app/categorize/_scope-nav.tsx`, `src/app/budget/[year]/[month]/page.tsx`)
+
+## Follow-ups from the `/ship` adversarial review (2026-09-17, categorize-month-scope, cross-model)
+
+A Claude adversarial subagent and Codex (adversarial challenge, then structured review, re-run twice more after fixes) independently converged on the same real bug class, then Codex's own re-run found a follow-up gap in the first fix. All three rounds fixed same-session:
+
+- **Round 1 (Claude subagent + Codex adversarial, independently).** `CategorizeUi` staying mounted across a `ScopeNav` navigation — the fix for the stale-counter bug earlier in this same TODOS section — opened a second, subtler gap: `MerchantRow`'s submit/undo is an in-flight `startTransition` promise, and if the user navigates to a different scope before it resolves, the callback (`onOptimisticSubmit`/`onUndo`/`onDismissedChange`) still fires once it does, against whatever scope is CURRENTLY mounted rather than the scope it was issued under. Worst case (Claude adversarial): a merchant recurring in both scopes gets marked `done` in the NEWLY-viewed month from a submit that actually happened in the OLD one, hiding a row with real uncategorized backlog with no error — reachable via ordinary use (submit, then click a `ScopeNav` arrow before the write settles), not a crafted input. Fixed: each callback now carries the scope key it was issued under (`MerchantRow` computes it fresh every render, so the closure captures the render-time value); `CategorizeUi` compares it against a `useRef`-held current scope key (updated via `useEffect`, never mutated during render — the direct-mutation version failed `react-hooks/refs`) and no-ops the callback on a mismatch. Codex separately found a companion gap in the same review round: `prunePendingPicks`' "not in the list = finished business" invariant only holds all-time — a scoped `initialGroups` is a subset, so pruning against it deletes a still-relevant parked pick for any merchant with backlog outside the viewed month. Fixed by skipping the prune entirely when `scope` is set, rather than reworking what it decides.
+- **Round 2 (Codex structured review, first re-run).** The Round 1 guard used strict scope-key equality, which is wrong in the other direction: two different scope keys are not necessarily disjoint — "all-time" contains every month. Categorize two September rows, switch to all-time, click the still-visible toast's Undo: the DB write is correct, but the strict-equality guard discarded the counter update entirely, permanently undercounting the all-time header relative to its own row list (no revalidation path corrected it, since the reset was gated on `scopeKey` changing, which it hadn't). Fixed: a `scopeKeysCanOverlap(a, b)` helper (`a === b || a === "all-time" || b === "all-time"`) replaces the strict check — only two DIFFERENT specific months are provably disjoint (a transaction cannot be dated in both), so only that case skips.
+- **Round 3 (Codex structured review, second re-run).** Applying the update in the genuinely-overlapping case (Round 2's fix) still used the WRONG magnitude: restoring 25 all-time rows while viewing September added the full 25 to September's counter, not the 2 that were actually September's. Root cause, once traced: `count`'s resync was gated on `scopeKey` changing, so a fresh, authoritative `initialBacklog` arriving from the SAME server action's own `revalidatePath` (for the currently-viewed, unchanged scope) was being silently discarded — the exact number that would have corrected the optimistic guess never got the chance to. Fixed: `count` now resyncs to `initialBacklog.count` whenever the `initialBacklog` object reference changes (an `renderedBacklog`-tracked adjust-state-during-render, mirroring the file's existing `renderedGroups`/`hidden` pattern), independent of whether `scopeKey` also changed — the optimistic delta still gives instant feedback, but the next authoritative payload (arriving moments later either way) now always wins.
+- **Verification.** A fourth Codex structured-review pass, run to confirm Round 3's fix, hung for 47+ minutes (well past its own 9-minute timeout — `gtimeout 540` did not terminate it) with no output ever written; killed and recorded as missing coverage per this project's own timeout doctrine ("a timed-out pass is missing coverage, not a clean bill"), not treated as a clean pass. The two PRIOR structured-review passes (Rounds 2 and 3) both completed normally and both found real, since-fixed issues — that is the adversarial coverage this branch actually has. tsc/lint clean, 2231/2231 tests pass throughout (this fix touches only `_categorize-ui.tsx`/`_merchant-row.tsx`, both UI components excluded from this project's automated test coverage per CLAUDE.md — verified instead via live browser: normal same-scope submit and Undo both confirmed still correct after each round's fix). (`src/app/categorize/_categorize-ui.tsx`, `src/app/categorize/_merchant-row.tsx`, `src/app/categorize/_pending-pick.ts`)

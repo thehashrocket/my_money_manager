@@ -2,6 +2,8 @@ import { and, inArray, isNull, ne, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
 import { loadExactRulesByMerchant, type ExistingRule } from "@/lib/rules";
 import { loadFiledCategoryIdsByMerchant } from "./resolveKeyTrainability";
+import type { YearMonth } from "@/lib/budget/monthOfIso";
+import { monthDatePredicates } from "@/lib/transactions/monthDatePredicates";
 
 type Db = typeof defaultDb;
 
@@ -75,8 +77,21 @@ export type MerchantGroup = {
  * how many groups there are — which matters more than it did when this said "a
  * second query at 30–60 groups", since the real ledger currently carries
  * several times that many.
+ *
+ * `scope`, when given, narrows the GROUPING query alone to one calendar
+ * month via `monthDatePredicates` (shared with `loadUncategorizedBacklog`
+ * and `bulkCategorize`'s own write-side scoping) — "categorize September,
+ * leave history for later" — so `count` and `totalCents` (and therefore
+ * which merchants appear here at all) reflect only that month's
+ * uncategorized rows. The four follow-up queries stay unscoped on purpose:
+ * trainability and disclosure (`sampleMemos`, `totalRowCount`,
+ * `filedCategoryIds`, `existingRule` — see D3 above) are both questions
+ * about the merchant's whole history, not about the month currently being
+ * viewed. A merchant scoped out of September's list because its only
+ * uncategorized row is from July still shows its full history if the user
+ * opens it from an unscoped view.
  */
-export function loadMerchantGroups(db: Db): MerchantGroup[] {
+export function loadMerchantGroups(db: Db, scope?: YearMonth): MerchantGroup[] {
   const rows = db
     .select({
       normalizedMerchant: schema.transactions.normalizedMerchant,
@@ -88,6 +103,7 @@ export function loadMerchantGroups(db: Db): MerchantGroup[] {
       and(
         isNull(schema.transactions.categoryId),
         isNull(schema.transactions.transferPairId),
+        ...monthDatePredicates(scope),
       ),
     )
     .groupBy(schema.transactions.normalizedMerchant)

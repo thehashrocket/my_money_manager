@@ -105,4 +105,56 @@ describe("validateBulkCategorizeInput", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts a well-formed scope (both fields present)", () => {
+    const result = validateBulkCategorizeInput({
+      normalizedMerchant: "SAFEWAY",
+      categoryId: "1",
+      scopeYear: "2026",
+      scopeMonth: "9",
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.scopeYear).toBe(2026);
+    expect(result.data.scopeMonth).toBe(9);
+  });
+
+  it("accepts neither scope field (the default, all-time)", () => {
+    const result = validateBulkCategorizeInput({
+      normalizedMerchant: "SAFEWAY",
+      categoryId: "1",
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.scopeYear).toBeUndefined();
+    expect(result.data.scopeMonth).toBeUndefined();
+  });
+
+  it("rejects scopeYear without scopeMonth (a dropped field must not silently narrow the write)", () => {
+    const result = validateBulkCategorizeInput({
+      normalizedMerchant: "SAFEWAY",
+      categoryId: "1",
+      scopeYear: "2026",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects scopeMonth without scopeYear", () => {
+    const result = validateBulkCategorizeInput({
+      normalizedMerchant: "SAFEWAY",
+      categoryId: "1",
+      scopeMonth: "9",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an out-of-range scopeMonth", () => {
+    const result = validateBulkCategorizeInput({
+      normalizedMerchant: "SAFEWAY",
+      categoryId: "1",
+      scopeYear: "2026",
+      scopeMonth: "13",
+    });
+    expect(result.success).toBe(false);
+  });
 });

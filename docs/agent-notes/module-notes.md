@@ -252,7 +252,12 @@ src/
                    manageCategories, archiveCategory, setCategoryKind, loadAllCategories —
                    category CRUD, archive/unarchive, and expense→income reclassification
                    copyMonth, monthOfIso, transactionsDrilldownHref — /budget → /transactions
-                   per-category-per-month link builder (dateFrom/dateTo, not year/month)
+                   per-category-per-month link builder (dateFrom/dateTo, not year/month).
+                   monthOfIso's monthLabel(year, month) ("September 2026") was extracted
+                   v1.4.0 from three byte-identical copies (page.tsx, _month-editor.tsx,
+                   _allocate-form.tsx) and is now also used by /categorize's ScopeNav;
+                   loadMonthlyTrends.ts keeps its own short-form ("Sep 2026") chart-axis
+                   copy as a deliberate variant, not folded in
                    merchantDrilldownHref — /categorize → /transactions exact-merchant link,
                    URLSearchParams-built (17 of 363 real keys carry `# * ? /`) and `null`
                    for an empty key. Parked here beside its sibling; TODOS.md tracks moving
@@ -265,7 +270,23 @@ src/
                    pinned by a test) are deliberately not `count`; filedCategoryIds
                    ships the IDS rather than a finished verdict, because the verdict
                    depends on the category the user has picked and only the row
-                   component knows that
+                   component knows that. Takes an optional `scope: YearMonth` (v1.4.0,
+                   month-scoped /categorize) that narrows the GROUPING query alone via
+                   monthDatePredicates (lib/transactions/) — count/totalCents and which
+                   merchants appear reflect only that month. The four per-merchant
+                   follow-up queries (sampleMemos, totalRowCount, filedCategoryIds,
+                   existingRule) stay unscoped: trainability and disclosure are
+                   questions about the merchant's whole history, not the month being
+                   viewed. bulkCategorize takes the matching optional scopeYear/
+                   scopeMonth (both-or-neither, re-checked defensively past
+                   validateBulkCategorizeInput's `.refine()`, which doesn't narrow the
+                   inferred type) so "Categorize all N →" on a scoped page files
+                   exactly the rows shown, never the merchant's whole history;
+                   scopeParams.ts (parseScopeParams, SCOPE_YEAR_MIN/MAX) is the page's
+                   `?year=&month=` parser, shared bounds with the write-side schema,
+                   and degrades an unparseable/unknown value to "all time" rather than
+                   404ing — this is the page's first-ever query param, so failing open
+                   just reproduces its pre-existing no-params default
                    loadTransactions + summarizeByCategory — both build their WHERE through
                    one shared buildPredicates, so the /transactions header and the list
                    under it can never disagree about WHICH ROWS MATCH. That is a predicate
@@ -548,6 +569,12 @@ src/
                    rendered a fallback while /categorize rendered the key verbatim — an
                    unreadable row with an sr-only label ending in "Category for ". Zero
                    imports on purpose, same client-graph constraint as limits
+                   monthDatePredicates(scope) — the `[gte(date, firstOfMonth),
+                   lt(date, firstOfNextMonth))` pair, extracted (v1.4.0) from three
+                   hand-rolled copies in loadUncategorizedBacklog, loadMerchantGroups
+                   and bulkCategorize (lib/categorize/, lib/budget/). Returns `[]` for
+                   an undefined scope, spread into each caller's own `and(...)` so an
+                   absent month is a no-op rather than a branch every caller repeats
   lib/transferRejections.ts
                    The ONE place that knows how "these two are not a pair" is
                    stored: `transfer_pair_rejections`, keyed on the unordered
