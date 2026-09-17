@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { z } from "zod";
 import { db } from "@/db";
 import { loadMonthView, type IncomeLeafRow, type MonthViewSummary } from "@/lib/budget/loadMonthView";
-import { monthPhase, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
+import { monthLabel, monthPhase, nextMonthOf, previousMonth } from "@/lib/budget/monthOfIso";
 import { loadAccountBalancesForRequest } from "@/lib/accounts/loadAccountBalances";
 import { BacklogBanner } from "@/app/_components/BacklogBanner";
 import { SummaryStrip, type SummaryStripCell } from "@/components/ledger/summary-strip";
@@ -268,14 +268,6 @@ export default async function BudgetMonthPage({
       {!isFirstRun ? <BudgetHelpPanel /> : null}
     </main>
   );
-}
-
-function monthLabel(year: number, month: number): string {
-  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 }
 
 function MonthNav({ year, month }: { year: number; month: number }) {

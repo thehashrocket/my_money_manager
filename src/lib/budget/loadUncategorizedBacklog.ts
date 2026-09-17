@@ -1,6 +1,7 @@
-import { and, gte, isNull, sql } from "drizzle-orm";
+import { and, isNull, sql } from "drizzle-orm";
 import { db as defaultDb, schema } from "@/db";
-import { monthBoundary, nextMonthOf } from "./monthOfIso";
+import type { YearMonth } from "./monthOfIso";
+import { monthDatePredicates } from "@/lib/transactions/monthDatePredicates";
 
 type Db = typeof defaultDb;
 
@@ -14,25 +15,24 @@ export type UncategorizedBacklog = {
  * X4 + E5: extracted from `loadMonthView` so `/categorize` and
  * `/transactions` — which only ever wanted this one COUNT(*) + SUM — stop
  * building and discarding a full month view (every allocation, every spend
- * sum, the rollover scan) to get it. Those two routes call this directly and
- * stay unscoped (all-time), matching their existing behavior; `loadMonthView`
- * is the only caller that passes `scope`, so its own `uncategorizedBacklog`
- * field narrows to the month actually being viewed — without a scope,
- * September's `received` figure could read short with no local explanation
- * while the banner blamed 498 rows from every month.
+ * sum, the rollover scan) to get it. `loadMonthView` passes `scope` so its
+ * own `uncategorizedBacklog` field narrows to the month actually being
+ * viewed — without a scope, September's `received` figure could read short
+ * with no local explanation while the banner blamed 498 rows from every
+ * month.
+ *
+ * `/transactions` calls this unscoped (all-time), matching its own
+ * all-time page. `/categorize` did too until its own month-scope feature
+ * landed — it now passes the PAGE's parsed `?year=&month=` scope straight
+ * through, so its counter always agrees with the scoped list rendered
+ * beside it rather than staying pinned to all-time. `loadMonthView` is no
+ * longer the only `scope`-passing caller.
  */
 export function loadUncategorizedBacklog(
   db: Db,
-  scope?: { year: number; month: number },
+  scope?: YearMonth,
 ): UncategorizedBacklog {
-  const datePredicates = scope
-    ? (() => {
-        const firstDay = monthBoundary(scope.year, scope.month);
-        const { year: nextYear, month: nextMonth } = nextMonthOf(scope.year, scope.month);
-        const firstDayNext = monthBoundary(nextYear, nextMonth);
-        return [gte(schema.transactions.date, firstDay), sql`${schema.transactions.date} < ${firstDayNext}`];
-      })()
-    : [];
+  const datePredicates = monthDatePredicates(scope);
 
   const row = db
     .select({

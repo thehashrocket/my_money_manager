@@ -23,7 +23,7 @@ import type {
   SectionGroup,
   UncategorizedRow,
 } from "@/lib/budget/loadMonthView";
-import type { MonthPhase } from "@/lib/budget/monthOfIso";
+import { monthLabel, type MonthPhase } from "@/lib/budget/monthOfIso";
 import { resolveRowDisplay, TONE_CLASS, type BarTone, type RowBadge, type RowTone } from "@/lib/budget/resolveRowDisplay";
 import { transactionsDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import { formatCents } from "@/lib/money";
@@ -176,14 +176,6 @@ function useHashScroll(): void {
     const id = window.location.hash.slice(1);
     if (id) document.getElementById(id)?.scrollIntoView();
   }, []);
-}
-
-function monthLabel(year: number, month: number): string {
-  return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 }
 
 export type MonthEditorProps = {
