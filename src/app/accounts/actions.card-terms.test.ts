@@ -106,6 +106,45 @@ describe("updateCardTermsAction", () => {
     expect(updateRunMock).not.toHaveBeenCalled();
   });
 
+  // The FIELD_MESSAGES lookup replaced a two-way ternary
+  // (`onLimit ? creditLimit-message : minimumPayment-message`) — a genuine
+  // refactor, not just an addition, so both of its pre-existing branches need
+  // their own pin alongside the new paydownTarget one above. A swapped key or
+  // a path[0] that doesn't match the object's keys would fall through to the
+  // generic fallback message silently.
+  it("refuses an out-of-range credit limit with a field-specific message", async () => {
+    const state = await updateCardTermsAction(IDLE, termsForm({ creditLimit: "100000001" }));
+    expect(state.status).toBe("error");
+    if (state.status !== "error") throw new Error("unreachable");
+    expect(state.message).toMatch(/credit limit/i);
+    expect(updateRunMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a negative minimum payment with a field-specific message", async () => {
+    const state = await updateCardTermsAction(IDLE, termsForm({ minimumPayment: "-5" }));
+    expect(state.status).toBe("error");
+    if (state.status !== "error") throw new Error("unreachable");
+    expect(state.message).toMatch(/minimum payment/i);
+    expect(updateRunMock).not.toHaveBeenCalled();
+  });
+
+  // accountId is read straight off FormData with no schema behind it
+  // (`Number(raw.accountId)`), so a missing, non-numeric, zero or negative
+  // id is its own untested branch distinct from "account not found" (which
+  // exercises a valid-shaped id that the mocked `select` can't find).
+  it.each([["missing", undefined], ["non-numeric", "abc"], ["zero", "0"], ["negative", "-1"]])(
+    "refuses a %s accountId before ever querying the account",
+    async (_label, value) => {
+      const fd = new FormData();
+      if (value !== undefined) fd.set("accountId", value);
+      const state = await updateCardTermsAction(IDLE, fd);
+      expect(state.status).toBe("error");
+      if (state.status !== "error") throw new Error("unreachable");
+      expect(state.message).toMatch(/no longer exists/i);
+      expect(updateRunMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("stores a valid dollar value as cents, for all three fields", async () => {
     const state = await updateCardTermsAction(
       IDLE,
