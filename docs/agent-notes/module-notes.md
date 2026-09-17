@@ -127,7 +127,11 @@ src/
                    — are reachable from a RENDERED item rather than only from a stale
                    tab, which is why each names the tool to use instead. The other
                    two, not-found and unconfirmed, name no tool: there is none
-                   validateCardTermsInput — credit limit + minimum payment repair
+                   validateCardTermsInput — credit limit + minimum payment repair, plus
+                   (card-paydown-target plan, v1.5.0) a recurring, edit-only
+                   paydownTargetCents goal compared against the existing
+                   paidDownCents actual — never read by the fund/`kind`
+                   machinery or `categories`
                    resolveCardAffordances.ts — T7 (card-transaction-import plan, PR2):
                    canAddCharge/canEditTerms/showReconcile as ONE pure decision instead
                    of three separately-computed booleans agreeing by hand — the same
