@@ -98,7 +98,19 @@ export function CardTermsDisclosure({
         type="button"
         variant="ghost"
         size="sm"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          // Re-sync `values` from CURRENT props before opening, not just on
+          // first mount. Without this, a Cancel clicked while a Save was
+          // still pending (see the guard below) — or, on this account's own
+          // next render after a same-tab save eventually revalidates —
+          // reopening could show `values` left over from before that write,
+          // even though the snapshot hidden inputs are already correct
+          // because they're recomputed fresh every render. Re-syncing here
+          // makes every reopen start from what's actually stored, closing
+          // the gap without needing a live resync while the form stays open.
+          setValues(fieldsFromProps());
+          setOpen(true);
+        }}
         className="min-h-11 w-full sm:w-auto"
       >
         Card details
@@ -117,9 +129,11 @@ export function CardTermsDisclosure({
   // so a second tab's more recent save survives), changed means the user
   // edited it (write it, even if that happens to match what's already
   // stored). Recomputed fresh on every render, from props — not from
-  // `values`, which the user may have since edited — so a same-tab
-  // revalidation that delivers a newer prop still produces a correct
-  // snapshot without any extra effect or reset.
+  // `values`, which the user may have since edited — so THIS value is
+  // always correct with no extra effect or reset. `values` itself is not
+  // automatically this safe: see the reopen-time resync above and the
+  // Cancel `disabled={pending}` guard below for the two places `values`
+  // could otherwise go stale relative to a same-tab revalidation.
   const snapshot = fieldsFromProps();
 
   return (
@@ -162,6 +176,13 @@ export function CardTermsDisclosure({
         type="button"
         variant="ghost"
         size="sm"
+        // Disabled during `pending` (red-team finding): with Save in
+        // flight, Cancel's `fieldsFromProps()` reads props from BEFORE that
+        // write lands, so clicking it could reset `values` to a
+        // soon-to-be-stale snapshot. Once the response lands and revalidates
+        // props, the reopen-time resync above would already re-correct it —
+        // this guard just removes the window where it could happen at all.
+        disabled={pending}
         onClick={() => {
           // Discard edits along with the disclosure, so reopening shows what
           // is actually stored rather than an abandoned draft.
