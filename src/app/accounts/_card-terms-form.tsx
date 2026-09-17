@@ -26,6 +26,18 @@ import { updateCardTermsAction } from "./actions";
  * DS52 argues against. Card details change once a year at most, so they are
  * the ones that stay folded.
  *
+ * **Toggle wrapper + remountable inner form, mirroring `ReconcileDisclosure`
+ * / `ReconcileForm` in `_balance-forms.tsx` exactly (red-team finding, 3rd
+ * convergence pass).** These used to be one component whose `if (!open)`
+ * branch just changed what it returned — which meant `useActionState`'s
+ * `state` (a stale "Updated…" or error message) and the edited `values`
+ * both SURVIVED a Cancel-then-reopen, because nothing ever unmounted.
+ * Splitting `CardTermsForm` out as its own component makes the disclosure
+ * toggle a genuine mount/unmount boundary: closing it destroys the form's
+ * hooks entirely, and reopening mounts a fresh instance that initializes
+ * `values` from current props and `state` at `IDLE` — for free, with no
+ * manual resync needed on the toggle button the way round 3 required.
+ *
  * All three fields share one shape (a dollar amount where "" means CLEAR,
  * not zero — see `optionalPositiveDollarsSchema`), so they're driven off one
  * `FIELDS` config and one values-object `useState` rather than three
@@ -50,25 +62,45 @@ const FIELDS: { key: FieldKey; label: string }[] = [
   { key: "paydownTarget", label: "Monthly paydown goal" },
 ];
 
-export function CardTermsDisclosure({
-  accountId,
-  accountName,
-  creditLimitCents,
-  minimumPaymentCents,
-  paydownTargetCents,
-}: {
+type CardTerms = {
   accountId: number;
   accountName: string;
   creditLimitCents: number | null;
   minimumPaymentCents: number | null;
   paydownTargetCents: number | null;
-}) {
+};
+
+export function CardTermsDisclosure(props: CardTerms) {
   const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(true)}
+        className="min-h-11 w-full sm:w-auto"
+      >
+        Card details
+        <span className="sr-only">{` for ${props.accountName}`}</span>
+      </Button>
+    );
+  }
+
+  return <CardTermsForm {...props} onClose={() => setOpen(false)} />;
+}
+
+function CardTermsForm({
+  accountId,
+  accountName,
+  creditLimitCents,
+  minimumPaymentCents,
+  paydownTargetCents,
+  onClose,
+}: CardTerms & { onClose: () => void }) {
   const [state, formAction, pending] = useActionState(updateCardTermsAction, IDLE);
 
-  // Recomputed (not memoized) on every call: the initial mount AND every
-  // Cancel click need the CURRENT prop values, not whatever was true when
-  // this component first rendered.
   function fieldsFromProps(): Record<FieldKey, string> {
     return {
       creditLimit: creditLimitCents === null ? "" : centsToDollarString(creditLimitCents),
@@ -82,42 +114,18 @@ export function CardTermsDisclosure({
   // so uncontrolled inputs snap back to `defaultValue` on every submit —
   // including a rejected one, which would revert the user's typed limit to
   // the stored value while the error message about it stayed on screen,
-  // pointing at a field that no longer held the offending input.
+  // pointing at a field that no longer held the offending input. Seeded
+  // once, at mount — a fresh `CardTermsForm` instance is exactly what
+  // "start from what's actually stored" means now, so there is no separate
+  // reopen-time resync to keep in sync with this.
   const [values, setValues] = useState<Record<FieldKey, string>>(fieldsFromProps);
-  // Three unconditional `useId()` calls, same as before the extraction —
-  // hooks can't be called from inside `FIELDS.map()`.
+  // Three unconditional `useId()` calls — hooks can't be called from inside
+  // `FIELDS.map()`.
   const ids: Record<FieldKey, string> = {
     creditLimit: useId(),
     minimumPayment: useId(),
     paydownTarget: useId(),
   };
-
-  if (!open) {
-    return (
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        onClick={() => {
-          // Re-sync `values` from CURRENT props before opening, not just on
-          // first mount. Without this, a Cancel clicked while a Save was
-          // still pending (see the guard below) — or, on this account's own
-          // next render after a same-tab save eventually revalidates —
-          // reopening could show `values` left over from before that write,
-          // even though the snapshot hidden inputs are already correct
-          // because they're recomputed fresh every render. Re-syncing here
-          // makes every reopen start from what's actually stored, closing
-          // the gap without needing a live resync while the form stays open.
-          setValues(fieldsFromProps());
-          setOpen(true);
-        }}
-        className="min-h-11 w-full sm:w-auto"
-      >
-        Card details
-        <span className="sr-only">{` for ${accountName}`}</span>
-      </Button>
-    );
-  }
 
   // The stale-tab guard (Red Team finding, card-paydown-target plan). A
   // field genuinely never appears "absent" from this form's POST — it
@@ -125,22 +133,23 @@ export function CardTermsDisclosure({
   // cannot tell "the user left this untouched" from "the user re-confirmed
   // the same value" by presence alone. Posting each field's CURRENT prop
   // value alongside it lets the action compare posted-vs-snapshot instead:
-  // unchanged from what THIS tab loaded means untouched (skip the write,
-  // so a second tab's more recent save survives), changed means the user
+  // unchanged from what THIS tab loaded means untouched (skip the write, so
+  // a second tab's more recent save survives), changed means the user
   // edited it (write it, even if that happens to match what's already
   // stored). Recomputed fresh on every render, from props — not from
-  // `values`, which the user may have since edited — so THIS value is
-  // always correct with no extra effect or reset. `values` itself is not
-  // automatically this safe: see the reopen-time resync above and the
-  // Cancel `disabled={pending}` guard below for the two places `values`
-  // could otherwise go stale relative to a same-tab revalidation.
+  // `values`, which the user may have since edited.
   const snapshot = fieldsFromProps();
 
   return (
     <form action={formAction} className="mt-2 flex w-full flex-wrap items-end gap-3">
       <input type="hidden" name="accountId" value={accountId} />
       {FIELDS.map(({ key }) => (
-        <input key={`${key}-snapshot`} type="hidden" name={`${key}Snapshot`} value={snapshot[key]} />
+        <input
+          key={`${key}-snapshot`}
+          type="hidden"
+          name={`${key}Snapshot`}
+          value={snapshot[key]}
+        />
       ))}
       {FIELDS.map(({ key, label }) => (
         <div key={key}>
@@ -176,19 +185,18 @@ export function CardTermsDisclosure({
         type="button"
         variant="ghost"
         size="sm"
-        // Disabled during `pending` (red-team finding): with Save in
-        // flight, Cancel's `fieldsFromProps()` reads props from BEFORE that
-        // write lands, so clicking it could reset `values` to a
-        // soon-to-be-stale snapshot. Once the response lands and revalidates
-        // props, the reopen-time resync above would already re-correct it —
-        // this guard just removes the window where it could happen at all.
+        // Disabled during `pending` (red-team finding, round 3): closing the
+        // disclosure while a Save is still in flight would unmount this
+        // form before its own write's revalidation has landed — the NEXT
+        // mount would then seed `values`/`snapshot` from props that don't
+        // reflect that write yet, and a save of some OTHER field in that
+        // window could repost this field's pre-write value as if the user
+        // had just re-typed it, clobbering the in-flight save once it does
+        // land. The remount-on-reopen split above closes the "stale local
+        // state survives a reopen" half of that bug; this closes the
+        // "reopen too soon after an in-flight write" half.
         disabled={pending}
-        onClick={() => {
-          // Discard edits along with the disclosure, so reopening shows what
-          // is actually stored rather than an abandoned draft.
-          setValues(fieldsFromProps());
-          setOpen(false);
-        }}
+        onClick={onClose}
         className="min-h-11 w-full sm:w-auto"
       >
         Cancel
