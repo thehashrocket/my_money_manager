@@ -148,9 +148,10 @@ Fixed left rail, 240px. Main content: `pl-[290px]` (240 + 50 gutter). Below 820p
 answers "can I afford this", and net worth cannot. Listing a mortgage above a
 subtotal labelled `cash` would produce a figure that visibly does not sum its
 own rows — a closure violation on every page in the app. Debt lives on `/` and
-`/accounts`, which you reach deliberately. Side benefit: no truncation rule is
-needed in a 240px rail, where `($302,480.11)` in 13px mono leaves ~100px for a
-name and `.peek-acct` has no `min-width` or ellipsis.
+`/accounts`, which you reach deliberately. Side benefit: a 240px rail has less
+room to spare now that `--text-sm` is 14px, so `.peek-name` truncates with an
+ellipsis — `.peek-amt` never shrinks, since a dollar figure is never the thing
+that gets clipped.
 
 **Rail background**: subtle horizontal gradient — 10% terracotta tint at far left fading to `--paper-1`.
 

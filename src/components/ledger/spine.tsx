@@ -45,9 +45,9 @@ export async function Spine() {
   // leaving the liabilities in the list above it produces a subtotal that
   // visibly does not sum its own rows — a closure violation, on every page in
   // the app. Debt lives on / and /accounts, which you reach deliberately.
-  // Side benefit: no truncation rule is needed in a 240px rail, where
-  // ($302,480.11) in 13px mono leaves about 100px for a name and `.peek-acct`
-  // has no min-width or ellipsis.
+  // Side benefit: a 240px rail has less room to spare now that `--text-sm`
+  // is 14px, so `.peek-name` truncates with an ellipsis (`.peek-amt` never
+  // shrinks — a dollar figure is never the thing that gets clipped).
   const balances = allBalances.filter((a) => a.class === "asset");
   const { assetsCents } = summarizeBalances(allBalances);
   const backlog = loadBacklogCount();

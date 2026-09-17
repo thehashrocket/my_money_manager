@@ -90,9 +90,9 @@
    * deleted it.
    */
   --text-*: initial;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 15px;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
   --text-md: 17px;
   --text-lg: 20px;
   --text-xl: 24px;
@@ -578,10 +578,15 @@
 }
 .spine-peek .peek-name {
   color: var(--fg-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .spine-peek .peek-amt {
   font-family: var(--font-mono);
   font-weight: 500;
+  flex-shrink: 0;
 }
 .spine-peek .peek-sep {
   height: 1px;

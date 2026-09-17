@@ -435,7 +435,7 @@ async function RemoteSections({ host }: { host: string | null }) {
           </ul>
         )}
         {remote.length > 0 && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-base text-muted-foreground">
             SimpleFIN also returns accounts this app doesn&apos;t model (a
             mortgage, for one). Anything left unlinked is simply never imported.
           </p>
@@ -527,7 +527,7 @@ async function RemoteSections({ host }: { host: string | null }) {
                 );
               })}
           </ul>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-base text-muted-foreground">
             Pending card holds show up as the gap between balance and available —
             Star One doesn&apos;t expose them as individual rows.
           </p>
