@@ -102,6 +102,17 @@ const BALANCE_SURFACES = [
   "/budget",
 ] as const;
 
+/** `updateCardTermsAction`'s per-field validation-failure messages, keyed by
+ *  the first path segment `validateCardTermsInput`'s schema puts on a zod
+ *  issue. Module scope, not per-call — same non-exported-const pattern as
+ *  `BALANCE_SURFACES` above; a `"use server"` module may only EXPORT async
+ *  functions, but a private top-level binding is fine. */
+const CARD_TERMS_FIELD_MESSAGES: Record<string, string> = {
+  creditLimit: "Enter a credit limit this app accepts, or leave it blank.",
+  minimumPayment: "Enter a minimum payment this app accepts, or leave it blank.",
+  paydownTarget: "Enter a monthly paydown goal this app accepts, or leave it blank.",
+};
+
 /**
  * Revalidates every surface that renders a balance (see `BALANCE_SURFACES`).
  *
@@ -367,13 +378,16 @@ export async function revertLiabilityBalanceAction(
 }
 
 /**
- * The repair path for a card's terms — its credit limit and minimum payment.
+ * The repair path for a card's terms — its credit limit, minimum payment,
+ * and paydown target.
  *
- * Both were write-once at account creation, so a mistyped $5,000 limit made
- * the utilization bar wrong on every render forever and the only fix was raw
- * SQL. That is the same gap CLAUDE.md rule 1 closed for `starting_balance_*`
- * with `updateAccountAnchorAction`; a number the user typed once and can
- * never correct is a bug regardless of how small the number is.
+ * Credit limit and minimum payment were write-once at account creation, so a
+ * mistyped $5,000 limit made the utilization bar wrong on every render
+ * forever and the only fix was raw SQL. That is the same gap CLAUDE.md rule 1
+ * closed for `starting_balance_*` with `updateAccountAnchorAction`; a number
+ * the user typed once and can never correct is a bug regardless of how small
+ * the number is. Paydown target (card-paydown-target plan) has no
+ * creation-time counterpart — it rides this same repair path from the start.
  *
  * Cards only, enforced here and not merely by where the form renders (D2=A).
  * A mortgage row draws no utilization bar and shows no minimum payment, so
@@ -382,6 +396,11 @@ export async function revertLiabilityBalanceAction(
  * An empty field CLEARS the value rather than leaving it. "I no longer want a
  * limit recorded" has to be expressible, and a form that can only ever raise
  * a number is how you get a card stuck at a limit it does not have.
+ *
+ * Each field's write is gated on POSTED-VS-SNAPSHOT, not presence — see the
+ * comment at the patch guard below. A stale tab submitting an untouched
+ * field must not silently overwrite a more recent save of that same field
+ * from another tab.
  */
 export async function updateCardTermsAction(
   _prev: AccountsActionState,
@@ -397,13 +416,13 @@ export async function updateCardTermsAction(
     const parsed = validateCardTermsInput({
       creditLimit: raw.creditLimit,
       minimumPayment: raw.minimumPayment,
+      paydownTarget: raw.paydownTarget,
     });
     if (!parsed.success) {
-      const onLimit = parsed.error.issues[0]?.path.includes("creditLimit");
+      const badField = parsed.error.issues[0]?.path[0];
       return fail(
-        onLimit
-          ? "Enter a credit limit this app accepts, or leave it blank."
-          : "Enter a minimum payment this app accepts, or leave it blank.",
+        (typeof badField === "string" && CARD_TERMS_FIELD_MESSAGES[badField]) ||
+          "Enter a value this app accepts, or leave it blank.",
         "balance",
       );
     }
@@ -418,22 +437,61 @@ export async function updateCardTermsAction(
       return fail(`${account.name} is not a credit card.`);
     }
 
-    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears.
+    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears — and
+    // "absent" is STILL the first test, layered with snapshot-diffing rather
+    // than replaced by it (adversarial-review finding, both Codex and a
+    // Claude subagent independently, card-paydown-target plan). It used to
+    // be: the form always posts all three fields, so `raw.field !== undefined`
+    // was really testing "is this a hand-made request that dropped a key,"
+    // which only a crafted or buggy POST could trigger.
     //
-    // `optionalPositiveDollarsSchema` is `.nullish()`, so a field missing from
-    // the request parsed to `null` exactly like an emptied one — making this
-    // endpoint destructive by omission. A POST carrying only `accountId` and
-    // `creditLimit` silently NULLed the minimum payment.
+    // A STALE TAB triggers the same class of bug through a different door
+    // (red-team finding): open /accounts in two tabs, edit only the paydown
+    // goal in tab A and save, then edit only the credit limit in tab B
+    // (still holding the pre-edit page) and save — tab B's POST still
+    // carries its own stale `paydownTarget` value, present exactly like
+    // every other field, and silently overwrites tab A's already-committed
+    // change with no warning. `raw.field !== undefined` is always true for a
+    // real submit, so it could never catch this.
     //
-    // Empty-clears is deliberate and documented ("I no longer want a limit
-    // recorded" has to be expressible). Absent-clears was an accident of the
-    // same schema serving both, and it is the same absent-vs-zero distinction
-    // rule 9 insists on one field over. The form always posts both, so this
-    // only ever fires for a hand-made request.
+    // Snapshot-diffing closes that: `_card-terms-form.tsx` posts a parallel
+    // `<field>Snapshot` hidden input carrying whatever value THIS tab last
+    // loaded for that field. A field is only applied to the patch when what
+    // was posted differs from what this tab's own snapshot says — which is
+    // true when the user actually edited it, and false when the field is
+    // merely along for the ride on an unrelated field's save.
+    //
+    // REPLACING the presence check with the snapshot check (rather than
+    // ANDing them) reintroduced the exact bug both were meant to prevent:
+    // `optionalPositiveDollarsSchema` is `.nullish()`, so a request that
+    // drops `creditLimit` from the POST but still carries a leftover
+    // `creditLimitSnapshot` (a crafted/malformed request — the real browser
+    // form always posts both or neither) parses the missing field to `null`,
+    // and `undefined !== "5000.00"` reads as "changed" — silently writing
+    // `null` over a real stored value. Not reachable through the real form
+    // today, but a future refactor dropping one `name` attribute while
+    // leaving its Snapshot input in place would reintroduce it with no test
+    // able to catch it. `raw.field !== undefined` as a PRECONDITION closes
+    // it: absent is never "changed," full stop, regardless of what its
+    // Snapshot claims. `optionalPositiveDollarsSchema`'s "" vs `undefined`
+    // are both real, comparable strings here (never coerced before this
+    // comparison), so an explicit clear (typed "" against a "5000.00"
+    // snapshot) still reads as changed and still applies.
     const patch: Partial<typeof schema.accounts.$inferInsert> = { updatedAt: new Date() };
-    if (raw.creditLimit !== undefined) patch.creditLimitCents = parsed.data.creditLimitCents;
-    if (raw.minimumPayment !== undefined) {
+    if (raw.creditLimit !== undefined && raw.creditLimit !== raw.creditLimitSnapshot) {
+      patch.creditLimitCents = parsed.data.creditLimitCents;
+    }
+    if (
+      raw.minimumPayment !== undefined &&
+      raw.minimumPayment !== raw.minimumPaymentSnapshot
+    ) {
       patch.minimumPaymentCents = parsed.data.minimumPaymentCents;
+    }
+    if (
+      raw.paydownTarget !== undefined &&
+      raw.paydownTarget !== raw.paydownTargetSnapshot
+    ) {
+      patch.paydownTargetCents = parsed.data.paydownTargetCents;
     }
 
     db.update(schema.accounts).set(patch).where(eq(schema.accounts.id, accountId)).run();

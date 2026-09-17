@@ -29,6 +29,7 @@ function seedAccount(opts: {
   name?: string;
   type?: "checking" | "savings" | "credit" | "loan";
   creditLimitCents?: number;
+  paydownTargetCents?: number;
   balanceSource?: "feed" | "manual";
 }) {
   seq += 1;
@@ -40,6 +41,7 @@ function seedAccount(opts: {
       startingBalanceCents: opts.startingBalanceCents,
       startingBalanceDate: opts.startingBalanceDate,
       creditLimitCents: opts.creditLimitCents ?? null,
+      paydownTargetCents: opts.paydownTargetCents ?? null,
       balanceSource: opts.balanceSource ?? null,
     })
     .returning()
@@ -239,11 +241,13 @@ describe("loadAccountBalances", () => {
         startingBalanceCents: -214_800,
         startingBalanceDate: "2026-09-06",
         creditLimitCents: 500_000,
+        paydownTargetCents: 50_000,
         balanceSource: "manual",
       });
 
       const [balance] = loadAccountBalances(handle.db);
       expect(balance.creditLimitCents).toBe(500_000);
+      expect(balance.paydownTargetCents).toBe(50_000);
       expect(balance.balanceSource).toBe("manual");
       expect(balance.balanceAsOf).toBeNull();
       expect(balance.minimumPaymentCents).toBeNull();
@@ -254,6 +258,7 @@ describe("loadAccountBalances", () => {
       const [balance] = loadAccountBalances(handle.db);
       expect(balance.creditLimitCents).toBeNull();
       expect(balance.minimumPaymentCents).toBeNull();
+      expect(balance.paydownTargetCents).toBeNull();
       expect(balance.balanceAsOf).toBeNull();
       expect(balance.balanceSource).toBeNull();
       expect(balance.simplefinAccountId).toBeNull();

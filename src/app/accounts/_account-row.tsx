@@ -141,12 +141,37 @@ export function AccountRow({
           leaves paying $500 with no acknowledgement anywhere. Omitted at $0
           (a $0.00 reads as a reproach) and at null (the mortgage's figure is
           uncomputable — it has no rows by D3=A — and a false $0 would be
-          worse than silence). */}
-      {account.paidDownCents !== null && account.paidDownCents > 0 ? (
-        <p className="mt-1 font-mono text-xs text-ledger [font-variant-numeric:tabular-nums]">
-          paid down {formatCents(account.paidDownCents)} this month
-        </p>
-      ) : null}
+          worse than silence).
+
+          card-paydown-target plan — a recurring `paydownTargetCents` reverses
+          the $0-suppression above ON PURPOSE: once the user has opted in by
+          setting a goal, $0-of-$Y is the same useful "haven't started yet"
+          signal a fund's "Left to target" already gives elsewhere, not an
+          ambient reproach. `paidDownCents === null` (uncomputable — a
+          row-less mortgage, or a linked card with zero rows) still omits the
+          line even with a target set: "$0 of $Y" against an uncomputable
+          actual is the same false-precision problem the null-guard already
+          avoids for the plain figure. A stored `paydownTargetCents === 0`
+          (a legal, distinct-from-cleared value — see
+          validateCardTermsInput.test.ts) is treated as "no goal set" here
+          too (red-team finding): "paid down $0.00 of $0.00 planned" is a
+          technically-true but nonsensical sentence, the same reason
+          resolveUtilizationDisplay already guards `creditLimitCents <= 0`
+          for the credit-limit bar. */}
+      {(() => {
+        const target =
+          account.paydownTargetCents !== null && account.paydownTargetCents > 0
+            ? account.paydownTargetCents
+            : null;
+        return account.paidDownCents !== null &&
+          (account.paidDownCents > 0 || target !== null) ? (
+          <p className="mt-1 font-mono text-xs text-ledger [font-variant-numeric:tabular-nums]">
+            paid down {formatCents(account.paidDownCents)}
+            {target !== null ? ` of ${formatCents(target)} planned` : ""}{" "}
+            this month
+          </p>
+        ) : null;
+      })()}
 
       {/* DS55 — exactly one BALANCE control, never both, never neither.
           
@@ -175,6 +200,7 @@ export function AccountRow({
           categories={categories}
           creditLimitCents={account.creditLimitCents}
           minimumPaymentCents={account.minimumPaymentCents}
+          paydownTargetCents={account.paydownTargetCents}
           // T7 (card-transaction-import plan) — these three used to be
           // separately-computed inline expressions passed into `CardControls`
           // one at a time; see `resolveCardAffordances`'s own docstring for

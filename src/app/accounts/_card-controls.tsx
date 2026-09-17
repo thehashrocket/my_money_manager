@@ -27,6 +27,7 @@ export function CardControls({
   categories,
   creditLimitCents,
   minimumPaymentCents,
+  paydownTargetCents,
   canAddCharge,
   canEditTerms,
   showReconcile,
@@ -40,6 +41,7 @@ export function CardControls({
   categories: LeafCategory[];
   creditLimitCents: number | null;
   minimumPaymentCents: number | null;
+  paydownTargetCents: number | null;
   /**
    * False for a long-term liability. A mortgage takes no hand-entered
    * charges (D3=A keeps it at zero transaction rows, and `manualTransaction`
@@ -159,6 +161,7 @@ export function CardControls({
           accountName={accountName}
           creditLimitCents={creditLimitCents}
           minimumPaymentCents={minimumPaymentCents}
+          paydownTargetCents={paydownTargetCents}
         />
       ) : null}
     </div>
