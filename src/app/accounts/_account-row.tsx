@@ -151,17 +151,27 @@ export function AccountRow({
           row-less mortgage, or a linked card with zero rows) still omits the
           line even with a target set: "$0 of $Y" against an uncomputable
           actual is the same false-precision problem the null-guard already
-          avoids for the plain figure. */}
-      {account.paidDownCents !== null &&
-      (account.paidDownCents > 0 || account.paydownTargetCents !== null) ? (
-        <p className="mt-1 font-mono text-xs text-ledger [font-variant-numeric:tabular-nums]">
-          paid down {formatCents(account.paidDownCents)}
-          {account.paydownTargetCents !== null
-            ? ` of ${formatCents(account.paydownTargetCents)} planned`
-            : ""}{" "}
-          this month
-        </p>
-      ) : null}
+          avoids for the plain figure. A stored `paydownTargetCents === 0`
+          (a legal, distinct-from-cleared value — see
+          validateCardTermsInput.test.ts) is treated as "no goal set" here
+          too (red-team finding): "paid down $0.00 of $0.00 planned" is a
+          technically-true but nonsensical sentence, the same reason
+          resolveUtilizationDisplay already guards `creditLimitCents <= 0`
+          for the credit-limit bar. */}
+      {(() => {
+        const target =
+          account.paydownTargetCents !== null && account.paydownTargetCents > 0
+            ? account.paydownTargetCents
+            : null;
+        return account.paidDownCents !== null &&
+          (account.paidDownCents > 0 || target !== null) ? (
+          <p className="mt-1 font-mono text-xs text-ledger [font-variant-numeric:tabular-nums]">
+            paid down {formatCents(account.paidDownCents)}
+            {target !== null ? ` of ${formatCents(target)} planned` : ""}{" "}
+            this month
+          </p>
+        ) : null;
+      })()}
 
       {/* DS55 — exactly one BALANCE control, never both, never neither.
           

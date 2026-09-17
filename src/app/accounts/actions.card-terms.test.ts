@@ -217,3 +217,113 @@ describe("updateCardTermsAction", () => {
     expect(patch).not.toHaveProperty("creditLimitCents");
   });
 });
+
+/**
+ * THE STALE-TAB REGRESSION (red-team finding, card-paydown-target plan).
+ * `_card-terms-form.tsx`'s real browser form always posts all three fields —
+ * confirmed above, `absent` never fires for a genuine submit — so the
+ * `raw.field !== undefined` guard alone could never catch this: tab A edits
+ * only the paydown goal and saves; tab B, still showing the pre-edit page,
+ * edits only the credit limit and saves — its POST still carries tab B's own
+ * stale `paydownTarget`, present exactly like every other field, and would
+ * silently overwrite tab A's already-committed change.
+ *
+ * The fix is snapshot-diffing: the form now posts a parallel `<field>Snapshot`
+ * hidden input per field, carrying whatever value THAT TAB last loaded. A
+ * field is only written when what was posted differs from its own snapshot —
+ * true when the user actually edited it, false when it's merely along for
+ * the ride on an unrelated field's save.
+ */
+function browserForm(
+  fields: Partial<Record<"creditLimit" | "minimumPayment" | "paydownTarget", string>>,
+  snapshots: Partial<Record<"creditLimit" | "minimumPayment" | "paydownTarget", string>>,
+): FormData {
+  const fd = new FormData();
+  fd.set("accountId", "1");
+  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+  for (const [k, v] of Object.entries(snapshots)) fd.set(`${k}Snapshot`, v);
+  return fd;
+}
+
+describe("updateCardTermsAction — stale-tab guard (snapshot vs. posted value)", () => {
+  it("does NOT write a field whose posted value still matches its own snapshot (untouched)", async () => {
+    // Simulates tab B: it loaded creditLimit=5000, never touched it, and
+    // posts it back unchanged alongside a real edit to minimumPayment.
+    await updateCardTermsAction(
+      IDLE,
+      browserForm(
+        { creditLimit: "5000.00", minimumPayment: "60", paydownTarget: "500.00" },
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "500.00" },
+      ),
+    );
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.minimumPaymentCents).toBe(6_000);
+    expect(patch).not.toHaveProperty("creditLimitCents");
+    expect(patch).not.toHaveProperty("paydownTargetCents");
+  });
+
+  it("WRITES a field whenever posted differs from its own snapshot, even if it matches what's currently stored elsewhere", async () => {
+    await updateCardTermsAction(
+      IDLE,
+      browserForm(
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "700.00" },
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "500.00" },
+      ),
+    );
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.paydownTargetCents).toBe(70_000);
+    expect(patch).not.toHaveProperty("creditLimitCents");
+    expect(patch).not.toHaveProperty("minimumPaymentCents");
+  });
+
+  it("still applies an explicit clear even though the emptied field differs from its own snapshot", async () => {
+    await updateCardTermsAction(
+      IDLE,
+      browserForm(
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "" },
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "500.00" },
+      ),
+    );
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.paydownTargetCents).toBeNull();
+  });
+
+  it("THE FULL REPRO: a stale tab's save cannot revert a different tab's already-committed edit to an unrelated field", async () => {
+    // Tab A already saved paydownTarget 500 -> 700 (not modeled here directly;
+    // this test's premise is that tab B never saw that write). Tab B loaded
+    // the account before tab A's save (paydownTarget snapshot = 500, the
+    // PRE-tab-A value) and now saves its own unrelated creditLimit edit.
+    await updateCardTermsAction(
+      IDLE,
+      browserForm(
+        { creditLimit: "9000.00", minimumPayment: "50.00", paydownTarget: "500.00" },
+        { creditLimit: "5000.00", minimumPayment: "50.00", paydownTarget: "500.00" },
+      ),
+    );
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.creditLimitCents).toBe(900_000);
+    // The bug this guards against: without snapshot-diffing, this line would
+    // have been `paydownTargetCents: 50_000`, silently reverting tab A's
+    // already-committed 700 back to the stale 500 tab B still had loaded.
+    expect(patch).not.toHaveProperty("paydownTargetCents");
+  });
+
+  it("a genuinely absent snapshot (hand-made request, no snapshot concept) behaves exactly like the pre-existing absent-field guard", async () => {
+    // No `raw.creditLimitSnapshot` at all — `undefined !== undefined` is
+    // false, so this still reads as "untouched," matching the guard's
+    // original behavior for a crafted request that omits the field itself.
+    const fd = new FormData();
+    fd.set("accountId", "1");
+    fd.set("minimumPayment", "60");
+    await updateCardTermsAction(IDLE, fd);
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.minimumPaymentCents).toBe(6_000);
+    expect(patch).not.toHaveProperty("creditLimitCents");
+    expect(patch).not.toHaveProperty("paydownTargetCents");
+  });
+});

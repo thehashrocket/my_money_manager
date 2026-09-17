@@ -107,9 +107,27 @@ export function CardTermsDisclosure({
     );
   }
 
+  // The stale-tab guard (Red Team finding, card-paydown-target plan). A
+  // field genuinely never appears "absent" from this form's POST — it
+  // always renders and submits all three inputs — so `updateCardTermsAction`
+  // cannot tell "the user left this untouched" from "the user re-confirmed
+  // the same value" by presence alone. Posting each field's CURRENT prop
+  // value alongside it lets the action compare posted-vs-snapshot instead:
+  // unchanged from what THIS tab loaded means untouched (skip the write,
+  // so a second tab's more recent save survives), changed means the user
+  // edited it (write it, even if that happens to match what's already
+  // stored). Recomputed fresh on every render, from props — not from
+  // `values`, which the user may have since edited — so a same-tab
+  // revalidation that delivers a newer prop still produces a correct
+  // snapshot without any extra effect or reset.
+  const snapshot = fieldsFromProps();
+
   return (
     <form action={formAction} className="mt-2 flex w-full flex-wrap items-end gap-3">
       <input type="hidden" name="accountId" value={accountId} />
+      {FIELDS.map(({ key }) => (
+        <input key={`${key}-snapshot`} type="hidden" name={`${key}Snapshot`} value={snapshot[key]} />
+      ))}
       {FIELDS.map(({ key, label }) => (
         <div key={key}>
           <label className={LABEL} htmlFor={ids[key]}>

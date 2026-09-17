@@ -396,6 +396,11 @@ export async function revertLiabilityBalanceAction(
  * An empty field CLEARS the value rather than leaving it. "I no longer want a
  * limit recorded" has to be expressible, and a form that can only ever raise
  * a number is how you get a card stuck at a limit it does not have.
+ *
+ * Each field's write is gated on POSTED-VS-SNAPSHOT, not presence — see the
+ * comment at the patch guard below. A stale tab submitting an untouched
+ * field must not silently overwrite a more recent save of that same field
+ * from another tab.
  */
 export async function updateCardTermsAction(
   _prev: AccountsActionState,
@@ -432,26 +437,39 @@ export async function updateCardTermsAction(
       return fail(`${account.name} is not a credit card.`);
     }
 
-    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears.
+    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears — but
+    // "absent" alone is no longer the right test. It used to be: the form
+    // always posts all three fields, so `raw.field !== undefined` was really
+    // testing "is this a hand-made request that dropped a key," which only a
+    // crafted or buggy POST could trigger.
     //
-    // `optionalPositiveDollarsSchema` is `.nullish()`, so a field missing from
-    // the request parsed to `null` exactly like an emptied one — making this
-    // endpoint destructive by omission. A POST carrying only `accountId` and
-    // `creditLimit` silently NULLed the minimum payment.
+    // A STALE TAB triggers the same class of bug through a different door
+    // (red-team finding, card-paydown-target plan): open /accounts in two
+    // tabs, edit only the paydown goal in tab A and save, then edit only the
+    // credit limit in tab B (still holding the pre-edit page) and save — tab
+    // B's POST still carries its own stale `paydownTarget` value, present
+    // exactly like every other field, and silently overwrites tab A's
+    // already-committed change with no warning. `raw.field !== undefined` is
+    // always true for a real submit, so it could never catch this.
     //
-    // Empty-clears is deliberate and documented ("I no longer want a limit
-    // recorded" has to be expressible). Absent-clears was an accident of the
-    // same schema serving both, and it is the same absent-vs-zero distinction
-    // rule 9 insists on one field over. The form always posts all three, so
-    // this only ever fires for a hand-made request. `paydownTarget`
-    // (card-paydown-target plan) follows the identical guard — a third field
-    // sharing this schema is a third field that can be silently omitted.
+    // The fix is snapshot-diffing, not presence: `_card-terms-form.tsx` now
+    // posts a parallel `<field>Snapshot` hidden input carrying whatever value
+    // THIS tab last loaded for that field. A field is only applied to the
+    // patch when what was posted differs from what this tab's own snapshot
+    // says — which is true when the user actually edited it, and false when
+    // the field is merely along for the ride on an unrelated field's save,
+    // stale relative to another tab or not. `optionalPositiveDollarsSchema`'s
+    // "" vs `undefined` are both real, comparable strings here (never coerced
+    // before this comparison), so an explicit clear (typed "" against a
+    // "5000.00" snapshot) still reads as changed and still applies.
     const patch: Partial<typeof schema.accounts.$inferInsert> = { updatedAt: new Date() };
-    if (raw.creditLimit !== undefined) patch.creditLimitCents = parsed.data.creditLimitCents;
-    if (raw.minimumPayment !== undefined) {
+    if (raw.creditLimit !== raw.creditLimitSnapshot) {
+      patch.creditLimitCents = parsed.data.creditLimitCents;
+    }
+    if (raw.minimumPayment !== raw.minimumPaymentSnapshot) {
       patch.minimumPaymentCents = parsed.data.minimumPaymentCents;
     }
-    if (raw.paydownTarget !== undefined) {
+    if (raw.paydownTarget !== raw.paydownTargetSnapshot) {
       patch.paydownTargetCents = parsed.data.paydownTargetCents;
     }
 
