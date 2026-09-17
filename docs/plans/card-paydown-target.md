@@ -79,9 +79,12 @@ fields transform (`v.x === null ? null : Math.round(v.x * 100)`).
   no separate check needed.
 
 ### Form
-`src/app/accounts/_card-terms-form.tsx` — add a third controlled field, "Paydown target,"
-next to Credit limit / Minimum payment, following the identical pattern (controlled state
-initialized from the prop, reset on Cancel, `min-h-11` touch target, `aria-label`).
+`src/app/accounts/_card-terms-form.tsx` — add a third controlled field next to Credit limit /
+Minimum payment, following the identical pattern (controlled state initialized from the prop,
+reset on Cancel, `min-h-11` touch target, `aria-label`). **Labeled "Paydown target" at first
+implementation; renamed to "Monthly paydown goal" during `/ship`'s pre-landing review** — an
+outside-voice design pass flagged the original label as ambiguous with a target BALANCE rather
+than a monthly amount. Same rename also applied to the field's validation-failure error message.
 Placeholder text: "none" (matches the other two — empty means "no target set," not $0).
 
 ### Read model

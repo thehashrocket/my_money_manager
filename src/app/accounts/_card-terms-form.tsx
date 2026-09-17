@@ -8,23 +8,47 @@ import { ActionStatus } from "@/components/ledger/action-status";
 import { updateCardTermsAction } from "./actions";
 
 /**
- * The repair path for a card's credit limit and minimum payment.
+ * The repair path for a card's credit limit, minimum payment, and monthly
+ * paydown goal.
  *
- * Both were write-once at account creation. A mistyped $5,000 limit made the
- * utilization bar wrong on every render forever, and the only fix was raw
- * SQL — the same gap `updateAccountAnchorAction` closed for the anchor.
+ * Credit limit and minimum payment were write-once at account creation. A
+ * mistyped $5,000 limit made the utilization bar wrong on every render
+ * forever, and the only fix was raw SQL — the same gap
+ * `updateAccountAnchorAction` closed for the anchor. The paydown goal
+ * (card-paydown-target plan) has no creation-time counterpart at all — it is
+ * edit-only from the start, and it's the one field here with no bank-facing
+ * meaning of its own: it's a number you set and compare against
+ * `paidDownCents` (the actual money moved) on `/accounts`.
  *
  * A disclosure, not a permanently-open form, for the reason
  * `ReconcileDisclosure` documents: these are the row's third and fourth
  * controls, and four expanded forms in one row is exactly the per-row clutter
  * DS52 argues against. Card details change once a year at most, so they are
  * the ones that stay folded.
+ *
+ * All three fields share one shape (a dollar amount where "" means CLEAR,
+ * not zero — see `optionalPositiveDollarsSchema`), so they're driven off one
+ * `FIELDS` config and one values-object `useState` rather than three
+ * hand-written copies. What's NOT shared: `updateCardTermsAction`'s
+ * absent-vs-empty write guard is still three separate `if` checks server
+ * side, because that guard's whole point is per-field independence — a
+ * single loop there would reintroduce the exact "all three POSTed or none
+ * of them are safe" coupling the guard exists to avoid.
  */
 
 const LABEL = "mb-1 block font-mono text-xs uppercase tracking-wide text-ink-3";
 const FIELD =
   "w-32 rounded-md border border-border bg-card px-3 py-2 text-base [font-variant-numeric:tabular-nums]";
 
+type FieldKey = "creditLimit" | "minimumPayment" | "paydownTarget";
+
+/** `key` doubles as the FormData field name — must match
+ *  `validateCardTermsInput.ts`'s `cardTermsInputSchema` keys exactly. */
+const FIELDS: { key: FieldKey; label: string }[] = [
+  { key: "creditLimit", label: "Credit limit" },
+  { key: "minimumPayment", label: "Minimum payment" },
+  { key: "paydownTarget", label: "Monthly paydown goal" },
+];
 
 export function CardTermsDisclosure({
   accountId,
@@ -41,23 +65,32 @@ export function CardTermsDisclosure({
 }) {
   const [open, setOpen] = useState(false);
   const [state, formAction, pending] = useActionState(updateCardTermsAction, IDLE);
+
+  // Recomputed (not memoized) on every call: the initial mount AND every
+  // Cancel click need the CURRENT prop values, not whatever was true when
+  // this component first rendered.
+  function fieldsFromProps(): Record<FieldKey, string> {
+    return {
+      creditLimit: creditLimitCents === null ? "" : centsToDollarString(creditLimitCents),
+      minimumPayment:
+        minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
+      paydownTarget: paydownTargetCents === null ? "" : centsToDollarString(paydownTargetCents),
+    };
+  }
+
   // CONTROLLED. React 19 resets a form submitted through a function action,
   // so uncontrolled inputs snap back to `defaultValue` on every submit —
   // including a rejected one, which would revert the user's typed limit to
   // the stored value while the error message about it stayed on screen,
   // pointing at a field that no longer held the offending input.
-  const [limit, setLimit] = useState(
-    creditLimitCents === null ? "" : centsToDollarString(creditLimitCents),
-  );
-  const [minimum, setMinimum] = useState(
-    minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
-  );
-  const [paydownTarget, setPaydownTarget] = useState(
-    paydownTargetCents === null ? "" : centsToDollarString(paydownTargetCents),
-  );
-  const limitId = useId();
-  const minimumId = useId();
-  const paydownTargetId = useId();
+  const [values, setValues] = useState<Record<FieldKey, string>>(fieldsFromProps);
+  // Three unconditional `useId()` calls, same as before the extraction —
+  // hooks can't be called from inside `FIELDS.map()`.
+  const ids: Record<FieldKey, string> = {
+    creditLimit: useId(),
+    minimumPayment: useId(),
+    paydownTarget: useId(),
+  };
 
   if (!open) {
     return (
@@ -77,61 +110,28 @@ export function CardTermsDisclosure({
   return (
     <form action={formAction} className="mt-2 flex w-full flex-wrap items-end gap-3">
       <input type="hidden" name="accountId" value={accountId} />
-      <div>
-        <label className={LABEL} htmlFor={limitId}>
-          Credit limit
-        </label>
-        <input
-          id={limitId}
-          type="number"
-          name="creditLimit"
-          step="0.01"
-          min="0"
-          placeholder="none"
-          /* Empty CLEARS. "I no longer want a limit recorded" has to be
-             expressible, or a card gets stuck at a limit it does not have. */
-          value={limit}
-          onChange={(e) => setLimit(e.target.value)}
-          aria-label={`Credit limit on ${accountName}`}
-          className={FIELD}
-        />
-      </div>
-      <div>
-        <label className={LABEL} htmlFor={minimumId}>
-          Minimum payment
-        </label>
-        <input
-          id={minimumId}
-          type="number"
-          name="minimumPayment"
-          step="0.01"
-          min="0"
-          placeholder="none"
-          value={minimum}
-          onChange={(e) => setMinimum(e.target.value)}
-          aria-label={`Minimum payment on ${accountName}`}
-          className={FIELD}
-        />
-      </div>
-      <div>
-        <label className={LABEL} htmlFor={paydownTargetId}>
-          Paydown target
-        </label>
-        <input
-          id={paydownTargetId}
-          type="number"
-          name="paydownTarget"
-          step="0.01"
-          min="0"
-          placeholder="none"
-          /* A recurring monthly goal, compared against actual paydown on
-             /accounts — empty CLEARS the goal, same as the other two fields. */
-          value={paydownTarget}
-          onChange={(e) => setPaydownTarget(e.target.value)}
-          aria-label={`Paydown target on ${accountName}`}
-          className={FIELD}
-        />
-      </div>
+      {FIELDS.map(({ key, label }) => (
+        <div key={key}>
+          <label className={LABEL} htmlFor={ids[key]}>
+            {label}
+          </label>
+          <input
+            id={ids[key]}
+            type="number"
+            name={key}
+            step="0.01"
+            min="0"
+            placeholder="none"
+            /* Empty CLEARS this field. "I no longer want a limit/goal
+               recorded" has to be expressible, or a card gets stuck at a
+               figure it does not have. */
+            value={values[key]}
+            onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
+            aria-label={`${label} on ${accountName}`}
+            className={FIELD}
+          />
+        </div>
+      ))}
       <Button
         type="submit"
         variant="primary"
@@ -147,13 +147,7 @@ export function CardTermsDisclosure({
         onClick={() => {
           // Discard edits along with the disclosure, so reopening shows what
           // is actually stored rather than an abandoned draft.
-          setLimit(creditLimitCents === null ? "" : centsToDollarString(creditLimitCents));
-          setMinimum(
-            minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
-          );
-          setPaydownTarget(
-            paydownTargetCents === null ? "" : centsToDollarString(paydownTargetCents),
-          );
+          setValues(fieldsFromProps());
           setOpen(false);
         }}
         className="min-h-11 w-full sm:w-auto"

@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [1.5.0] - 2026-09-17
 
 ### Added
-- **Credit cards can now carry a monthly paydown goal.** "Card details" on `/accounts` gained a third field, Paydown target, next to Credit limit and Minimum payment — a standing amount you're aiming to pay down each month. Once set, the existing "paid down $X this month" line becomes "paid down $X of $Y planned this month," including at $0 so you can see you haven't started yet. It's independent of the required minimum payment (a different number for most cards) and never touches budget envelopes or funds — just a goal compared against what you actually paid.
+- **Credit cards can now carry a monthly paydown goal.** "Card details" on `/accounts` gained a third field, Monthly paydown goal, next to Credit limit and Minimum payment — a standing amount you're aiming to pay down each month. Once set, the existing "paid down $X this month" line becomes "paid down $X of $Y planned this month," including at $0 so you can see you haven't started yet. It's independent of the required minimum payment (a different number for most cards) and never touches budget envelopes or funds — just a goal compared against what you actually paid.
 
 ## [1.4.2] - 2026-09-17
 

@@ -98,11 +98,11 @@ describe("updateCardTermsAction", () => {
     expect(updateRunMock).not.toHaveBeenCalled();
   });
 
-  it("refuses an out-of-range paydown target with a field-specific message", async () => {
+  it("refuses an out-of-range paydown goal with a field-specific message", async () => {
     const state = await updateCardTermsAction(IDLE, termsForm({ paydownTarget: "100000001" }));
     expect(state.status).toBe("error");
     if (state.status !== "error") throw new Error("unreachable");
-    expect(state.message).toMatch(/paydown target/i);
+    expect(state.message).toMatch(/paydown goal/i);
     expect(updateRunMock).not.toHaveBeenCalled();
   });
 
@@ -200,5 +200,20 @@ describe("updateCardTermsAction", () => {
     expect(patch.creditLimitCents).toBe(700_000);
     expect(patch.minimumPaymentCents).toBe(10_000);
     expect(patch).not.toHaveProperty("paydownTargetCents");
+  });
+
+  // The mirror of the two tests above: every OTHER absent-vs-empty case in
+  // this file posts creditLimit, so creditLimitCents' own guard branch
+  // (`if (raw.creditLimit !== undefined) ...`) was never exercised omitted.
+  it("leaves creditLimit untouched when only the other two fields are posted", async () => {
+    await updateCardTermsAction(
+      IDLE,
+      termsForm({ minimumPayment: "100", paydownTarget: "600" }),
+    );
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.minimumPaymentCents).toBe(10_000);
+    expect(patch.paydownTargetCents).toBe(60_000);
+    expect(patch).not.toHaveProperty("creditLimitCents");
   });
 });

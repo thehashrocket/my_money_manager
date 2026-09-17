@@ -102,6 +102,17 @@ const BALANCE_SURFACES = [
   "/budget",
 ] as const;
 
+/** `updateCardTermsAction`'s per-field validation-failure messages, keyed by
+ *  the first path segment `validateCardTermsInput`'s schema puts on a zod
+ *  issue. Module scope, not per-call — same non-exported-const pattern as
+ *  `BALANCE_SURFACES` above; a `"use server"` module may only EXPORT async
+ *  functions, but a private top-level binding is fine. */
+const CARD_TERMS_FIELD_MESSAGES: Record<string, string> = {
+  creditLimit: "Enter a credit limit this app accepts, or leave it blank.",
+  minimumPayment: "Enter a minimum payment this app accepts, or leave it blank.",
+  paydownTarget: "Enter a monthly paydown goal this app accepts, or leave it blank.",
+};
+
 /**
  * Revalidates every surface that renders a balance (see `BALANCE_SURFACES`).
  *
@@ -367,13 +378,16 @@ export async function revertLiabilityBalanceAction(
 }
 
 /**
- * The repair path for a card's terms — its credit limit and minimum payment.
+ * The repair path for a card's terms — its credit limit, minimum payment,
+ * and paydown target.
  *
- * Both were write-once at account creation, so a mistyped $5,000 limit made
- * the utilization bar wrong on every render forever and the only fix was raw
- * SQL. That is the same gap CLAUDE.md rule 1 closed for `starting_balance_*`
- * with `updateAccountAnchorAction`; a number the user typed once and can
- * never correct is a bug regardless of how small the number is.
+ * Credit limit and minimum payment were write-once at account creation, so a
+ * mistyped $5,000 limit made the utilization bar wrong on every render
+ * forever and the only fix was raw SQL. That is the same gap CLAUDE.md rule 1
+ * closed for `starting_balance_*` with `updateAccountAnchorAction`; a number
+ * the user typed once and can never correct is a bug regardless of how small
+ * the number is. Paydown target (card-paydown-target plan) has no
+ * creation-time counterpart — it rides this same repair path from the start.
  *
  * Cards only, enforced here and not merely by where the form renders (D2=A).
  * A mortgage row draws no utilization bar and shows no minimum payment, so
@@ -401,13 +415,8 @@ export async function updateCardTermsAction(
     });
     if (!parsed.success) {
       const badField = parsed.error.issues[0]?.path[0];
-      const FIELD_MESSAGES: Record<string, string> = {
-        creditLimit: "Enter a credit limit this app accepts, or leave it blank.",
-        minimumPayment: "Enter a minimum payment this app accepts, or leave it blank.",
-        paydownTarget: "Enter a paydown target this app accepts, or leave it blank.",
-      };
       return fail(
-        (typeof badField === "string" && FIELD_MESSAGES[badField]) ||
+        (typeof badField === "string" && CARD_TERMS_FIELD_MESSAGES[badField]) ||
           "Enter a value this app accepts, or leave it blank.",
         "balance",
       );
