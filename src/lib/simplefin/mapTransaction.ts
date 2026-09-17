@@ -50,8 +50,14 @@ export function simplefinRowHash(externalId: string): string {
 }
 
 export function mapTransaction(txn: SimpleFinTransaction): MappedRow {
-  // description === memo on 100% of real rows; prefer memo and fall back.
-  const rawMemo = (txn.memo ?? txn.description ?? "").trim();
+  // description === memo on 100% of Star One's real rows; prefer memo and
+  // fall back to description. But `??` only treats null/undefined as absent —
+  // SoFi's feed sends memo as a PRESENT, EMPTY string on every row rather than
+  // omitting it, so `txn.memo ?? txn.description` never fell through and every
+  // SoFi row normalized to the empty ("no merchant name") key, verified live
+  // 2026-09-16 (see .context/simplefin-sample.json). Treat a blank memo as
+  // absent explicitly, matching the comment's actual intent.
+  const rawMemo = (txn.memo?.trim() || txn.description || "").trim();
   const amountCents = parseAmountToCents(txn.amount);
 
   return {

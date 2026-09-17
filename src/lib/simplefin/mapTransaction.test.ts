@@ -29,6 +29,39 @@ const OVERDRAFT_SWEEP: SimpleFinTransaction = {
   mcc: null,
 };
 
+// Verbatim shape from a live SoFi pull (.context/simplefin-sample.json,
+// 2026-09-16): memo is a PRESENT but EMPTY string on every row, not null —
+// `txn.memo ?? txn.description` never falls through to description for this
+// institution.
+const SOFI_ACH_WITHDRAWAL: SimpleFinTransaction = {
+  id: "TRN-4265a1af-ccdd-40fa-8922-c3afc16a7c4b",
+  posted: 1789387200,
+  amount: "-30.41",
+  description: "ACH: AFFIRM.COM PAYME",
+  payee: "Affirm",
+  memo: "",
+  transacted_at: 1789387200,
+  mcc: null,
+};
+
+// memo is `nullish()` in the zod schema (null OR undefined), which is a
+// distinct case from SoFi's present-but-empty string above: `txn.memo?.trim()`
+// short-circuits to `undefined` for either null or omitted, so this pins that
+// the optional-chained rewrite still falls through to `description` the way
+// the old `txn.memo ?? txn.description` did — a plain `txn.memo.trim()` typo
+// (dropping the `?`) would throw on exactly this shape instead of failing a
+// visible assertion.
+const NULL_MEMO_WITHDRAWAL: SimpleFinTransaction = {
+  id: "TRN-8a1cf2f0-2222-4444-8888-abcdefabcdef",
+  posted: 1789387200,
+  amount: "-12.50",
+  description: "SOME BANK MEMO-LESS ROW",
+  payee: null,
+  memo: null,
+  transacted_at: 1789387200,
+  mcc: null,
+};
+
 const POS_INBOUND: SimpleFinTransaction = {
   id: "TRN-b558e132-0f59-4933-8329-673b388b2345",
   posted: 1788350400,
@@ -93,6 +126,28 @@ describe("mapTransaction", () => {
     expect(a.importRowHash).toBe(simplefinRowHash(AIRBNB_CHARGE.id));
     expect(a.importRowHash).toBe(mapTransaction(AIRBNB_CHARGE).importRowHash);
     expect(a.importRowHash).not.toBe(mapTransaction(POS_INBOUND).importRowHash);
+  });
+
+  it("falls back to description when memo is present but blank (SoFi shape)", () => {
+    // Without the fallback, `rawMemo` (and therefore `normalizedMerchant`)
+    // is "" for every SoFi row, and /transactions renders "No merchant name"
+    // for all of them.
+    const row = mapTransaction(SOFI_ACH_WITHDRAWAL);
+    expect(row.rawMemo).toBe("ACH: AFFIRM.COM PAYME");
+    // normalize.ts has no PROCESSOR_PREFIXES entry for "ACH:", so this ships
+    // unstripped — non-empty and correct, but noisier than Star One's keys.
+    // Pinned exactly (not just `.not.toBe("")`) so a future normalize.ts change
+    // that alters this is a visible, deliberate decision.
+    expect(row.normalizedMerchant).toBe("ACH: AFFIRM.COM PAYME");
+  });
+
+  it("still falls back to description when memo is null, not just blank", () => {
+    // A distinct case from the SoFi shape above: memo absent entirely
+    // (nullish) rather than present-but-empty. `?.` must short-circuit here
+    // the same way `??` did before this fix.
+    const row = mapTransaction(NULL_MEMO_WITHDRAWAL);
+    expect(row.rawMemo).toBe("SOME BANK MEMO-LESS ROW");
+    expect(row.normalizedMerchant).toBe("SOME BANK MEMO-LESS ROW");
   });
 
   it("maps the overdraft sweep leg intact for the matcher to find", () => {
