@@ -164,6 +164,46 @@ parallelization opportunity.
 
 **Shipped as v1.5.0** — 2262 tests pass (2256 baseline already included this plan's own 7 new cases; +6 more from `/ship`'s coverage audit backfilling the accountId guard and the two pre-existing field-message branches), `tsc --noEmit` clean, lint clean (pre-existing unrelated warnings only). See CHANGELOG.md.
 
+## `/ship`'s pre-landing + adversarial review (2026-09-17)
+
+What actually shipped is not what T1-T7 above describe alone — `/ship`'s review army and four
+rounds of adversarial red-teaming (a native checklist pass, 6 specialists, a design pass, and
+then Red Team / Claude adversarial / Codex adversarial / Codex structured review, each re-run
+after every fix until a pass produced zero new findings) found and fixed real bugs in the write
+path this plan's own T3/T7 had called done:
+
+1. **Stale-tab overwrite (CRITICAL).** The browser form always posts all three fields, so the
+   original absent-vs-empty guard could never tell "untouched" from "re-confirmed" — a second
+   tab's save of an unrelated field silently reverted a more recently saved field. Fixed with
+   snapshot-diffing (a parallel `<field>Snapshot` hidden input per field).
+2. **Cancel-during-pending (CRITICAL).** Cancel had no `disabled={pending}` guard, so closing
+   the form while a Save was still in flight could seed the next reopen from pre-write props,
+   reintroducing (1) through a different door.
+3. **Stale `useActionState` across reopen (CRITICAL).** `CardTermsDisclosure` never unmounted
+   on close, so a stale success/error message (and, combined with (2), stale `values`) survived
+   a Cancel-then-reopen. Fixed by splitting into a toggle wrapper + remountable inner form,
+   mirroring the existing `ReconcileDisclosure`/`ReconcileForm` pattern in `_balance-forms.tsx`.
+4. **Presence-guard regression (CRITICAL, found independently by Codex and a Claude subagent).**
+   The fix for (1) REPLACED the presence check with the snapshot check instead of layering them,
+   which reintroduced destructive-by-omission for a request that drops a field but keeps a
+   stale Snapshot input. Fixed by ANDing `raw.field !== undefined` back in as a precondition.
+5. **Canonicalization drift (CRITICAL, found independently by both Codex passes).** The form
+   stays open after a successful save, but `values` was never resynced to the canonical
+   (`centsToDollarString`, always 2 decimals) string — a raw-typed "60" would permanently
+   mismatch a freshly-recomputed "60.00" snapshot, silently reposting the untouched field on
+   every later save. Fixed with this codebase's own adjust-state-during-render pattern.
+6. **$0-goal nonsensical copy (informational).** An explicit `paydownTargetCents === 0` rendered
+   "paid down $0.00 of $0.00 planned this month." Fixed by treating a stored 0 as null for
+   display, same as `resolveUtilizationDisplay` already does for a $0 credit limit.
+
+Every fix was verified with a live two-tab (or Save/Cancel-race) browser repro, not just a unit
+test — (5) in particular was only visible by watching the "Minimum payment" field literally
+change from `60` to `60.00` on screen after Save. Two things the review flagged were deliberately
+**not** changed (same-field genuine conflicts resolve last-write-wins; a stale-but-matching
+untouched field correctly skips the write) — see TODOS.md's card-paydown-target follow-ups
+section for the reasoning, and for the one accepted low-confidence residual (no DB-level CHECK
+constraint on `paydown_target_cents`).
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
