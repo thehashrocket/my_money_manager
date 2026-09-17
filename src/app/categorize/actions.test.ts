@@ -633,3 +633,87 @@ describe("bulkCategorizeMerchantAction — a post-commit read failure keeps the 
     expect(result.ruleRefusal?.message).toContain("Undo restores it");
   });
 });
+
+/**
+ * Drives the REAL request path for the month-scope feature — FormData with
+ * `scopeYear`/`scopeMonth` set, exactly as `MerchantRow`'s hidden inputs
+ * render them — rather than only `bulkCategorize` called directly with a
+ * pre-built `BulkCategorizeInput`. `bulkCategorize.test.ts` already pins the
+ * pure-function behavior; this pins that `Object.fromEntries(formData)` →
+ * `validateBulkCategorizeInput` → `bulkCategorize` actually carries the two
+ * fields through, which is exactly the class of gap CLAUDE.md's rule 11
+ * names for `runBulkRetarget` ("a hand-written mirror of the action" hiding
+ * a wiring break that a pure-function test cannot see).
+ */
+describe("bulkCategorizeMerchantAction — scope wiring", () => {
+  function seedTxnOn(accountId: number, batchId: number, merchant: string, date: string) {
+    seq += 1;
+    const [row] = handle.db
+      .insert(schema.transactions)
+      .values({
+        accountId,
+        date,
+        rawDescription: "DESC",
+        rawMemo: "MEMO",
+        normalizedMerchant: merchant,
+        amountCents: -1200,
+        categoryId: null,
+        importSource: "csv",
+        importBatchId: batchId,
+        importRowHash: `hash-${seq}`,
+        transferPairId: null,
+        isPending: false,
+      })
+      .returning()
+      .all();
+    return row;
+  }
+
+  function scopedForm(categoryId: number, scopeYear: number, scopeMonth: number) {
+    const fd = new FormData();
+    fd.set("normalizedMerchant", "SAFEWAY");
+    fd.set("categoryId", String(categoryId));
+    fd.set("rememberMerchant", "false");
+    fd.set("scopeYear", String(scopeYear));
+    fd.set("scopeMonth", String(scopeMonth));
+    return fd;
+  }
+
+  it("files only the in-scope row when scopeYear/scopeMonth hidden fields are set", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const july = seedTxnOn(a.id, b.id, "SAFEWAY", "2026-07-10");
+    const sept = seedTxnOn(a.id, b.id, "SAFEWAY", "2026-09-10");
+
+    const result = await bulkCategorizeMerchantAction(scopedForm(groceries.id, 2026, 9));
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.snapshot.txnIds).toEqual([sept.id]);
+
+    const julyRow = handle.db
+      .select({ categoryId: schema.transactions.categoryId })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, july.id))
+      .get();
+    expect(julyRow?.categoryId).toBeNull();
+  });
+
+  it("rejects a FormData post with only scopeYear set, rather than silently filing the whole history", async () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxnOn(a.id, b.id, "SAFEWAY", "2026-09-10");
+
+    const fd = new FormData();
+    fd.set("normalizedMerchant", "SAFEWAY");
+    fd.set("categoryId", String(groceries.id));
+    fd.set("rememberMerchant", "false");
+    fd.set("scopeYear", "2026");
+    // scopeMonth intentionally omitted — a dropped field must refuse, not widen.
+
+    await expect(bulkCategorizeMerchantAction(fd)).rejects.toThrow(
+      /Invalid bulk categorize input/,
+    );
+  });
+});

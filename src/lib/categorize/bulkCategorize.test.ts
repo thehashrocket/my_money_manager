@@ -888,3 +888,148 @@ describe("bulkCategorize — Remember guard, boundary cases", () => {
     expect(result.ruleTouched).toBe(false);
   });
 });
+
+describe("bulkCategorize — month scope", () => {
+  it("with no scope, flips every uncategorized row for the merchant (regression)", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-10" });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: false,
+    });
+
+    expect(result.updatedCount).toBe(2);
+  });
+
+  it("with a scope, only flips rows dated inside that month", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const july = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+    const sept = seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-10" });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: false,
+      scopeYear: 2026,
+      scopeMonth: 9,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(result.txnIds).toEqual([sept.id]);
+
+    const julyRow = handle.db
+      .select({ categoryId: schema.transactions.categoryId })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, july.id))
+      .get();
+    expect(julyRow?.categoryId).toBeNull();
+  });
+
+  it("trains a rule from a scoped batch exactly as an unscoped one would", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-10" });
+
+    const result = bulkCategorize(
+      handle.db,
+      {
+        normalizedMerchant: "SAFEWAY",
+        categoryId: groceries.id,
+        rememberMerchant: true,
+        scopeYear: 2026,
+        scopeMonth: 9,
+      },
+      { allowRuleRemoval: true },
+    );
+
+    expect(result.ruleTouched).toBe(true);
+    expect(result.insertedRuleId).not.toBeNull();
+  });
+
+  it("a scoped batch still refuses Remember on ALL-TIME filed categories, not just the scoped rows", () => {
+    // History is split across two categories, but ONLY the July row is
+    // outside this month's scope — the September row alone would look
+    // unanimous with the pick if trainability were computed from the batch
+    // rather than the merchant's whole history (rule 6 / D3).
+    const a = seedAccount();
+    const b = seedBatch();
+    const amazon = seedCategory("Amazon");
+    const homeGoods = seedCategory("HomeGoods");
+    seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      merchant: "AMAZON",
+      amountCents: -4000,
+      categoryId: homeGoods.id,
+      date: "2026-07-10",
+    });
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "AMAZON", amountCents: -1500, date: "2026-09-10" });
+
+    const result = bulkCategorize(
+      handle.db,
+      {
+        normalizedMerchant: "AMAZON",
+        categoryId: amazon.id,
+        rememberMerchant: true,
+        scopeYear: 2026,
+        scopeMonth: 9,
+      },
+      { allowRuleRemoval: true },
+    );
+
+    // The September row is still filed, scoped correctly...
+    expect(result.updatedCount).toBe(1);
+    // ...but the rule is refused because the merchant's ALL-TIME history
+    // (the July row, outside this batch) is split across two categories.
+    expect(result.ruleRefusal?.reason).toBe("multi-category");
+    expect(result.ruleTouched).toBe(false);
+  });
+
+  it("throws on a partial scope rather than silently widening to all-time (defense in depth)", () => {
+    // `validateBulkCategorizeInput`'s `.refine()` already refuses this shape
+    // at the Server Action boundary — this pins `bulkCategorize` itself
+    // refusing it too, for a caller who builds a `BulkCategorizeInput` by
+    // hand (`z.infer` doesn't carry the refine's cross-field constraint into
+    // the TYPE, so this compiles) rather than going through validation.
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-09-10" });
+
+    expect(() =>
+      bulkCategorize(handle.db, {
+        normalizedMerchant: "SAFEWAY",
+        categoryId: groceries.id,
+        rememberMerchant: false,
+        scopeYear: 2026,
+        // scopeMonth intentionally omitted
+      }),
+    ).toThrow(/scopeYear and scopeMonth must both be present or both absent/);
+  });
+
+  it("a scope that matches nothing updates zero rows without throwing", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+
+    const result = bulkCategorize(handle.db, {
+      normalizedMerchant: "SAFEWAY",
+      categoryId: groceries.id,
+      rememberMerchant: false,
+      scopeYear: 2026,
+      scopeMonth: 9,
+    });
+
+    expect(result.updatedCount).toBe(0);
+    expect(result.earliestDate).toBeNull();
+  });
+});

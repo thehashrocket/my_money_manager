@@ -692,4 +692,132 @@ describe("loadMerchantGroups — filedCategoryIds", () => {
       groups.find((g) => g.normalizedMerchant === "CHIPOTLE")?.filedCategoryIds,
     ).toEqual([dining.id]);
   });
+
+  describe("scope", () => {
+    it("with no scope, behaves exactly as before (regression)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-10" });
+
+      const groups = loadMerchantGroups(handle.db);
+      const safeway = groups.find((g) => g.normalizedMerchant === "SAFEWAY");
+      expect(safeway?.count).toBe(2);
+      expect(safeway?.totalCents).toBe(-7500);
+    });
+
+    it("narrows count/totalCents to rows dated inside the scoped month", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-10" });
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -1000, date: "2026-09-30" });
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 9 });
+      const safeway = groups.find((g) => g.normalizedMerchant === "SAFEWAY");
+      expect(safeway?.count).toBe(2);
+      expect(safeway?.totalCents).toBe(-3500);
+    });
+
+    it("excludes a merchant entirely when it has no qualifying row in the scoped month", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -5000, date: "2026-07-10" });
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 9 });
+      expect(groups.find((g) => g.normalizedMerchant === "SAFEWAY")).toBeUndefined();
+    });
+
+    it("does NOT scope sampleMemos, totalRowCount or filedCategoryIds — those stay all-time (D3)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      const groceries = seedCategory("Groceries");
+      // A July row already filed as Groceries — all-time evidence.
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "SAFEWAY",
+        amountCents: -4000,
+        categoryId: groceries.id,
+        date: "2026-07-05",
+        rawMemo: "SAFEWAY JULY MEMO",
+      });
+      // A September row, still uncategorized — the only row scoped-in.
+      seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "SAFEWAY",
+        amountCents: -1500,
+        date: "2026-09-10",
+        rawMemo: "SAFEWAY SEPT MEMO",
+      });
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 9 });
+      const safeway = groups.find((g) => g.normalizedMerchant === "SAFEWAY");
+      expect(safeway?.count).toBe(1);
+      expect(safeway?.totalCents).toBe(-1500);
+      // totalRowCount and filedCategoryIds see the July row too — all-time.
+      expect(safeway?.totalRowCount).toBe(2);
+      expect(safeway?.filedCategoryIds).toEqual([groceries.id]);
+    });
+
+    it("excludes a row dated on the first day of the following month (lt boundary is exclusive)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-09-30" });
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -9999, date: "2026-10-01" });
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 9 });
+      const safeway = groups.find((g) => g.normalizedMerchant === "SAFEWAY");
+      expect(safeway?.count).toBe(1);
+      expect(safeway?.totalCents).toBe(-2500);
+    });
+
+    it("scopes correctly across a year boundary (December)", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -2500, date: "2026-12-15" });
+      // Just past the scoped month, into the next year — must not be picked up.
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -9999, date: "2027-01-01" });
+      // Just before the scoped month, into the prior year — must not be picked up.
+      seedTxn({ accountId: a.id, batchId: b.id, merchant: "SAFEWAY", amountCents: -8888, date: "2025-12-31" });
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 12 });
+      const safeway = groups.find((g) => g.normalizedMerchant === "SAFEWAY");
+      expect(safeway?.count).toBe(1);
+      expect(safeway?.totalCents).toBe(-2500);
+    });
+
+    it("excludes transfer-paired rows from the scoped count, same as unscoped", () => {
+      const a = seedAccount();
+      const b = seedBatch();
+      const anchor = seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "ZELLE",
+        amountCents: -2500,
+        date: "2026-09-10",
+      });
+      const partner = seedTxn({
+        accountId: a.id,
+        batchId: b.id,
+        merchant: "ZELLE",
+        amountCents: 2500,
+        date: "2026-09-10",
+      });
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: partner.id })
+        .where(eq(schema.transactions.id, anchor.id))
+        .run();
+      handle.db
+        .update(schema.transactions)
+        .set({ transferPairId: anchor.id })
+        .where(eq(schema.transactions.id, partner.id))
+        .run();
+
+      const groups = loadMerchantGroups(handle.db, { year: 2026, month: 9 });
+      expect(groups.find((g) => g.normalizedMerchant === "ZELLE")).toBeUndefined();
+    });
+  });
 });

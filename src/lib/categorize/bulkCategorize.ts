@@ -4,6 +4,7 @@ import { applyRuleWrite, type RuleRefusalReport } from "./applyRuleWrite";
 import { assertAssignableCategory } from "./assertAssignableCategory";
 import type { PriorRuleSnapshot } from "./priorRuleSnapshot";
 import type { BulkCategorizeInput } from "./validateBulkCategorizeInput";
+import { monthDatePredicates } from "@/lib/transactions/monthDatePredicates";
 
 type Db = typeof defaultDb;
 
@@ -74,6 +75,13 @@ export type BulkCategorizeResult = BulkCategorizeSnapshot & {
  * `categorizeTransaction`. No `excludeTxnIds` is passed: this only ever touches
  * `categoryId IS NULL` rows, which the filed-categories query skips anyway.
  *
+ * `input.scopeYear`/`scopeMonth`, when both present, narrow which of those
+ * NULL rows get flipped to one calendar month — matching `loadMerchantGroups`'
+ * own `scope` and the count it rendered — so "Categorize all N →" on a
+ * month-scoped `/categorize` files exactly N rows, never the merchant's whole
+ * history. Absent (the default for `/subscriptions` and every pre-existing
+ * caller), this behaves exactly as before.
+ *
  * A refusal withholds the RULE only; the rows are still filed, because the
  * user's decision about these rows is sound even when generalizing it is not.
  * `/categorize` disables the checkbox for such keys, but this path is also
@@ -91,11 +99,37 @@ export function bulkCategorize(
   input: BulkCategorizeInput,
   options: BulkCategorizeOptions = {},
 ): BulkCategorizeResult {
-  const { normalizedMerchant, categoryId, rememberMerchant } = input;
+  const { normalizedMerchant, categoryId, rememberMerchant, scopeYear, scopeMonth } = input;
 
   assertAssignableCategory(db, categoryId);
 
+  // `bulkCategorizeInputSchema`'s `.refine()` enforces both-or-neither, but
+  // `.refine()` doesn't narrow `z.infer`'s TYPE — `BulkCategorizeInput`
+  // still structurally allows `{scopeYear: 2026}` alone, so a caller who
+  // builds one by hand (bypassing `validateBulkCategorizeInput`) rather than
+  // going through the Server Action can still hand this function a partial
+  // scope. Re-checked here, defensively, for the same reason
+  // `assertAssignableCategory`'s checks are defensive: the wrong direction
+  // for that gap to fail is silent widening (a "September only" submit
+  // quietly filing the merchant's whole history), never a throw.
+  if ((scopeYear === undefined) !== (scopeMonth === undefined)) {
+    throw new Error("bulkCategorize: scopeYear and scopeMonth must both be present or both absent");
+  }
+  const datePredicates = monthDatePredicates(
+    scopeYear !== undefined && scopeMonth !== undefined
+      ? { year: scopeYear, month: scopeMonth }
+      : undefined,
+  );
+
   return db.transaction((tx) => {
+    // `scope`, when present, is the exact set of rows the "Categorize all N"
+    // button on a month-scoped `/categorize` promised — this only ever
+    // NARROWS the write, never widens it, so an unscoped caller
+    // (`/subscriptions`' sweep, every pre-existing `/categorize` submit)
+    // keeps touching every uncategorized row for the merchant exactly as
+    // before. The Remember/rule decision below is unaffected either way —
+    // `applyRuleWrite` keys off the merchant's whole history via
+    // `filedCategoryIds`, computed elsewhere, not off this batch.
     const matchingRows = tx
       .select({
         id: schema.transactions.id,
@@ -107,6 +141,7 @@ export function bulkCategorize(
           eq(schema.transactions.normalizedMerchant, normalizedMerchant),
           isNull(schema.transactions.categoryId),
           isNull(schema.transactions.transferPairId),
+          ...datePredicates,
         ),
       )
       .all();

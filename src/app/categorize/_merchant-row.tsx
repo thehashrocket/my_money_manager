@@ -7,6 +7,7 @@ import { formatCents } from "@/lib/money";
 import { merchantDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
 import type { MerchantGroup } from "@/lib/categorize/loadMerchantGroups";
 import type { LeafCategory } from "@/lib/categories";
+import type { YearMonth } from "@/lib/budget/monthOfIso";
 import { CategoryCombobox } from "@/components/CategoryCombobox";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { notifyUndo, notifyWrite } from "@/components/ledger/write-toast";
@@ -27,10 +28,28 @@ import {
 type Props = {
   group: MerchantGroup;
   leafCategories: LeafCategory[];
-  onOptimisticSubmit: (count: number) => void;
-  onUndo: (count: number) => void;
+  /**
+   * The page's current month scope, if any — carried as hidden form fields
+   * so `bulkCategorizeMerchantAction` files exactly the rows `group.count`
+   * promised, not the merchant's whole history. `undefined` means all-time
+   * and reproduces this row's pre-scoping behavior exactly.
+   */
+  scope: YearMonth | undefined;
+  /**
+   * `count`/`dismissed` plus the SCOPE KEY this row's submit/undo was issued
+   * under — `CategorizeUi` no-ops the call if that no longer matches the
+   * scope currently mounted (cross-model adversarial finding: an in-flight
+   * submit/undo resolving after a `ScopeNav` click must not mutate the NEW
+   * scope's counter or mark a same-named merchant done there).
+   */
+  onOptimisticSubmit: (count: number, atScopeKey: string) => void;
+  onUndo: (count: number, atScopeKey: string) => void;
   /** Lifted so the page can count "12 of 181 merchants done" (T15/D18). */
-  onDismissedChange: (normalizedMerchant: string, dismissed: boolean) => void;
+  onDismissedChange: (
+    normalizedMerchant: string,
+    dismissed: boolean,
+    atScopeKey: string,
+  ) => void;
 };
 
 /** The chevron's own column, reserved on every row so names line up. */
@@ -74,6 +93,7 @@ export const ROW_GRID =
 export function MerchantRow({
   group,
   leafCategories,
+  scope,
   onOptimisticSubmit,
   onUndo,
   onDismissedChange,
@@ -81,6 +101,14 @@ export function MerchantRow({
   const [isPending, startTransition] = useTransition();
 
   const merchant = group.normalizedMerchant;
+  /**
+   * Captured fresh on every render, so `handleSubmit`'s closure — including
+   * its `startTransition` continuation, which can resolve after a `ScopeNav`
+   * click has already re-rendered this row under a NEW `scope` prop — carries
+   * the scope THIS submit/undo was actually issued under. `CategorizeUi`
+   * compares it against the scope currently mounted before applying it.
+   */
+  const scopeKey = scope ? `${scope.year}-${scope.month}` : "all-time";
 
   /**
    * T11/D19 — `sessionStorage` IS this field's state, not a copy of it.
@@ -154,11 +182,11 @@ export function MerchantRow({
     const formData = new FormData(event.currentTarget);
 
     startTransition(async () => {
-      onOptimisticSubmit(group.count);
+      onOptimisticSubmit(group.count, scopeKey);
       try {
         const result = await bulkCategorizeMerchantAction(formData);
         clearPendingPick(merchant);
-        onDismissedChange(merchant, true);
+        onDismissedChange(merchant, true, scopeKey);
         // Belt-and-suspenders: the row usually hides on success, but an Undo
         // can bring it back, and a stale consent should not survive a
         // completed write regardless of what the next mask comparison says.
@@ -177,8 +205,8 @@ export function MerchantRow({
           onUndo: async () => {
             try {
               const undo = await undoBulkCategorizeAction(result.snapshot);
-              onUndo(undo.revertedCount);
-              onDismissedChange(merchant, false);
+              onUndo(undo.revertedCount, scopeKey);
+              onDismissedChange(merchant, false, scopeKey);
               notifyUndo(
                 `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
                 undo.warning,
@@ -190,7 +218,7 @@ export function MerchantRow({
         });
       } catch (err) {
         // Revert optimistic counter on error.
-        onUndo(group.count);
+        onUndo(group.count, scopeKey);
         toast.error(err instanceof Error ? err.message : "Categorize failed.");
       }
     });
@@ -209,7 +237,13 @@ export function MerchantRow({
       className={ROW_GRID}
     >
       <input type="hidden" name="normalizedMerchant" value={merchant} />
-      <MerchantDisclosure group={group} />
+      {scope ? (
+        <>
+          <input type="hidden" name="scopeYear" value={scope.year} />
+          <input type="hidden" name="scopeMonth" value={scope.month} />
+        </>
+      ) : null}
+      <MerchantDisclosure group={group} scope={scope} />
       <span className="text-xs text-ink-2 sm:col-start-2 sm:row-start-1 sm:text-right">
         <strong className="text-foreground">{group.count}</strong> row
         {group.count === 1 ? "" : "s"}
@@ -281,8 +315,23 @@ export function MerchantRow({
  * "Nothing to disclose" and "nothing to link to" are different facts, and
  * conflating them took the escape hatch away from precisely the rows that
  * cannot explain themselves any other way.
+ *
+ * `scope` is read for exactly one thing: whether to qualify the drilldown's
+ * `totalRowCount` as "(all time)". That figure has always differed from the
+ * row's own `count` whenever any history is filed (D3, unscoped or not) —
+ * what changed is that a scoped headline ("2 rows") now sits right next to
+ * a much larger all-time link ("See all 25 →"), which Red Team review found
+ * reads as a contradiction rather than as history. Unscoped, the two numbers
+ * were never juxtaposed with a month label claiming to be the whole story,
+ * so the qualifier is scope-gated rather than always-on.
  */
-function MerchantDisclosure({ group }: { group: MerchantGroup }) {
+function MerchantDisclosure({
+  group,
+  scope,
+}: {
+  group: MerchantGroup;
+  scope: YearMonth | undefined;
+}) {
   const merchant = group.normalizedMerchant;
   const href = merchantDrilldownHref(merchant);
   const badge = group.existingRule ? (
@@ -303,7 +352,8 @@ function MerchantDisclosure({ group }: { group: MerchantGroup }) {
         className={`inline-flex min-h-11 items-center text-[var(--text-xs)] text-terracotta underline underline-offset-4 visited:text-ink-3 hover:no-underline ${FOCUS_RING}`}
       >
         See all {group.totalRowCount} transaction
-        {group.totalRowCount === 1 ? "" : "s"} →
+        {group.totalRowCount === 1 ? "" : "s"}
+        {scope ? " (all time)" : ""} →
       </Link>
     );
 
