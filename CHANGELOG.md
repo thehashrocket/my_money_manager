@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] - 2026-09-16
+
+### Fixed
+- **A newly-linked SoFi checking account showed every transaction with no merchant name.** SimpleFIN's Star One feed always fills in a real `memo` field, so the sync code trusted that field whenever it was present and only fell back to the feed's `description` field when `memo` was completely missing. SoFi's feed instead sends `memo` as a present-but-empty string on every row, so that fallback never triggered and every SoFi transaction's merchant name came back blank. A blank memo is now treated the same as a missing one. One already-imported Citi Bank row hit the same underlying bug and has been repaired the same way (re-imported with its real merchant text); it will need re-categorizing since re-import doesn't carry over its prior category.
+
 ## [1.3.4] - 2026-09-16
 
 ### Fixed
