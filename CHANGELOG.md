@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-17
+
+### Fixed
+- **Body text was rendering as small as 11px in places, well under the 16px readability floor.** The app's whole type scale moved up a size (labels 11→12px, general UI text 13→14px, body text 15→16px), and six specific helper/warning sentences on `/goals`, `/subscriptions`, `/sync` and `/import` that were sized like small print now read at full body size. A documented sidebar layout assumption (the "no truncation needed" note on the account-balance peek list) was pinned to the old pixel width, so the account name column there now truncates with an ellipsis instead of silently risking a collision with the balance.
+
 ## [1.5.0] - 2026-09-17
 
 ### Added
