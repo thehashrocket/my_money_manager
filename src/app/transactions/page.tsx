@@ -36,7 +36,7 @@ import {
 import {
   buildHref,
   FilterBar,
-  hasNonMerchantFilters,
+  isMerchantSummaryScoped,
   type TransactionsFilterValues,
 } from "./_filter-bar";
 import { RetargetForm, type FiledCategory } from "./_retarget-form";
@@ -356,7 +356,7 @@ function FilterHeader({
         <MerchantSummary
           totalCount={totalCount}
           breakdown={categoryBreakdown}
-          scoped={hasNonMerchantFilters(values)}
+          scoped={isMerchantSummaryScoped(values)}
         />
       ) : (
         <p className="text-sm text-ink-2">
@@ -469,14 +469,20 @@ function MerchantSummary({
   totalCount: number;
   breakdown: CategoryBreakdownRow[];
   /**
-   * True when a filter other than `merchant` is also narrowing the list.
+   * `isMerchantSummaryScoped(values)` (`_filter-bar.tsx`) — true when a filter
+   * other than `merchant` is also narrowing the list, OR `includeTransfers`
+   * has widened it.
    *
    * The breakdown describes the LIST — it shares `buildPredicates` with it,
    * which is the invariant that stops the header describing rows the list is
    * not showing. `/categorize` shares none of that: `loadMerchantGroups`
    * filters on `category_id IS NULL AND transfer_pair_id IS NULL` and nothing
    * else, so it offers every uncategorized row for the key regardless of the
-   * date range, account or amount window in force here.
+   * date range, account or amount window in force here — and with
+   * `includeTransfers` on, `uncategorized` can include paired rows
+   * `loadMerchantGroups` can never surface and `bulkCategorize` refuses
+   * outright. See `isMerchantSummaryScoped`'s own docstring for why a paired
+   * row is usually (not provably always) uncategorized.
    *
    * So the count is right about this page and wrong about the destination,
    * and the CTA is the one place that difference can cost money. Measured on

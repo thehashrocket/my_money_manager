@@ -93,6 +93,10 @@ export const CLEARED_FILTERS: TransactionsFilterValues = {
  *   and adds rows — flipped the copy to "the merchant key itself may still be
  *   fine", suppressing the diagnosis on a page that is emptier for no new
  *   reason.
+ *
+ * `includeTransfers` being excluded here is correct for THIS question and
+ * wrong for a different one this function must never be reused to answer
+ * alone — see `isMerchantSummaryScoped` below.
  */
 export function hasNonMerchantFilters(values: TransactionsFilterValues): boolean {
   const params = filterValuesToSearchParams({
@@ -102,6 +106,31 @@ export function hasNonMerchantFilters(values: TransactionsFilterValues): boolean
     includeTransfers: undefined,
   });
   return params.size > 0;
+}
+
+/**
+ * Is the uncategorized count on a merchant-scoped `/transactions` page safe
+ * to promise `/categorize` can actually act on?
+ *
+ * A row's uncategorized-ness (`category_id IS NULL`) and its transfer-pairing
+ * are independent facts — pairing never touches `category_id`
+ * (`linkTransferPairManually` only ever writes `transferPairId`), and
+ * `linkCardPayment` (D4.1) deliberately permits pairing an already-categorized
+ * row rather than refusing. So a paired row is USUALLY uncategorized (that is
+ * the common case this guard exists for) but not provably always. What *is*
+ * unconditional is the other side: `/categorize`'s `loadMerchantGroups` and
+ * `bulkCategorize` both exclude every paired row regardless of its category,
+ * so `includeTransfers=true` can pull paired-and-uncategorized rows into this
+ * page's count that `/categorize` can never show or act on.
+ *
+ * Deliberately NOT folded into `hasNonMerchantFilters` itself: that function
+ * answers a different question ("why is the list empty"), for which
+ * `includeTransfers` correctly does not count, since it can only ever widen
+ * the row set. Two different questions, two different answers from the same
+ * flag.
+ */
+export function isMerchantSummaryScoped(values: TransactionsFilterValues): boolean {
+  return hasNonMerchantFilters(values) || values.includeTransfers === true;
 }
 
 /**
