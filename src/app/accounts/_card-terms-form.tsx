@@ -31,11 +31,13 @@ export function CardTermsDisclosure({
   accountName,
   creditLimitCents,
   minimumPaymentCents,
+  paydownTargetCents,
 }: {
   accountId: number;
   accountName: string;
   creditLimitCents: number | null;
   minimumPaymentCents: number | null;
+  paydownTargetCents: number | null;
 }) {
   const [open, setOpen] = useState(false);
   const [state, formAction, pending] = useActionState(updateCardTermsAction, IDLE);
@@ -50,8 +52,12 @@ export function CardTermsDisclosure({
   const [minimum, setMinimum] = useState(
     minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
   );
+  const [paydownTarget, setPaydownTarget] = useState(
+    paydownTargetCents === null ? "" : centsToDollarString(paydownTargetCents),
+  );
   const limitId = useId();
   const minimumId = useId();
+  const paydownTargetId = useId();
 
   if (!open) {
     return (
@@ -107,6 +113,25 @@ export function CardTermsDisclosure({
           className={FIELD}
         />
       </div>
+      <div>
+        <label className={LABEL} htmlFor={paydownTargetId}>
+          Paydown target
+        </label>
+        <input
+          id={paydownTargetId}
+          type="number"
+          name="paydownTarget"
+          step="0.01"
+          min="0"
+          placeholder="none"
+          /* A recurring monthly goal, compared against actual paydown on
+             /accounts — empty CLEARS the goal, same as the other two fields. */
+          value={paydownTarget}
+          onChange={(e) => setPaydownTarget(e.target.value)}
+          aria-label={`Paydown target on ${accountName}`}
+          className={FIELD}
+        />
+      </div>
       <Button
         type="submit"
         variant="primary"
@@ -125,6 +150,9 @@ export function CardTermsDisclosure({
           setLimit(creditLimitCents === null ? "" : centsToDollarString(creditLimitCents));
           setMinimum(
             minimumPaymentCents === null ? "" : centsToDollarString(minimumPaymentCents),
+          );
+          setPaydownTarget(
+            paydownTargetCents === null ? "" : centsToDollarString(paydownTargetCents),
           );
           setOpen(false);
         }}

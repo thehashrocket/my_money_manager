@@ -397,13 +397,18 @@ export async function updateCardTermsAction(
     const parsed = validateCardTermsInput({
       creditLimit: raw.creditLimit,
       minimumPayment: raw.minimumPayment,
+      paydownTarget: raw.paydownTarget,
     });
     if (!parsed.success) {
-      const onLimit = parsed.error.issues[0]?.path.includes("creditLimit");
+      const badField = parsed.error.issues[0]?.path[0];
+      const FIELD_MESSAGES: Record<string, string> = {
+        creditLimit: "Enter a credit limit this app accepts, or leave it blank.",
+        minimumPayment: "Enter a minimum payment this app accepts, or leave it blank.",
+        paydownTarget: "Enter a paydown target this app accepts, or leave it blank.",
+      };
       return fail(
-        onLimit
-          ? "Enter a credit limit this app accepts, or leave it blank."
-          : "Enter a minimum payment this app accepts, or leave it blank.",
+        (typeof badField === "string" && FIELD_MESSAGES[badField]) ||
+          "Enter a value this app accepts, or leave it blank.",
         "balance",
       );
     }
@@ -428,12 +433,17 @@ export async function updateCardTermsAction(
     // Empty-clears is deliberate and documented ("I no longer want a limit
     // recorded" has to be expressible). Absent-clears was an accident of the
     // same schema serving both, and it is the same absent-vs-zero distinction
-    // rule 9 insists on one field over. The form always posts both, so this
-    // only ever fires for a hand-made request.
+    // rule 9 insists on one field over. The form always posts all three, so
+    // this only ever fires for a hand-made request. `paydownTarget`
+    // (card-paydown-target plan) follows the identical guard — a third field
+    // sharing this schema is a third field that can be silently omitted.
     const patch: Partial<typeof schema.accounts.$inferInsert> = { updatedAt: new Date() };
     if (raw.creditLimit !== undefined) patch.creditLimitCents = parsed.data.creditLimitCents;
     if (raw.minimumPayment !== undefined) {
       patch.minimumPaymentCents = parsed.data.minimumPaymentCents;
+    }
+    if (raw.paydownTarget !== undefined) {
+      patch.paydownTargetCents = parsed.data.paydownTargetCents;
     }
 
     db.update(schema.accounts).set(patch).where(eq(schema.accounts.id, accountId)).run();

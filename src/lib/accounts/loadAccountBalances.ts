@@ -38,6 +38,8 @@ export type AccountBalance = {
   simplefinAccountId: string | null;
   creditLimitCents: number | null;
   minimumPaymentCents: number | null;
+  /** Recurring standing paydown goal, cards only. See `paidDownCents` for the actual figure it's compared against. */
+  paydownTargetCents: number | null;
   balanceAsOf: Date | null;
   balanceSource: BalanceSource | null;
   /**
@@ -99,6 +101,7 @@ export function loadAccountBalances(db: Db = defaultDb): AccountBalance[] {
       simplefinAccountId: a.simplefinAccountId,
       creditLimitCents: a.creditLimitCents,
       minimumPaymentCents: a.minimumPaymentCents,
+      paydownTargetCents: a.paydownTargetCents,
       balanceAsOf: a.balanceAsOf,
       balanceSource: a.balanceSource,
       priorStartingBalanceCents: a.priorStartingBalanceCents,

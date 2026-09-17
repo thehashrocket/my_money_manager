@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `paydown_target_cents` integer;

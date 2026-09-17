@@ -46,6 +46,14 @@ export const accounts = sqliteTable(
     // distinction is why it dodges the "minimum-payment tracking is not V1"
     // exclusion rather than violating it. Cards only, per D2=A.
     minimumPaymentCents: integer("minimum_payment_cents"),
+    // A recurring, standing paydown goal — same shape as minimum_payment_cents,
+    // NOT month-scoped (card-paydown-target plan, Issue 1A): holds until you
+    // edit it rather than being re-entered per month. Compared against
+    // `paidDownCents` (actual money moved) on `/accounts`; never read by the
+    // fund/`kind` machinery or `categories` in any way — that reuse was
+    // considered and rejected to avoid reopening DESIGN.md's closed 1.0.0 gate
+    // #2 ("a fund number is money PLANNED, not money moved"). Cards only.
+    paydownTargetCents: integer("paydown_target_cents"),
     // THE PROVIDER'S OWN `balance-date`, NOT when we fetched it (D15).
     // classifyBalanceFreshness exists precisely because a successful fetch
     // can still serve a stale provider snapshot; storing fetch time here

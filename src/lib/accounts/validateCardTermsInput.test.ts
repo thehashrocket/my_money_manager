@@ -7,12 +7,17 @@ import { validateCardTermsInput } from "./validateCardTermsInput";
  * render and the only fix was raw SQL.
  */
 describe("validateCardTermsInput", () => {
-  it("converts dollars to cents on both fields", () => {
-    const parsed = validateCardTermsInput({ creditLimit: "5000", minimumPayment: "50" });
+  it("converts dollars to cents on all three fields", () => {
+    const parsed = validateCardTermsInput({
+      creditLimit: "5000",
+      minimumPayment: "50",
+      paydownTarget: "500",
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.creditLimitCents).toBe(500_000);
       expect(parsed.data.minimumPaymentCents).toBe(5_000);
+      expect(parsed.data.paydownTargetCents).toBe(50_000);
     }
   });
 
@@ -25,20 +30,30 @@ describe("validateCardTermsInput", () => {
   // but makes "no limit recorded" and "a $0 limit" indistinguishable in the
   // form, since the field then renders 0.00 instead of the `none` placeholder.
   it.each(["", "   ", "\t", null, undefined])("treats %j as CLEARED, never as zero", (empty) => {
-    const parsed = validateCardTermsInput({ creditLimit: empty, minimumPayment: empty });
+    const parsed = validateCardTermsInput({
+      creditLimit: empty,
+      minimumPayment: empty,
+      paydownTarget: empty,
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.creditLimitCents).toBeNull();
       expect(parsed.data.minimumPaymentCents).toBeNull();
+      expect(parsed.data.paydownTargetCents).toBeNull();
     }
   });
 
   it("keeps an explicit zero distinct from a cleared field", () => {
-    const parsed = validateCardTermsInput({ creditLimit: "0", minimumPayment: "" });
+    const parsed = validateCardTermsInput({
+      creditLimit: "0",
+      minimumPayment: "",
+      paydownTarget: "0",
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.creditLimitCents).toBe(0);
       expect(parsed.data.minimumPaymentCents).toBeNull();
+      expect(parsed.data.paydownTargetCents).toBe(0);
     }
   });
 
@@ -47,18 +62,32 @@ describe("validateCardTermsInput", () => {
     expect(validateCardTermsInput({ creditLimit: "banana" }).success).toBe(false);
   });
 
+  it("refuses a negative or non-numeric paydown target", () => {
+    expect(validateCardTermsInput({ paydownTarget: "-100" }).success).toBe(false);
+    expect(validateCardTermsInput({ paydownTarget: "banana" }).success).toBe(false);
+  });
+
   // Shared with account creation via STARTING_BALANCE_DOLLARS_MAX, so the two
   // cannot disagree about what magnitude is legal.
   it("refuses a limit above the shared maximum", () => {
     expect(validateCardTermsInput({ creditLimit: "100000001" }).success).toBe(false);
   });
 
-  it("lets one field change while the other is cleared", () => {
-    const parsed = validateCardTermsInput({ creditLimit: "7500", minimumPayment: "" });
+  it("refuses a paydown target above the shared maximum", () => {
+    expect(validateCardTermsInput({ paydownTarget: "100000001" }).success).toBe(false);
+  });
+
+  it("lets one field change while the others are cleared", () => {
+    const parsed = validateCardTermsInput({
+      creditLimit: "7500",
+      minimumPayment: "",
+      paydownTarget: "",
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.creditLimitCents).toBe(750_000);
       expect(parsed.data.minimumPaymentCents).toBeNull();
+      expect(parsed.data.paydownTargetCents).toBeNull();
     }
   });
 });
