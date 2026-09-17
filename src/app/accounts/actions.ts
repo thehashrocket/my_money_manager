@@ -437,39 +437,60 @@ export async function updateCardTermsAction(
       return fail(`${account.name} is not a credit card.`);
     }
 
-    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears — but
-    // "absent" alone is no longer the right test. It used to be: the form
-    // always posts all three fields, so `raw.field !== undefined` was really
-    // testing "is this a hand-made request that dropped a key," which only a
-    // crafted or buggy POST could trigger.
+    // ABSENT IS NOT THE SAME AS EMPTY, and only one of them clears — and
+    // "absent" is STILL the first test, layered with snapshot-diffing rather
+    // than replaced by it (adversarial-review finding, both Codex and a
+    // Claude subagent independently, card-paydown-target plan). It used to
+    // be: the form always posts all three fields, so `raw.field !== undefined`
+    // was really testing "is this a hand-made request that dropped a key,"
+    // which only a crafted or buggy POST could trigger.
     //
     // A STALE TAB triggers the same class of bug through a different door
-    // (red-team finding, card-paydown-target plan): open /accounts in two
-    // tabs, edit only the paydown goal in tab A and save, then edit only the
-    // credit limit in tab B (still holding the pre-edit page) and save — tab
-    // B's POST still carries its own stale `paydownTarget` value, present
-    // exactly like every other field, and silently overwrites tab A's
-    // already-committed change with no warning. `raw.field !== undefined` is
-    // always true for a real submit, so it could never catch this.
+    // (red-team finding): open /accounts in two tabs, edit only the paydown
+    // goal in tab A and save, then edit only the credit limit in tab B
+    // (still holding the pre-edit page) and save — tab B's POST still
+    // carries its own stale `paydownTarget` value, present exactly like
+    // every other field, and silently overwrites tab A's already-committed
+    // change with no warning. `raw.field !== undefined` is always true for a
+    // real submit, so it could never catch this.
     //
-    // The fix is snapshot-diffing, not presence: `_card-terms-form.tsx` now
-    // posts a parallel `<field>Snapshot` hidden input carrying whatever value
-    // THIS tab last loaded for that field. A field is only applied to the
-    // patch when what was posted differs from what this tab's own snapshot
-    // says — which is true when the user actually edited it, and false when
-    // the field is merely along for the ride on an unrelated field's save,
-    // stale relative to another tab or not. `optionalPositiveDollarsSchema`'s
-    // "" vs `undefined` are both real, comparable strings here (never coerced
-    // before this comparison), so an explicit clear (typed "" against a
-    // "5000.00" snapshot) still reads as changed and still applies.
+    // Snapshot-diffing closes that: `_card-terms-form.tsx` posts a parallel
+    // `<field>Snapshot` hidden input carrying whatever value THIS tab last
+    // loaded for that field. A field is only applied to the patch when what
+    // was posted differs from what this tab's own snapshot says — which is
+    // true when the user actually edited it, and false when the field is
+    // merely along for the ride on an unrelated field's save.
+    //
+    // REPLACING the presence check with the snapshot check (rather than
+    // ANDing them) reintroduced the exact bug both were meant to prevent:
+    // `optionalPositiveDollarsSchema` is `.nullish()`, so a request that
+    // drops `creditLimit` from the POST but still carries a leftover
+    // `creditLimitSnapshot` (a crafted/malformed request — the real browser
+    // form always posts both or neither) parses the missing field to `null`,
+    // and `undefined !== "5000.00"` reads as "changed" — silently writing
+    // `null` over a real stored value. Not reachable through the real form
+    // today, but a future refactor dropping one `name` attribute while
+    // leaving its Snapshot input in place would reintroduce it with no test
+    // able to catch it. `raw.field !== undefined` as a PRECONDITION closes
+    // it: absent is never "changed," full stop, regardless of what its
+    // Snapshot claims. `optionalPositiveDollarsSchema`'s "" vs `undefined`
+    // are both real, comparable strings here (never coerced before this
+    // comparison), so an explicit clear (typed "" against a "5000.00"
+    // snapshot) still reads as changed and still applies.
     const patch: Partial<typeof schema.accounts.$inferInsert> = { updatedAt: new Date() };
-    if (raw.creditLimit !== raw.creditLimitSnapshot) {
+    if (raw.creditLimit !== undefined && raw.creditLimit !== raw.creditLimitSnapshot) {
       patch.creditLimitCents = parsed.data.creditLimitCents;
     }
-    if (raw.minimumPayment !== raw.minimumPaymentSnapshot) {
+    if (
+      raw.minimumPayment !== undefined &&
+      raw.minimumPayment !== raw.minimumPaymentSnapshot
+    ) {
       patch.minimumPaymentCents = parsed.data.minimumPaymentCents;
     }
-    if (raw.paydownTarget !== raw.paydownTargetSnapshot) {
+    if (
+      raw.paydownTarget !== undefined &&
+      raw.paydownTarget !== raw.paydownTargetSnapshot
+    ) {
       patch.paydownTargetCents = parsed.data.paydownTargetCents;
     }
 

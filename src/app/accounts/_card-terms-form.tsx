@@ -127,6 +127,34 @@ function CardTermsForm({
     paydownTarget: useId(),
   };
 
+  // Re-canonicalize `values` after every SUCCESSFUL save (adversarial-review
+  // finding, both Codex passes independently). The form deliberately stays
+  // open after a save (only Cancel/close unmounts it — see the module
+  // docstring), so `values` otherwise keeps whatever raw string the user
+  // typed forever, while `snapshot` below is recomputed from props every
+  // render through `centsToDollarString`, which always formats to 2 decimal
+  // places. Type "50" (not "50.00"), save it, then edit ONLY a different
+  // field and save again: `values.minimumPayment` is still "50" but the new
+  // snapshot (from the now-updated prop) is "50.00" — different strings for
+  // the same stored value — so the guard reads "50" as a fresh edit and
+  // reposts it, overwriting anything a different tab wrote to that field in
+  // between.
+  //
+  // Adjust-state-during-render, not `useEffect` — the same pattern this
+  // codebase already uses for `_categorize-ui.tsx`'s `renderedGroups`/
+  // `renderedBacklog` resyncs, and the one React's own lint rule
+  // (`react-hooks/set-state-in-effect`) steers away from an effect for:
+  // comparing against the last-rendered `state` right here means the
+  // correction lands in the SAME commit as the fresh props, with no extra
+  // render pass. `state` is a new object on every action return (even a
+  // repeat "ok"), so `state !== renderedState` is true exactly once per
+  // successful save.
+  const [renderedState, setRenderedState] = useState(state);
+  if (state !== renderedState) {
+    setRenderedState(state);
+    if (state.status === "ok") setValues(fieldsFromProps());
+  }
+
   // The stale-tab guard (Red Team finding, card-paydown-target plan). A
   // field genuinely never appears "absent" from this form's POST — it
   // always renders and submits all three inputs — so `updateCardTermsAction`

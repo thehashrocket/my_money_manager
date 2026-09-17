@@ -326,4 +326,31 @@ describe("updateCardTermsAction — stale-tab guard (snapshot vs. posted value)"
     expect(patch).not.toHaveProperty("creditLimitCents");
     expect(patch).not.toHaveProperty("paydownTargetCents");
   });
+
+  // THE ASYMMETRIC CASE (Codex + a Claude adversarial subagent, independently).
+  // The real browser form always posts a field and its Snapshot together —
+  // never one without the other — but nothing server-side enforced that
+  // pairing. Dropping `paydownTarget` while leaving `paydownTargetSnapshot`
+  // present made `raw.paydownTarget` (undefined) parse to `null` and compare
+  // unequal to the snapshot string, reading as "changed" and silently
+  // writing null over a real stored value — the exact destructive-by-omission
+  // bug the presence guard exists to prevent, reintroduced by relying on
+  // snapshot-diffing ALONE instead of layering it onto that guard.
+  it("a field ABSENT from the request is never written, even when its own Snapshot is present (crafted/malformed request)", async () => {
+    const fd = new FormData();
+    fd.set("accountId", "1");
+    // paydownTarget itself is never `.set()` — only its snapshot is, which a
+    // real browser submit could never produce (the two inputs are siblings
+    // in the same form, always posted together) but a crafted POST could.
+    fd.set("paydownTargetSnapshot", "500.00");
+    fd.set("minimumPayment", "75");
+    fd.set("minimumPaymentSnapshot", "50.00");
+
+    await updateCardTermsAction(IDLE, fd);
+
+    const patch = updateSetMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(patch.minimumPaymentCents).toBe(7_500);
+    expect(patch).not.toHaveProperty("paydownTargetCents");
+    expect(patch).not.toHaveProperty("creditLimitCents");
+  });
 });
