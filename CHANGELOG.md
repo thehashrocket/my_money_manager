@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-09-17
+
+### Fixed
+- **On `/transactions`, "Categorize all N →" could promise more rows than `/categorize` could actually file.** With a merchant filtered and "Show transfers" turned on, the count included transfer-paired uncategorized rows — but `/categorize` never shows those and refuses to file them. The button now drops the number and reads "Categorize this merchant →" whenever that mismatch is possible, instead of overpromising.
+
 ## [1.4.1] - 2026-09-17
 
 ### Fixed
