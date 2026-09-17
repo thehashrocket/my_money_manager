@@ -14,6 +14,7 @@ import {
   clearFiltersHref,
   filterValuesToSearchParams,
   hasNonMerchantFilters,
+  isMerchantSummaryScoped,
   merchantSearchRecoveryHref,
   thisMonthHref,
   VISIBLE_FIELDS,
@@ -332,6 +333,30 @@ describe("hasNonMerchantFilters", () => {
     expect(
       hasNonMerchantFilters({ ...emptyValues, includeTransfers: true, dateFrom: "2026-04-01" }),
     ).toBe(true);
+  });
+});
+
+describe("isMerchantSummaryScoped", () => {
+  // Unlike hasNonMerchantFilters, includeTransfers alone DOES scope this —
+  // it can pull transfer-paired uncategorized rows into the count that
+  // /categorize's loadMerchantGroups unconditionally excludes.
+  it("is scoped when includeTransfers is true even with no other filters", () => {
+    expect(isMerchantSummaryScoped({ ...emptyValues, includeTransfers: true })).toBe(true);
+  });
+
+  it("is not scoped when includeTransfers is false or unset and no other filters are active", () => {
+    expect(isMerchantSummaryScoped({ ...emptyValues, includeTransfers: false })).toBe(false);
+    expect(isMerchantSummaryScoped(emptyValues)).toBe(false);
+  });
+
+  it("stays scoped when includeTransfers is true and another filter is also active", () => {
+    expect(
+      isMerchantSummaryScoped({ ...emptyValues, includeTransfers: true, dateFrom: "2026-04-01" }),
+    ).toBe(true);
+  });
+
+  it("is scoped by an ordinary non-merchant filter alone, same as hasNonMerchantFilters", () => {
+    expect(isMerchantSummaryScoped({ ...emptyValues, dateFrom: "2026-04-01" })).toBe(true);
   });
 });
 

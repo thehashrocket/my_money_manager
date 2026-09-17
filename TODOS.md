@@ -1364,7 +1364,45 @@ Six specialist reviewers (testing, maintainability, security, performance, desig
 
 Seven specialists (testing, maintainability, security, performance, design, simplification, red team) re-ran against the branch after the six-agent fix pass. Fifteen findings were fixed in-branch and are in the v0.18.0 CHANGELOG — the `includeTransfers` empty-state misdiagnosis, the `/categorize` → `/transactions` revalidation gap, the empty-merchant-key asymmetry, the order-dependent session-storage suite, the recovery-link tests that asserted against a copy of the code, the `191`/`181` count, two false claims in the focus-ring docstring, two overstated docstrings, and three missing focus rings. Performance found nothing; the security finding was a false positive (all four flagged AMAZON tokens return zero hits against the live ledger). The rest are recorded here. Five earlier design findings (the `h-8` submit buttons, the filter-slab density, the `--ink-3` memo contrast, `/categorize`'s `← Budget` link, the third amber banner) are NOT repeated below — they are already parked in the section above.
 
-- [ ] **P2** — **`Categorize all N →` can promise rows `/categorize` structurally cannot offer.** With `?merchant=X&includeTransfers=true`, `summarizeByCategory` shares the list's predicates (correctly), so transfer-paired rows land in the NULL-category bucket — they always carry `category_id = NULL`, deliberately. `MerchantSummary` derives `uncategorized` from that bucket and links to `/categorize`, whose `loadMerchantGroups` excludes paired rows unconditionally (`isNull(transferPairId)`) and whose `bulkCategorize` refuses them. The header says N; the destination can only ever show fewer. The fix is a design call, not a mechanic: either compute the actionable figure with `includeTransfers` forced false — which makes the header describe a row set the list is not showing, the exact thing sharing `buildPredicates` exists to prevent — or keep one breakdown and say the count is scoped. Narrow to reach (needs the transfers toggle AND a merchant with paired rows), which is why it is not fixed blind. Blocked by: nothing. (`src/app/transactions/page.tsx`'s `MerchantSummary`, `src/lib/categorize/loadTransactions.ts`)
+- [x] **P2 → CLOSED (2026-09-17, v1.4.2).** **`Categorize all N →` can promise rows `/categorize` structurally cannot offer.**
+      Took the second of the entry's own two named options: kept one breakdown
+      and made the CTA say the count is scoped, rather than forcing
+      `includeTransfers` false (which would have made the header describe a
+      row set the list itself is not showing — the exact thing sharing
+      `buildPredicates` exists to prevent). `MerchantSummary`'s `scoped` prop
+      already existed for every OTHER filter (`hasNonMerchantFilters`); it
+      just didn't know `includeTransfers` was in the same class, because
+      `hasNonMerchantFilters` deliberately excludes it — correctly, for the
+      different question IT answers ("why is the list empty", where a
+      widening toggle can never be at fault; see its own docstring).
+      Verified live (not unit tested initially — `MerchantSummary` is a UI
+      component, out of V1 test scope): `CHEAPER CIGARETTES MANTECA` (11
+      transfer-paired uncategorized rows of 34) read "Categorize all 34 →"
+      before the fix with `includeTransfers=true`, and "Categorize this
+      merchant →" (no number) after. The unaffected case (`includeTransfers`
+      off) is unchanged: "Categorize all 23 →", matching what `/categorize`
+      can actually show.
+      **`/ship`'s pre-landing review (2026-09-17) found and fixed two more
+      things, both same-session.** The Testing specialist flagged the
+      `scoped` decision itself as money-consequential logic left inlined with
+      zero coverage — extracted into `isMerchantSummaryScoped(values)`
+      (`_filter-bar.tsx`, exported, composing `hasNonMerchantFilters(values)
+      || values.includeTransfers === true`), called from `page.tsx`, with 4
+      new unit tests. The Maintainability specialist caught a genuine
+      overclaim in both new docstrings — "a transfer-paired row is ALWAYS
+      `category_id IS NULL`" is false (`linkCardPayment`'s D4.1 warns rather
+      than refuses when the source leg is already categorized, and
+      `linkTransferPairManually` never touches `categoryId`), and the
+      "(rule 3)" citation attached to it didn't support the claim (rule 3 is
+      about dedup keys, not transfer pairing) — corrected to "usually, not
+      provably always uncategorized," verified against both functions by two
+      independent passes (structured + adversarial). Both adversarial passes
+      (Claude subagent, Codex) then ran clean — no fixable findings.
+      2247/2247 tests pass, `tsc --noEmit` clean, lint clean.
+      (`src/app/transactions/page.tsx`, `src/app/transactions/_filter-bar.tsx`,
+      `src/app/transactions/_filter-bar.test.ts`)
+      Original entry:
+      **`Categorize all N →` can promise rows `/categorize` structurally cannot offer.** With `?merchant=X&includeTransfers=true`, `summarizeByCategory` shares the list's predicates (correctly), so transfer-paired rows land in the NULL-category bucket — they always carry `category_id = NULL`, deliberately. `MerchantSummary` derives `uncategorized` from that bucket and links to `/categorize`, whose `loadMerchantGroups` excludes paired rows unconditionally (`isNull(transferPairId)`) and whose `bulkCategorize` refuses them. The header says N; the destination can only ever show fewer. The fix is a design call, not a mechanic: either compute the actionable figure with `includeTransfers` forced false — which makes the header describe a row set the list is not showing, the exact thing sharing `buildPredicates` exists to prevent — or keep one breakdown and say the count is scoped. Narrow to reach (needs the transfers toggle AND a merchant with paired rows), which is why it is not fixed blind. Blocked by: nothing. (`src/app/transactions/page.tsx`'s `MerchantSummary`, `src/lib/categorize/loadTransactions.ts`)
 
 - [ ] **P3** — **`merchant` is gated two different ways, and only `flatten` keeps them agreeing.** `buildPredicates` tests `filter.merchant !== undefined && filter.merchant !== ""`, while EIGHT render sites test `!== undefined` alone: in `page.tsx` the `← Categorize` back link, the removable chip and the `categoryBreakdown` switch; plus `_transaction-row.tsx`'s `merchantFiltered` dimming switch, `PrimaryLabel`'s memo promotion and `TransferRowItem`, and `_transactions-ui.tsx`'s column-header label and merchant `EmptyState`. Today `flatten` drops `""` so the states cannot diverge — but the `!== ""` guard exists precisely because that is not being relied on, and if it is ever reached the page renders an empty chip, a return link and a merchant breakdown over an unfiltered 1,540-row list. One line fixes it for good: normalize `parsed.data.merchant || undefined` once, right after the parse, so predicate and render read the same value. Blocked by: nothing. (`src/app/transactions/page.tsx`, `src/lib/categorize/loadTransactions.ts`)
 
