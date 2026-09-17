@@ -1516,7 +1516,28 @@ column).
       does not resolve it. Blocked by: nothing.
       (`src/app/_components/BacklogBanner.tsx`, `src/lib/budget/loadMonthView.ts`)
 
-- [ ] **P2** — **v0.16.0's liability feature has no rows behind it, and nothing in
+- [x] **P2 → CLOSED (2026-09-17, stale — closed by the /plan-eng-review "what
+      next" pass reviewing TODOS.md/PLAN.md, not by new work).** The premise
+      this entry was measured against — Citi feed-linked, zero transaction
+      rows, no path for a card to import its own spending — was superseded
+      2026-09-09 through 09-15 by `docs/plans/card-transaction-import.md`,
+      which this entry's own later corrections never circled back to: PR1
+      shipped the accounting cutover (D8.1) so a linked card imports its own
+      transactions from the day it was reconciled forward, and PR2 (T9) added
+      `linkCardPayment` for retroactively pairing a checking payment to the
+      card's own imported row. `paidDownCents`, the utilization bar and the
+      balance sum are no longer vacuous by construction on an importing card
+      — they depend on the card actually having posted activity since its
+      anchor, which is a live-ledger fact rather than a code gap. Left as a
+      historical record rather than deleted: this entry (and the "CORRECTED
+      2026-09-08" / "CORRECTED AGAIN 2026-09-09" trail below it) is a
+      documented case of the general rule its own last paragraph states —
+      re-measure every premise against the live database before acting on a
+      usage-pass TODO — and deleting it would lose that example. See
+      `PLAN.md`'s "SUPERSEDED (2026-09-09, same day)" note under the 1.0.0
+      gate for the decision that made this obsolete.
+      Original entry:
+      **v0.16.0's liability feature has no rows behind it, and nothing in
       the docs says so.** Measured 2026-09-08: accounts 3 (`Fixed Rate 1st Mortgage`)
       and 4 (`Citi Bank`, `-$2,206.43` owed) are both feed-linked and both hold
       **zero transaction rows**; all 1,562 rows sit on accounts 1 and 2. Three
@@ -2416,7 +2437,41 @@ burn-down rate forward.
       `tsc --noEmit` clean.
       (`src/app/budget/actions.ts`, `src/app/budget/actions.wiring.test.ts`)
 
-- [ ] **P2** — **The container spends a snapshot retention slot on every
+- [x] **P2 → PARTIALLY CLOSED (2026-09-17). The "spends a slot on every
+      restart" and "degraded snapshot proceeds after only a console.error"
+      halves are fixed; the crash-loop half is explicitly NOT — see below.**
+      `docker/entrypoint.src.mjs` gained `hasPendingMigrations(dbPath,
+      migrationsFolder)`, which mirrors drizzle's own migrator comparison
+      (`SQLiteSyncDialect#migrate`: a migration runs iff its `folderMillis`
+      exceeds the newest applied one in `__drizzle_migrations`) rather than
+      the cruder "row count vs journal length" heuristic this entry
+      suggested — so it can't drift from what `migrate()` itself decides.
+      `main()` now takes the pre-migrate snapshot and calls `pruneSnapshots`
+      only when `hasPendingMigrations` is true, so an ordinary
+      `restart: unless-stopped` reboot with nothing to apply neither writes a
+      snapshot nor spends a retention slot pruning one. That also makes the
+      degraded-snapshot check meaningful in the one case where it matters: a
+      `!snapshot.consistent` result now REFUSES to boot (`fail(...)`) rather
+      than logging a `console.error` and proceeding, because by construction
+      it can only fire when a migration is actually about to run — exactly
+      the case this entry named ("0020 and 0021 have no down migration...
+      refuse on `!snapshot.consistent` when there ARE pending migrations").
+      **Not fixed, and not claimed fixed: the crash-loop half.** This entry's
+      own text is explicit that the pending-migrations check does not rescue
+      it — if a migration FAILS against the live volume, migrations stay
+      pending on every `restart: unless-stopped` retry, so a crash loop still
+      takes an unbounded full-ledger `VACUUM INTO` on every restart (the
+      pending check now correctly identifies EVERY one of those restarts as
+      "migration pending," which is true, just not sufficient on its own to
+      bound the count). The documented mitigation stands: run the migration
+      once via `docker compose run --rm` before bringing the restarting
+      service up. 12 new tests in `docker/entrypoint.test.mjs` pin
+      `hasPendingMigrations` against the real migration folder (no db yet,
+      fully caught up, a newer migration added after catch-up, an empty
+      folder); 2238 tests pass, `tsc --noEmit` clean, lint clean.
+      (`docker/entrypoint.src.mjs`, `docker/entrypoint.test.mjs`)
+      Original entry:
+      **The container spends a snapshot retention slot on every
       restart, not on every migration.** (Merged 2026-09-09: this was filed
       FOUR times — twice verbatim, plus the degraded-snapshot and crash-loop
       halves as separate entries. All four are one boot-path decision.)
@@ -3262,3 +3317,21 @@ A Claude adversarial subagent and Codex (adversarial challenge, then structured 
 - **Round 2 (Codex structured review, first re-run).** The Round 1 guard used strict scope-key equality, which is wrong in the other direction: two different scope keys are not necessarily disjoint — "all-time" contains every month. Categorize two September rows, switch to all-time, click the still-visible toast's Undo: the DB write is correct, but the strict-equality guard discarded the counter update entirely, permanently undercounting the all-time header relative to its own row list (no revalidation path corrected it, since the reset was gated on `scopeKey` changing, which it hadn't). Fixed: a `scopeKeysCanOverlap(a, b)` helper (`a === b || a === "all-time" || b === "all-time"`) replaces the strict check — only two DIFFERENT specific months are provably disjoint (a transaction cannot be dated in both), so only that case skips.
 - **Round 3 (Codex structured review, second re-run).** Applying the update in the genuinely-overlapping case (Round 2's fix) still used the WRONG magnitude: restoring 25 all-time rows while viewing September added the full 25 to September's counter, not the 2 that were actually September's. Root cause, once traced: `count`'s resync was gated on `scopeKey` changing, so a fresh, authoritative `initialBacklog` arriving from the SAME server action's own `revalidatePath` (for the currently-viewed, unchanged scope) was being silently discarded — the exact number that would have corrected the optimistic guess never got the chance to. Fixed: `count` now resyncs to `initialBacklog.count` whenever the `initialBacklog` object reference changes (an `renderedBacklog`-tracked adjust-state-during-render, mirroring the file's existing `renderedGroups`/`hidden` pattern), independent of whether `scopeKey` also changed — the optimistic delta still gives instant feedback, but the next authoritative payload (arriving moments later either way) now always wins.
 - **Verification.** A fourth Codex structured-review pass, run to confirm Round 3's fix, hung for 47+ minutes (well past its own 9-minute timeout — `gtimeout 540` did not terminate it) with no output ever written; killed and recorded as missing coverage per this project's own timeout doctrine ("a timed-out pass is missing coverage, not a clean bill"), not treated as a clean pass. The two PRIOR structured-review passes (Rounds 2 and 3) both completed normally and both found real, since-fixed issues — that is the adversarial coverage this branch actually has. tsc/lint clean, 2231/2231 tests pass throughout (this fix touches only `_categorize-ui.tsx`/`_merchant-row.tsx`, both UI components excluded from this project's automated test coverage per CLAUDE.md — verified instead via live browser: normal same-scope submit and Undo both confirmed still correct after each round's fix). (`src/app/categorize/_categorize-ui.tsx`, `src/app/categorize/_merchant-row.tsx`, `src/app/categorize/_pending-pick.ts`)
+
+## Follow-ups from the `/ship` pre-landing + adversarial review (2026-09-17, docker-snapshot-retention)
+
+Five specialists (testing, maintainability, security, performance, simplification) plus a Red Team pass ran against the fix for "the container spends a snapshot retention slot on every restart" (closed above). Security/performance/simplification: NO FINDINGS. Fixed same-session from testing + maintainability: a duplicated `"/app/drizzle"` literal (extracted to `MIGRATIONS_FOLDER`); a redundant `dbExists &&` term in `tookPreMigrateSnapshot` (removed — the variable itself was later deleted in favor of using `migrationsPending` directly at both call sites); missing test coverage for a db-file-with-no-`__drizzle_migrations`-table, a table that exists with zero rows, and a corrupt db file (three new tests); `hasPendingMigrations()`'s call site had no try/catch, unlike every other guard in this file, so a corrupt/locked `money.db` would have thrown unhandled instead of failing with a readable message (now wrapped, matching the file's existing idiom); and the degraded-snapshot boot-refusal itself had zero test coverage since `main()` isn't unit-testable (`process.exit`, dynamic import of `/app/server.js`) — extracted into `checkPreMigrateSnapshot(snapshot) → {ok, message}`, the same `{ok, message}` shape `checkTz`/`checkCwd` already use, and unit tested directly on a plain object literal rather than needing to reproduce rule 5's documented reader-pinned-VACUUM race for real.
+
+Then a cross-model adversarial round (Claude subagent + Codex adversarial challenge, independently; then Codex structured review) found a genuinely serious issue neither the specialists nor Red Team caught, plus three smaller ones, all fixed same-session:
+
+- **[Found by BOTH Claude and Codex independently] The degraded-snapshot hard-refusal can poison the very retention pool this whole fix exists to protect.** `createSnapshot`'s `copyFileSync` fallback WRITES the degraded snapshot file to disk before ever reporting `consistent: false` back to the caller, and `pruneSnapshots` is never reached when `checkPreMigrateSnapshot` refuses the boot (the refusal exits first). Under `restart: unless-stopped`, that refusal RETRIES the identical failure on every restart, and each retry leaves ANOTHER degraded file in the same `PRE_MIGRATE_PREFIX` pool real historical snapshots share — `pruneSnapshots` has no way to tell a degraded file from a good one (it only sees filenames and mtimes). Once more than 10 restarts accumulate junk, the eventual successful migration's prune call keeps only the 10 most recent files, which by then are all crash-loop garbage, silently deleting every real rollback point — the exact failure class ("a restart-happy container evicts real snapshots") this whole PR was written to close, reintroduced through a different door. Fixed: `quarantineDegradedSnapshot(snapshotPath)` renames the file out of the `PRE_MIGRATE_PREFIX` prefix match (not deleted — rule 5 says even a degraded copy beats no snapshot at all) before `fail()` runs, so it can never compete for a retention slot.
+- **[Claude adversarial] The `readMigrationFiles` accuracy fix (splitting "image build problem" from "database problem" error messages) was gated inside `if (dbExists)`, so it never ran on the FIRST-EVER boot** — the most likely moment to discover a broken image build (no `drizzle/` folder bundled, or a migration `.sql` referenced by the journal missing). On that path the identical error still surfaced, but through `runMigrations`'s own internal `migrate()` call, mislabeled as "Migration failed — refusing to boot on a half-applied schema" — precisely the confusion this diagnostic was written to eliminate, just on a code path the guard didn't cover. Fixed: moved the `readMigrationFiles` pre-check outside the `dbExists` guard so it runs unconditionally.
+- **[Codex adversarial] The refusal message suggested `pnpm db:export` as a recovery step, which runs `docker compose exec` against a RUNNING container — the one thing that does not exist at the exact moment this message fires** (the container just refused to boot). Fixed: points at `pnpm db:import` instead, which starts from a stopped container by design.
+- **[Codex adversarial] The same message inlined `sudo chmod 777 ./backups` as the permissions remedy — CLAUDE.md's own already-documented, CI-validated fix for this exact EACCES hazard, but now duplicated in a second location that could drift from it.** Fixed: references CLAUDE.md's Docker section by name instead of repeating the command.
+- **[Codex structured review, P3] Once quarantining moved the file, the failure message still cited the OLD (now-nonexistent) snapshot path** — an operator inspecting the preserved copy for manual recovery would get a filename from the logs that no longer exists. Fixed: the message now names the quarantined path when the rename succeeds.
+
+One INVESTIGATE finding recorded rather than fixed, self-assessed unreproduced by its own source:
+
+- [ ] **P4 — Codex (unreproduced, "I did not reproduce it here"): `hasPendingMigrations()`'s new READONLY connection could fail on a database with a hot rollback journal where a WRITABLE connection would have auto-recovered.** SQLite returns `SQLITE_READONLY_ROLLBACK` when opened read-only against a file needing rollback-journal recovery, which a writable open resolves automatically. Before this branch, the boot sequence's FIRST database open was `runMigrations`'s writable connection; this branch inserts a new READONLY open ahead of it. This app sets `journal_mode = WAL` immediately on every write connection (`runMigrations`, and per CLAUDE.md the app's own runtime singleton), so a database that has ever been touched by this app's own code should never be sitting on a hot ROLLBACK journal — the precondition would need a snapshot restored via `pnpm db:import` that was itself taken via `createSnapshot`'s `copyFileSync` fallback (not `VACUUM INTO`, which always produces a clean, checkpointed file) of a source database with a genuinely in-flight, uncommitted rollback-mode transaction at the exact moment of copy — a state this app's WAL-everywhere design shouldn't produce during ordinary operation. Not fixed blind against an unverified, narrow precondition; if it ever manifests, the accurate symptom would be `hasPendingMigrations` throwing `SQLITE_READONLY_ROLLBACK` at boot, now failing loudly via the try/catch this same branch added rather than silently. (`docker/entrypoint.src.mjs`)
+
+20 new/changed tests in `docker/entrypoint.test.mjs` (2223 → 2243), `tsc --noEmit` clean, lint clean, `pnpm build:docker-artifacts` bundles cleanly with the new `drizzle-orm/migrator` import. (`docker/entrypoint.src.mjs`, `docker/entrypoint.test.mjs`)
