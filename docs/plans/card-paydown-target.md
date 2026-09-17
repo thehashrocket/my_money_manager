@@ -159,7 +159,7 @@ parallelization opportunity.
 - [x] **T6 (P2)** — Extend the paid-down display line in `_account-row.tsx`.
 - [x] **T7 (P2)** — Browser-verified on a seeded scratch ledger (`pnpm db:seed-dev`, never the real `data/money.db`): target-set-with-partial-progress renders "paid down $500.00 of $600.00 planned this month"; target-set-with-uncomputable-actual (zero-row Amex) correctly omits the line rather than showing a false "$0 of $200.00"; no-target behavior unchanged.
 
-**Shipped as v1.5.0** — 2263 tests pass (2256 + 7 new), `tsc --noEmit` clean, lint clean (pre-existing unrelated warnings only). See CHANGELOG.md.
+**Shipped as v1.5.0** — 2262 tests pass (2256 baseline already included this plan's own 7 new cases; +6 more from `/ship`'s coverage audit backfilling the accountId guard and the two pre-existing field-message branches), `tsc --noEmit` clean, lint clean (pre-existing unrelated warnings only). See CHANGELOG.md.
 
 ## GSTACK REVIEW REPORT
 
