@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.0] - 2026-09-17
+## [1.4.1] - 2026-09-17
+
+### Fixed
+- **Running the app in Docker could silently lose your database backups over time.** Every container restart took a fresh snapshot and trimmed old ones down to the last 10 — even an ordinary restart with no schema change at all. Ten restarts after any real upgrade, that upgrade's own backup could get pushed out by backups of nothing happening. Snapshots and cleanup now only run when a database upgrade is actually about to happen.
+- **A database backup that failed partway (for example, a permissions problem on the backups folder) used to just print a warning and boot anyway — including right before an upgrade with no working backup to fall back on.** Since backups are now only taken right before an upgrade, a failed one means exactly what it says: there's no safety net for the change about to happen, so the app now refuses to start and tells you how to fix it (and, if the failed backup left a partial file behind, keeps it out of the way of your good ones rather than letting future cleanup mistake it for something worth keeping).
 
 ### Added
 - **`/categorize` can now be scoped to a single month.** Navigate to "just September" (or any other month, via new prev/next arrows) to clear that month's backlog without touching the rest of your history. "Categorize all N →" files exactly the rows shown for the month you're viewing — never the merchant's whole history — and the backlog counter and progress ("N of M merchants done") follow whichever scope you're looking at. Switch back to "all time" at any point; the merchant name's disclosure panel and its "See all N transactions" link always show the full history regardless of scope, so you can still see how a merchant was categorized in the past.
