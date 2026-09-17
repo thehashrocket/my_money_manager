@@ -93,7 +93,7 @@ export default async function ImportPage() {
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-zinc-500">
+            <p className="text-base text-zinc-500">
               The anchor is the balance at the <em>close</em> of its date; every
               transaction dated after it is summed on top. A CSV import can only
               move it <em>forward</em>, so if it is set too late — leaving your

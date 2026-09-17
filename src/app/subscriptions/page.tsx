@@ -133,8 +133,8 @@ function EmptyState() {
   return (
     <div className="rounded-lg border border-border bg-muted/40 px-8 py-10 text-center">
       <div className="mb-3 font-mono text-3xl text-muted-foreground">↻</div>
-      <p className="mb-1 text-sm font-medium">No recurring charges detected yet</p>
-      <p className="text-xs text-muted-foreground">
+      <p className="mb-1 text-base font-medium">No recurring charges detected yet</p>
+      <p className="text-base text-muted-foreground">
         Import at least 3 months of transactions for subscription detection to work.
       </p>
     </div>
