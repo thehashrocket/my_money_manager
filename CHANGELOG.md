@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-09-18
+
+### Fixed
+- **A concurrent CSV import racing a sync could insert a genuine duplicate transaction.** `syncSimpleFin`'s content-dedup pass (the fallback used when a row has no `external_id` to match on) was only ever checked once, in the staging loop, before the write transaction opened — so a CSV import landing in that window left a second copy of the same row on the ledger with no error. `recheckContentDedup` now re-verifies inside the write transaction (and on the rollback path), diffing a fresh per-signature tally against a frozen snapshot taken at staging time, so only a signature that genuinely gained a new match since staging gets treated as a race loss.
+- **A card's anchor moving earlier mid-sync (an "Undo" landing in another tab during the fetch) could permanently strand a real transaction.** The accounting-cutover boundary used to be applied in the staging loop against the account's anchor as read *before* the network round trip — a row legitimately after a newly-earlier anchor was excluded before the in-transaction recheck ever got a chance to reconsider it, and the next sync's own window starts after the account's last imported date, so the row was never requested from the feed again. The cutover is now decided entirely inside the write transaction, against the anchor as it stands at that moment.
+- **The above fix, if left as first written, would have made "Sync now" warn on every ordinary sync of a newly-linked card.** Widening which rows reach the cutover check meant a routine, no-race exclusion (a feed response that legitimately reaches back before a card's own anchor, before its first real charge posts) started firing the same "landed on or before its balance date... use Undo... then sync again" warning meant only for a genuine race — contradicting this app's own rule that a routine drop should stay quiet. The warning now fires only when the anchor actually changed since staging.
+- **Sync's rollback path (triggered when nothing new landed for anyone) could silently drop an unrelated account's "connection may need re-authorising" warning**, and separately could blank an unrelated account's genuine reported bank balance and duplicate counts — both because that path assumed it could only be reached when every synced account had been individually unlinked, an assumption this release's other fixes broke. Both are now scoped to the accounts that actually caused the rollback.
+
+### Known, not fixed this release
+- A SimpleFIN feed sending the same transaction id twice in one response, with one occurrence on either side of a card's cutover date, can now cause the eligible occurrence to be silently lost — a real, narrow regression from the fix above. Recorded in `TODOS.md` rather than rushed; a correct fix needs a real design pass on how duplicate ids are tie-broken.
+- Found, unrelated, while verifying the above: a transaction imported from a CSV file while still pending is never promoted to posted by a later sync, if the same transaction later arrives over the SimpleFIN feed with a matching date/amount/memo — it's silently treated as a duplicate and the pending row is left stuck, permanently missing from the account's balance. Pre-existing, not introduced by this release; recorded in `TODOS.md`.
+
 ## [1.6.1] - 2026-09-17
 
 ### Fixed
