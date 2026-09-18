@@ -566,11 +566,40 @@ being fixed: the function now re-checks the prior category's kind INSIDE its
 own write transaction (rule 11 — never trust a value read before the moment
 it's used) and falls back to `null` (uncategorized) instead of the fund,
 matching the fallback this same file already used for a row someone else
-re-categorized during the undo window. `undoBulkRetarget`'s structurally
-similar unguarded restore was checked and is NOT the same bug — it is
-deliberate: `bulkRetarget` allows a fund as a retarget SOURCE (moving rows
-*off* it), so undoing that retarget must be able to put them back. Only
-`undoCategorizeTransaction` was the accidental gap.
+re-categorized during the undo window.
+
+**This section originally claimed `undoBulkRetarget`'s structurally similar
+unguarded restore was checked and was NOT the same bug — that claim was
+itself wrong, and a FOURTH review pass (code-reviewer and silent-failure-hunter,
+independently, both reproducing it end to end with no crafted input) found
+why.** The dismissal's reasoning — `bulkRetarget` allows a fund as a retarget
+SOURCE, so undoing it must be able to restore into one — is sound for exactly
+one case: a source that was *already* a fund when the retarget ran. It does
+not cover a source that *becomes* a fund *during* the 10-second undo window,
+and that case is not a corner: moving a merchant's rows off a category is
+precisely what can leave that category unused (zero transactions, zero
+`budget_periods` rows), and an unused category is freely reclassifiable to
+`fund` with **zero confirmation** (rule 8 — `assignableKinds` returns every
+kind once `isCategoryUsed` is false). So: retarget a single-merchant category's
+rows away, reclassify it to `fund` from the `⋯` menu before the toast expires,
+click Undo — the rows land back in the now-fund category, with no rule and no
+import involved at all. This is the exact same race `undoCategorizeTransaction`
+was just fixed for, on the one write path that fix didn't touch, reachable
+through completely ordinary use.
+
+**Fixed the same way, with one simplification a fifth review pass (code-reviewer)
+argued for and this section adopts:** rather than snapshotting whether the
+source category was ALREADY a fund at retarget time (which would need a new
+field round-tripping through the browser, just to preserve "undo can restore
+into a `pnpm db:studio`-created fund," a scenario this app's own thesis says
+shouldn't exist), `undoBulkRetarget` now unconditionally re-checks the
+source's CURRENT kind inside its write transaction and falls back to `null`
+whenever it is a fund — no exceptions, no snapshot field, no ambiguity about
+which case is which. The one behavior this trades away — undoing a bulk
+retarget that deliberately drained a `pnpm db:studio`-created fund no longer
+restores into that fund — is the correct trade given the same "if a fund
+holding rows is a state that can't exist, an undo that recreates it is not a
+feature worth preserving" reasoning this whole section is built on.
 
 Consequences that follow from it, so they are not re-litigated one at a time:
 
