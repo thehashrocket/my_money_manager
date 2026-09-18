@@ -501,7 +501,7 @@ that has not earned the layout.
 checking account it always was. `/goals` says so plainly and this page must not
 contradict it.
 
-### What a fund's progress means (1.0.0 gate #2, closed 2026-09-08)
+### What a fund's progress means (1.0.0 gate #2, closed 2026-09-08; the underlying product question closed permanently 2026-09-17)
 
 **A fund number is money PLANNED, not money moved.** Every figure this app
 shows for a fund — `Planned`, `Planned to date`, `Left to target`, and
@@ -521,11 +521,38 @@ than rediscovering:
 file a transaction to a fund. `assertAssignableCategory` throws
 `SavingsGoalCategoryError` on `kind='fund'`, and all three categorize write
 paths route through it; `CategoryCombobox` filters funds out of the picker
-before that; and `src/lib/rules.ts` refuses to auto-file a *positive* row into
-a fund at import time, on the grounds that such a row "poisons" the category.
-So `withdrawn` is a sum over a set no ordinary path can populate, and funding a
-fund once shows you the same number twice. There was never an experiment to
-run — only this decision to record.
+before that; and `src/lib/rules.ts` refuses to auto-file *any* row, either
+sign, into a fund at import time, on the grounds that such a row "poisons"
+the category. So `withdrawn` is a sum over a set no ordinary path can
+populate, and funding a fund once shows you the same number twice. There was
+never an experiment to run — only this decision to record.
+
+**Correction (2026-09-17): the import-time guard used to be one-sided, and
+that was a real bug, not a documentation gap.** `rules.ts` originally refused
+only a *positive* row into a fund, on the theory that a negative row is a
+withdrawal and `withdrawn` was meant to sum exactly that. It missed that
+`setCategoryKind` never touches `category_rules` — a rule trained while a
+category was `expense` or `income` survives untouched if that category is
+later reclassified to `fund` through the `⋯` menu, and the one-sided guard
+then let a later, ordinary import silently auto-file a matching debit into
+the now-fund category with no explicit user action, populating `withdrawn`
+in exactly the way this section says is impossible. Found by an outside
+review of the decision below, verified against the code, and closed:
+`rules.ts` now refuses a fund match on *either* sign, so the two numbers are
+identical for a reason that is actually true in code, not just in the manual
+categorize paths. See `src/lib/rules.test.ts`'s "trained BEFORE the category
+was reclassified to fund" case for the pinned regression.
+
+**A second outside review (Red Team, pre-landing) asked the question the fix
+alone doesn't answer: had the loophole already fired on this ledger before it
+closed?** A closed guard says nothing about the past — the loophole was
+reachable via ordinary use (retarget a category's rows elsewhere until it's
+unused, reclassify it to `fund`, let a later import auto-file a matching
+debit through the surviving rule) for as long as the one-sided guard existed.
+Measured directly against the live ledger rather than inferred: `SELECT
+count(*) FROM transactions t JOIN categories c ON c.id = t.category_id WHERE
+c.kind = 'fund'` returns **0**. The invariant this section states was never
+violated in practice, not just closed going forward.
 
 Consequences that follow from it, so they are not re-litigated one at a time:
 
@@ -543,11 +570,29 @@ Consequences that follow from it, so they are not re-litigated one at a time:
   carries forward. That is rule 1's v0.19.0 decision and it is untouched — the
   fund guard is fund-scoped precisely so it does not quietly reverse it.
 
-What is deliberately still open is the *product* question underneath: whether
-money should be able to move into a fund at all (a real transfer-into-savings
-model), rather than a fund being a plan you keep in your head and your checking
-account. That is successor work to rule 1's `loadGoals` note, not a 1.0.0
-blocker — this section documents the model the code actually implements.
+**Closed permanently (2026-09-17): a fund's progress is money planned, full
+stop — this is the intended, permanent model, not a placeholder awaiting a
+real transfer-into-savings feature.** The product question this section used
+to leave open — whether money should ever be able to move into a fund,
+tracked against a real linked account — is decided: no. `categories.account_id`
+and the reconciled-paydown-envelope redesign that would have needed it
+(TODOS.md's "PR3: what a fund's progress MEANS") are retired as a
+deliberate non-goal, not merely deferred. The narrower, concrete need that
+motivated the idea — plan a credit card paydown and check whether you hit
+it — already shipped decoupled from this question entirely, in v1.5.0's
+`accounts.paydown_target_cents` (`docs/plans/card-paydown-target.md`).
+
+**Named explicitly so it isn't silently assumed away: a fund still has no
+lifecycle for spending from it and replenishing it later.** `allocatedCents`
+can't go negative (`validateAllocateInput.ts`), and a fund refuses every
+transaction regardless of sign (the correction above), so there is no
+supported way to represent "allocate $1,000 into Emergency Fund, spend $400
+on an actual emergency, then replenish it." An emergency payout is just an
+ordinary expense filed to whatever category fits, with no connection back to
+the fund it was meant to protect. That is an accepted gap in what a fund
+models, not an oversight this section failed to consider — a fund is a
+savings *target* you track in your head against your checking balance, not a
+reserve account this app reconciles for you.
 
 **Bands are ordered INCOME → EXPENSES → FUNDS, and the help panel follows all
 three.** You cannot assign a dollar you have not planned, and a fund
