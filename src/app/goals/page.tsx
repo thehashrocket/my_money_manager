@@ -32,11 +32,19 @@ export default async function GoalsPage() {
           UI still asserting a fact about money that may never have moved
           (B2) — this says so plainly instead. `empty`, not `error`: this is
           the page working as designed, not a failure, so it shouldn't wear
-          the same redbrown `!` mark a real error does. */}
+          the same redbrown `!` mark a real error does.
+          This is the permanent model (DESIGN.md, "What a fund's progress
+          means", closed 2026-09-17), not a placeholder awaiting a future
+          transfer-tracking feature — the earlier "...until that's true"
+          phrasing promised a capability that was never going to ship. A
+          fund also has no way to represent spending from it and replenishing
+          it later (allocations can't go negative); an actual withdrawal —
+          say, an Emergency Fund payout — is just an ordinary expense filed
+          to whatever category fits, disconnected from the fund. */}
       <StateCard
         variant="empty"
-        title="Progress tracking is paused"
-        description="These are amounts you budgeted toward each fund, not confirmed transfers — the app can't tell whether the money actually moved, so there's no percent-complete bar until that's true."
+        title="Progress means planned, not moved"
+        description="These are amounts you budgeted toward each fund, month by month — never confirmed transfers, and never spending from the fund itself. There's no percent-complete bar because a fund tracks a savings plan, not an account balance."
       />
 
       <section className="space-y-3">
