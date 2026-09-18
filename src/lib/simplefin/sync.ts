@@ -1807,6 +1807,19 @@ function recheckCutoverAnchor<
  * The transaction that produced the warnings was discarded, so its strings went
  * with it. Re-deriving them outside is sound here precisely because nothing was
  * written: there is no ordering guarantee left to protect, only copy to rebuild.
+ *
+ * SURVIVING accounts must flush their OWN `accountWarnings` here too — a
+ * `NothingVerifiedError` rollback means every staged account ended the run
+ * with zero net rows, which says nothing about whether one of them also
+ * carries a staging-time note like "the connection may need re-authorising".
+ * The success-path `verifyStagedLinks` already does this
+ * (`warnings.push(...entry.accountWarnings)` once an entry survives); this
+ * sibling silently dropped it — found by a Codex adversarial pass over this
+ * same branch, which correctly noted that widening how often the rollback
+ * path is reached (this branch's own P4 residual: a routine pre-cutover-only
+ * card sync no longer takes the cheap early return) makes an existing,
+ * pre-existing gap in this function easier to hit in practice, even though
+ * this function itself was otherwise untouched by this branch's fix.
  */
 function verifyStagedLinksReadOnly<
   T extends {
@@ -1837,6 +1850,8 @@ function verifyStagedLinksReadOnly<
         `"${entry.account.name}" was re-linked to a different bank account while the sync was running, so its transactions were not imported — sync again to import them against the current link.`,
       );
       droppedAccountIds.push(entry.account.id);
+    } else {
+      warnings.push(...entry.accountWarnings);
     }
   }
   return { warnings, droppedAccountIds };

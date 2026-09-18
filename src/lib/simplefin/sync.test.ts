@@ -1183,6 +1183,69 @@ describe("syncSimpleFin — content dedup is re-verified inside the write transa
   });
 });
 
+describe("syncSimpleFin — NothingVerifiedError rollback path flushes SURVIVING accounts' own warnings (Codex adversarial finding)", () => {
+  // `verifyStagedLinksReadOnly` (the rollback path's link re-check) had no
+  // `else` branch flushing `entry.accountWarnings` for an account whose link
+  // is fine — unlike the success-path `verifyStagedLinks`, which always does.
+  // Pre-existing, not introduced by this branch — but this branch's own P4
+  // residual (a routine pre-cutover-only card sync no longer takes the cheap
+  // early return) makes the rollback path easier to reach in practice, since
+  // `NothingVerifiedError` now fires whenever EVERY staged account across the
+  // whole sync nets zero rows, not just when every account is individually
+  // link-dropped. A staging-time note like "the connection may need
+  // re-authorising" on an unrelated, perfectly fine-linked account would be
+  // silently swallowed — the user sees a plain "up to date" while a real
+  // connection problem goes unreported.
+  it("still reports a broken-connection warning for an unrelated account when a card's own pre-cutover-only sync triggers the rollback path", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK", name: "Checking" });
+    // Only its rows and link status matter here, never its id — no binding needed.
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-20",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        // No entry for ACT-CHK at all — the "connection may need
+        // re-authorising" case, unrelated to anything about the card.
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // Pre-anchor only, so this account alone contributes 0 rows —
+          // the P4 residual: this now goes through NothingVerifiedError
+          // instead of the cheap up-to-date early return.
+          transactions: [{ ...feedTxn("CITI-OLD", "-50.00", "COSTCO"), posted: 1785585600 }], // 2026-08-01
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+
+    // The whole point: Checking's own connection warning must survive the
+    // rollback, even though Checking's own link never moved and nothing
+    // about it was ever "dropped" in the link/content/cutover sense.
+    expect(
+      outcome.warnings.some((w) => w.includes("Checking") && w.includes("re-authorising")),
+    ).toBe(true);
+
+    const checkingRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, checking.id))
+      .all();
+    expect(checkingRows).toHaveLength(0);
+  });
+});
+
 describe("syncSimpleFin — snapshot consistency", () => {
   it("still commits but persists a warning when the pre-sync snapshot degrades", async () => {
     seedAccount({ simplefinAccountId: "ACT-1" });
