@@ -263,6 +263,17 @@ export default async function TransactionsPage({
           the right tool for what is left. */}
       {merchant !== undefined && filedCategories.length > 0 ? (
         <RetargetForm
+          // cache-components-migration plan, Stage 3c: `fromChoice`/`toValue`
+          // are plain useState with no reset-on-hide of their own (TODOS.md's
+          // own deferred finding). Under Activity, leaving `/transactions`
+          // entirely and returning now preserves this component instance —
+          // not just a searchParam-only merchant change, the risk TODOS.md
+          // originally scoped this to — so a stale, numerically-coincidental
+          // "from" choice from a DIFFERENT merchant could survive the round
+          // trip. Keying on the merchant forces a fresh instance whenever it
+          // changes, closing both paths at once rather than leaving this
+          // deferred a second time.
+          key={merchant}
           normalizedMerchant={merchant}
           filed={filedCategories}
           filedCategoryIds={retargetFiledCategoryIds}
