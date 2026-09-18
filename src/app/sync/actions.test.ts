@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SNAPSHOT_STUB } from "@/lib/simplefin/test/syncFixtures";
 
 /**
  * `linkAccountAction` used to discard `setAccountLink`'s return value
@@ -74,7 +75,7 @@ beforeEach(() => {
   unlinkTransferPairMock.mockReset();
   unlinkTransferPairMock.mockReturnValue("unlinked");
   undoSyncBatchMock.mockReset();
-  undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2 });
+  undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2, revertedCount: 0 });
   // mockRESET, not mockClear: the refresh-failure tests below install a
   // throwing implementation, and `mockClear` only wipes call history. Leaving
   // the implementation in place would make every later test in this file
@@ -181,6 +182,53 @@ describe("syncNowAction — a refusal must not revalidate first", () => {
 
     expect(state.status).toBe("error");
     expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("syncNowAction — a promotion is reported as success, not a warning", () => {
+  // Regression coverage (code-reviewer, `/ship` PR review): promotion notices
+  // used to ride in `outcome.warnings`, which `ok()` maps to `status:
+  // "warning"` (role="alert", amber) for ANY non-empty warnings array — so a
+  // clean sync that only confirmed a pending row as posted rendered as an
+  // alert, with the headline still reading "Imported 0 transactions" since
+  // that count is insert-only. A promotion is good news, not a problem.
+  it("renders plain 'ok' and names the promoted count, even when insertedCount is 0", async () => {
+    const { syncSimpleFin } = await import("@/lib/simplefin/sync");
+    vi.mocked(syncSimpleFin).mockResolvedValue({
+      status: "synced",
+      batchId: 1,
+      insertedCount: 0,
+      pairsLinked: 0,
+      ambiguous: [],
+      snapshot: SNAPSHOT_STUB,
+      accounts: [
+        {
+          accountId: 1,
+          name: "Checking",
+          insertedCount: 0,
+          duplicateByExternalId: 0,
+          duplicateByContent: 0,
+          skippedPending: 0,
+          skippedBeforeAnchor: 0,
+          promotedFromPending: 1,
+          reportedBalanceCents: null,
+          availableBalanceCents: null,
+          balanceDate: null,
+          computedBalanceCents: 0,
+          driftCents: null,
+        },
+      ],
+      balanceUpdates: [],
+      warnings: [],
+    } as Awaited<ReturnType<typeof syncSimpleFin>>);
+
+    const { syncNowAction } = await import("./actions");
+    const state = await syncNowAction();
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(
+      /confirmed 1 pending transaction as posted/i,
+    );
   });
 });
 
@@ -599,6 +647,38 @@ describe("undoSyncAction — a refusal must not revalidate the form away", () =>
     const paths = vi.mocked(revalidatePath).mock.calls.map((c) => c[0]);
     expect(paths).toEqual(
       expect.arrayContaining(["/sync", "/", "/transactions", "/categorize", "/budget"]),
+    );
+  });
+
+  it("reports a promotion-only undo as 'put back to pending', not 'removed 0 transactions'", async () => {
+    undoSyncBatchMock.mockReturnValue({
+      status: "undone",
+      batchId: 3,
+      deletedCount: 0,
+      revertedCount: 1,
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toBe(
+      "Undid the sync — removed 0 transactions and put 1 transaction back to pending.",
+    );
+  });
+
+  it("reports a mixed undo (deleted AND reverted) with both counts", async () => {
+    undoSyncBatchMock.mockReturnValue({
+      status: "undone",
+      batchId: 3,
+      deletedCount: 1,
+      revertedCount: 2,
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toBe(
+      "Undid the sync — removed 1 transaction and put 2 transactions back to pending.",
     );
   });
 

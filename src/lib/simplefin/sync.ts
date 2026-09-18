@@ -11,8 +11,27 @@ import { readAccessUrl } from "./accessUrl";
 import { asFeedAccountId, type FeedAccountId } from "./feedAccountId";
 import { fetchAccounts } from "./client";
 import { contentSignature } from "../contentSignature";
+import {
+  buildContentCandidates,
+  claimPendingCandidate,
+  type ContentCandidate,
+} from "../contentCandidates";
 import { buildRuleMatcher } from "../rules";
 import { mapTransaction, type MappedRow } from "./mapTransaction";
+
+/**
+ * A `MappedRow` plus sync-internal staging bookkeeping — `mapTransaction.ts`
+ * stays scoped to pure feed-mapping concerns (maintainability specialist
+ * finding, `/ship`: an earlier version widened `MappedRow` itself, so its
+ * exported type carried a field with no producer in that file). Set by
+ * sync's own staging loop, never by `mapTransaction`, when a posted incoming
+ * row content-matched a PENDING existing row — that row's real-world
+ * counterpart finally arriving. The write transaction re-verifies the
+ * candidate is still available before promoting it in place instead of
+ * inserting this row as new. See the staging loop and
+ * `src/lib/contentCandidates.ts`.
+ */
+type StagedRow = MappedRow & { promotionCandidateId?: number };
 import {
   matchTransfers,
   type CrossAccountBucket,
@@ -108,6 +127,15 @@ export type AccountSyncCounts = {
   duplicateByExternalId: number;
   /** Already had this row from a CSV import, matched on content. */
   duplicateByContent: number;
+  /**
+   * A pending CSV row this sync confirmed as posted, updating it in place
+   * instead of inserting a new row — see `sync_promotions` (schema.ts) and
+   * the staging loop below. Counted separately from `insertedCount`: a
+   * promotion is a real write, but it is not new money the way rule 1's
+   * spend/income distinction already refuses to fold two different facts
+   * into one figure.
+   */
+  promotedFromPending: number;
   /**
    * Pending rows the feed returned and sync refused to write. Should always be
    * 0 — see the skip in the row loop for why writing them would double-count.
@@ -236,17 +264,19 @@ function isoDaysAgo(days: number, now: Date): string {
  * per-account off `now`, while a future caller could scope it differently
  * without this function needing to know.
  */
-function loadContentBudget(
+function queryContentDedupCandidateRows(
   db: AnyDb,
   accountId: number,
   feedId: FeedAccountId,
   floorIso: string,
-): Map<string, number> {
-  const existingByContent = db
+) {
+  return db
     .select({
+      id: schema.transactions.id,
       date: schema.transactions.date,
       amountCents: schema.transactions.amountCents,
       rawMemo: schema.transactions.rawMemo,
+      isPending: schema.transactions.isPending,
     })
     .from(schema.transactions)
     .where(
@@ -293,15 +323,172 @@ function loadContentBudget(
       ),
     )
     .all();
+}
+
+/**
+ * The posted-only content-dedup budget: how many times each signature is
+ * already covered by an existing POSTED row. A pending existing row is
+ * deliberately EXCLUDED from this tally — it is never a plain duplicate, it
+ * is a promotion candidate (see `loadPromotionCandidates` below) or nothing.
+ * Before this split, a pending row counted toward the same budget a posted
+ * one did, which is the bug this plan exists to fix: a posted incoming row
+ * would silently "spend" a pending existing row's slot and be dropped,
+ * leaving the pending row stuck forever.
+ */
+function loadContentBudget(
+  db: AnyDb,
+  accountId: number,
+  feedId: FeedAccountId,
+  floorIso: string,
+): Map<string, number> {
+  const rows = queryContentDedupCandidateRows(db, accountId, feedId, floorIso);
 
   // A repeated signature is a real repeat (two identical coffees), so this
   // counts rather than sets.
   const budget = new Map<string, number>();
-  for (const r of existingByContent) {
+  for (const r of rows) {
+    if (r.isPending) continue;
     const sig = contentSignature(r);
     budget.set(sig, (budget.get(sig) ?? 0) + 1);
   }
   return budget;
+}
+
+/**
+ * The staging loop's own combined read: budget AND promotion candidates from
+ * ONE query, not two. An earlier version called `loadContentBudget` and a
+ * separate `loadPromotionCandidates` back to back with identical arguments —
+ * each independently re-running `queryContentDedupCandidateRows`, so every
+ * account paid for the same SQL query twice per sync (multi-specialist
+ * finding — performance and simplification independently flagged the same
+ * redundant call, `/ship`). `recheckContentDedup` (inside the write
+ * transaction) still calls `loadContentBudget` directly: it only ever needs
+ * the budget, never candidates, so giving it this combined shape would just
+ * make it build a Map it throws away.
+ *
+ * Candidate PENDING rows a posted incoming row may promote in place are
+ * grouped by content signature via the shared `buildContentCandidates`
+ * (also used by CSV's `importBatch.ts`). Every pending row in this ledger is
+ * CSV-origin — sync never writes one (a pending feed row is skipped
+ * outright, see the staging loop below) — so, unlike the posted-only
+ * budget, promotion candidacy needs no feed-provenance exclusion: a pending
+ * row can never already carry any feed's `external_id`.
+ */
+function loadContentDedupData(
+  db: AnyDb,
+  accountId: number,
+  feedId: FeedAccountId,
+  floorIso: string,
+): { budget: Map<string, number>; promotionCandidates: Map<string, ContentCandidate[]> } {
+  const rows = queryContentDedupCandidateRows(db, accountId, feedId, floorIso);
+
+  const budget = new Map<string, number>();
+  const pendingRows: typeof rows = [];
+  for (const r of rows) {
+    if (r.isPending) {
+      pendingRows.push(r);
+      continue;
+    }
+    const sig = contentSignature(r);
+    budget.set(sig, (budget.get(sig) ?? 0) + 1);
+  }
+
+  return { budget, promotionCandidates: buildContentCandidates(pendingRows) };
+}
+
+/**
+ * Promotes a pending row to posted in place, INSIDE the write transaction —
+ * the redirect from INSERT to UPDATE that makes a promotable row's write
+ * path differ from an ordinary insert's. Returns `false` (never throws) when
+ * the candidate is no longer available, so the caller can fall through to an
+ * ordinary insert instead.
+ *
+ * Re-verifies the candidate's `is_pending` fresh, inside `tx` — rule 11.
+ * `candidateId` was chosen at staging time, before this transaction opened;
+ * between then and now it could have been deleted (`removeCardActivity`
+ * shape, though this is never a card row — see D8.4 note above) or already
+ * promoted by a concurrent completed sync landing the same content match
+ * first. Either way, re-reading it fresh here is the only way to know.
+ *
+ * Every prior value needed to undo this promotion later is snapshotted into
+ * `sync_promotions` BEFORE the UPDATE overwrites it — including
+ * `priorTransferPairId`, which a pending row can already carry today
+ * (`linkTransfersByBucket`'s own candidate query has no `isPending` guard),
+ * so undo must restore whatever pairing already existed rather than assume
+ * there was none. See `undoSyncBatch`'s own promotion-revert step.
+ *
+ * `bankTransactionNumber` is explicitly nulled, not left alone: sync's
+ * transfer matcher treats ANY non-null value as "already adjudicated by
+ * CSV" (rule 4) and routes an otherwise-clean cross-source pair to manual
+ * review instead of auto-linking it — leaving it in place would silently
+ * defeat `linkTransfersByBucket`'s whole point for exactly the rows this
+ * function exists to make pairable.
+ *
+ * `categoryId` is deliberately NOT part of the UPDATE — a promoted row
+ * already went through rule-matching once, when it was first inserted (as
+ * pending) by whichever write path created it. Matches CSV's own `toUpdate`
+ * precedent (`importBatch.ts`) exactly: neither re-runs `buildRuleMatcher`,
+ * and neither writes an `import_batch_categorizations` row for the update.
+ */
+function tryPromoteCandidate(
+  tx: SyncTx,
+  candidateId: number,
+  row: MappedRow,
+  batchId: number,
+  feedId: FeedAccountId,
+): boolean {
+  const current = tx
+    .select({
+      isPending: schema.transactions.isPending,
+      rawMemo: schema.transactions.rawMemo,
+      normalizedMerchant: schema.transactions.normalizedMerchant,
+      payee: schema.transactions.payee,
+      cardLastFour: schema.transactions.cardLastFour,
+      importRowHash: schema.transactions.importRowHash,
+      externalId: schema.transactions.externalId,
+      simplefinSourceAccountId: schema.transactions.simplefinSourceAccountId,
+      bankTransactionNumber: schema.transactions.bankTransactionNumber,
+      transferPairId: schema.transactions.transferPairId,
+    })
+    .from(schema.transactions)
+    .where(eq(schema.transactions.id, candidateId))
+    .get();
+
+  if (!current || !current.isPending) return false;
+
+  tx.insert(schema.syncPromotions)
+    .values({
+      batchId,
+      transactionId: candidateId,
+      priorIsPending: current.isPending,
+      priorRawMemo: current.rawMemo,
+      priorNormalizedMerchant: current.normalizedMerchant,
+      priorPayee: current.payee,
+      priorCardLastFour: current.cardLastFour,
+      priorImportRowHash: current.importRowHash,
+      priorExternalId: current.externalId,
+      priorSimplefinSourceAccountId: current.simplefinSourceAccountId,
+      priorBankTransactionNumber: current.bankTransactionNumber,
+      priorTransferPairId: current.transferPairId,
+    })
+    .run();
+
+  tx.update(schema.transactions)
+    .set({
+      isPending: false,
+      rawMemo: row.rawMemo,
+      normalizedMerchant: row.normalizedMerchant,
+      payee: row.payee,
+      cardLastFour: row.cardLastFour,
+      importRowHash: row.importRowHash,
+      externalId: row.externalId,
+      simplefinSourceAccountId: feedId,
+      bankTransactionNumber: null,
+    })
+    .where(eq(schema.transactions.id, candidateId))
+    .run();
+
+  return true;
 }
 
 /**
@@ -822,7 +1009,7 @@ export async function syncSimpleFin(
   type Staged = {
     account: (typeof linked)[number];
     feedId: FeedAccountId;
-    rows: MappedRow[];
+    rows: StagedRow[];
     /** Pending-skip and dead-connection notes, flushed only if this account survives the link re-check. */
     accountWarnings: string[];
     /**
@@ -926,16 +1113,27 @@ export async function syncSimpleFin(
     // Bounding it at startIso let a feed row dated before the window content-match
     // nothing and insert a duplicate of an older CSV row.
     const contentFloorIso = isoDaysAgo(MAX_LOOKBACK_DAYS, now);
-    const contentBudget = loadContentBudget(db, account.id, feedId, contentFloorIso);
+    // ONE query for both the posted-only budget and the pending promotion
+    // candidates — see `loadContentDedupData`'s own docstring.
+    const { budget: contentBudget, promotionCandidates } = loadContentDedupData(
+      db,
+      account.id,
+      feedId,
+      contentFloorIso,
+    );
     // Frozen BEFORE consumption starts below — see the `Staged` field's own
     // docstring for why `recheckContentDedup` needs the pre-consumption tally
     // rather than whatever `contentBudget` looks like after this loop spends it.
     const originalContentBudget = new Map(contentBudget);
+    // `promotionCandidates` (a pending CSV row this sync's posted rows may
+    // promote in place) is consumed below, BEFORE the posted-only budget
+    // check, so a posted row's real-world pending counterpart is never
+    // mistaken for an ordinary content duplicate.
 
     let duplicateByExternalId = 0;
     let duplicateByContent = 0;
     let skippedPending = 0;
-    const toInsert: MappedRow[] = [];
+    const toInsert: StagedRow[] = [];
 
     // D8.1 — THE ACCOUNTING CUTOVER.
     //
@@ -1046,6 +1244,27 @@ export async function syncSimpleFin(
       seenExternalIds.add(row.externalId);
 
       const sig = contentSignature(row);
+
+      // A posted incoming row's real-world PENDING counterpart, if one
+      // exists, is claimed FIRST — before the ordinary posted-only budget
+      // check below. This row is pushed onto `toInsert` LIKE ANY OTHER NEW
+      // ROW (carrying `promotionCandidateId`), not diverted into a separate
+      // list: `recheckLandedIds` and `recheckContentDedup` both iterate
+      // `entry.rows`, so a promotable row gets the exact same
+      // concurrent-writer protection as a brand-new row for free. The write
+      // transaction re-verifies the candidate is still available and
+      // redirects the write from INSERT to UPDATE only then (see the insert
+      // loop below) — never here, staging is read-only.
+      // D8.4's `expectedCardExternalIds` is deliberately NOT populated here:
+      // CSV import is asset-only (`import/page.tsx` filters to
+      // `accountClass === "asset"`), so a card can never hold a CSV-origin
+      // pending row and this branch never fires for one in practice.
+      const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
+      if (pendingCandidate) {
+        toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+        continue;
+      }
+
       const budget = contentBudget.get(sig) ?? 0;
       if (budget > 0) {
         contentBudget.set(sig, budget - 1);
@@ -1097,6 +1316,13 @@ export async function syncSimpleFin(
     counts.push({
       accountId: account.id,
       name: account.name,
+      // Provisionally counts every staged row, including one carrying a
+      // `promotionCandidateId` — whether it actually ends up promoted or
+      // falls back to a plain insert is decided inside the write transaction
+      // (the race re-check), so the split into `insertedCount`/
+      // `promotedFromPending` happens AFTER the write, mirroring how this
+      // figure is already provisional pending the id/content/cutover
+      // rechecks below.
       insertedCount: toInsert.length,
       duplicateByExternalId,
       duplicateByContent,
@@ -1105,6 +1331,9 @@ export async function syncSimpleFin(
       // downstream by `applyDedupPruning`, once `recheckCutoverAnchor` knows
       // the real (freshly re-read) anchor. See the D8.1 comment above.
       skippedBeforeAnchor: 0,
+      // Set definitively after the write transaction, from what actually got
+      // promoted rather than what was merely candidate for it.
+      promotedFromPending: 0,
       reportedBalanceCents: reported,
       availableBalanceCents: available,
       balanceDate:
@@ -1170,7 +1399,50 @@ export async function syncSimpleFin(
     idDroppedByAccountId: Map<number, Set<string>>;
     contentDroppedByAccountId: Map<number, Set<string>>;
     cutoverDroppedByAccountId: Map<number, Set<string>>;
+    /**
+     * How many rows this batch actually PROMOTED (updated a pending row in
+     * place) per account, as opposed to inserted — decided inside the write
+     * transaction's race re-check, so it can only be known after the
+     * transaction returns. Applied onto `counts` afterward, the same
+     * after-the-fact pattern `applyDedupPruning` already uses for the three
+     * dedup rechecks below.
+     */
+    promotedByAccountId: Map<number, number>;
+    /**
+     * The oldest date among rows this run actually promoted, across every
+     * account — or `null` if none were. Used to widen the floor passed to
+     * `linkTransfersByBucket` so a promoted row's own date is never
+     * excluded from pairing on the very sync that just confirmed it. See
+     * the field's own docstring at its declaration site for the full
+     * reasoning (red-team finding, `/ship`).
+     */
+    earliestPromotedDate: string | null;
+    /**
+     * External ids caught by the write loop's fallback content check, per
+     * account — a genuine duplicate discovered too late to have been
+     * staged as one (cross-model adversarial finding, `/ship`; see the
+     * check's own declaration site). Shaped as `Set<string>` of external
+     * ids, not a bare count, specifically so it can be applied through the
+     * EXISTING `applyDedupPruning(..., "duplicateByContent")` — the same
+     * mechanism the id/content/cutover rechecks already use — rather than a
+     * fourth hand-rolled copy of "correct `insertedCount` down, credit the
+     * real reason, prune `expectedCardExternalIds`".
+     */
   };
+  // Declared OUTSIDE the transaction, unlike the id/content/cutover drops
+  // above (which live inside `written` and are lost on rollback) — this one
+  // is populated by an inline check in the write loop with no standalone
+  // recheck function of its own to re-run against the live handle the way
+  // `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor` are
+  // re-run in the `NothingVerifiedError` catch below. A plain JS `Map`
+  // mutated inside `db.transaction()`'s callback survives a ROLLED-BACK
+  // transaction just fine — only the DB writes unwind, not this process's
+  // memory — so keeping it here is what lets the catch block still warn
+  // about (and prune) a late drop that happened during the attempt that
+  // ultimately threw `NothingVerifiedError` (silent-failure-hunter finding,
+  // `/ship`: this warning previously existed only via `written`, so it was
+  // both completely silent on the SUCCESS path and unreachable on rollback).
+  const lateContentDropsByAccountId = new Map<number, Set<string>>();
   try {
     written = db.transaction((tx) => {
     // The links were read before the network round trip; re-check them here,
@@ -1228,7 +1500,12 @@ export async function syncSimpleFin(
     } = recheckCutoverAnchor(contentChecked, tx);
     linkWarnings.push(...cutoverWarnings);
 
-    const verifiedTotal = cutoverChecked.reduce((n, s) => n + s.rows.length, 0);
+    // Adjusted DOWN after the write loop below for rows the fallback
+    // content check catches as late duplicates (`lateContentDropsByAccountId`)
+    // — every row in `cutoverChecked` was assumed to become a write when
+    // this was first computed, and that assumption is no longer exact once
+    // a third outcome (silently dropped, no write at all) exists.
+    let verifiedTotal = cutoverChecked.reduce((n, s) => n + s.rows.length, 0);
 
     // Same contract as the CSV path: read the trained rules once for the batch
     // and resolve every row against them. Keyed on `normalized_merchant`, never
@@ -1246,8 +1523,114 @@ export async function syncSimpleFin(
       .returning({ id: schema.importBatches.id })
       .all();
 
+    const promotedByAccountId = new Map<number, number>();
+    // The OLDEST date among rows actually promoted this run — see its use
+    // at the `linkTransfersByBucket` call site below (red-team finding,
+    // `/ship`, confirmed by tracing `resolveStartDate`/`linkTransfersByBucket`/
+    // `findAmbiguousTransfers` directly). `startIso` is 7 days before the
+    // OLDEST per-account latest row, which has nothing to do with a
+    // promoted row's own date — a pending row that sat unconfirmed while
+    // OTHER, newer activity posted on the same account (exactly how a row
+    // ends up "stuck pending" in the first place) can easily predate
+    // `startIso` by more than a week. `linkTransfersByBucket`'s own
+    // candidate query is `gte(date, sinceIso)`, so such a row would never
+    // be considered for pairing on the very sync that just confirmed it —
+    // and `startIso` only ever slides FORWARD on later syncs, so the
+    // window never reaches back far enough again. Worse, an unambiguous
+    // match would also never surface in `/sync`'s manual review queue:
+    // `findAmbiguousTransfers` returns only `matchTransfers`'s `.ambiguous`
+    // bucket, never its resolved `.pairs` — a clean match is invisible
+    // there by design. Tracking the earliest promoted date and widening
+    // the pairing floor to cover it (below) closes both paths at once.
+    let earliestPromotedDate: string | null = null;
+    // Rows caught by the fallback content check below — a genuine
+    // duplicate found too late to have been staged as one, so it needs its
+    // own after-the-fact count adjustment (same pattern as
+    // `promotedByAccountId`): `insertedCount` was set at staging time,
+    // before this row's own candidate raced away and revealed it was a
+    // duplicate all along. `lateContentDropsByAccountId` itself is the
+    // OUTER-scoped one declared above `try` — not redeclared here — so it
+    // survives a `NothingVerifiedError` rollback.
+
     for (const { account, feedId, rows } of cutoverChecked) {
       for (const row of rows) {
+        if (row.promotionCandidateId !== undefined) {
+          const promoted = tryPromoteCandidate(
+            tx,
+            row.promotionCandidateId,
+            row,
+            batch.id,
+            feedId,
+          );
+          if (promoted) {
+            promotedByAccountId.set(
+              account.id,
+              (promotedByAccountId.get(account.id) ?? 0) + 1,
+            );
+            if (earliestPromotedDate === null || row.date < earliestPromotedDate) {
+              earliestPromotedDate = row.date;
+            }
+            // No rule-matching, no `import_batch_categorizations` row — a
+            // promoted row already went through categorization once, when it
+            // was first inserted as pending. See `tryPromoteCandidate`'s
+            // docstring for why re-deciding it here would be wrong, not just
+            // redundant.
+            continue;
+          }
+          // The staging-time candidate is no longer available (already
+          // promoted or deleted since staging — rule 11's read-before-await
+          // race, re-verified inside `tryPromoteCandidate`).
+          //
+          // This does NOT simply fall through to an ordinary insert (Codex
+          // structured-review finding, `/ship`, confirmed by direct
+          // reading): `recheckContentDedup`'s own drop pass EXEMPTS every
+          // promotion-candidate row from its delta-based check (a separate,
+          // earlier fix — see that function's own comment), specifically so
+          // an unrelated posted duplicate can never sacrifice a promotion
+          // this row was staged for. That exemption means this row has
+          // never actually been checked against the fresh content budget —
+          // and unlike the "candidate already claimed under THIS feed's own
+          // external_id" race (caught by `recheckLandedIds`, tested
+          // separately), a CONCURRENT CSV IMPORT can promote the identical
+          // candidate via its own `toUpdate` path, which never sets
+          // `external_id` at all — leaving no id for `recheckLandedIds` to
+          // collide on either. Falling through to a bare insert here would
+          // then write a second row for the same real transaction: the
+          // CSV-promoted candidate (posted, `external_id` null) AND this
+          // sync's own insert (posted, this feed's `external_id`) — both
+          // real rows, same money, counted twice.
+          //
+          // So a fresh, targeted content check runs HERE, inside this same
+          // write transaction, immediately before the insert it guards —
+          // the only place left that can still see a change made after
+          // `recheckContentDedup` already ran and chose not to look.
+          const nowDuplicate = tx
+            .select({
+              date: schema.transactions.date,
+              amountCents: schema.transactions.amountCents,
+              rawMemo: schema.transactions.rawMemo,
+            })
+            .from(schema.transactions)
+            .where(
+              and(
+                eq(schema.transactions.accountId, account.id),
+                eq(schema.transactions.date, row.date),
+                eq(schema.transactions.isPending, false),
+              ),
+            )
+            .all()
+            .some((r) => contentSignature(r) === contentSignature(row));
+          if (nowDuplicate) {
+            const ids = lateContentDropsByAccountId.get(account.id) ?? new Set<string>();
+            ids.add(row.externalId);
+            lateContentDropsByAccountId.set(account.id, ids);
+            continue;
+          }
+          // Falls through to an ordinary INSERT below, now genuinely safe:
+          // no posted row anywhere on this account currently shares this
+          // row's content signature.
+        }
+
         const match = matchRule(row.normalizedMerchant, row.amountCents);
 
         const [inserted] = tx
@@ -1299,11 +1682,38 @@ export async function syncSimpleFin(
       }
     }
 
-    // `verifiedTotal`, not `totalToInsert`: the batch must count what was
-    // actually written, or `undoSyncBatch` and `/import/success/[batchId]`
-    // both report rows that do not exist.
+    // Every row the fallback content check (above) caught as a late
+    // duplicate was never actually written — subtract it from the total
+    // BEFORE anything downstream (the `NothingVerifiedError` trigger,
+    // `transactionCount`, the aggregate `insertedCount`) treats it as a
+    // real write. Cross-model adversarial review (Codex structured review
+    // + independent Claude adversarial subagent, `/ship`) both found this
+    // exact gap.
+    const totalLateContentDrops = [...lateContentDropsByAccountId.values()].reduce(
+      (n, ids) => n + ids.size,
+      0,
+    );
+    verifiedTotal -= totalLateContentDrops;
+
+    // INSERT-only, matching CSV's `commitImport` (`transactionCount:
+    // toInsert.length`) — NOT `verifiedTotal`, which also counts promoted
+    // rows. A promoted row is never batch-owned (`sync_promotions.ts`), so
+    // `/import/success/[batchId]`'s `autoCategorized` — a
+    // `COUNT(*) WHERE import_batch_id = batchId AND categoryId IS NOT NULL`
+    // — can never see it either. Writing `transactionCount` as
+    // insert-plus-promote (an earlier version of this line did) made that
+    // page's "left to categorize" (`transactionCount - autoCategorized`)
+    // overcount by however many rows this batch promoted: the denominator
+    // included them, the numerator structurally cannot (maintainability
+    // specialist finding, `/ship`). `verifiedTotal` above ALREADY excludes
+    // late content drops (a row in `cutoverChecked` can now end in one of
+    // THREE outcomes — insert, promotion, or a late-discovered duplicate,
+    // not just the first two), so `verifiedTotal - totalPromoted` is exact:
+    // every row still counted in `verifiedTotal` is either an insert or a
+    // promotion, and never both.
+    const totalPromoted = [...promotedByAccountId.values()].reduce((n, c) => n + c, 0);
     tx.update(schema.importBatches)
-      .set({ transactionCount: verifiedTotal })
+      .set({ transactionCount: verifiedTotal - totalPromoted })
       .where(eq(schema.importBatches.id, batch.id))
       .run();
 
@@ -1338,6 +1748,8 @@ export async function syncSimpleFin(
       idDroppedByAccountId,
       contentDroppedByAccountId,
       cutoverDroppedByAccountId,
+      promotedByAccountId,
+      earliestPromotedDate,
     };
   });
 
@@ -1421,6 +1833,19 @@ export async function syncSimpleFin(
     for (const w of cutoverWarnings) console.error(`sync: ${w}`);
     warnings.push(...cutoverWarnings);
     applyDedupPruning(staged, counts, cutoverDropped, "skippedBeforeAnchor");
+
+    // The fallback content check has no standalone recheck function to
+    // re-run here (unlike the three above) — but `lateContentDropsByAccountId`
+    // is declared OUTSIDE the transaction specifically so a drop it recorded
+    // during THIS attempt, before `NothingVerifiedError` unwound the write,
+    // is still sitting in this closure's memory (the DB rollback undoes the
+    // writes, not this process's variables). Applying and warning about it
+    // here is what makes this the one caller-visible place a
+    // `NothingVerifiedError` run could otherwise credit `insertedCount` for a
+    // row that was never actually going to be written (silent-failure-hunter
+    // finding, `/ship`).
+    applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
+    warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
     warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
     // Blank these fields for LINK-DROPPED accounts only — same reasoning as
@@ -1467,7 +1892,22 @@ export async function syncSimpleFin(
     };
   }
 
-  const { batchId, insertedCount } = written;
+  const { batchId } = written;
+  // NOT `written.insertedCount` directly — that figure (`verifiedTotal`) is
+  // set INSIDE the write transaction, before the insert-vs-promote decision
+  // for each row is made, so it still counts promoted rows as inserts. The
+  // per-account `counts[].insertedCount` gets the same adjustment below
+  // (`applyDedupPruning`'s own sibling, for promotion rather than a drop);
+  // both must agree, or `outcome.insertedCount` disagrees with the sum of
+  // `outcome.accounts[*].insertedCount` — the exact class of aggregate/
+  // per-account mismatch `verifiedTotal`'s own comment two lines below
+  // exists to prevent for the id/content/cutover rechecks, just reached
+  // through a fourth path (a Testing specialist finding, `/ship`).
+  const totalPromoted = [...written.promotedByAccountId.values()].reduce(
+    (n, c) => n + c,
+    0,
+  );
+  const insertedCount = written.insertedCount - totalPromoted;
   // Durable-ish trace beside the persisted copy: the batch row survives a
   // closed tab, this survives a lost batch.
   for (const w of written.linkWarnings) console.error(`sync: ${w}`);
@@ -1540,6 +1980,38 @@ export async function syncSimpleFin(
   // update" doctrine exists to prevent, just on a count instead of a balance.
   applyDedupPruning(staged, counts, written.cutoverDroppedByAccountId, "skippedBeforeAnchor");
 
+  // A row whose candidate raced away and fell back toward an ordinary
+  // insert is NOT always safely counted as one: the write loop's own
+  // fallback content check (cross-model adversarial finding, `/ship`) can
+  // catch a genuine duplicate at that point too, and `insertedCount` was
+  // set at staging time before that was known. Applied through the SAME
+  // mechanism the id/content/cutover rechecks already use, crediting it as
+  // `duplicateByContent` — it is one, just discovered later than the others.
+  // Also warned about, unlike its three siblings above — it used to have no
+  // user-visible warning on any path (silent-failure-hunter finding, `/ship`).
+  applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
+  warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
+
+  // Reclassify a promoted row out of `insertedCount` and into
+  // `promotedFromPending` — decided only just now, inside the write
+  // transaction's race re-check (`tryPromoteCandidate`), so it could not
+  // have been known at staging time when `insertedCount` was first set.
+  //
+  // This is deliberately NOT pushed into `warnings`: a promotion is good
+  // news (a row confirmed, not a problem), but every consumer of `warnings`
+  // — `ok()` in `src/app/sync/actions.ts`, `ActionStatus` — treats a
+  // non-empty warnings array as `role="alert"`/amber, which inverted this
+  // exact feature's own happy path (a promotion-only sync rendered as a
+  // warning, found by /ship's own code-reviewer pass). The per-account
+  // figure is already on `AccountSyncSummary.promotedFromPending`; the
+  // caller builds its own success sentence from that instead.
+  for (const [accountId, promotedCount] of written.promotedByAccountId) {
+    const c = counts.find((c) => c.accountId === accountId);
+    if (!c || promotedCount === 0) continue;
+    c.insertedCount -= promotedCount;
+    c.promotedFromPending = promotedCount;
+  }
+
   warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
   // Prune only now that the write has committed, so a failed sync never evicts
@@ -1553,7 +2025,51 @@ export async function syncSimpleFin(
     );
   }
 
-  const { pairsLinked, ambiguous } = linkTransfersByBucket(startIso, db, batchId);
+  // `startIso` alone is not a safe floor for pairing a promoted row: it is
+  // 7 days before the OLDEST per-account latest row, which has nothing to
+  // do with a promoted row's own date. A pending row that sat unconfirmed
+  // while other, newer activity posted on the same account — exactly how a
+  // row ends up "stuck pending" in the first place — can predate `startIso`
+  // by more than a week, and `startIso` only ever slides forward on later
+  // syncs, so a missed pairing here is missed forever. Widen the floor to
+  // cover whatever this run actually promoted (red-team finding, `/ship`).
+  const pairingFloorIso =
+    written.earliestPromotedDate !== null && written.earliestPromotedDate < startIso
+      ? written.earliestPromotedDate
+      : startIso;
+  const { pairsLinked, ambiguous } = linkTransfersByBucket(pairingFloorIso, db, batchId);
+  // Persisted, not left for `/import/success/[batchId]` to recompute via
+  // `COUNT(*) WHERE import_batch_id = batchId` — that recompute is exact for
+  // an ordinary sync batch (no `toUpdate`/promotion concept, historically),
+  // but a pair involving a PROMOTED row (kept on its ORIGINAL batch id, per
+  // `sync_promotions`) would silently escape it. CSV's `commitImport` has
+  // written this column since its own `toUpdate` path existed for the exact
+  // same reason; sync never needed to until now.
+  //
+  // This UPDATE runs OUTSIDE the write transaction, after everything above —
+  // the insert/promotion batch, the transfer pairing — has already committed.
+  // Rule 3's own text calls `SQLITE_BUSY` "live here"; if this single-row
+  // write throws, the exception must not be allowed to reach `syncSimpleFin`'s
+  // caller, which has only ONE catch (`src/app/sync/actions.ts`) and would
+  // render a fully-committed, successful sync as a plain failure — the exact
+  // shape `guardPostCommitRead` exists to prevent, one write later. Degrading
+  // to a warning instead (the display-only figure on `/import/success` stays
+  // stale, never wrong in a way that costs money) is cheaper than losing the
+  // whole outcome (found by /ship's own silent-failure-hunter pass).
+  try {
+    db.update(schema.importBatches)
+      .set({ pairsLinkedCount: pairsLinked })
+      .where(eq(schema.importBatches.id, batchId))
+      .run();
+  } catch (err) {
+    console.error(
+      `[syncSimpleFin] failed to persist pairsLinkedCount for batch ${batchId}; the sync itself already committed`,
+      err,
+    );
+    warnings.push(
+      "Synced successfully, but the transfer-pair count on this batch's import summary may be out of date.",
+    );
+  }
   const finalised = finaliseBalances(counts, db);
   warnings.push(...missingAccountWarnings(finalised.missingAccounts));
 
@@ -1631,7 +2147,7 @@ function recheckLandedIds<
   T extends {
     account: { id: number; name: string };
     feedId: FeedAccountId;
-    rows: readonly MappedRow[];
+    rows: readonly StagedRow[];
   },
 >(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
   const droppedByAccountId = new Map<number, Set<string>>();
@@ -1726,7 +2242,7 @@ function recheckContentDedup<
   T extends {
     account: { id: number; name: string };
     feedId: FeedAccountId;
-    rows: readonly MappedRow[];
+    rows: readonly StagedRow[];
     originalContentBudget: ReadonlyMap<string, number>;
     contentFloorIso: string;
   },
@@ -1754,9 +2270,27 @@ function recheckContentDedup<
     }
     if (deltaRemaining.size === 0) return entry;
 
-    const survivors: MappedRow[] = [];
+    const survivors: StagedRow[] = [];
     const droppedIds = new Set<string>();
     for (const row of entry.rows) {
+      // A promotion-candidate row is NEVER eligible to be dropped here
+      // (red-team finding, `/ship`, confirmed by direct reading) — this
+      // delta represents an unrelated POSTED duplicate that appeared for
+      // this signature since staging, and a promotion row was never staged
+      // as competing for that posted-only budget in the first place (it
+      // matched a PENDING candidate, a separate resource entirely). Its own
+      // race window is decided precisely, by candidate id, inside the write
+      // transaction (`tryPromoteCandidate`'s fresh `is_pending` re-read) —
+      // not by whether SOME row shares its content signature. Treating it
+      // as an ordinary insert here would let an unrelated posted duplicate
+      // sacrifice this row, silently stranding the pending row it was going
+      // to promote and reproducing rule 1's phantom `driftCents` bug this
+      // whole fix exists to close, just gated behind a narrow race instead
+      // of firing every time.
+      if (row.promotionCandidateId !== undefined) {
+        survivors.push(row);
+        continue;
+      }
       const sig = contentSignature(row);
       const remaining = deltaRemaining.get(sig) ?? 0;
       if (remaining > 0) {
@@ -1832,6 +2366,33 @@ function applyDedupPruning(
       c.insertedCount -= droppedIds.size;
     }
   }
+}
+
+/**
+ * The late fallback content check (the write loop's own `nowDuplicate` guard,
+ * immediately before insert) has no standalone recheck function of its own —
+ * unlike `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor`, it
+ * is inline logic inside the per-row insert loop, so it has no
+ * `{ warnings: string[] }` of its own the way those three do. This builds the
+ * equivalent sentence from the raw drop map, in the same voice as
+ * `recheckContentDedup`'s own warnings, so a genuine late-race drop is never
+ * silent (silent-failure-hunter finding, `/ship`: this used to have no
+ * user-visible warning on any path).
+ */
+function lateContentDropWarnings(
+  droppedByAccountId: ReadonlyMap<number, ReadonlySet<string>>,
+  staged: readonly { account: { id: number; name: string } }[],
+): string[] {
+  return staged.flatMap((entry) => {
+    const droppedIds = droppedByAccountId.get(entry.account.id);
+    if (!droppedIds || droppedIds.size === 0) return [];
+    const n = droppedIds.size;
+    return [
+      `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" matched activity ` +
+        `already imported by another process while this sync was running, so ` +
+        `${n === 1 ? "it was" : "they were"} skipped.`,
+    ];
+  });
 }
 
 /**
@@ -1930,7 +2491,7 @@ function applyDedupPruning(
 function recheckCutoverAnchor<
   T extends {
     account: { id: number; type: AccountType; name: string; startingBalanceDate: string };
-    rows: readonly MappedRow[];
+    rows: readonly StagedRow[];
   },
 >(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
   const droppedByAccountId = new Map<number, Set<string>>();
@@ -2005,7 +2566,7 @@ function verifyStagedLinksReadOnly<
   T extends {
     account: { id: number; name: string };
     feedId: FeedAccountId;
-    rows: readonly MappedRow[];
+    rows: readonly StagedRow[];
     accountWarnings: readonly string[];
   },
 >(staged: readonly T[], db: Db): { warnings: string[]; droppedAccountIds: number[] } {
@@ -2269,7 +2830,7 @@ function verifyStagedLinks<
   T extends {
     account: { id: number; name: string };
     feedId: FeedAccountId;
-    rows: readonly MappedRow[];
+    rows: readonly StagedRow[];
     accountWarnings: readonly string[];
   },
 >(
@@ -2510,15 +3071,30 @@ export function linkTransfersByBucket(
   // pair two rows that both predate this sync — but undoSyncBatch deletes only
   // this batch's rows and relies on ON DELETE SET NULL to unlink survivors, so
   // such a pair would outlive the undo with no way to clear it.
+  //
+  // "From this batch" is NOT just `import_batch_id = batchId`: a promoted row
+  // keeps its ORIGINAL (pre-promotion) batch id by design — repointing it
+  // would make undo's delete-based reversal destroy a transaction that
+  // predates this sync (see `sync_promotions`, schema.ts). Without also
+  // counting `sync_promotions`-owned rows here, a newly-posted row could
+  // never get its transfer pairing persisted at all: it would be genuinely
+  // pairable (unpaired, posted, correct amount) but permanently excluded from
+  // every pair this function would otherwise write.
   const batchRowIds = batchId
-    ? new Set(
-        db
+    ? new Set([
+        ...db
           .select({ id: schema.transactions.id })
           .from(schema.transactions)
           .where(eq(schema.transactions.importBatchId, batchId))
           .all()
           .map((r) => r.id),
-      )
+        ...db
+          .select({ id: schema.syncPromotions.transactionId })
+          .from(schema.syncPromotions)
+          .where(eq(schema.syncPromotions.batchId, batchId))
+          .all()
+          .map((r) => r.id),
+      ])
     : null;
   const pairs = batchRowIds
     ? allPairs.filter((p) => batchRowIds.has(p.a.id) || batchRowIds.has(p.b.id))

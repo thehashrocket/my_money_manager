@@ -15,6 +15,7 @@ import {
   refreshLiabilityBalancesOnly,
 } from "./sync";
 import { setAccountLink } from "./link";
+import { undoSyncBatch } from "./undoSync";
 import {
   clearPairRejection,
   loadRejectedPairs,
@@ -137,6 +138,8 @@ function seedTxn(opts: {
    * whose account has since been re-pointed elsewhere.
    */
   simplefinSourceAccountId?: string | null;
+  isPending?: boolean;
+  bankTransactionNumber?: string | null;
 }) {
   seq += 1;
   const externalId = opts.externalId ?? null;
@@ -164,6 +167,8 @@ function seedTxn(opts: {
         opts.simplefinSourceAccountId !== undefined
           ? opts.simplefinSourceAccountId
           : linkedFeedId,
+      isPending: opts.isPending ?? false,
+      bankTransactionNumber: opts.bankTransactionNumber ?? null,
     })
     .returning()
     .all();
@@ -486,6 +491,769 @@ describe("syncSimpleFin — cross-source dedup ignores memo whitespace", () => {
     expect(outcome.insertedCount).toBe(1);
     expect(outcome.accounts[0].duplicateByContent).toBe(1);
     expect(handle.db.select().from(schema.transactions).all().length).toBe(2);
+  });
+});
+
+describe("syncSimpleFin — pending/posted content-dedup promotion", () => {
+  function seedCategory(name: string): number {
+    const [row] = handle.db.insert(schema.categories).values({ name }).returning().all();
+    return row.id;
+  }
+
+  it("promotes a pending CSV row in place instead of dropping the posted feed row as a duplicate", async () => {
+    // TODOS.md's confirmed repro: a pending CSV row and a matching posted
+    // feed row used to produce duplicateByContent: 1, insertedCount: 0 — the
+    // pending row stuck forever, permanently excluded from the balance sum.
+    const account = seedAccount({
+      simplefinAccountId: "ACT-PROMO",
+      startingBalanceCents: 100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+      isPending: true,
+      bankTransactionNumber: "6098",
+    });
+
+    // Reported balance already reflects the transaction as posted — the
+    // pending row's real-world counterpart has arrived.
+    respondWith("ACT-PROMO", [feedTxn("ext-promo-1", "-48.70")], "951.30");
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.promotedFromPending).toBe(1);
+    expect(summary.insertedCount).toBe(0);
+    expect(summary.duplicateByContent).toBe(0);
+    // No longer a phantom missing amount — the row now counts toward the sum.
+    expect(summary.driftCents).toBe(0);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(pending.id);
+    expect(rows[0].isPending).toBe(false);
+    expect(rows[0].externalId).toBe("ext-promo-1");
+    expect(rows[0].simplefinSourceAccountId).toBe("ACT-PROMO");
+    // Nulled — a non-null value routes an otherwise-clean transfer pair to
+    // manual review instead of auto-linking it (rule 4).
+    expect(rows[0].bankTransactionNumber).toBeNull();
+    // Untouched: the batch this row was originally imported under.
+    expect(rows[0].importBatchId).toBe(csvBatch.id);
+    expect(rows[0].importSource).toBe("csv");
+
+    const promotions = handle.db.select().from(schema.syncPromotions).all();
+    expect(promotions).toHaveLength(1);
+    expect(promotions[0].transactionId).toBe(pending.id);
+    expect(promotions[0].batchId).toBe(outcome.batchId);
+    expect(promotions[0].priorIsPending).toBe(true);
+    expect(promotions[0].priorBankTransactionNumber).toBe("6098");
+    expect(promotions[0].priorExternalId).toBeNull();
+  });
+
+  it("does NOT re-run rule matching on promotion — the row's pre-existing category survives untouched", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-CAT" });
+    const csvBatch = seedBatch("csv");
+    const categoryId = seedCategory("Coffee Fund Promotion Test");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ categoryId })
+      .where(eq(schema.transactions.id, pending.id))
+      .run();
+
+    respondWith("ACT-PROMO-CAT", [feedTxn("ext-cat-1", "-4.87")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    expect(row.categoryId).toBe(categoryId);
+    expect(
+      handle.db.select().from(schema.importBatchCategorizations).all(),
+    ).toHaveLength(0);
+  });
+
+  it("falls back to inserting the incoming row when the staged candidate is deleted before the write transaction (rule 11)", async () => {
+    // `createSnapshot` runs AFTER staging finishes and BEFORE the write
+    // transaction opens (see the id-race describe block below for the same
+    // idiom) — mutating the DB from inside its mock is what actually lands
+    // in the staging -> transaction window `tryPromoteCandidate`'s own
+    // re-check exists for. Mutating inside `fetchAccountsMock` instead (an
+    // earlier version of this test did) mutates BEFORE staging even runs,
+    // since the staging loop reads the DB fresh only after `await
+    // fetchAccounts` resolves — that tests a different, weaker case where
+    // the row never gets a `promotionCandidateId` at all.
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-RACE" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+    respondWith("ACT-PROMO-RACE", [feedTxn("ext-race-1", "-48.70")]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      handle.db.delete(schema.transactions).where(eq(schema.transactions.id, pending.id)).run();
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.promotedFromPending).toBe(0);
+    expect(summary.insertedCount).toBe(1);
+
+    const rows = handle.db.select().from(schema.transactions).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("ext-race-1");
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+  });
+
+  it("does not lose or duplicate a transaction when the candidate is already promoted (isPending flipped) by a concurrent completed sync", async () => {
+    // Same idiom, same real race window as the deletion test above: the
+    // mutation happens between staging (which finds the row still pending
+    // and attaches a `promotionCandidateId`) and the write transaction —
+    // exactly where `tryPromoteCandidate`'s own fresh `is_pending` read
+    // fires. The concurrent writer stamps the SAME external id this sync's
+    // own fetch also carries for it (the realistic shape: a stable id is
+    // the whole point of external_id for an already-posted transaction).
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-RACE2" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+    respondWith("ACT-PROMO-RACE2", [feedTxn("ext-race2-1", "-48.70")]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      handle.db
+        .update(schema.transactions)
+        .set({
+          isPending: false,
+          externalId: "ext-race2-1",
+          simplefinSourceAccountId: "ACT-PROMO-RACE2",
+        })
+        .where(eq(schema.transactions.id, pending.id))
+        .run();
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    // Caught by the existing id-race recheck (recheckLandedIds) inside the
+    // write transaction, not by tryPromoteCandidate's own is_pending
+    // re-check — the row already carries this feed's external id by the
+    // time the transaction opens, which is exactly the case
+    // recheckLandedIds exists for. With nothing else staged, that drop
+    // takes verifiedTotal to 0 and the whole write rolls back.
+    expect(outcome.status).toBe("up-to-date");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    // Exactly one row for this transaction — not two, and not zero.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isPending).toBe(false);
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+  });
+
+  it("promotes its own candidate even when an UNRELATED posted duplicate lands on the same content signature during the race window", async () => {
+    // Regression coverage (red-team finding, `/ship`): recheckContentDedup's
+    // delta-based drop diffs the posted-only budget purely by content
+    // SIGNATURE, with no knowledge of which staged rows are promotion
+    // candidates. A promotion row was never staged as competing for that
+    // posted budget (it matched a PENDING candidate, a separate resource) —
+    // so an unrelated write landing a genuinely new posted duplicate for
+    // the SAME signature during the staging->write window must not be
+    // allowed to sacrifice this row instead. Doing so would silently
+    // strand the pending row it was going to promote, reproducing rule 1's
+    // phantom driftCents bug this whole fix exists to close.
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-UNRELATED-RACE" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+    respondWith("ACT-PROMO-UNRELATED-RACE", [feedTxn("ext-unrelated-race-1", "-48.70")]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      // An unrelated concurrent write (a second CSV import, say) lands a
+      // genuinely new POSTED duplicate sharing this exact content
+      // signature — growing the posted-only budget for it from 0 to 1,
+      // with nothing to do with `pending`'s own promotion.
+      const unrelatedBatch = seedBatch("csv");
+      seedTxn({
+        accountId: account.id,
+        batchId: unrelatedBatch.id,
+        amountCents: -4870,
+        rawMemo: COFFEE_MEMO,
+      });
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    // The promotion still happened — it was never at stake in this race.
+    expect(summary.promotedFromPending).toBe(1);
+
+    const promotedRow = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    expect(promotedRow.isPending).toBe(false);
+    expect(promotedRow.externalId).toBe("ext-unrelated-race-1");
+
+    // Both the promoted row and the unrelated racing duplicate survive —
+    // two real, distinct transactions.
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(2);
+  });
+
+  it("does not double-write a transaction when a concurrent CSV import promotes the SAME candidate via its own toUpdate path", async () => {
+    // Regression coverage (Codex structured review [P1], `/ship`, confirmed
+    // by direct reading): recheckContentDedup exempts every
+    // promotionCandidateId row from its delta-based drop (the fix for the
+    // "unrelated posted duplicate" race above) — which means a row that
+    // falls through to a plain insert because ITS OWN candidate became
+    // unavailable was NEVER checked against the fresh content budget at
+    // all. That's fine when the concurrent writer is another sync (caught
+    // by recheckLandedIds's external_id collision, tested elsewhere) — but
+    // CSV's own promotion path (commitImport's toUpdate) never sets
+    // external_id, so there is no id for recheckLandedIds to catch either.
+    // Without a fresh, targeted re-check at the fallback site itself, this
+    // sync would insert a SECOND row for the same real transaction beside
+    // the one CSV's own concurrent import already promoted.
+    const account = seedAccount({ simplefinAccountId: "ACT-CSV-RACE" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+    respondWith("ACT-CSV-RACE", [feedTxn("ext-csv-race-1", "-48.70")]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      // Simulates a concurrent CSV import's own commitImport promoting this
+      // EXACT candidate via its toUpdate path — posted, but with NO
+      // external_id/simplefinSourceAccountId (CSV never sets those).
+      handle.db
+        .update(schema.transactions)
+        .set({ isPending: false })
+        .where(eq(schema.transactions.id, pending.id))
+        .run();
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    // Nothing was actually written this run (the fallback check correctly
+    // caught the only staged row as a duplicate) — `verifiedTotal` reflects
+    // that BEFORE the `NothingVerifiedError` check runs, so this reports
+    // `up-to-date`, not a `synced` batch that wrote zero rows.
+    expect(outcome.status).toBe("up-to-date");
+
+    // Regression coverage (silent-failure-hunter, `/ship` PR review): the
+    // late-content-drop this test exercises used to produce NO warning at
+    // all, on either path — and specifically on THIS path (a
+    // `NothingVerifiedError` rollback), it was structurally unreachable,
+    // because `lateContentDropsByAccountId` lived inside the transaction
+    // and was lost the moment it rolled back. It's now declared outside the
+    // transaction (a plain JS Map survives a rolled-back DB transaction)
+    // and warned about on both the success and rollback paths.
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.warnings.join(" ")).toMatch(
+      /matched activity already imported by another process/i,
+    );
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    // Exactly one row — the CSV-promoted candidate, untouched by this sync.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(pending.id);
+    expect(rows[0].isPending).toBe(false);
+    expect(rows[0].externalId).toBeNull();
+  });
+
+  it("undo reports BOTH deletedCount and revertedCount correctly when a single sync inserts one row and promotes another", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-MIXED" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+      isPending: true,
+    });
+
+    respondWith("ACT-MIXED", [
+      // Promotes the pending row above.
+      feedTxn("ext-mixed-promoted", "-48.70", COFFEE_MEMO),
+      // A genuinely new transaction — no existing candidate matches it.
+      feedTxn("ext-mixed-new", "-12.00", "NEW MERCHANT"),
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.promotedFromPending).toBe(1);
+    expect(summary.insertedCount).toBe(1);
+
+    const result = undoSyncBatch(outcome.batchId, handle.db);
+    expect(result).toEqual({
+      status: "undone",
+      batchId: outcome.batchId,
+      deletedCount: 1,
+      revertedCount: 1,
+    });
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    // The inserted row is gone; the promoted row is back to pending.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isPending).toBe(true);
+  });
+
+  it("a promotion-only sync does NOT take the up-to-date early return", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-ONLY" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+    });
+
+    respondWith("ACT-PROMO-ONLY", [feedTxn("ext-only-1", "-48.70")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // Regression coverage (Testing specialist, `/ship`): the top-level
+    // aggregate must agree with the per-account figures — an earlier
+    // version of this fix subtracted promoted rows from the per-account
+    // `counts[].insertedCount` but not from the aggregate `insertedCount`
+    // returned here, so a promotion-only sync reported
+    // `outcome.insertedCount: 1` (misread as a freshly-imported
+    // transaction) while every per-account summary correctly read 0.
+    expect(outcome.insertedCount).toBe(0);
+    const promoOnlySummary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(promoOnlySummary.insertedCount).toBe(0);
+    expect(promoOnlySummary.promotedFromPending).toBe(1);
+  });
+
+  it("pairs a promoted row with its already-posted transfer partner, and persists pairsLinkedCount for it", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-XFER-CHECK", name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -5000,
+      rawMemo: "TRANSFER TO SAVINGS",
+      date: "2026-09-01",
+      isPending: true,
+    });
+    const partner = seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 5000,
+      rawMemo: "TRANSFER FROM CHECKING",
+      date: "2026-09-01",
+    });
+
+    respondWith("ACT-XFER-CHECK", [feedTxn("ext-xfer-1", "-50.00", "TRANSFER TO SAVINGS")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.pairsLinked).toBe(1);
+
+    const [checkingRow, savingsRow] = [
+      handle.db.select().from(schema.transactions).where(eq(schema.transactions.id, pending.id)).get()!,
+      handle.db.select().from(schema.transactions).where(eq(schema.transactions.id, partner.id)).get()!,
+    ];
+    expect(checkingRow.transferPairId).toBe(savingsRow.id);
+    expect(savingsRow.transferPairId).toBe(checkingRow.id);
+
+    const [batch] = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .all();
+    expect(batch.pairsLinkedCount).toBe(1);
+  });
+
+  it("pairs a promoted row even when OTHER, newer activity on the same account has pushed startIso past the promoted row's own date", async () => {
+    // Regression coverage (red-team finding, `/ship`): `startIso` is 7 days
+    // before the OLDEST per-account latest row — it has nothing to do with
+    // a promoted row's own date. A pending row that sat unconfirmed while
+    // other, newer activity posted on the SAME account (exactly how a row
+    // ends up "stuck pending" in the first place) can predate `startIso` by
+    // more than a week once that newer activity exists, and
+    // `linkTransfersByBucket`'s own candidate query is `gte(date, sinceIso)`
+    // — so without widening the floor to cover what this run actually
+    // promoted, the pairing would silently, permanently never happen (the
+    // window only ever slides forward on later syncs).
+    const checking = seedAccount({ simplefinAccountId: "ACT-OLD-PROMO", name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    // Within the 45-day content-dedup lookback floor (so promotion itself
+    // can still happen) but well before `startIso` once the newer row
+    // below exists (so the pairing floor is the thing actually under test).
+    const pending = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -5000,
+      rawMemo: "OLD TRANSFER TO SAVINGS",
+      date: "2026-07-25",
+      isPending: true,
+    });
+    const partner = seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 5000,
+      rawMemo: "OLD TRANSFER FROM CHECKING",
+      date: "2026-07-25",
+    });
+    // Other, newer, unrelated activity on CHECKING — this is what pushes
+    // resolveStartDate's per-account MAX(date) (and so `startIso`) well
+    // past the old pending row's own date.
+    seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -999,
+      rawMemo: "UNRELATED RECENT PURCHASE",
+      date: "2026-08-30",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-OLD-PROMO",
+          name: "Checking",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            {
+              id: "ext-old-promo-1",
+              // The feed reports this transaction as having posted on the
+              // SAME (old) date as the pending row it confirms — content
+              // matching keys on date, so this must agree with `pending`'s
+              // own date for promotion to happen at all.
+              posted: Math.floor(Date.UTC(2026, 6, 25, 12, 0, 0) / 1000),
+              amount: "-50.00",
+              description: "OLD TRANSFER TO SAVINGS",
+              memo: "OLD TRANSFER TO SAVINGS",
+              payee: null,
+              transacted_at: Math.floor(Date.UTC(2026, 6, 25, 12, 0, 0) / 1000),
+              mcc: null,
+            },
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === checking.id)!;
+    expect(summary.promotedFromPending).toBe(1);
+    // The whole point: pairing still happens despite the old date.
+    expect(outcome.pairsLinked).toBe(1);
+
+    const [checkingRow, savingsRow] = [
+      handle.db.select().from(schema.transactions).where(eq(schema.transactions.id, pending.id)).get()!,
+      handle.db.select().from(schema.transactions).where(eq(schema.transactions.id, partner.id)).get()!,
+    ];
+    expect(checkingRow.transferPairId).toBe(savingsRow.id);
+    expect(savingsRow.transferPairId).toBe(checkingRow.id);
+  });
+
+  it("nulling bankTransactionNumber on promotion is what lets the pair auto-link instead of routing to manual review", async () => {
+    // Regression coverage for the round-3 finding: a promoted row that KEPT
+    // its pre-promotion bankTransactionNumber would read as "already
+    // adjudicated by CSV" (rule 4) and divert this otherwise-clean
+    // cross-source pair to manual review instead of auto-linking it. Seeds
+    // the candidate with a real (non-null) bank transaction number — unlike
+    // the plain pairing test above, which defaults to null and would pass
+    // identically even if the nulling line were deleted.
+    const checking = seedAccount({ simplefinAccountId: "ACT-XFER-ADJ", name: "Checking" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -5000,
+      rawMemo: "TRANSFER TO SAVINGS",
+      date: "2026-09-01",
+      isPending: true,
+      bankTransactionNumber: "7001",
+    });
+    seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 5000,
+      rawMemo: "TRANSFER FROM CHECKING",
+      date: "2026-09-01",
+    });
+
+    respondWith("ACT-XFER-ADJ", [feedTxn("ext-xfer-adj-1", "-50.00", "TRANSFER TO SAVINGS")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // Auto-linked, not sent to review — proves the nulling actually took
+    // effect before linkTransfersByBucket's adjudication check ran.
+    expect(outcome.pairsLinked).toBe(1);
+    expect(outcome.ambiguous).toHaveLength(0);
+  });
+
+  it("undoing a promotion-only sync reverts the row to pending and reports revertedCount, not deletedCount", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-PROMO-UNDO" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -4870,
+      rawMemo: COFFEE_MEMO,
+      isPending: true,
+      bankTransactionNumber: "6098",
+    });
+
+    respondWith("ACT-PROMO-UNDO", [feedTxn("ext-undo-1", "-48.70")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const result = undoSyncBatch(outcome.batchId, handle.db);
+    expect(result).toEqual({
+      status: "undone",
+      batchId: outcome.batchId,
+      deletedCount: 0,
+      revertedCount: 1,
+    });
+
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    expect(row.isPending).toBe(true);
+    expect(row.externalId).toBeNull();
+    expect(row.simplefinSourceAccountId).toBeNull();
+    expect(row.bankTransactionNumber).toBe("6098");
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+  });
+
+  it("undo restores a promoted row's PRE-existing transfer pairing rather than clearing it", async () => {
+    // A pending row can already be legitimately paired before it is ever
+    // promoted — linkTransfersByBucket's own candidate query has no
+    // isPending guard. Undo must put that pairing BACK, not erase it.
+    const checking = seedAccount({ simplefinAccountId: "ACT-PRE-PAIR" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -3000,
+      rawMemo: "PRE-PAIRED",
+      isPending: true,
+    });
+    const partner = seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 3000,
+      rawMemo: "PRE-PAIRED PARTNER",
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, pending.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: pending.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+
+    respondWith("ACT-PRE-PAIR", [feedTxn("ext-prepair-1", "-30.00", "PRE-PAIRED")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    // Still paired immediately after promotion — nothing about promotion
+    // touches an existing pairing.
+    const afterPromotion = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    expect(afterPromotion.transferPairId).toBe(partner.id);
+
+    undoSyncBatch(outcome.batchId, handle.db);
+
+    const afterUndo = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    const partnerAfterUndo = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, partner.id))
+      .get()!;
+    expect(afterUndo.isPending).toBe(true);
+    // The pre-existing pairing survives the undo.
+    expect(afterUndo.transferPairId).toBe(partner.id);
+    expect(partnerAfterUndo.transferPairId).toBe(pending.id);
+  });
+
+  it("does not restore a one-sided transfer pair when the pre-existing partner pairing was unlinked before undo", async () => {
+    // Regression coverage (Testing specialist, `/ship`): revertPromotion
+    // used to restore priorTransferPairId onto the reverted row
+    // unconditionally, with no check that the partner still pointed back.
+    // Time can pass between promotion and undo — the user can unlink the
+    // pre-existing pair in that window — so blindly restoring resurrects a
+    // dangling, one-sided reference no UI surface can detect or repair.
+    const checking = seedAccount({ simplefinAccountId: "ACT-STALE-PAIR" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -3000,
+      rawMemo: "PRE-PAIRED",
+      isPending: true,
+    });
+    const partner = seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 3000,
+      rawMemo: "PRE-PAIRED PARTNER",
+    });
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: partner.id })
+      .where(eq(schema.transactions.id, pending.id))
+      .run();
+    handle.db
+      .update(schema.transactions)
+      .set({ transferPairId: pending.id })
+      .where(eq(schema.transactions.id, partner.id))
+      .run();
+
+    respondWith("ACT-STALE-PAIR", [feedTxn("ext-stale-1", "-30.00", "PRE-PAIRED")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    // The user later decides this was never a transfer and unlinks it —
+    // clearing BOTH legs — before ever undoing the sync.
+    unlinkTransferPair(pending.id, handle.db);
+
+    undoSyncBatch(outcome.batchId, handle.db);
+
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    const partnerRow = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, partner.id))
+      .get()!;
+    expect(row.isPending).toBe(true);
+    // Left unpaired rather than resurrecting a one-sided reference.
+    expect(row.transferPairId).toBeNull();
+    expect(partnerRow.transferPairId).toBeNull();
+  });
+
+  it("undo clears a pairing THIS sync created after promotion, but leaves the reverted row correctly unpaired", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-NEW-PAIR" });
+    const savings = seedAccount({ name: "Savings" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: checking.id,
+      batchId: csvBatch.id,
+      amountCents: -6000,
+      rawMemo: "NEW PAIR TRANSFER",
+      date: "2026-09-01",
+      isPending: true,
+    });
+    const partner = seedTxn({
+      accountId: savings.id,
+      batchId: csvBatch.id,
+      amountCents: 6000,
+      rawMemo: "NEW PAIR TRANSFER PARTNER",
+      date: "2026-09-01",
+    });
+
+    respondWith("ACT-NEW-PAIR", [feedTxn("ext-newpair-1", "-60.00", "NEW PAIR TRANSFER")]);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.pairsLinked).toBe(1);
+
+    undoSyncBatch(outcome.batchId, handle.db);
+
+    const afterUndo = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get()!;
+    const partnerAfterUndo = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, partner.id))
+      .get()!;
+    expect(afterUndo.isPending).toBe(true);
+    expect(afterUndo.transferPairId).toBeNull();
+    expect(partnerAfterUndo.transferPairId).toBeNull();
   });
 });
 

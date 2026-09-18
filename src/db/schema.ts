@@ -436,6 +436,66 @@ export const importBatchesRelations = relations(importBatches, ({ many }) => ({
   transactions: many(transactions),
 }));
 
+// Records "this sync batch promoted this pending row to posted" and the row's
+// PRE-promotion values, so `undoSyncBatch` can put it back. A promoted row's
+// `transactions.import_batch_id` is deliberately left pointing at its
+// ORIGINAL (usually CSV) batch — repointing it to the sync batch would make
+// undo's delete-based reversal destroy a transaction that predates the sync,
+// which is worse than the bug this table exists to fix. This table is the
+// join CSV's own `toUpdate` never needed: CSV has no separate undo model to
+// keep consistent (its rollback is the pre-import file snapshot), while sync
+// has a live, row-owning undo (`undoSyncBatch`) that a promotion must
+// participate in without being deleted.
+//
+// Unique on `transactionId` alone, not `(batchId, transactionId)`: a
+// transaction can have at most ONE active promotion record at a time (it is
+// either currently pending or it isn't), and `onDelete: cascade` on `batchId`
+// removes this row the moment its batch is undone — freeing the id for a
+// later sync to promote the same transaction again after a subsequent CSV
+// re-import makes it pending once more.
+export const syncPromotions = sqliteTable(
+  "sync_promotions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    batchId: integer("batch_id")
+      .notNull()
+      .references(() => importBatches.id, { onDelete: "cascade" }),
+    transactionId: integer("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    priorIsPending: integer("prior_is_pending", { mode: "boolean" }).notNull(),
+    priorRawMemo: text("prior_raw_memo").notNull(),
+    priorNormalizedMerchant: text("prior_normalized_merchant").notNull(),
+    priorPayee: text("prior_payee"),
+    priorCardLastFour: text("prior_card_last_four"),
+    priorImportRowHash: text("prior_import_row_hash").notNull(),
+    priorExternalId: text("prior_external_id"),
+    priorSimplefinSourceAccountId: text("prior_simplefin_source_account_id"),
+    priorBankTransactionNumber: text("prior_bank_transaction_number"),
+    // A snapshot value, not a live FK — the partner row named here is free to
+    // be deleted or repaired independently of this record's lifecycle, the
+    // same convention `import_batches.priorStartingBalanceCents` already
+    // uses for a bygone value with nothing to reference.
+    priorTransferPairId: integer("prior_transfer_pair_id"),
+    createdAt,
+  },
+  (t) => [
+    uniqueIndex("sync_promotions_transaction_unique").on(t.transactionId),
+    index("sync_promotions_batch_idx").on(t.batchId),
+  ],
+);
+
+export const syncPromotionsRelations = relations(syncPromotions, ({ one }) => ({
+  batch: one(importBatches, {
+    fields: [syncPromotions.batchId],
+    references: [importBatches.id],
+  }),
+  transaction: one(transactions, {
+    fields: [syncPromotions.transactionId],
+    references: [transactions.id],
+  }),
+}));
+
 export const transactionsRelations = relations(transactions, ({ one }) => ({
   account: one(accounts, {
     fields: [transactions.accountId],

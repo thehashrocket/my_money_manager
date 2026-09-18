@@ -168,6 +168,22 @@ export async function syncNowAction(): Promise<SyncActionState> {
   if (outcome.ambiguous.length > 0) {
     parts.push(`${outcome.ambiguous.length} needing review`);
   }
+  // A promotion is good news (a pending row confirmed, not a problem), so it
+  // belongs in the success sentence, not folded into `outcome.warnings` — see
+  // `syncSimpleFin`'s own comment on `promotedFromPending` for why that
+  // channel is the wrong one. A promotion-only sync (insertedCount: 0) still
+  // needs this clause, or the headline reads "Imported 0 transactions" for a
+  // run that genuinely wrote something (found by /ship's own code-reviewer
+  // pass).
+  const promotedTotal = outcome.accounts.reduce(
+    (sum, a) => sum + a.promotedFromPending,
+    0,
+  );
+  if (promotedTotal > 0) {
+    parts.push(
+      `confirmed ${promotedTotal} pending transaction${promotedTotal === 1 ? "" : "s"} as posted`,
+    );
+  }
   const summary = parts.join(", ") + ".";
   return ok(balanceNote === null ? summary : `${summary} ${balanceNote}`, [
     ...outcome.warnings,
@@ -211,10 +227,20 @@ export async function undoSyncAction(
     return fail(result.reason);
   }
 
-  return ok(
-    `Undid the sync — removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}.`,
-    revalidateAll(),
-  );
+  // `revertedCount` (a promoted row put back to pending) is reported
+  // alongside `deletedCount`, never folded into it — folding it in would
+  // claim a reverted row was DELETED, which it wasn't (it still exists,
+  // just pending again). The two counts are always both stated, even when
+  // one is zero ("removed 0 transactions and put 1 back to pending" for a
+  // promotion-only undo): that's two true facts side by side, not the
+  // misleading claim the fold would have been.
+  const parts = [`removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}`];
+  if (result.revertedCount > 0) {
+    parts.push(
+      `put ${result.revertedCount} transaction${result.revertedCount === 1 ? "" : "s"} back to pending`,
+    );
+  }
+  return ok(`Undid the sync — ${parts.join(" and ")}.`, revalidateAll());
 }
 
 export async function linkAccountAction(

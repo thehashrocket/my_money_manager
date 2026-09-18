@@ -123,6 +123,53 @@ describe("findLastSyncBatch", () => {
       deriveBatchLabel("simplefin", batch.importedAt),
     );
   });
+
+  it("counts a PROMOTED row toward transactionCount but excludes its category from categorizedCount", () => {
+    // Regression coverage: transactionCount used to be a bare
+    // `WHERE import_batch_id = batch.id` count, which a promoted row (kept
+    // on its ORIGINAL, pre-promotion batch id — see sync_promotions) is
+    // never part of. categorizedCount must NOT follow it there: undo
+    // REVERTS a promoted row rather than deleting it, so its categorization
+    // is never at risk and folding it in would overstate what undo destroys
+    // ("Undoing deletes N rows you've already categorised").
+    const account = seedAccount();
+    const category = seedCategory();
+
+    const originalBatch = seedBatch("csv", "starone.csv");
+    const promoted = seedTxn({
+      accountId: account.id,
+      batchId: originalBatch.id,
+      amountCents: -487,
+      categoryId: category.id,
+    });
+
+    const syncBatch = seedBatch("simplefin", "simplefin 2026-09-02 10:00Z");
+    seedTxn({
+      accountId: account.id,
+      batchId: syncBatch.id,
+      amountCents: -300,
+    });
+
+    handle.db
+      .insert(schema.syncPromotions)
+      .values({
+        batchId: syncBatch.id,
+        transactionId: promoted.id,
+        priorIsPending: true,
+        priorRawMemo: "PENDING COFFEE",
+        priorNormalizedMerchant: "PENDING COFFEE",
+        priorImportRowHash: "hash-prior",
+      })
+      .run();
+
+    const summary = findLastSyncBatch(handle.db);
+    expect(summary?.batchId).toBe(syncBatch.id);
+    // 1 inserted (batch-owned) + 1 promoted (sync_promotions-owned) = 2.
+    expect(summary?.transactionCount).toBe(2);
+    // Only batch-owned rows count here — the promoted row's category isn't
+    // at risk from undo, so it must not appear in this destructive-undo count.
+    expect(summary?.categorizedCount).toBe(0);
+  });
 });
 
 describe("undoSyncBatch", () => {
@@ -144,6 +191,7 @@ describe("undoSyncBatch", () => {
       status: "undone",
       batchId: batch.id,
       deletedCount: 2,
+      revertedCount: 0,
     });
 
     const remaining = handle.db.select().from(schema.transactions).all();
@@ -157,6 +205,55 @@ describe("undoSyncBatch", () => {
         .where(eq(schema.importBatches.id, batch.id))
         .get(),
     ).toBeUndefined();
+  });
+
+  it("does not credit revertedCount for a sync_promotions row whose transaction no longer exists", () => {
+    // Regression coverage (silent-failure-hunter, `/ship`): revertPromotion
+    // used to have no existence check on the promoted row itself — only on
+    // its transfer partner. If the row it names is gone, the final UPDATE
+    // silently affects 0 rows (better-sqlite3 doesn't throw), and the
+    // caller would credit revertedCount for a row that was never actually
+    // put back to pending. Unreachable through the app's own UI (a
+    // promoted, posted row can never be deleted — manualTransaction.ts
+    // restricts deletes to import_source='manual'), and the FK on
+    // sync_promotions.transactionId (ON DELETE CASCADE) means an ordinary
+    // delete would take the promotion row with it too — so this can only
+    // be simulated the way this codebase already simulates corrupted state
+    // elsewhere (migration0019.test.ts, migration0020.test.ts): with
+    // foreign_keys off, deleting the transaction WITHOUT its cascade.
+    const account = seedAccount();
+    const originalBatch = seedBatch("csv", "starone.csv");
+    const promoted = seedTxn({
+      accountId: account.id,
+      batchId: originalBatch.id,
+      amountCents: -487,
+    });
+
+    const syncBatch = seedBatch("simplefin", "simplefin 2026-09-02 10:00Z");
+    handle.db
+      .insert(schema.syncPromotions)
+      .values({
+        batchId: syncBatch.id,
+        transactionId: promoted.id,
+        priorIsPending: true,
+        priorRawMemo: "PENDING COFFEE",
+        priorNormalizedMerchant: "PENDING COFFEE",
+        priorImportRowHash: "hash-prior",
+      })
+      .run();
+
+    handle.sqlite.pragma("foreign_keys = OFF");
+    handle.sqlite
+      .prepare("DELETE FROM transactions WHERE id = ?")
+      .run(promoted.id);
+    handle.sqlite.pragma("foreign_keys = ON");
+
+    expect(undoSyncBatch(syncBatch.id, handle.db)).toEqual({
+      status: "undone",
+      batchId: syncBatch.id,
+      deletedCount: 0,
+      revertedCount: 0,
+    });
   });
 
   it("unlinks a surviving CSV row that was transfer-paired to a deleted sync row", () => {
@@ -398,7 +495,7 @@ describe("REGRESSION R2 — a manual batch must not suppress a sync's undo", () 
     });
 
     const result = undoSyncBatch(sync.id, handle.db);
-    expect(result).toEqual({ status: "undone", batchId: sync.id, deletedCount: 1 });
+    expect(result).toEqual({ status: "undone", batchId: sync.id, deletedCount: 1, revertedCount: 0 });
 
     // The manual row is untouched — it was never part of the sync.
     const remaining = handle.db.select().from(schema.transactions).all();

@@ -268,6 +268,7 @@ describe("verifyStagedLinks — an all-dropped sync mints NO batch at all", () =
       status: "undone",
       batchId: first.batchId,
       deletedCount: 1,
+      revertedCount: 0,
     });
   });
 
