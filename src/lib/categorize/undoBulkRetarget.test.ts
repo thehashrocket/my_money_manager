@@ -129,6 +129,67 @@ describe("undoBulkRetarget — transactions", () => {
     expect(rows.every((r) => r.categoryId === gas.id)).toBe(true);
   });
 
+  it("falls back to NULL rather than restoring into a source category reclassified to fund since the retarget ran (outside review finding)", () => {
+    // Reproduces the race a code-review pass found: retargeting a merchant's
+    // rows OFF `gas` is exactly what can leave it unused (zero transactions,
+    // zero budget_periods rows), and an unused category is freely
+    // reclassifiable to fund with no confirmation (rule 8) — entirely inside
+    // the 10s undo window. Restoring into it then would recreate the fund-
+    // transaction bug this whole release exists to close.
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", amountCents: -5000, categoryId: gas.id });
+
+    const snap = bulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: gas.id,
+      categoryId: groceries.id,
+      rememberMerchant: false,
+    });
+
+    handle.db
+      .update(schema.categories)
+      .set({ kind: "fund" })
+      .where(eq(schema.categories.id, gas.id))
+      .run();
+
+    const result = undoBulkRetarget(handle.db, snap);
+    expect(result.anyReverted).toBe(true);
+    if (!result.anyReverted) throw new Error("unreachable — asserted above");
+    expect(result.restoredCategoryId).toBeNull();
+    expect(result.fromCategoryBecameFund).toBe(true);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.normalizedMerchant, "COSTCO"))
+      .all();
+    expect(rows.every((r) => r.categoryId === null)).toBe(true);
+  });
+
+  it("does not set fromCategoryBecameFund when the source category is still an ordinary kind", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const gas = seedCategory("Gas");
+    const groceries = seedCategory("Groceries");
+    seedTxn({ accountId: a.id, batchId: b.id, merchant: "COSTCO", amountCents: -5000, categoryId: gas.id });
+
+    const snap = bulkRetarget(handle.db, {
+      normalizedMerchant: "COSTCO",
+      fromCategoryId: gas.id,
+      categoryId: groceries.id,
+      rememberMerchant: false,
+    });
+
+    const result = undoBulkRetarget(handle.db, snap);
+    expect(result.anyReverted).toBe(true);
+    if (!result.anyReverted) throw new Error("unreachable — asserted above");
+    expect(result.fromCategoryBecameFund).toBe(false);
+    expect(result.restoredCategoryId).toBe(gas.id);
+  });
+
   it("leaves rows alone that the user re-categorized after the snapshot", () => {
     const a = seedAccount();
     const b = seedBatch();
@@ -338,7 +399,11 @@ describe("undoBulkRetarget — snapshot shapes only a crafted post can produce",
       earliestDate: "2026-04-05",
     });
 
-    expect(result).toEqual({ revertedCount: 0, ruleAction: "none" });
+    expect(result).toEqual({
+      anyReverted: false,
+      revertedCount: 0,
+      ruleAction: "none",
+    });
     // The guard matters: an unguarded `inArray(id, [])` compiles to a WHERE
     // that must match nothing, and a row filed at `categoryId` sitting right
     // there is what would notice if it ever stopped.

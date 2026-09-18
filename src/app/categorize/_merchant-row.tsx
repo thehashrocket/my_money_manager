@@ -211,7 +211,7 @@ export function MerchantRow({
               onDismissedChange(merchant, false, scopeKey);
               notifyUndo(
                 `Reverted ${undo.revertedCount} row${undo.revertedCount === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                undo.warning,
+                [undo.warning],
               );
             } catch (err) {
               toast.error(err instanceof Error ? err.message : "Undo failed.");

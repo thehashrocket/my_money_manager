@@ -17,6 +17,10 @@ const rule = (over) => ({
   // Joined in by the CLI from categories.archived_at. Null = live, which is
   // the default here so every pre-existing case keeps meaning what it did.
   category_archived_at: null,
+  // Joined in by the CLI from categories.kind. "expense" is the default here
+  // for the same reason — every pre-existing case keeps meaning what it did,
+  // and a real category's kind is never actually null.
+  category_kind: "expense",
   ...over,
 });
 
@@ -327,6 +331,79 @@ describe("planBackfill — collisions with an archived category", () => {
     });
 
     expect(plan.collisions[0].ranked[0].rule.id).toBe(77);
+  });
+});
+
+describe("planBackfill — collisions with a fund category", () => {
+  /**
+   * The fund-kind half of buildRuleMatcher's skip filter (added 2026-09-17,
+   * closing a real incident: the guard used to skip only a POSITIVE row into
+   * a fund, so a fund-pointing rule could still fire on a negative one and
+   * this ranking never needed to know about kind). A rule whose category is
+   * now `kind='fund'` never fires, on either sign, for the same reason an
+   * archived category's rule never fires — so it has to sort last here too,
+   * or a collision could delete the live rule and keep the inert one.
+   */
+  it("ranks a live rule above a fund-pointing one that outranks it on every other key", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "JACK 430" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "JACK 342" }),
+      ],
+      rules: [
+        rule({
+          id: 41,
+          match_value: "JACK 430",
+          category_id: 10,
+          priority: 99,
+          updated_at: 9000,
+          category_kind: "fund",
+        }),
+        rule({
+          id: 77,
+          match_value: "JACK 342",
+          category_id: 20,
+          priority: 0,
+          updated_at: 1000,
+          category_kind: "expense",
+        }),
+      ],
+      dismissals: [],
+      normalize: () => "JACK IN THE BOX",
+    });
+
+    const [collision] = plan.collisions;
+    expect(collision.ranked[0].rule.id).toBe(77);
+    expect(plan.losingRuleIds).toEqual(new Set([41]));
+  });
+
+  it("sorts a fund-pointing rule last even against an archived one — both are inert, compareRules breaks the tie", () => {
+    const plan = planBackfill({
+      txns: [
+        txn({ id: 1, raw_memo: "a", normalized_merchant: "JACK 430" }),
+        txn({ id: 2, raw_memo: "b", normalized_merchant: "JACK 342" }),
+      ],
+      rules: [
+        rule({
+          id: 41,
+          match_value: "JACK 430",
+          updated_at: 9000,
+          category_kind: "fund",
+        }),
+        rule({
+          id: 77,
+          match_value: "JACK 342",
+          updated_at: 1000,
+          category_archived_at: 1,
+        }),
+      ],
+      dismissals: [],
+      normalize: () => "JACK IN THE BOX",
+    });
+
+    // Both inert, so neither wins on that alone — compareRules' updated_at
+    // DESC tie-break decides, and 41 (fund) is more recent.
+    expect(plan.collisions[0].ranked[0].rule.id).toBe(41);
   });
 });
 

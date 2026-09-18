@@ -162,17 +162,16 @@ export function loadGoals(db: Db, asOf: YearMonth = currentMonth()): GoalsView {
   // that already counted the same intention. A fund allocated $500 that then
   // receives the $500 would read ~$1,000 saved.
   //
-  // Whether that is reachable depends on how money enters a fund, which is
-  // itself the unresolved half of TODOS.md's PR3 item ("progress is money
-  // planned, not money moved"). In today's model it arrives as a transfer, and
-  // transfers are paired out by the `transfer_pair_id IS NULL` filter, so the
-  // sum would be negatives-only anyway and the change would be a no-op — but
-  // that is an assumption about a code path with ZERO live exercise (there are
-  // no `kind='fund'` categories and no `target_cents` on the ledger), and a
-  // dead path is the worst place to introduce arithmetic nobody can observe.
-  //
-  // Settle the meaning of progress first; the sign convention here follows
-  // from that answer rather than the other way round.
+  // TODOS.md's PR3 item ("progress is money planned, not money moved") is
+  // CLOSED PERMANENTLY as of v1.6.1 — this is no longer an open question to
+  // settle, it is the decided, permanent model. See DESIGN.md's "What a
+  // fund's progress means" for the full account, including why "how money
+  // enters a fund" was the wrong question: every in-app write path refuses to
+  // ever file a transaction to a fund, so `withdrawn` sums a set nothing can
+  // populate, by design rather than by the accident of an unexercised path.
+  // The outflows-only-vs-net choice above stays exactly as documented — it
+  // was never contingent on the PR3 answer, and net would still be wrong for
+  // the same double-counting reason even now that the model is settled.
   const withdrawalRows = db
     .select({
       categoryId: schema.transactions.categoryId,

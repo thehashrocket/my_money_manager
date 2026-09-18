@@ -117,22 +117,28 @@ export function planBackfill({ txns, rules, dismissals, normalize = normalizeMer
   // only the sort was a bug:
   //
   //   - SKIP: a rule whose category is archived never fires (rule 8 makes
-  //     archiving inert, not deleting). Ranking one of those first would delete
-  //     the live rule that WAS firing and keep one that never will, leaving the
-  //     merchant with no effective rule at all — worse than either prior state.
-  //     So archived-category rules sort last, mirroring the `continue`.
+  //     archiving inert, not deleting), and — as of 2026-09-17 — neither does
+  //     a rule whose category is `kind='fund'`, on EITHER sign (the guard
+  //     used to be positive-only; a live incident found the asymmetry
+  //     reachable through ordinary use and closed it, see DESIGN.md's "What
+  //     a fund's progress means"). Ranking either kind of inert rule first
+  //     would delete the live rule that WAS firing and keep one that never
+  //     will, leaving the merchant with no effective rule at all — worse than
+  //     either prior state. So both sort last, mirroring buildRuleMatcher's
+  //     two `continue`s.
   //   - SORT: priority DESC, then updated_at DESC, with id DESC as a final
   //     tie-break. Picking differently — the plan originally said "lowest id" —
   //     resolves to the OLDEST rule and silently reverts the user's most recent
   //     training.
   //
-  // `conflicting` deliberately still counts an archived rule's category. Its
-  // merge does not move money today, so this over-asks for --resolve-conflicts
-  // in that case; over-asking is the right direction for the one flag that
-  // exists to gate money movement, and the printed lines mark which rules are
-  // archived so the choice is reviewable.
+  // `conflicting` deliberately still counts an inert rule's category (archived
+  // OR fund). Its merge does not move money today, so this over-asks for
+  // --resolve-conflicts in that case; over-asking is the right direction for
+  // the one flag that exists to gate money movement, and the printed lines
+  // mark which rules are inert and why so the choice is reviewable.
   const isArchived = (rule) =>
     rule.category_archived_at !== null && rule.category_archived_at !== undefined;
+  const isInert = (rule) => isArchived(rule) || rule.category_kind === "fund";
 
   const byNewValue = new Map();
   for (const entry of rewritten) {
@@ -145,7 +151,7 @@ export function planBackfill({ txns, rules, dismissals, normalize = normalizeMer
     if (entries.length < 2) continue;
     const ranked = [...entries].sort(
       (a, b) =>
-        Number(isArchived(a.rule)) - Number(isArchived(b.rule)) ||
+        Number(isInert(a.rule)) - Number(isInert(b.rule)) ||
         b.rule.priority - a.rule.priority ||
         b.rule.updated_at - a.rule.updated_at ||
         b.rule.id - a.rule.id,
@@ -274,13 +280,17 @@ function runCli(argv) {
       "SELECT id, raw_memo, normalized_merchant FROM transactions WHERE raw_memo IS NOT NULL",
     )
     .all();
-  // `category_archived_at` joins in because the collision ranking has to
-  // replicate buildRuleMatcher's skip filter, not just its sort — see the
-  // collisions block in planBackfill.
+  // `category_archived_at` and `category_kind` join in because the collision
+  // ranking has to replicate buildRuleMatcher's skip filter, not just its
+  // sort — see the collisions block in planBackfill. `category_kind` is the
+  // newer of the two (2026-09-17): buildRuleMatcher's fund guard used to be
+  // sign-conditional (only a positive row was skipped), so a fund-pointing
+  // rule could still fire and this ranking never needed to know about kind.
+  // It is unconditional now, matching the archived case exactly.
   const rules = db
     .prepare(
       `SELECT r.id, r.category_id, r.match_type, r.match_value, r.priority, r.updated_at,
-              c.archived_at AS category_archived_at
+              c.archived_at AS category_archived_at, c.kind AS category_kind
          FROM category_rules r
          JOIN categories c ON c.id = r.category_id`,
     )
@@ -372,9 +382,15 @@ function runCli(argv) {
       say(`  ${JSON.stringify(value)}${conflicting ? "   <-- CATEGORY CONFLICT" : ""}`);
       for (const [i, e] of ranked.entries()) {
         const cat = categories.get(e.rule.category_id);
+        const inertNote =
+          cat?.archived_at != null
+            ? " (ARCHIVED — never fires)"
+            : e.rule.category_kind === "fund"
+              ? " (FUND — never fires)"
+              : "";
         say(
           `      id=${e.rule.id} priority=${e.rule.priority} category=${cat?.name}` +
-            (cat?.archived_at != null ? " (ARCHIVED — never fires)" : "") +
+            inertNote +
             (i === 0 ? "   <= KEPT" : "   -- deleted"),
         );
       }

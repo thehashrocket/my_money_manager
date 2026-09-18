@@ -95,7 +95,7 @@ describe("notifyUndo", () => {
   it("is a PLAIN toast when the undo refreshed cleanly", () => {
     // Not `toast.success`: the undo is a reversal, and the surfaces that call
     // it were already reporting it plainly.
-    notifyUndo("Reverted 3 rows.", undefined);
+    notifyUndo("Reverted 3 rows.", [undefined]);
 
     expect(plain).toHaveBeenCalledWith("Reverted 3 rows.");
     expect(warning).not.toHaveBeenCalled();
@@ -104,11 +104,36 @@ describe("notifyUndo", () => {
   it("is a WARNING carrying the sentence when the undo's own refresh failed", () => {
     // The undo is a committed write too — it restores the rule the refusal
     // removed — so its own failed refresh has to be said.
-    notifyUndo("Reverted 3 rows.", "Reload to see the current state.");
+    notifyUndo("Reverted 3 rows.", ["Reload to see the current state."]);
 
     expect(warning).toHaveBeenCalledWith(
       "Reverted 3 rows. Reload to see the current state.",
     );
     expect(plain).not.toHaveBeenCalled();
+  });
+
+  it("joins multiple notes onto one WARNING toast, dropping null/undefined entries", () => {
+    // The array shape mirrors `notifyWrite` so callers stop hand-rolling
+    // their own `[a, b].filter(...).join(" ")` around a single-string param —
+    // that copy-drift is exactly what `notifyWrite`'s own docstring warns
+    // against, and this function had grown one such copy in `_retarget-form.tsx`.
+    notifyUndo("Moved 3 rows back to Uncategorized.", [
+      "Groceries is now a fund, so these rows are uncategorized instead.",
+      undefined,
+      null,
+      "Reload to see the current state.",
+    ]);
+
+    expect(warning).toHaveBeenCalledWith(
+      "Moved 3 rows back to Uncategorized. Groceries is now a fund, so these rows are uncategorized instead. Reload to see the current state.",
+    );
+    expect(plain).not.toHaveBeenCalled();
+  });
+
+  it("is a PLAIN toast when every note is null/undefined", () => {
+    notifyUndo("Reverted 3 rows.", [undefined, null]);
+
+    expect(plain).toHaveBeenCalledWith("Reverted 3 rows.");
+    expect(warning).not.toHaveBeenCalled();
   });
 });

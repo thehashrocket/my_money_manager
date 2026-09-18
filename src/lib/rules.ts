@@ -49,13 +49,23 @@ export type RuleMatch = { categoryId: number; ruleId: number };
  * the batch's auto-categorization can be undone later.
  *
  * The returned matcher also takes the row's `amountCents` (X2 + E8): a rule
- * must not file a negative row into a `kind='income'` category, or a
- * positive row into a `kind='fund'` category — either one "poisons" that
- * category's numbers for every future occurrence of the merchant (B8). The
- * guard joins `categories` in the same query this function already reads
- * once per batch, rather than adding a second `categories` read at each call
- * site. A rejected candidate is skipped, not fatal to the whole match:
- * matching continues to the next-ranked rule.
+ * must not file a negative row into a `kind='income'` category — that
+ * "poisons" the category's numbers for every future occurrence of the
+ * merchant (B8). A `kind='fund'` category refuses EVERY row, either sign,
+ * for the same reason `assertAssignableCategory` refuses one on the manual
+ * categorize paths: a fund's progress is money PLANNED, never money moved
+ * (DESIGN.md, "What a fund's progress means"), and a rule outlives the
+ * category it was trained on — `setCategoryKind` never touches
+ * `category_rules` — so an old rule trained while the category was an
+ * expense or income kind can still be live after a `⋯` menu reclassifies it
+ * to `fund`. A one-sided (positive-only) guard here let exactly that
+ * sequence auto-file a withdrawal into a fund with no explicit user action,
+ * silently populating `loadGoals`' `withdrawn` sum that every other write
+ * path keeps permanently empty. The guard joins `categories` in the same
+ * query this function already reads once per batch, rather than adding a
+ * second `categories` read at each call site. A rejected candidate is
+ * skipped, not fatal to the whole match: matching continues to the
+ * next-ranked rule.
  *
  * X3 (PR2b): the same join now also carries `archivedAt`, and an archived
  * category's rules are skipped the same way a sign-mismatched one is —
@@ -83,7 +93,7 @@ export function buildRuleMatcher(
       if (!matches(rule, normalizedMerchant)) continue;
       if (categoryArchivedAt !== null) continue;
       if (categoryKind === "income" && amountCents < 0) continue;
-      if (categoryKind === "fund" && amountCents > 0) continue;
+      if (categoryKind === "fund") continue;
       return { categoryId: rule.categoryId, ruleId: rule.id };
     }
     return null;

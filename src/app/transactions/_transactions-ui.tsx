@@ -100,15 +100,13 @@ export function TransactionsUi({
                     importingCards={importingCards}
                     onPairingChanged={onPairingChanged}
                     filterValues={searchParams}
-                    onCategorized={(priorCategoryId, updatedCount) => {
-                      if (priorCategoryId === null) {
-                        setBacklogCount((c) => Math.max(0, c - updatedCount));
-                      }
+                    onCategorized={(newlyCategorizedCount) => {
+                      setBacklogCount((c) =>
+                        Math.max(0, c - newlyCategorizedCount),
+                      );
                     }}
-                    onUndone={(priorCategoryId, revertedCount) => {
-                      if (priorCategoryId === null) {
-                        setBacklogCount((c) => c + revertedCount);
-                      }
+                    onUndone={(newlyUncategorizedCount) => {
+                      setBacklogCount((c) => c + newlyUncategorizedCount);
                     }}
                   />
                 )}

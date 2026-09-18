@@ -223,11 +223,27 @@ export function RetargetForm({
             undo.revertedCount === result.snapshot.txnIds.length
               ? ""
               : ` (${result.snapshot.txnIds.length - undo.revertedCount} had been re-categorized since)`;
+          // `result.fromCategoryName` is only an honest destination when
+          // `undo` did NOT fall back — `fromCategoryId` can become a fund
+          // WITHIN the undo window (its rows just left it, which is exactly
+          // what can make it "unused" and freely reclassifiable), and
+          // restoring into it then would recreate the fund-transaction bug
+          // this whole release closes. The rows land in Uncategorized
+          // instead, and the toast says so rather than repeating a category
+          // name the rows didn't actually go back to.
+          const destination =
+            undo.anyReverted && undo.fromCategoryBecameFund
+              ? "Uncategorized"
+              : result.fromCategoryName;
+          const fundFallbackWarning =
+            undo.anyReverted && undo.fromCategoryBecameFund
+              ? `${result.fromCategoryName} is now a fund, so these rows are uncategorized instead.`
+              : undefined;
           notifyUndo(
             `Moved ${undo.revertedCount} row${
               undo.revertedCount === 1 ? "" : "s"
-            } back to ${result.fromCategoryName}${scope}.${describeRuleUndo(undo.ruleAction)}`,
-            undo.warning,
+            } back to ${destination}${scope}.${describeRuleUndo(undo.ruleAction)}`,
+            [fundFallbackWarning, undo.warning],
           );
         },
       });

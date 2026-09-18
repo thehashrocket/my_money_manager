@@ -20,10 +20,17 @@ export type EffectiveAllocation = {
  * unpaired row makes `spent` NEGATIVE and `max(0, prevEffective - spent)` then
  * carries a balance LARGER than anything ever allocated. On an expense envelope
  * that is correct and deliberate — a refund restores buying capacity. On a fund
- * it is money appearing from nowhere, and every other subsystem already refuses
- * it: `rules.ts` will not auto-file a positive row into a fund at import,
- * `assertAssignableCategory` refuses a fund on all three categorize paths, and
- * `loadGoals` keeps `withdrawn` outflows-only for this exact reason.
+ * it is money appearing from nowhere, and every other in-app path already
+ * refuses to ever file a transaction to a fund — see DESIGN.md's "What a
+ * fund's progress means" for the full, current enumeration of guards. This
+ * docstring used to hand-roll that list itself; it went stale TWICE in one
+ * review cycle (2026-09-17) when two of those guards were found to have
+ * asymmetric gaps and fixed one at a time, so it now defers to the one place
+ * that gets updated as part of closing each gap, rather than being a third
+ * copy of a list that keeps moving. A fund transaction can therefore only
+ * ever exist via a direct `pnpm db:studio` edit — this guard is defense
+ * against exactly that, the same residual TODOS.md already documents for
+ * `paydown_target_cents`, not a path any in-app action can reach.
  *
  * There are TWO rollover spellings and they cannot share the SQL — this one is
  * a per-category scalar read, `loadRolloverEffectiveByCategory` is a grouped

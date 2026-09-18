@@ -169,20 +169,19 @@ export type FundRow = {
 };
 
 /*
- * A FUND ROW HAS NO SPEND FIELD, AND THAT IS DELIBERATE — but it has one
- * visible consequence worth knowing before you treat it as a bug.
+ * A FUND ROW HAS NO SPEND FIELD, AND THAT IS DELIBERATE.
  *
  * `FundRow` carries no `spentCents`/`remainingCents`, and `plannedToDateCents`
- * is allocated-only by design (see its own note above). Fund spend is still
- * real, though: `buildRuleMatcher` refuses only POSITIVE rows on a fund
- * (`rules.ts` — a positive row poisons the category), so a NEGATIVE row can
- * auto-file into one at import, and the clamped prefix scan then subtracts it
- * from next month's carried balance.
- *
- * So a fund's `+$X rollover → $Y` caption can shrink between months with no
- * spend figure anywhere on the band to account for it. `spendIgnoresPositiveRows`
- * makes fund spend ONE-DIRECTIONAL; it does not make it visible. The row name
- * links to the transaction list, which is where the explanation actually lives.
+ * is allocated-only by design (see its own note above). This band's clamp
+ * (`loadRolloverEffectiveByCategory`'s fund-scoped CASE WHEN, driven by
+ * `spendIgnoresPositiveRows`) still runs on every read, but it is defensive
+ * rather than live: a fund transaction can only ever exist via a direct
+ * `pnpm db:studio` edit — this clamp is what keeps that edit from corrupting
+ * the carried balance, not a UI-reachable feature. See DESIGN.md's "What a
+ * fund's progress means" for the current, full account of why that's true —
+ * it took two separate review-found fixes to make it actually true rather
+ * than merely claimed, and this comment stopped trying to re-narrate them
+ * inline after the narration itself went stale mid-review.
  */
 
 /**
@@ -670,12 +669,13 @@ function loadSpendForMonth(
  * money appearing from nowhere.
  *
  * The app had already decided this everywhere else and this was the one place
- * that had not heard. `src/lib/rules.ts:80` refuses to auto-file a positive
- * row into a fund at import time — its comment says such a row "poisons" the
- * category — `assertAssignableCategory` refuses a fund outright on all three
- * categorize paths, and `loadGoals` keeps `withdrawn` outflows-only for
- * exactly this reason (rule 1's closing note). Funds only reached this code at
- * all in v0.23.0, when they joined `rolloverCategoryIds` for the first time.
+ * that had not heard. See DESIGN.md's "What a fund's progress means" for the
+ * current, full account of every guard that keeps a transaction out of a
+ * fund — not re-narrated here on purpose, since the last two times this
+ * comment tried to enumerate them inline, a review found a gap in one of the
+ * guards and the enumeration went stale before the fix even landed. Funds
+ * only reached this code at all in v0.23.0, when they joined
+ * `rolloverCategoryIds` for the first time.
  *
  * So: for a fund, positive rows contribute 0 rather than negative spend. It
  * has to happen in SQL, not after the GROUP BY — a month holding both a $50

@@ -782,7 +782,7 @@ describe("loadMonthView — FUNDS band (TC17, TC17b)", () => {
      the fixtures could not express the bug.
 
      The app had already decided this elsewhere — `rules.ts` refuses to
-     auto-file a positive row into a fund ("poisons that category"),
+     auto-file ANY row into a fund, either sign ("poisons that category"),
      `assertAssignableCategory` refuses a fund on all three categorize paths,
      and `loadGoals` keeps `withdrawn` outflows-only per rule 1. */
   it("(round-5) a POSITIVE row filed to a rollover fund does not inflate its carried balance", () => {

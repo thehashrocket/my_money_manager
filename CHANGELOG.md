@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-09-17
+
+### Fixed
+- **A fund category could silently receive a withdrawal it should never have been able to.** Reclassifying a category to a fund through the `⋯` menu left any rule trained on it beforehand still active, and importing could match a debit through that old rule straight into the fund — quietly starting to track "money moved," which contradicts the fund's whole progress model (money planned, not moved) and this app's own documented guarantee that it can't happen. Closed by refusing a fund match on either sign of transaction, not just deposits.
+- **A second, unrelated way for a transaction to land in a fund: undoing a categorize action.** Categorize a transaction, reclassify its old category to a fund (in another tab, or a fast second click), then hit the original action's Undo — the row was silently put back into the now-fund category, no import or trained rule involved. Undo now checks the category's current kind before restoring into it and lands the row in Uncategorized instead when it's become a fund.
+- **A third way, found on the already-fixed PR: undoing a bulk merchant retarget.** Retarget a merchant's rows off a category (which can leave it with nothing left in it), reclassify that now-empty category to a fund, then undo the retarget within the 10-second window — the rows landed right back in the new fund. Same fix: undo checks the category's current kind first and falls back to Uncategorized.
+- **The backlog count on `/transactions` could drift when "Apply to past" moved rows that weren't the row you were looking at.** Categorizing or undoing a row with "Apply to past" checked only updated the live counter based on that one row's own prior category, so the other rows it also touched (always uncategorized before, always uncategorized again on undo) went uncounted whenever the row itself wasn't the one crossing in or out of Uncategorized.
+
+### Changed
+- **Whether a fund could ever track real transferred money, not just what you planned to save, is now decided: no, on purpose.** `/goals` no longer describes this as temporary ("...until that's true") — a fund tracks a savings plan against your checking balance, not a reserve account this app reconciles for you, and that's permanent. Also now explicit: a fund has no way to represent spending from it and then replenishing it (an Emergency Fund payout, say) — that's an ordinary expense with no link back to the fund.
+
 ## [1.6.0] - 2026-09-17
 
 ### Added

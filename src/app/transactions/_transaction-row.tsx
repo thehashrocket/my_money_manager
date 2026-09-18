@@ -26,10 +26,21 @@ import {
 type Props = {
   row: TransactionRow;
   leafCategories: LeafCategory[];
-  /** Called after the action resolves — used to bump the live backlog counter. */
-  onCategorized: (priorCategoryId: number | null, updatedCount: number) => void;
-  /** Called after Undo resolves — reverses the backlog bump. */
-  onUndone: (priorCategoryId: number | null, revertedCount: number) => void;
+  /**
+   * Called after the action resolves with the number of rows that just
+   * crossed from Uncategorized into a real category — used to bump the live
+   * backlog counter. Deliberately NOT `(priorCategoryId, updatedCount)`: that
+   * shape undercounted whenever "Apply to past" was checked on a row whose
+   * OWN prior category wasn't null (the past rows it also touches are always
+   * ex-null, regardless of the target's own prior state) — this reports the
+   * exact delta instead of making the caller reconstruct it from a single
+   * row's prior id.
+   */
+  onCategorized: (newlyCategorizedCount: number) => void;
+  /** Called after Undo resolves with the number of rows that just crossed
+   *  back from a real category into Uncategorized — the undo twin of
+   *  `onCategorized`, same reasoning. */
+  onUndone: (newlyUncategorizedCount: number) => void;
   /** DS52 — credit cards, for the row menu's "Mark as payment to". */
   cardAccounts: AccountOption[];
   /** T9 — cards whose own transactions come in from the feed, with candidates. */
@@ -195,7 +206,14 @@ export function TransactionRowForm({
         setCurrentCategoryName(newCategoryName);
         remember.reset();
         setApplyToPast(false);
-        onCategorized(priorCategoryId, result.updatedCount);
+        // "Apply to past" rows are always ex-NULL regardless of whether the
+        // TARGET row's own prior category was null — count them
+        // unconditionally, and add the target only when it was the one that
+        // actually left Uncategorized.
+        onCategorized(
+          (priorCategoryId === null ? 1 : 0) +
+            result.snapshot.applyToPastTxnIds.length,
+        );
 
         /* ONE toast, not a success plus a warning — rule 6. The
            collapsed-stack argument for why two toasts cannot both be read, and
@@ -217,20 +235,46 @@ export function TransactionRowForm({
               );
               const reverted =
                 (undo.targetReverted ? 1 : 0) + undo.revertedApplyToPastCount;
-              setCurrentCategoryId(priorCategoryId);
+              // `undo.restoredCategoryId` is what the server ACTUALLY wrote —
+              // usually `priorCategoryId`, but never the prior category once
+              // it's become a fund (rule: a fund can never hold a
+              // transaction). Falls back to the optimistic `priorCategoryId`
+              // only when the row wasn't reverted at all (e.g. re-categorized
+              // by the user in the meantime), matching this block's
+              // pre-existing behavior for that unrelated case. Narrowing on
+              // `targetReverted` first (rather than `undo.restoredCategoryId
+              // ?? priorCategoryId`) is load-bearing, not style — `??` would
+              // silently treat "restored to nothing" (fund fallback) the same
+              // as "nothing happened," which is exactly the bug this type's
+              // own docstring warns about.
+              const revertedTo = undo.targetReverted
+                ? undo.restoredCategoryId
+                : priorCategoryId;
+              setCurrentCategoryId(revertedTo);
               setCurrentCategoryName(
-                priorCategoryId === null
+                revertedTo === null
                   ? null
-                  : (leafCategories.find((c) => c.id === priorCategoryId)
-                      ?.name ?? null),
+                  : (leafCategories.find((c) => c.id === revertedTo)?.name ??
+                      null),
               );
               setPickerValue(
-                priorCategoryId !== null ? String(priorCategoryId) : "",
+                revertedTo !== null ? String(revertedTo) : "",
               );
-              onUndone(priorCategoryId, reverted);
+              // Apply-to-past reverts always land on NULL regardless of the
+              // target's own restore destination (same asymmetry as the
+              // forward path above) — count them unconditionally, and add
+              // the target only when IT specifically came back to NULL.
+              onUndone(
+                (undo.targetReverted && revertedTo === null ? 1 : 0) +
+                  undo.revertedApplyToPastCount,
+              );
+              const fundFallbackWarning =
+                undo.targetReverted && undo.priorCategoryBecameFund
+                  ? "Its previous category is now a fund, so it's uncategorized instead."
+                  : undefined;
               notifyUndo(
                 `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                undo.warning,
+                [fundFallbackWarning, undo.warning],
               );
             } catch (err) {
               toast.error(err instanceof Error ? err.message : "Undo failed.");

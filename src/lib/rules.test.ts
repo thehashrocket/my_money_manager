@@ -424,7 +424,7 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     expect(match("TRANSFER", 10000)).toBeNull();
   });
 
-  it("allows a match into a kind='fund' category for a negative row (a withdrawal)", () => {
+  it("skips a match into a kind='fund' category for a negative row too (a withdrawal is never auto-filed)", () => {
     const fund = seedCategory("Car Repair", "fund");
     createOrUpdateRule(handle.db, {
       normalizedMerchant: "MECHANIC",
@@ -433,10 +433,35 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     });
 
     const match = buildRuleMatcher(handle.db);
-    expect(match("MECHANIC", -30000)?.categoryId).toBe(fund.id);
+    expect(match("MECHANIC", -30000)).toBeNull();
   });
 
-  it("a zero-amount row is not blocked by either sign guard (both use strict < / >)", () => {
+  it("skips a match into a fund category even when the rule was trained BEFORE the category was reclassified to fund", () => {
+    // Reproduces the loophole an outside review found: setCategoryKind never
+    // touches category_rules, so a rule trained while a category was still
+    // 'expense' survives a later reclassification to 'fund' untouched. A
+    // one-sided (positive-only) fund guard let a negative row from that
+    // surviving rule auto-file into the now-fund category with no explicit
+    // user action, silently populating loadGoals' `withdrawn` sum — the one
+    // thing DESIGN.md documents as permanently empty on every other path.
+    const category = seedCategory("Car Repair", "expense");
+    createOrUpdateRule(handle.db, {
+      normalizedMerchant: "MECHANIC",
+      categoryId: category.id,
+      source: "manual",
+    });
+    handle.db
+      .update(schema.categories)
+      .set({ kind: "fund" })
+      .where(eq(schema.categories.id, category.id))
+      .run();
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("MECHANIC", -30000)).toBeNull();
+    expect(match("MECHANIC", 30000)).toBeNull();
+  });
+
+  it("a zero-amount row is not blocked by income's strict < guard, but a fund still refuses it (fund has no sign condition at all)", () => {
     const paycheck = seedCategory("Paycheck", "income");
     createOrUpdateRule(handle.db, {
       normalizedMerchant: "EMPLOYER",
@@ -452,7 +477,7 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
 
     const match = buildRuleMatcher(handle.db);
     expect(match("EMPLOYER", 0)?.categoryId).toBe(paycheck.id);
-    expect(match("TRANSFER", 0)?.categoryId).toBe(fund.id);
+    expect(match("TRANSFER", 0)).toBeNull();
   });
 
   it("never blocks a match into an ordinary expense category, either sign", () => {
@@ -466,6 +491,33 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     const match = buildRuleMatcher(handle.db);
     expect(match("SAFEWAY", -5000)?.categoryId).toBe(groceries.id);
     expect(match("SAFEWAY", 1000)?.categoryId).toBe(groceries.id); // a refund
+  });
+
+  it("a rejected fund candidate falls through to the next-ranked rule, same as the income guard's fallthrough case", () => {
+    const fund = seedCategory("Car Repair", "fund");
+    const groceries = seedCategory("Groceries", "expense");
+    handle.db
+      .insert(schema.categoryRules)
+      .values([
+        {
+          categoryId: fund.id,
+          matchType: "contains",
+          matchValue: "SAVEMART",
+          priority: 90, // higher priority, but a fund never matches
+          source: "auto",
+        },
+        {
+          categoryId: groceries.id,
+          matchType: "contains",
+          matchValue: "STORE",
+          priority: 10,
+          source: "auto",
+        },
+      ])
+      .run();
+
+    const match = buildRuleMatcher(handle.db);
+    expect(match("SAVEMART STORE", -2000)?.categoryId).toBe(groceries.id);
   });
 
   it("a rejected candidate falls through to the next-ranked rule rather than aborting the whole match", () => {
@@ -507,7 +559,7 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     expect(match("EMPLOYER", 0)?.categoryId).toBe(paycheck.id);
   });
 
-  it("a $0.00 row matches a fund rule too, for the same reason", () => {
+  it("a $0.00 row still refuses a fund rule — fund has no sign condition to miss", () => {
     const fund = seedCategory("Car Repair", "fund");
     createOrUpdateRule(handle.db, {
       normalizedMerchant: "TRANSFER",
@@ -516,7 +568,7 @@ describe("buildRuleMatcher — sign guard (TC32, X2 + E8)", () => {
     });
 
     const match = buildRuleMatcher(handle.db);
-    expect(match("TRANSFER", 0)?.categoryId).toBe(fund.id);
+    expect(match("TRANSFER", 0)).toBeNull();
   });
 });
 
