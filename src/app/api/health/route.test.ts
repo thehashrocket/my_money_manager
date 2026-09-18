@@ -1,9 +1,32 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
+// `await connection()` (added for cache-components-migration, Stage 0) throws
+// "called outside a request scope" when the route's GET is invoked directly
+// in a Vitest process rather than through Next's real App Router request
+// handling — there is no request-scoped AsyncLocalStorage here to read.
+// Mocked to a no-op resolved promise so these tests keep exercising the
+// actual behavior under test (the DB-error-to-generic-503 mapping), not
+// Next's own request-scope machinery.
+//
+// `vi.fn()`, not a bare arrow function: `await connection()` is the whole
+// reason this route no longer silently freezes `{ok:true}` at build time
+// (see route.ts's own comment) — a `pnpm build` route-table check is what
+// actually proves static-vs-dynamic, but that only runs at ship time. A bare
+// no-op mock would let every test here keep passing even if a future edit
+// deleted the `await connection()` call entirely; the assertion below is the
+// unit-test-level guard for that regression (pre-landing review, testing
+// specialist).
+const connectionMock = vi.fn(async () => {});
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, connection: connectionMock };
+});
+
 describe("/api/health", () => {
   afterEach(() => {
     vi.doUnmock("@/db");
     vi.resetModules();
+    connectionMock.mockClear();
   });
 
   // Dynamic import under a full parallel test-suite run can exceed vitest's
@@ -15,6 +38,9 @@ describe("/api/health", () => {
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    // Regression guard: `await connection()` is what stops this route
+    // freezing static under Cache Components (route.ts's own comment).
+    expect(connectionMock).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   it("returns 503 with a generic error — the raw driver message is never returned to the caller", async () => {

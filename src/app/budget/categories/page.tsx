@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import Link from "next/link";
 import { db } from "@/db";
 import { loadAllCategories, type CategoryListRow } from "@/lib/budget/loadAllCategories";
@@ -15,6 +16,18 @@ import { UnarchiveButton } from "./_unarchive-button";
  * surface (pickers, month views) hides it by design (X3).
  */
 export default async function BudgetCategoriesPage() {
+  // Forces per-request rendering (cache-components-migration plan, Stage 0).
+  // `loadAllCategories` is a plain synchronous better-sqlite3 call, invisible
+  // to Next's Cache Components validator — without this, archiving/
+  // unarchiving a category (`UnarchiveButton` below) would never be
+  // reflected here: this page had no OTHER tracked dynamic API of its own,
+  // so it was eligible to freeze at build time. Verified via `pnpm build`'s
+  // route table for the sibling case this caught (`/api/health`); this route
+  // needed the same fix even though its aggregate `◐` symbol (driven by
+  // `Spine` in the root layout) didn't make the gap in THIS page's own
+  // content visible at a glance.
+  await connection();
+
   const rows = loadAllCategories(db);
   const groups = groupByKind(rows);
 
