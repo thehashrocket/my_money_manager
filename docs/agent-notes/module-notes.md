@@ -264,9 +264,11 @@ src/
                    also join rolloverCategoryIds — they were excluded while the band
                    was read-only, which made a rollover fund's carried balance appear
                    only after the first keystroke. plannedToDateCents is deliberately
-                   NOT loadGoals' progressCents: it is allocated ALONE, because what
-                   `withdrawn` should mean is the question rule 1's loadGoals note
-                   parks.
+                   NOT loadGoals' progressCents: it is allocated ALONE, because
+                   `withdrawn` is a sum over a set no ordinary path can populate — a
+                   fund's progress is money planned, never money moved, decided
+                   permanently as of v1.6.1 (DESIGN.md, "What a fund's progress
+                   means"), not an open question rule 1's loadGoals note parks.
                    loadFundPlannedToDate has NO lower bound and a HARD UPPER one at
                    the month being viewed. The upper bound is not optional: the route
                    is editable for future months and nothing gates a commit on phase,
