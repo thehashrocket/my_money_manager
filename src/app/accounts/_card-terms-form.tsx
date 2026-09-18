@@ -6,6 +6,7 @@ import { centsToDollarString } from "@/lib/money";
 import { IDLE } from "./action-state";
 import { ActionStatus } from "@/components/ledger/action-status";
 import { updateCardTermsAction } from "./actions";
+import { useCloseOnHide } from "@/components/ledger/use-close-on-hide";
 
 /**
  * The repair path for a card's credit limit, minimum payment, and monthly
@@ -72,6 +73,7 @@ type CardTerms = {
 
 export function CardTermsDisclosure(props: CardTerms) {
   const [open, setOpen] = useState(false);
+  useCloseOnHide(setOpen);
 
   if (!open) {
     return (

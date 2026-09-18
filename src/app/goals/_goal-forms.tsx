@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { createGoalAction, updateGoalTargetAction } from "./actions";
 import { IDLE_GOALS } from "./action-state";
 import { ActionStatus } from "@/components/ledger/action-status";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 
 /**
  * The two write forms on `/goals`, as client islands.
@@ -33,6 +34,10 @@ import { ActionStatus } from "@/components/ledger/action-status";
 
 export function CreateGoalForm() {
   const [state, formAction, pending] = useActionState(createGoalAction, IDLE_GOALS);
+  // A clean success redirects (see the comment on <ActionStatus> below), but
+  // a refusal (e.g. a name collision) leaves this form mounted showing the
+  // message — the same staleness risk `useStatusResetOnHide` exists for.
+  const shownState = useStatusResetOnHide(state, IDLE_GOALS);
 
   return (
     <form
@@ -94,7 +99,7 @@ export function CreateGoalForm() {
           since v0.27.0 because the obvious second click on a still-mounted form
           used to take the page down; and a success whose `/goals` revalidation
           threw. A clean success redirects, which discards this state entirely. */}
-      <ActionStatus state={state} />
+      <ActionStatus state={shownState} />
     </form>
   );
 }
@@ -119,6 +124,12 @@ export function UpdateTargetForm({
   currentTargetCents: number | null;
 }) {
   const [state, formAction, pending] = useActionState(updateGoalTargetAction, IDLE_GOALS);
+  // Reproduced live (cache-components-migration plan, Stage 1): this form has
+  // no open/close boolean of its own — the wrapping `<details>` never
+  // unmounts even under the old model — so a save's success message survived
+  // leaving `/goals` and coming back, showing "Target updated." for a save
+  // that happened on a previous visit.
+  const shownState = useStatusResetOnHide(state, IDLE_GOALS);
   const currentDollars =
     currentTargetCents === null ? undefined : (currentTargetCents / 100).toFixed(2);
   return (
@@ -147,7 +158,7 @@ export function UpdateTargetForm({
             {pending ? "Saving…" : "Save"}
           </button>
         </div>
-        <ActionStatus state={state} />
+        <ActionStatus state={shownState} />
       </form>
     </details>
   );

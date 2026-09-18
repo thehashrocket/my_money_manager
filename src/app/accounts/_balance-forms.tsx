@@ -10,6 +10,7 @@ import { ActionStatus } from "@/components/ledger/action-status";
 // client component. The type is erased at build time, so it never pulls zod
 // into the browser bundle (the measured +376 KB `limits.ts` shape).
 import type { BalanceDirection } from "@/lib/import/accountAnchorFields";
+import { useCloseOnHide } from "@/components/ledger/use-close-on-hide";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -47,6 +48,7 @@ export function ReconcileDisclosure(props: {
   importsFromFeed?: boolean;
 }) {
   const [open, setOpen] = useState(props.startOpen ?? false);
+  useCloseOnHide(setOpen);
 
   if (!open) {
     return (

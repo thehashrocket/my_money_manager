@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { createCategoryAction, createCategoryGroupAction } from "../../actions";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 
 /**
  * DS20 — "a persistent last row per group ('+ Add a line to Housing' — a
@@ -55,6 +56,12 @@ export function NewCategoryRow({
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pre-landing review, red-team pass: this refusal string had no
+  // reset-on-hide, so under Activity it would still be showing next to the
+  // still-empty input after leaving this route and coming back — the same
+  // class of bug found and fixed for /goals and /import's forms elsewhere in
+  // this migration, on a component the plan's own file-by-file audit missed.
+  const shownError = useStatusResetOnHide(error, null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cancelWaitRef = useRef<(() => void) | null>(null);
 
@@ -126,7 +133,7 @@ export function NewCategoryRow({
         disabled={pending}
         className="h-8 w-full min-w-0 rounded-sm border border-transparent bg-transparent px-2 text-sm text-ink-2 outline-none placeholder:text-ink-3 hover:border-[var(--rule-faint)] focus-visible:border-[var(--rule-regular)] focus-visible:ring-2 focus-visible:ring-ring/50"
       />
-      {error ? <span className="px-2 text-[10px] text-money-neg">{error}</span> : null}
+      {shownError ? <span className="px-2 text-[10px] text-money-neg">{shownError}</span> : null}
     </div>
   );
 
@@ -171,6 +178,8 @@ export function NewGroupRow() {
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // See NewCategoryRow's matching comment — same reset-on-hide gap, same fix.
+  const shownError = useStatusResetOnHide(error, null);
   const [pendingGroup, setPendingGroup] = useState<{ id: number; name: string } | null>(null);
 
   async function submitGroup() {
@@ -238,7 +247,7 @@ export function NewGroupRow() {
       >
         Add
       </button>
-      {error ? <span className="text-[10px] text-money-neg">{error}</span> : null}
+      {shownError ? <span className="text-[10px] text-money-neg">{shownError}</span> : null}
     </form>
   );
 }
@@ -253,6 +262,8 @@ function FirstLeafForm({ parentId, parentName, onDone }: { parentId: number; par
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // See NewCategoryRow's matching comment — same reset-on-hide gap, same fix.
+  const shownError = useStatusResetOnHide(error, null);
   const cancelWaitRef = useRef<(() => void) | null>(null);
 
   useEffect(() => () => cancelWaitRef.current?.(), []);
@@ -317,7 +328,7 @@ function FirstLeafForm({ parentId, parentName, onDone }: { parentId: number; par
       >
         Add
       </button>
-      {error ? <span className="text-[10px] text-money-neg">{error}</span> : null}
+      {shownError ? <span className="text-[10px] text-money-neg">{shownError}</span> : null}
     </form>
   );
 }

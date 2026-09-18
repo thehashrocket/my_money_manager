@@ -3,6 +3,7 @@
 import { useActionState } from "react";
 import { syncNowAction, type SyncActionState } from "./actions";
 import { ActionStatus } from "./ActionForm";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 
 const INITIAL: SyncActionState = { status: "idle" };
 
@@ -11,6 +12,14 @@ export function SyncButton({ disabled }: { disabled?: boolean }) {
     async () => syncNowAction(),
     INITIAL,
   );
+  // Found live while verifying the red-team fix on `_action-feedback.tsx`
+  // (cache-components-migration, pre-landing review) — this button's OWN
+  // `useActionState` result has the identical gap on a sibling component the
+  // red-team pass didn't separately name: no reset-on-hide, rendered
+  // unconditionally. Without this, running a sync, leaving `/sync`, and
+  // coming back would show the previous sync's "Already up to date" or
+  // warning text as if it were current.
+  const shownState = useStatusResetOnHide(state, INITIAL);
 
   return (
     <form action={formAction} className="space-y-3">
@@ -25,7 +34,7 @@ export function SyncButton({ disabled }: { disabled?: boolean }) {
       {/* Renders the warnings too: SimpleFIN reports a broken bank connection
           in `errors[]` on an HTTP 200, so without these a dead connection looks
           exactly like a clean "already up to date". */}
-      <ActionStatus state={state} />
+      <ActionStatus state={shownState} />
     </form>
   );
 }
