@@ -2625,9 +2625,10 @@ WHAT was wrong rather than a queue. The three that are worth remembering:
 
 ### Still open
 
-- [ ] **P3** — **The CONTENT dedup pass is still read before the write transaction, so a concurrent CSV `commitImport` produces a genuine duplicate row.** `existingByContent` is read in `syncSimpleFin`'s staging loop and trusted after it. Unlike the id pass it has no unique index behind it, so a `commitImport` landing in the staging → transaction window does not abort the batch — it silently leaves a second copy of a row the feed and the CSV both carry. Quieter than the id-pass failure, and worse. Not fixed by widening the id query: the content budget is a multiset COUNT (rule 3, so two identical same-day coffees both survive), and re-deriving that inside the transaction is a different and larger change than re-checking a unique key. Rule 11's general instruction applies — this is the value `syncSimpleFin` still carries across an `await` without re-verifying.
+- [x] **P3 → CLOSED (`sync-dedup-race-fixes` branch).** **The CONTENT dedup pass is still read before the write transaction, so a concurrent CSV `commitImport` produces a genuine duplicate row.** `existingByContent` is read in `syncSimpleFin`'s staging loop and trusted after it. Unlike the id pass it has no unique index behind it, so a `commitImport` landing in the staging → transaction window does not abort the batch — it silently leaves a second copy of a row the feed and the CSV both carry. Quieter than the id-pass failure, and worse. Not fixed by widening the id query: the content budget is a multiset COUNT (rule 3, so two identical same-day coffees both survive), and re-deriving that inside the transaction is a different and larger change than re-checking a unique key. Rule 11's general instruction applies — this is the value `syncSimpleFin` still carries across an `await` without re-verifying.
       **The ID half is DONE (v0.26.0), and is recorded here because it is the half that makes the remaining one legible.** The id pass now re-runs inside the write transaction, so a second sync committing between staging and the write has its rows dropped as the duplicates they are instead of colliding on the partial unique index and aborting the whole batch with a raw `SqliteError` (verified: removing the re-check reproduces exactly that error in the regression test). Note the window is NOT the fetch — the id pass reads in the staging loop — it is staging → transaction, which spans `createSnapshot`'s `VACUUM INTO`; the test races at that seam because that is where the seam is. This entry carried an `[x]` from the day the id half landed until the 2026-09-09 audit, which meant the open half was invisible to every "what is still open" grep — the worst failure mode this file has.
-      (`src/lib/simplefin/sync.ts`)
+      **The CONTENT half is now done too.** `recheckContentDedup` (`src/lib/simplefin/sync.ts`) re-verifies inside the write transaction — and on the `NothingVerifiedError` rollback path — mirroring the id pass: a fresh per-signature tally is diffed against `originalContentBudget` (a frozen pre-consumption snapshot carried on each `Staged` entry), and only the per-signature DELTA since staging is treated as a race-loss, so an already-correct staging-time match is never re-litigated. Two regression tests confirmed to fail against the pre-fix code and pass with it (`sync.test.ts`, "content dedup is re-verified inside the write transaction" describe block). A dedicated adversarial review found and closed three follow-on gaps in the fix itself: the drops weren't pruned from `expectedCardExternalIds`, producing a false D8.4 "doesn't appear in the ledger" alarm on a card; the rollback path didn't chain the content recheck's output into the cutover recheck, so a row that was both content-raced and genuinely pre-cutover got two contradictory warnings; and per-account `AccountSyncCounts` went stale on a raced account. All fixed via a shared `applyDedupPruning` (merged with the cutover side's own pruning helper) and rollback-path chaining.
+      (`src/lib/simplefin/sync.ts`, `src/lib/simplefin/sync.test.ts`)
 
 - [ ] **P3** — **`verifyStagedLinks` proves *a* transaction, not *the* one.**
       `SyncTx` makes passing `db` a build error (pinned by `_DB_IS_NOT_A_TX`),
@@ -3007,7 +3008,7 @@ per the plan's own "residuals" section.
 
 ## Follow-ups from the /ship pre-landing + adversarial review (2026-09-09, card-transaction-import PR1)
 
-- [ ] **P3 — an anchor moving BACKWARD mid-sync-fetch can permanently strand a
+- [x] **P3 → CLOSED (`sync-dedup-race-fixes` branch).** **An anchor moving BACKWARD mid-sync-fetch can permanently strand a
       row (Codex adversarial finding).** The staging loop's `cutoverAnchor`
       is read from the PRE-fetch account row, and `recheckCutoverAnchor`
       (rule 11) re-verifies it inside the write transaction — but that
@@ -3023,13 +3024,22 @@ per the plan's own "residuals" section.
       permanently, with no warning either run. Requires the same two-tab
       timing rule 11's other guards already accept as a real, narrow
       window — an Undo click landing inside one sync's fetch, on one card.
-      Fixing it means the staging loop would need to widen its own window
-      speculatively (stage everything back to the FLOOR, not just the
-      pre-fetch anchor) and let `recheckCutoverAnchor` narrow from there —
-      a real, larger change to the staging loop's contract, not a small
-      patch. Recorded as a residual, matching rule 3's own "boundary that is
-      pinned rather than closed" precedent, not fixed here.
-      (`src/lib/simplefin/sync.ts`)
+      **Fixed exactly the way this entry predicted was necessary**: the
+      staging loop no longer applies the cutover filter at all — every
+      non-pending row is staged and dedup'd normally regardless of the
+      account's anchor, and `recheckCutoverAnchor` (unchanged in its own
+      logic — it already re-read the anchor fresh) is now the sole place the
+      cutover is decided, fed the full candidate set instead of a
+      pre-filtered one. Verified this doesn't reintroduce the "routine drop
+      warns every run" noise the widening risked (a real regression a
+      red-team pass caught mid-branch, fixed same session: `recheckCutoverAnchor`
+      now only warns when the freshly-read anchor differs from the one
+      staging observed, not merely because a row was dropped). A regression
+      test proves the exact stranding scenario this entry describes no
+      longer happens (`sync.test.ts`, "imports a row the STALE pre-fetch
+      anchor would have excluded... rule 11" in the D8.1 cutover describe
+      block) — confirmed to fail against the pre-fix code and pass with it.
+      (`src/lib/simplefin/sync.ts`, `src/lib/simplefin/sync.test.ts`)
 
 - [ ] **P4 — a single sync response with 32,766+ new rows for one card would
       abort the whole write transaction on SQLite's bind-parameter limit
@@ -3422,3 +3432,18 @@ Four parallel `pr-review-toolkit` agents (code-reviewer, silent-failure-hunter, 
 - [ ] **P4 — deferred, low blast radius: `_row-menu.tsx`'s `confirmOpen` (the "Remove this charge" irreversible-delete confirmation, rule 8's `confirmedIrreversible` gate) has no reset-on-hide.** Results go through ephemeral toasts rather than persistent inline text, and a second explicit click is still required either way, so the practical risk is a dialog silently reopening on nav-away/back rather than a stale claim being believed — but it does match Next's own named "resetting stale status" regression pattern.
 
 `pnpm exec tsc --noEmit` clean, `pnpm lint` clean, `pnpm test` — 2241/2241 passing, `pnpm build` clean (Cache Components enabled, all routes render). All three CRITICAL/HIGH fixes live-verified in a scratch `DATA_DIR` (never the real ledger): `RefreshButton`'s error and `RevertBalanceButton`'s confirmation both correctly clear on navigate-away/navigate-back on `/accounts`; the account-link `ActionForm`'s "Account unlinked" message correctly clears on navigate-away/navigate-back on `/sync`; `ReconcileForm` still opens and closes normally with the `pending`-gated `useCloseOnHide` change.
+
+## Follow-ups from the `/ship` pre-landing + adversarial review (2026-09-18, sync-dedup-race-fixes)
+
+Closes the two open P3s above (content-dedup race, anchor-backward race — see
+their entries for the fix). A pre-existing adversarial review (before this
+`/ship` run) found 3 more real bugs IN the fix itself — a false D8.4
+completeness alarm, a double-warning on a row that was both content-raced and
+genuinely pre-cutover, and stale per-account counts — all fixed via a shared
+`applyDedupPruning`. `/ship`'s own pre-landing review (5 specialists + a
+cross-model-equivalent red team, two fix-and-reverify cycles) then found one
+CRITICAL regression the branch itself introduced (fixed same session) plus
+several DRY/documentation findings (also fixed) and one accepted residual:
+
+- [x] **P1 → FIXED same session (red-team finding, confidence 9/10, empirically reproduced).** **Widening the staging loop to fix the anchor-backward race broke `recheckCutoverAnchor`'s "routine drop = no warning" invariant** — every ordinary D8.1 cutover exclusion (not just a genuine anchor-moved-during-fetch race) started firing the "landed on or before its balance date... use Undo on /accounts... then sync again" warning, directly contradicting this file's own documented intent a few hundred lines below ("the drop is routine, so announcing it every run would be the noise D4.3 exists to remove"). Reproduced live: a newly-linked card's feed lookback routinely spans weeks of pre-anchor history before its first post-cutover activity (R1's own comment), so this would have fired the scary, actionable-sounding false alarm on every single ordinary sync in that window. **Fix:** `recheckCutoverAnchor` now compares the freshly-read anchor against `entry.account.startingBalanceDate` — the value staging itself observed, carried on the same account object — and only warns when they differ; a row is still dropped and counted either way, only the WARNING is gated on a genuine race. Two regression tests added directly to existing no-race tests (asserting `outcome.warnings` carries nothing matching "balance date"), both confirmed to fail against the pre-fix code and pass with it. A second, independent adversarial pass verified the fix has no false-negative case (if the anchor is unchanged, the dropped row set is provably identical to what the old pre-filter would have produced) and found one negligible (3/10) residual: the gate is per-ACCOUNT, not per-row-cause, so a genuinely raced account's warning could in principle fire for a row whose own eligibility didn't actually depend on the moved anchor — narrower than the bug this fixes, not acted on. (`src/lib/simplefin/sync.ts`)
+- [ ] **P4 — accepted residual, not fixed: the `totalToInsert === 0` early-return no longer takes the cheap path for a routine pre-cutover-only card sync (red-team finding, confidence 8/10).** Because pre-cutover rows now always enter `toInsert` at staging (the fix above removes the early skip), a card whose feed sends only routine, pre-anchor history with nothing new past the anchor no longer takes the cheap "up-to-date" early return — it now unconditionally takes the full write path (`createSnapshot`'s real `VACUUM INTO`, opens a `db.transaction`, inserts nothing, hits `verifiedTotal === 0`, throws `NothingVerifiedError`, deletes the snapshot it just took) on every such sync. No correctness impact — `NothingVerifiedError`'s existing handling already deletes the snapshot rather than let it evict a real one from the retention pool, and no batch is minted — only unnecessary disk I/O and an open-then-rollback transaction, on a manual "Sync now" button (not a cron), for one card, during the "weeks" window R1's own comment names before a newly-linked card's first post-cutover activity. Fix direction, if this is ever worth doing: have the early-return check "would any row plausibly survive the cutover" for card accounts rather than raw `toInsert.length`, without reopening the same read-before-await staleness rule 11 exists to close. Blocked by: nothing urgent — deferred rather than fixed under `/ship` review pressure for a non-correctness, low-frequency cost. (`src/lib/simplefin/sync.ts`)
