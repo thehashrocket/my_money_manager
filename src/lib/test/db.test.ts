@@ -30,6 +30,7 @@ describe("migration parse (integration)", () => {
         "import_batch_categorizations",
         "import_batches",
         "subscription_dismissals",
+        "sync_promotions",
         "transactions",
         "transfer_pair_rejections",
       ].sort(),
