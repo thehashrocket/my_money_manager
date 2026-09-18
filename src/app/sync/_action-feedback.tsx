@@ -3,6 +3,9 @@
 import { createContext, useCallback, useContext, useState } from "react";
 import { ActionStatus } from "./ActionForm";
 import type { SyncActionState } from "./actions";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
+
+const IDLE: SyncActionState = { status: "idle" };
 
 /**
  * A status region that OUTLIVES the form that produced it.
@@ -35,6 +38,28 @@ import type { SyncActionState } from "./actions";
  *
  * This provider sits ABOVE the list, so revalidating the list doesn't unmount
  * it and its state survives the re-render.
+ *
+ * **That is exactly the property that makes it vulnerable under Cache
+ * Components (cache-components-migration plan; found by the pre-landing
+ * review's red-team pass, missed by the plan's own Stage 3b verification,
+ * which only tested a nav-away-mid-pending-sync repro, not "resolve
+ * something, leave, come back").** This provider was deliberately built to
+ * survive a resolved form unmounting from the list (the paragraph above),
+ * which under Activity means it now ALSO survives navigating away from
+ * `/sync` and back. Without a reset, a resolved reversal's "Linked as
+ * reversal." banner (or an unlink/undo outcome) would still be showing on
+ * return, describing an action from a previous visit — the same "Resetting
+ * stale status messages" failure class `useCloseOnHide`/`useStatusResetOnHide`
+ * exist to close everywhere else in this migration.
+ *
+ * `ActionForm`'s own inline `state` (`./ActionForm.tsx`) has the identical
+ * vulnerability for the same reason, on every form this provider's own
+ * three-form carve-out does NOT cover — a form that survives a resolve is
+ * not this provider's exclusive property, and a form that never unmounts at
+ * all (the account-link form, which sets no `announceSuccess`) never had
+ * anything else protecting it. `ActionForm` carries its own
+ * `useStatusResetOnHide` for that reason, rather than this provider being
+ * the only place the reset is applied.
  */
 type Publish = (state: SyncActionState) => void;
 
@@ -45,7 +70,8 @@ export function useActionFeedback(): Publish | null {
 }
 
 export function ActionFeedbackProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<SyncActionState>({ status: "idle" });
+  const [state, setState] = useState<SyncActionState>(IDLE);
+  const shownState = useStatusResetOnHide(state, IDLE);
   // Stable identity: this is the context value every `ActionForm` on the page
   // subscribes to, so a new function each render would re-render all of them.
   // `ActionForm` calls it from inside its action, not from an effect — an
@@ -55,9 +81,9 @@ export function ActionFeedbackProvider({ children }: { children: React.ReactNode
 
   return (
     <ActionFeedbackContext.Provider value={publish}>
-      {state.status !== "idle" && (
+      {shownState.status !== "idle" && (
         <div className="rounded-md border border-border p-3">
-          <ActionStatus state={state} />
+          <ActionStatus state={shownState} />
         </div>
       )}
       {children}

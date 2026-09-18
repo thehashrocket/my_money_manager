@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { connection } from "next/server";
 import Link from "next/link";
 import { db, schema } from "@/db";
 import { formatCents } from "@/lib/money";
@@ -29,11 +30,15 @@ import {
   unlinkTransferAction,
 } from "./actions";
 
-// Never serve a cached balance. The bank round-trip is isolated inside
-// <RemoteSections> behind Suspense, so the ledger-backed parts of this page
-// (linked accounts, transfers needing review, undo) render straight from SQLite
-// and only the SimpleFIN-dependent sections wait on the network.
-export const dynamic = "force-dynamic";
+// `dynamic = "force-dynamic"` used to sit here to guarantee a fresh balance on
+// every visit. Removed under Cache Components (cache-components-migration
+// plan, Stage 0): nothing is cached by default without an explicit `use
+// cache`, so the old guarantee holds without the export, and the export
+// itself errors the build under Cache Components. The bank round-trip is
+// still isolated inside <RemoteSections> behind Suspense, so the
+// ledger-backed parts of this page (linked accounts, transfers needing
+// review, undo) render straight from SQLite and only the SimpleFIN-dependent
+// sections wait on the network.
 
 /**
  * Deliberately wider than sync's own 45-day MAX_LOOKBACK_DAYS. This list is not
@@ -84,7 +89,17 @@ function describeDrift(
     : `differs by ${sign(drift)}${formatCents(Math.abs(drift))} — the bank's figure isn't newer than your newest ledger row (${freshness?.ledgerAsOfDate}), so some or all of this is activity it hasn't reported yet`;
 }
 
-export default function SyncPage() {
+export default async function SyncPage() {
+  // Forces per-request rendering (cache-components-migration plan, Stage 0).
+  // Every read below is a plain synchronous better-sqlite3 call, which Next's
+  // Cache Components validator has no visibility into (it only tracks
+  // `fetch`/`cookies`/`headers`/`searchParams`/`connection`) — without this,
+  // the page would have been silently eligible for build-time prerendering,
+  // freezing every figure on it (balances, review queues, drift) at deploy
+  // time instead of erroring loudly the way the `daysAgoIso()` default-param
+  // `new Date()` read happened to. Same rationale as `Spine`/`/budget/page.tsx`.
+  await connection();
+
   const accounts = db.select().from(schema.accounts).all();
   const lastBatch = findLastSyncBatch();
   // A sync batch auto-categorizes through the same rule engine as a CSV

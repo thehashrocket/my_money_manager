@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-17
+
+### Added
+- **Navigating between pages is now instant.** The app adopts Next.js's Cache Components model: once you've visited a page, coming back to it — Sync back to Dashboard back to Sync, say — shows it immediately instead of re-fetching everything from scratch, while account balances, budget figures and the categorize backlog count still stay live and correct on every real visit.
+
+### Fixed
+- **A handful of screens could show a stale success or error message left over from a previous visit instead of a clean slate**, a side effect of pages now staying alive in the background rather than being torn down when you navigate away: `/sync`'s "already up to date" banner and reversal-review messages, a saved card or reconcile form's confirmation, a new-category form's error, a goal-target save's status. All now reset correctly the moment you return to the page.
+- **Two pages (`/api/health` and `/budget/categories`) were at risk of freezing their data at build time under the new caching model** instead of reading it fresh on every request — caught and closed before it could reach production.
+
 ## [1.5.1] - 2026-09-17
 
 ### Fixed

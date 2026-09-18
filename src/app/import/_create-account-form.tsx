@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { createAccountAction } from "./actions";
 import { IDLE_CREATE_ACCOUNT, type CreateAccountField } from "./action-state";
 import { ActionStatus } from "@/components/ledger/action-status";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 
 /**
  * DS64 — the account-creation form, and the one surface where the sign
@@ -42,6 +43,12 @@ const HELP = "mt-1 block text-base font-normal text-ink-3";
 
 export function CreateAccountForm({ today }: { today: string }) {
   const [state, formAction, pending] = useActionState(createAccountAction, IDLE_CREATE_ACCOUNT);
+  // `createAccountAction` deliberately does not redirect (see its own
+  // docstring), so this form and its success/error message stay mounted on
+  // `/import`. Under Cache Components that message survives leaving and
+  // returning to the route unless reset (cache-components-migration plan,
+  // Stage 1 — the same finding as `/goals`' UpdateTargetForm).
+  const shownState = useStatusResetOnHide(state, IDLE_CREATE_ACCOUNT);
   const [type, setType] = useState<AccountType>("checking");
   // CONTROLLED, and that is load-bearing rather than stylistic. React 19
   // resets a form submitted through a function action — `requestFormReset`
@@ -86,9 +93,11 @@ export function CreateAccountForm({ today }: { today: string }) {
     }
   }
 
-  // Announced against the control, not only as loose text below it.
+  // Announced against the control, not only as loose text below it. Reads
+  // `shownState`, not raw `state` — a field must not stay `aria-invalid`
+  // once the message explaining why has itself been reset on hide.
   const invalid = (field: CreateAccountField) =>
-    state.status === "error" && state.field === field;
+    shownState.status === "error" && shownState.field === field;
 
   const isLiability = accountClass(type) === "liability";
   const isCard = isCreditCard(type);
@@ -290,7 +299,7 @@ export function CreateAccountForm({ today }: { today: string }) {
           decision, inside the change whose subject is that hand-maintained
           copies drift. `CreateAccountState` satisfies `ActionState`
           structurally; its `field` is read by the inputs above, not here. */}
-      <ActionStatus state={state} className="sm:col-span-2" />
+      <ActionStatus state={shownState} className="sm:col-span-2" />
     </form>
   );
 }

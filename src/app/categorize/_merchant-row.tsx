@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useSyncExternalStore, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { formatCents } from "@/lib/money";
 import { merchantDrilldownHref } from "@/lib/budget/transactionsDrilldownHref";
@@ -17,13 +17,6 @@ import { hasMerchantName, merchantLabel } from "@/lib/transactions/merchantLabel
 import { resolveRememberUi } from "@/lib/categorize/keyTrainability";
 import { describeRuleUndo } from "@/lib/categorize/describeRuleUndo";
 import { bulkCategorizeMerchantAction, undoBulkCategorizeAction } from "./actions";
-import {
-  clearPendingPick,
-  noPendingPick,
-  readPendingPick,
-  subscribePendingPicks,
-  writePendingPick,
-} from "./_pending-pick";
 
 type Props = {
   group: MerchantGroup;
@@ -111,25 +104,34 @@ export function MerchantRow({
   const scopeKey = scope ? `${scope.year}-${scope.month}` : "all-time";
 
   /**
-   * T11/D19 — `sessionStorage` IS this field's state, not a copy of it.
+   * Plain `useState`, as of the cache-components-migration plan (Stage 2) —
+   * this used to be `_pending-pick.ts`'s `sessionStorage`-backed module
+   * state, because the app had no `cacheComponents` and following "See all N
+   * transactions" to `/transactions` and back genuinely unmounted this
+   * component, destroying any `useState`. With Cache Components on, Activity
+   * preserves the route instead of unmounting it, so plain component state
+   * survives that round trip for free — verified live (picked a category,
+   * drilled into the merchant's transactions, navigated through 8 OTHER
+   * distinct routes, returned: the pick was still there, well beyond the
+   * `<Activity>` docs' documented "3 routes" figure). `null` means
+   * "never touched, fall back to the existing rule's category" — `""` means
+   * "deliberately cleared," which must NOT fall back, the same distinction
+   * `_pending-pick.ts` drew for the same reason.
    *
-   * The pick has to survive following "See all N transactions" and coming
-   * back, and the app does not set `cacheComponents`, so that navigation
-   * genuinely unmounts this component and destroys any `useState`. Holding it
-   * in React state and syncing to storage would need a restore-on-mount
-   * effect; making storage the source of truth removes the second copy — and
-   * with it the question of which copy is right.
+   * This is also strictly SAFER than the sessionStorage version: that one
+   * needed `prunePendingPicks` because a pick lived independently of the row
+   * it was about and could outlive it (park a pick, file the merchant
+   * elsewhere, the row disappears from the list but the stored pick does
+   * not). Component state has no such afterlife — it disappears exactly
+   * when the row does, whether by real unmount or by never being restored
+   * when Activity's cache evicts `/categorize` itself.
    */
-  const storedPick = useSyncExternalStore(
-    subscribePendingPicks,
-    () => readPendingPick(merchant),
-    noPendingPick,
-  );
+  const [pick, setPick] = useState<string | null>(null);
   const categoryId =
-    storedPick ?? (group.existingRule ? String(group.existingRule.categoryId) : "");
+    pick ?? (group.existingRule ? String(group.existingRule.categoryId) : "");
 
   const handlePick = (next: string) => {
-    writePendingPick(merchant, next);
+    setPick(next);
     // No consent to clear here — `consentedSignature` is a mask, so a repick
     // that changes what Remember would do simply stops matching it on this
     // same render. See the field's own docstring above.
@@ -185,7 +187,7 @@ export function MerchantRow({
       onOptimisticSubmit(group.count, scopeKey);
       try {
         const result = await bulkCategorizeMerchantAction(formData);
-        clearPendingPick(merchant);
+        setPick(null);
         onDismissedChange(merchant, true, scopeKey);
         // Belt-and-suspenders: the row usually hides on success, but an Undo
         // can bring it back, and a stale consent should not survive a

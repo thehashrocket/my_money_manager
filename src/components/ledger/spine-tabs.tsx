@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -30,13 +31,17 @@ function isActive(pathname: string, t: TabItem): boolean {
   return pathname === t.matchPrefix || pathname.startsWith(t.matchPrefix + "/");
 }
 
-export function SpineTabs({ tabs }: { tabs: TabItem[] }) {
-  const pathname = usePathname() ?? "/";
-
+/**
+ * Pulled out of `SpineTabsReader` so a Suspense fallback can render the same
+ * real, working links with no `active` highlight (`pathname: null` matches
+ * nothing) rather than an empty nav — the reader below replaces it with the
+ * highlighted version once `usePathname()` is available client-side.
+ */
+function renderTabs(tabs: TabItem[], pathname: string | null) {
   return (
     <nav className="spine-tabs" aria-label="Primary navigation">
       {tabs.map((t) => {
-        const active = isActive(pathname, t);
+        const active = pathname !== null && isActive(pathname, t);
         const classes = cn(
           "spine-tab",
           active && "active",
@@ -79,5 +84,29 @@ export function SpineTabs({ tabs }: { tabs: TabItem[] }) {
         );
       })}
     </nav>
+  );
+}
+
+function SpineTabsReader({ tabs }: { tabs: TabItem[] }) {
+  const pathname = usePathname() ?? "/";
+  return renderTabs(tabs, pathname);
+}
+
+/**
+ * Wraps `SpineTabsReader` in its own `<Suspense>` — required under Cache
+ * Components (cache-components-migration plan, Stage 0), same reason and
+ * same pattern as `SpineMonth`: `usePathname()` is only available at
+ * request time, and this component sits inside `Spine`'s static shell
+ * (`SpineFallback`, reached whenever a route has no other dynamic content
+ * forcing it, e.g. `/_not-found` and a not-yet-visited `/budget/[year]/
+ * [month]` param). The fallback renders the same real links via
+ * `renderTabs`, just without active-tab highlighting, so navigation still
+ * works before hydration rather than showing an empty rail.
+ */
+export function SpineTabs({ tabs }: { tabs: TabItem[] }) {
+  return (
+    <Suspense fallback={renderTabs(tabs, null)}>
+      <SpineTabsReader tabs={tabs} />
+    </Suspense>
   );
 }

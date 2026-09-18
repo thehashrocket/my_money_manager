@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -9,6 +10,22 @@ import { usePathname } from "next/navigation";
  *  - Otherwise → real current month
  *
  * Arrows always navigate to `/budget/[year]/[month]`.
+ *
+ * The exported `SpineMonth` wraps the real component (`SpineMonthReader`) in
+ * its own `<Suspense>` — required under Cache Components
+ * (cache-components-migration plan, Stage 0). This component's own `new
+ * Date()` fallback is deliberately client-only (see `src/lib/now.ts`'s
+ * docstring: it must reflect the *visitor's* real timezone, not the
+ * server's), but Next 16 still does an initial server-side render pass for
+ * a Client Component's first paint, and Cache Components' build-time
+ * validation flags that read as "would freeze at build time" wherever it
+ * sits inside a route's static shell — reached via `Spine`'s own
+ * `SpineFallback` for `/_not-found`, which otherwise has nothing else
+ * making it dynamic. The `<Suspense>` boundary tells Next to defer this
+ * component past the static shell instead of baking its first value in;
+ * behavior (which month shows on first paint) is unchanged, since the
+ * shown value was always going to be replaced by the client render either
+ * way once React hydrates.
  */
 const BUDGET_MONTH_RE = /^\/budget\/(\d{4})\/(\d{1,2})(?:$|\/)/;
 
@@ -23,6 +40,14 @@ const MONTH_NAMES = [
 ];
 
 export function SpineMonth() {
+  return (
+    <Suspense fallback={<div className="spine-month" aria-hidden />}>
+      <SpineMonthReader />
+    </Suspense>
+  );
+}
+
+function SpineMonthReader() {
   const pathname = usePathname();
   const m = pathname ? BUDGET_MONTH_RE.exec(pathname) : null;
 

@@ -10,6 +10,8 @@ import { ActionStatus } from "@/components/ledger/action-status";
 // client component. The type is erased at build time, so it never pulls zod
 // into the browser bundle (the measured +376 KB `limits.ts` shape).
 import type { BalanceDirection } from "@/lib/import/accountAnchorFields";
+import { useCloseOnHide } from "@/components/ledger/use-close-on-hide";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 import {
   refreshLiabilityBalanceAction,
   revertLiabilityBalanceAction,
@@ -47,6 +49,13 @@ export function ReconcileDisclosure(props: {
   importsFromFeed?: boolean;
 }) {
   const [open, setOpen] = useState(props.startOpen ?? false);
+  // Tracked here, not just inside ReconcileForm, so a route-hide mid-Save
+  // doesn't force-close the disclosure out from under an in-flight write —
+  // ReconcileForm has no Cancel button at all, so this is its ONLY close
+  // path, and see useCloseOnHide's own docstring for why that makes the
+  // guard load-bearing rather than cosmetic here.
+  const [pending, setPending] = useState(false);
+  useCloseOnHide(setOpen, pending);
 
   if (!open) {
     return (
@@ -67,7 +76,7 @@ export function ReconcileDisclosure(props: {
       </div>
     );
   }
-  return <ReconcileForm {...props} autoFocus />;
+  return <ReconcileForm {...props} autoFocus onPendingChange={setPending} />;
 }
 
 export function ReconcileForm({
@@ -78,12 +87,17 @@ export function ReconcileForm({
   autoFocus = false,
   allowsPositiveBalance = true,
   importsFromFeed = false,
+  onPendingChange,
 }: {
   accountId: number;
   accountName: string;
   balanceCents: number;
   today: string;
   autoFocus?: boolean;
+  /** Reports `useActionState`'s `pending` up to `ReconcileDisclosure`, so a
+   *  route-hide mid-Save can skip force-closing this form — see
+   *  `useCloseOnHide`'s own docstring. */
+  onPendingChange: (pending: boolean) => void;
   /**
    * rule 9's sign guard: `false` for a loan or mortgage, which can never
    * legitimately hold a positive balance (unlike a card after an
@@ -108,6 +122,9 @@ export function ReconcileForm({
   importsFromFeed?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(updateLiabilityBalanceAction, IDLE);
+  useEffect(() => {
+    onPendingChange(pending);
+  }, [pending, onPendingChange]);
   // CONTROLLED, for the reason `CardTermsDisclosure` documents: React 19
   // unconditionally resets a form submitted through a function action
   // (`requestFormReset`, verified in react-dom 19.2.8), so an uncontrolled
@@ -366,6 +383,10 @@ export function RefreshButton({
   accountName: string;
 }) {
   const [state, formAction, pending] = useActionState(refreshLiabilityBalanceAction, IDLE);
+  // Rendered unconditionally in the account row, never behind a disclosure —
+  // useCloseOnHide has nothing to close here. Same stale-state gap already
+  // fixed for /sync's SyncButton (identical shape, same fix).
+  const shownState = useStatusResetOnHide(state, IDLE);
   return (
     <form action={formAction}>
       <input type="hidden" name="accountId" value={accountId} />
@@ -379,7 +400,7 @@ export function RefreshButton({
         {pending ? "Refreshing…" : "Refresh"}
       </Button>
       <span className="sr-only">{`Refresh ${accountName}'s balance from the bank`}</span>
-      <ActionStatus state={state} />
+      <ActionStatus state={shownState} />
     </form>
   );
 }
@@ -415,6 +436,11 @@ export function RevertBalanceButton({
 }) {
   const [state, formAction, pending] = useActionState(revertLiabilityBalanceAction, IDLE);
   const asOf = formatMonthDay(priorBalanceDate);
+  // Rule 9's single undo slot is a SWAP, not a clear — a stale "Balance put
+  // back to <date>." greeting the user on return would sit right next to a
+  // control whose second press undoes the undo. Same fix as RefreshButton
+  // above.
+  const shownState = useStatusResetOnHide(state, IDLE);
   return (
     <form action={formAction}>
       <input type="hidden" name="accountId" value={accountId} />
@@ -430,7 +456,7 @@ export function RevertBalanceButton({
       <span className="sr-only">
         {`Put ${accountName}'s balance back to what it was on ${asOf}`}
       </span>
-      <ActionStatus state={state} />
+      <ActionStatus state={shownState} />
     </form>
   );
 }
