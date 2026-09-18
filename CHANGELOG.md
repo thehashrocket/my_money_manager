@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-09-18
+
+### Fixed
+- **A transaction imported from a CSV file while still pending was never confirmed once the same transaction posted over the SimpleFIN feed** — the previous release's "known, not fixed" note. `syncSimpleFin` now promotes the pending row in place instead of dropping the posted match as a plain duplicate: the row's memo, provenance, and bank status all update to match the bank's own confirmation, the account's balance stops silently excluding it, and the row becomes eligible for automatic transfer pairing (including recognizing a transfer whose own date has since fallen outside the sync's usual lookback window, and correctly not re-triggering rule matching on a row that was already categorized). Undoing the sync reverts a promoted row to exactly its prior state — including restoring whatever transfer pairing it already had before the promotion — rather than deleting it outright.
+- **A very narrow race could still let a duplicate transaction slip through**, if a second import landed on the exact same transaction in the moment between this sync checking for duplicates and actually writing to the ledger. Sync now checks one more time, right before writing, so nothing sneaks past.
+
+### Known, not fixed this release
+- Undoing a sync that promoted a transaction later marked "Not a transfer" doesn't clear that decision — a future sync could re-suggest the same pairing. Recorded in `TODOS.md`; needs a deliberate decision on what "undo" should mean here, not a quick patch.
+- A SimpleFIN feed sending the same transaction id twice in one response, straddling a card's cutover date, can still cause the eligible occurrence to be silently lost. Carried over from the previous release; still needs a real design pass.
+- A separate, rare case where the same transaction could arrive twice under different SimpleFIN identifiers is now documented in `TODOS.md` rather than fixed — pre-existing, not introduced by this release.
+
 ## [1.6.2] - 2026-09-18
 
 ### Fixed
