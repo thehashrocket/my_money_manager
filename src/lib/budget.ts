@@ -21,9 +21,16 @@ export type EffectiveAllocation = {
  * carries a balance LARGER than anything ever allocated. On an expense envelope
  * that is correct and deliberate — a refund restores buying capacity. On a fund
  * it is money appearing from nowhere, and every other subsystem already refuses
- * it: `rules.ts` will not auto-file a positive row into a fund at import,
- * `assertAssignableCategory` refuses a fund on all three categorize paths, and
- * `loadGoals` keeps `withdrawn` outflows-only for this exact reason.
+ * it: `rules.ts` refuses to auto-file ANY row into a fund at import, either
+ * sign (2026-09-17 — it used to refuse only a positive row, which was itself a
+ * bug: a rule trained before a category's reclassification to `fund` survived
+ * it, since `setCategoryKind` never touches `category_rules`, and could still
+ * auto-file a withdrawal), `assertAssignableCategory` refuses a fund on all
+ * three categorize paths, and `loadGoals` keeps `withdrawn` outflows-only for
+ * this exact reason. So a fund transaction can now only ever exist via a
+ * direct `pnpm db:studio` edit — this guard is defense against exactly that,
+ * the same residual TODOS.md already documents for `paydown_target_cents`,
+ * not a path any in-app action can reach.
  *
  * There are TWO rollover spellings and they cannot share the SQL — this one is
  * a per-category scalar read, `loadRolloverEffectiveByCategory` is a grouped
