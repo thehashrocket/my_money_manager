@@ -635,6 +635,29 @@ src/
                    and bulkCategorize (lib/categorize/, lib/budget/). Returns `[]` for
                    an undefined scope, spread into each caller's own `and(...)` so an
                    absent month is a no-op rather than a branch every caller repeats
+  lib/contentCandidates.ts
+                   buildContentCandidates + claimPendingCandidate (v1.6.3) — the
+                   content-dedup candidate grouping shared by CSV import
+                   (`importBatch.ts`'s `buildPreview`) and sync
+                   (`simplefin/sync.ts`'s staging loop), extracted once both
+                   needed the identical "tell a pending existing row apart
+                   from a posted one at the same signature" shape rather than
+                   just a count. `claimPendingCandidate` claims and removes
+                   ONE pending candidate for a signature, or returns
+                   `undefined` if none is pending — it never claims a posted
+                   one, because a posted row matching a pending candidate is
+                   that row's real-world counterpart finally arriving (an
+                   in-place update/promotion), a different fact from an
+                   ordinary repeat. CSV's own `claimContentCandidate` calls
+                   this first and falls back to popping the list itself for
+                   "claim anything else"; sync counts a posted match
+                   separately instead (`loadContentBudget`) rather than
+                   falling back the same way. Row order within one
+                   signature's list is UNSPECIFIED — neither caller may rely
+                   on which one comes back when several rows share a
+                   signature, since a repeated signature is a real repeat
+                   (two identical same-day coffees), never a case where
+                   "which one" matters
   lib/transferRejections.ts
                    The ONE place that knows how "these two are not a pair" is
                    stored: `transfer_pair_rejections`, keyed on the unordered
