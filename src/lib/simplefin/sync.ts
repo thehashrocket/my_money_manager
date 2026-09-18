@@ -922,7 +922,7 @@ export async function syncSimpleFin(
     let duplicateByContent = 0;
     let skippedPending = 0;
     // Never incremented in this loop any more — set entirely downstream by
-    // `applyCutoverPruning`, once `recheckCutoverAnchor` knows the real
+    // `applyDedupPruning`, once `recheckCutoverAnchor` knows the real
     // (freshly re-read) anchor. See the D8.1 comment above this loop.
     const skippedBeforeAnchor = 0;
     const toInsert: MappedRow[] = [];
@@ -1014,7 +1014,7 @@ export async function syncSimpleFin(
       // goes through both dedup passes normally; `recheckCutoverAnchor` (inside
       // the write transaction) is the only place that decides whether it
       // actually gets written. `skippedBeforeAnchor` stays 0 through this whole
-      // loop and is set entirely by `applyCutoverPruning` downstream.
+      // loop and is set entirely by `applyDedupPruning` downstream.
       if (seenExternalIds.has(row.externalId)) {
         duplicateByExternalId++;
         // FINDABLE only if this id was in the DB, under this feed's own
@@ -1576,13 +1576,13 @@ class NothingVerifiedError extends Error {}
  * (D8.4, built pre-fetch, before any recheck has run) and adjust `counts`.
  * A row this function drops was never going to land under this feed's
  * provenance either — the same "correctly, intentionally excluded, not
- * missing" fact `applyCutoverPruning` exists to keep D8.4 from
- * misreporting, just discovered here instead of by the cutover. Both
- * callers apply it through `applyContentDedupPruning`, not
- * `applyCutoverPruning` itself: a content-race drop is a duplicate found
- * late, not a cutover exclusion, so it belongs in `duplicateByContent`, not
- * `skippedBeforeAnchor` — reusing the cutover function would silently
- * mislabel it.
+ * missing" fact `applyDedupPruning` exists to keep D8.4 from misreporting,
+ * just discovered here instead of by the cutover. Both callers apply it
+ * through `applyDedupPruning(..., "duplicateByContent")` — never
+ * `"skippedBeforeAnchor"`, which `recheckCutoverAnchor`'s own callers pass
+ * instead: a content-race drop is a duplicate found late, not a cutover
+ * exclusion, and `applyDedupPruning`'s required `countField` parameter is
+ * what stops the two from being silently conflated.
  */
 function recheckContentDedup<
   T extends {
@@ -1746,7 +1746,7 @@ function applyDedupPruning(
  * The fix: compare the FRESH anchor against `entry.account.startingBalanceDate`
  * — the value staging itself read, before the fetch, off the same account
  * object this entry still carries — not against whether any row was dropped.
- * A row is still dropped (and still counted via `applyCutoverPruning`) either
+ * A row is still dropped (and still counted via `applyDedupPruning`) either
  * way; only the WARNING is now conditioned on the anchor having genuinely
  * changed since staging, which is the actual race this function exists to
  * catch. Every sibling warning in this file names the account, and this is
@@ -1870,10 +1870,11 @@ function missingAccountWarnings(names: string[]): string[] {
  * every path that can add to `expectedCardExternalIds`: an id only ever
  * enters that set when it is (a) already stored under this feed's tag before
  * this run started, (b) about to be written by THIS run's own insert loop
- * and not subsequently pruned by the link/id-race/cutover re-checks (each of
- * which removes its drops from the set — see `applyCutoverPruning` and the
- * `dropped.has(...)` guard below), or (c) landed by a concurrent sync this
- * same run's raced-id check found already stored. Every one of those is, by
+ * and not subsequently pruned by the link/id-race/content-race/cutover
+ * re-checks (each of which removes its drops from the set — see
+ * `applyDedupPruning` and the `dropped.has(...)` guard below), or (c) landed
+ * by a concurrent sync this same run's raced-id check found already stored.
+ * Every one of those is, by
  * construction, provably in the database by the time this check runs — so
  * under CORRECT code this function can never actually find a gap. Its real
  * value is as a REGRESSION GUARD on the insert pipeline: if a future change

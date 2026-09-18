@@ -1104,11 +1104,10 @@ describe("syncSimpleFin — content dedup is re-verified inside the write transa
     expect(rows).toHaveLength(3);
 
     // The PER-ACCOUNT summary must agree with the aggregate, exactly like
-    // `applyCutoverPruning`'s own sibling tests already pin for
-    // `skippedBeforeAnchor` — `applyContentDedupPruning` adjusts
-    // `duplicateByContent`/`insertedCount` the same way, and a bug in its
-    // account-matching or arithmetic would be invisible to an aggregate-only
-    // assertion.
+    // the cutover-side tests already pin for `skippedBeforeAnchor` —
+    // `applyDedupPruning` adjusts `duplicateByContent`/`insertedCount` the
+    // same way for a content-race drop, and a bug in its account-matching or
+    // arithmetic would be invisible to an aggregate-only assertion.
     const summary = outcome.accounts.find((a) => a.accountId === account.id);
     expect(summary?.insertedCount).toBe(1);
     // 1 consumed by staging's own dedup (the prior real row) + 1 consumed by
@@ -1172,9 +1171,9 @@ describe("syncSimpleFin — content dedup is re-verified inside the write transa
     expect(cleanRows[0].externalId).toBe("TRN-clean");
 
     // Per-account scoping has to show up in the per-account summary too, not
-    // just in which rows landed — `applyContentDedupPruning` looks up each
-    // account by id, and a wrong lookup would leak the raced account's drop
-    // onto the clean one's counts.
+    // just in which rows landed — `applyDedupPruning` looks up each account
+    // by id, and a wrong lookup would leak the raced account's drop onto the
+    // clean one's counts.
     const racedSummary = outcome.accounts.find((a) => a.accountId === raced.id);
     expect(racedSummary?.insertedCount).toBe(0);
     expect(racedSummary?.duplicateByContent).toBe(1);
