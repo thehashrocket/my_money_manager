@@ -3,6 +3,7 @@
 import { useActionState } from "react";
 import { useActionFeedback } from "./_action-feedback";
 import type { SyncActionState } from "./actions";
+import { useStatusResetOnHide } from "@/components/ledger/use-status-reset-on-hide";
 
 const INITIAL: SyncActionState = { status: "idle" };
 
@@ -86,6 +87,16 @@ export function ActionForm({
     },
     INITIAL,
   );
+  // Every OTHER stale-state gap on /sync got closed by wrapping the component
+  // holding the useActionState result (ActionFeedbackProvider, SyncButton) —
+  // but the review queues and the account-link/undo forms all render THIS
+  // shared component's own `state` (below) with no reset of their own, so the
+  // fix belongs here, once, rather than at every caller. A form that survives
+  // a resolve (the multi-candidate reversal case the comment above documents,
+  // the account-link `<li>`, an undo refusal) now also survives navigating
+  // away from /sync and back under Activity — without this, its inline
+  // message would still read as current on return.
+  const shownState = useStatusResetOnHide(state, INITIAL);
 
   return (
     <form action={formAction} className={className} aria-labelledby={ariaLabelledBy}>
@@ -108,7 +119,7 @@ export function ActionForm({
         a form that unmounts takes this copy with it, which is the whole reason
         the region exists.
       */}
-      <ActionStatus state={state} />
+      <ActionStatus state={shownState} />
     </form>
   );
 }

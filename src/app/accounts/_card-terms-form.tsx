@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useId, useState } from "react";
+import { useActionState, useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { centsToDollarString } from "@/lib/money";
 import { IDLE } from "./action-state";
@@ -73,7 +73,11 @@ type CardTerms = {
 
 export function CardTermsDisclosure(props: CardTerms) {
   const [open, setOpen] = useState(false);
-  useCloseOnHide(setOpen);
+  // Tracked here, not just inside CardTermsForm, so a route-hide mid-Save
+  // doesn't force-close the disclosure out from under an in-flight write —
+  // see useCloseOnHide's own docstring.
+  const [pending, setPending] = useState(false);
+  useCloseOnHide(setOpen, pending);
 
   if (!open) {
     return (
@@ -90,7 +94,9 @@ export function CardTermsDisclosure(props: CardTerms) {
     );
   }
 
-  return <CardTermsForm {...props} onClose={() => setOpen(false)} />;
+  return (
+    <CardTermsForm {...props} onClose={() => setOpen(false)} onPendingChange={setPending} />
+  );
 }
 
 function CardTermsForm({
@@ -100,8 +106,12 @@ function CardTermsForm({
   minimumPaymentCents,
   paydownTargetCents,
   onClose,
-}: CardTerms & { onClose: () => void }) {
+  onPendingChange,
+}: CardTerms & { onClose: () => void; onPendingChange: (pending: boolean) => void }) {
   const [state, formAction, pending] = useActionState(updateCardTermsAction, IDLE);
+  useEffect(() => {
+    onPendingChange(pending);
+  }, [pending, onPendingChange]);
 
   function fieldsFromProps(): Record<FieldKey, string> {
     return {

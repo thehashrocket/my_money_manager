@@ -1,4 +1,6 @@
-import { useLayoutEffect } from "react";
+"use client";
+
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 /**
  * Resets a disclosure's `open` state to `false` when the ROUTE it lives on
@@ -52,11 +54,38 @@ import { useLayoutEffect } from "react";
  * Strict Mode," and this effect already IS safe to run twice — the visible
  * symptom is specific to the one `startOpen` caller, is dev-only, and is
  * recorded here rather than patched with a fragile detection hack.
+ *
+ * **`pending` skips the forced close (silent-failure-hunter finding,
+ * post-landing).** `CardTermsForm`'s own Cancel button is `disabled={pending}`
+ * specifically because closing (unmounting) mid-Save lets the NEXT mount
+ * reseed `values`/`snapshot` from pre-write props, and an edit to some OTHER
+ * field in that window can then repost this field's stale value and clobber
+ * the in-flight write once it lands. An unconditional forced close on hide
+ * reopened that exact door through routing instead of a button click —
+ * `ReconcileForm` has no Cancel button to compare against at all, so hide was
+ * its ONLY close path, making the race the sole way it could ever unmount
+ * mid-write. Passing `pending` leaves the disclosure open (and hidden, not
+ * gone) until the in-flight submit resolves, matching what a real unmount
+ * would have to wait for anyway; the next genuine hide, once `pending` has
+ * gone false, closes it normally. Read via a ref updated in a plain
+ * `useEffect` (not during render, which `react-hooks/refs` forbids) so the
+ * layout effect's own mount-once `[]` deps — required for the synchronous
+ * hide-timing guarantee above — don't have to include it.
  */
-export function useCloseOnHide(setOpen: (open: boolean) => void): void {
+export function useCloseOnHide(
+  setOpen: (open: boolean) => void,
+  pending = false,
+): void {
+  const pendingRef = useRef(pending);
+  useEffect(() => {
+    pendingRef.current = pending;
+  });
+
   useLayoutEffect(() => {
     return () => {
-      setOpen(false);
+      if (!pendingRef.current) {
+        setOpen(false);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

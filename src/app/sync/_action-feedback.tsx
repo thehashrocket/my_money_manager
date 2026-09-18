@@ -43,17 +43,23 @@ const IDLE: SyncActionState = { status: "idle" };
  * Components (cache-components-migration plan; found by the pre-landing
  * review's red-team pass, missed by the plan's own Stage 3b verification,
  * which only tested a nav-away-mid-pending-sync repro, not "resolve
- * something, leave, come back").** Every OTHER form's `useActionState`
- * result resets for free because leaving `/sync` used to unmount the whole
- * tree — this provider was deliberately built to survive exactly that
- * unmount (the paragraph above), which under Activity means it now survives
- * navigating away from `/sync` and back too. Without a reset, a resolved
- * reversal's "Linked as reversal." banner (or an unlink/undo outcome) would
- * still be showing on return, describing an action from a previous visit —
- * the same "Resetting stale status messages" failure class
- * `useCloseOnHide`/`useStatusResetOnHide` exist to close everywhere else in
- * this migration, just on the one component whose whole design point was
- * outliving its own list.
+ * something, leave, come back").** This provider was deliberately built to
+ * survive a resolved form unmounting from the list (the paragraph above),
+ * which under Activity means it now ALSO survives navigating away from
+ * `/sync` and back. Without a reset, a resolved reversal's "Linked as
+ * reversal." banner (or an unlink/undo outcome) would still be showing on
+ * return, describing an action from a previous visit — the same "Resetting
+ * stale status messages" failure class `useCloseOnHide`/`useStatusResetOnHide`
+ * exist to close everywhere else in this migration.
+ *
+ * `ActionForm`'s own inline `state` (`./ActionForm.tsx`) has the identical
+ * vulnerability for the same reason, on every form this provider's own
+ * three-form carve-out does NOT cover — a form that survives a resolve is
+ * not this provider's exclusive property, and a form that never unmounts at
+ * all (the account-link form, which sets no `announceSuccess`) never had
+ * anything else protecting it. `ActionForm` carries its own
+ * `useStatusResetOnHide` for that reason, rather than this provider being
+ * the only place the reset is applied.
  */
 type Publish = (state: SyncActionState) => void;
 
