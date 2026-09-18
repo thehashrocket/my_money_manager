@@ -26,6 +26,7 @@ import {
   COFFEE_MEMO,
   NOW,
   SEP_1_NOON,
+  SNAPSHOT_STUB,
   resetFixtureSeq,
   seedAccount as seedAccountIn,
 } from "./test/syncFixtures";
@@ -879,6 +880,307 @@ describe("syncSimpleFin — rows dated before the fetch window", () => {
     if (outcome.status !== "up-to-date") throw new Error("unreachable");
     expect(outcome.accounts[0].duplicateByContent).toBe(1);
     expect(handle.db.select().from(schema.transactions).all()).toHaveLength(2);
+  });
+});
+
+describe("syncSimpleFin — content dedup is re-verified inside the write transaction", () => {
+  /**
+   * The id pass already re-checks inside the transaction (see the relink-race
+   * describe block below). Content dedup has no unique index behind it, so
+   * the same race does not ABORT — it silently inserts a second copy of a row
+   * a concurrent CSV `commitImport` (or a second sync) already wrote.
+   *
+   * The staging loop's OWN `existingByContent` query runs AFTER
+   * `await fetchAccounts` resolves, so mutating the DB from inside the fetch
+   * mock (the idiom the relink-race tests use below) would land too EARLY
+   * here — staging's own query would already see it and dedup it normally,
+   * proving nothing about the in-transaction re-check. The real window is
+   * staging -> transaction, spanning `createSnapshot`'s `VACUUM INTO`, so
+   * that is the seam these tests race at.
+   */
+  function raceLandCsvRow(opts: {
+    accountId: number;
+    amountCents: number;
+    rawMemo: string;
+    date: string;
+  }): void {
+    createSnapshotMock.mockImplementationOnce(() => {
+      const batch = seedBatch("csv");
+      seedTxn({
+        accountId: opts.accountId,
+        batchId: batch.id,
+        amountCents: opts.amountCents,
+        rawMemo: opts.rawMemo,
+        date: opts.date,
+      });
+      return SNAPSHOT_STUB;
+    });
+  }
+
+  it("drops a row that matches content a concurrent writer landed between staging and the write, rather than inserting a genuine duplicate", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-fresh", "-4.87")]);
+
+    raceLandCsvRow({
+      accountId: account.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    // The only row this account had to insert lost the race, so nothing
+    // survived to write — same shape a quiet sync returns.
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.warnings.join(" ")).toMatch(/matched activity already imported by another process/);
+
+    // Exactly ONE row — the CSV one landed at the seam. The feed's row must
+    // not have been inserted as a second, genuine duplicate.
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("csv");
+  });
+
+  it("leaves a survivor alone when nothing races it — the re-check costs nothing in the ordinary case", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    respondWith("ACT-1", [feedTxn("TRN-fresh", "-4.87")]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("matched activity"))).toBe(false);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("simplefin");
+  });
+
+  it("does NOT report a false D8.4 completeness alarm for a CARD row dropped by the content-dedup race (adversarial review finding)", async () => {
+    // expectedCardExternalIds is built at staging time, before any recheck
+    // can know a row will turn out to be a race-duplicate. Without pruning it
+    // to match `recheckContentDedup`'s drop, `checkCardCompleteness` queries
+    // for an external id that correctly, intentionally never landed under
+    // this feed's provenance — and reports it as unexplainedly missing, a
+    // false alarm telling the user to distrust a bridge connection that is
+    // actually fine.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+    respondWith("ACT-CITI", [feedTxn("CITI-RACED", "-4.87")]);
+
+    raceLandCsvRow({
+      accountId: card.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.warnings.join(" ")).toMatch(/matched activity already imported by another process/);
+
+    // The whole point: no false "doesn't appear in the ledger" alarm.
+    expect(outcome.warnings.some((w) => w.includes("appear in the ledger"))).toBe(false);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].importSource).toBe("csv");
+  });
+
+  it("gives exactly ONE warning, not two, for a row that is BOTH content-raced AND genuinely pre-cutover (adversarial review finding)", async () => {
+    // The rollback path used to call `recheckCutoverAnchor` over the raw,
+    // unfiltered `stagedForCutover` rather than content-recheck's OWN
+    // `checked` output — so a row dropped by the content race would ALSO get
+    // independently flagged by the cutover recheck, producing two different,
+    // contradictory-looking explanations ("matched activity already
+    // imported" AND "landed on or before its balance date") for the same
+    // single drop. Chaining content -> cutover (matching the write path)
+    // means content dedup, having already claimed the row, removes it from
+    // what the cutover recheck ever sees.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      // Later than the feed row below — genuinely pre-cutover on its own,
+      // no race needed on this half.
+      startingBalanceDate: "2026-09-05",
+    });
+    respondWith("ACT-CITI", [feedTxn("CITI-BOTH", "-4.87")]); // dated 2026-09-01
+
+    raceLandCsvRow({
+      accountId: card.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+
+    const contentWarnings = outcome.warnings.filter((w) => w.includes("matched activity"));
+    const cutoverWarnings = outcome.warnings.filter((w) => w.includes("balance date"));
+    // Content dedup claims the row first; the cutover recheck never sees it.
+    expect(contentWarnings).toHaveLength(1);
+    expect(cutoverWarnings).toHaveLength(0);
+    expect(outcome.warnings.filter((w) => w.includes("Citi"))).toHaveLength(1);
+  });
+
+  it("drops only the RACED delta from a multi-row same-signature group, not the whole group", async () => {
+    // `recheckContentDedup` diffs a FRESH tally against `originalContentBudget`
+    // rather than re-litigating from zero — this is the case that distinguishes
+    // the two. One genuine existing row is on the ledger before staging even
+    // runs (a real prior coffee), so staging's own dedup pass consumes exactly
+    // one of three incoming same-signature rows as an ordinary duplicate,
+    // leaving TWO legitimate survivors (two more real, distinct same-day
+    // coffees — CLAUDE.md rule 3's own example of a genuine multiset
+    // duplicate). A second identical-signature row then lands mid-race. If the
+    // recheck re-tallied from scratch instead of diffing, it would see a fresh
+    // count of 2 against 2 survivors and drop BOTH — silently losing a real,
+    // distinct transaction the race never touched. The delta is exactly 1
+    // (fresh 2 - original 1), so exactly ONE survivor must be dropped and ONE
+    // must still land.
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const priorBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: priorBatch.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+    respondWith("ACT-1", [
+      feedTxn("TRN-1", "-4.87"),
+      feedTxn("TRN-2", "-4.87"),
+      feedTxn("TRN-3", "-4.87"),
+    ]);
+
+    raceLandCsvRow({
+      accountId: account.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // Two of the three incoming rows survived staging's own dedup (budget 1
+    // consumed by one), and the race then claimed exactly one of those two.
+    expect(outcome.insertedCount).toBe(1);
+    expect(outcome.warnings.join(" ")).toMatch(/1 transaction .*matched activity already imported/);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, account.id))
+      .all();
+    // Prior real row + the mid-race real row + exactly one surviving feed row.
+    expect(rows).toHaveLength(3);
+
+    // The PER-ACCOUNT summary must agree with the aggregate, exactly like
+    // `applyCutoverPruning`'s own sibling tests already pin for
+    // `skippedBeforeAnchor` — `applyContentDedupPruning` adjusts
+    // `duplicateByContent`/`insertedCount` the same way, and a bug in its
+    // account-matching or arithmetic would be invisible to an aggregate-only
+    // assertion.
+    const summary = outcome.accounts.find((a) => a.accountId === account.id);
+    expect(summary?.insertedCount).toBe(1);
+    // 1 consumed by staging's own dedup (the prior real row) + 1 consumed by
+    // the mid-race delta.
+    expect(summary?.duplicateByContent).toBe(2);
+  });
+
+  it("scopes the recheck per account — a race on one staged account does not drop another account's unrelated row", async () => {
+    const raced = seedAccount({ simplefinAccountId: "ACT-1", name: "Raced" });
+    const clean = seedAccount({ simplefinAccountId: "ACT-2", name: "Clean" });
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-1",
+          name: "REGULAR SAVINGS",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("TRN-raced", "-4.87")],
+        },
+        {
+          id: "ACT-2",
+          name: "REGULAR SAVINGS",
+          balance: "0.00",
+          "available-balance": "0.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [feedTxn("TRN-clean", "-9.00", "TRADER JOES 123 MANTECA CA")],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    raceLandCsvRow({
+      accountId: raced.id,
+      amountCents: -487,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+
+    const racedRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, raced.id))
+      .all();
+    // Only the mid-race CSV row — the feed's own row lost the race.
+    expect(racedRows).toHaveLength(1);
+    expect(racedRows[0].importSource).toBe("csv");
+
+    const cleanRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, clean.id))
+      .all();
+    // Untouched by the other account's race.
+    expect(cleanRows).toHaveLength(1);
+    expect(cleanRows[0].externalId).toBe("TRN-clean");
+
+    // Per-account scoping has to show up in the per-account summary too, not
+    // just in which rows landed — `applyContentDedupPruning` looks up each
+    // account by id, and a wrong lookup would leak the raced account's drop
+    // onto the clean one's counts.
+    const racedSummary = outcome.accounts.find((a) => a.accountId === raced.id);
+    expect(racedSummary?.insertedCount).toBe(0);
+    expect(racedSummary?.duplicateByContent).toBe(1);
+    const cleanSummary = outcome.accounts.find((a) => a.accountId === clean.id);
+    expect(cleanSummary?.insertedCount).toBe(1);
+    expect(cleanSummary?.duplicateByContent).toBe(0);
   });
 });
 
@@ -1986,7 +2288,7 @@ describe("syncSimpleFin — the D8.1 accounting cutover", () => {
       ],
     } satisfies SimpleFinResponse);
 
-    await syncSimpleFin({ now: NOW }, handle.db);
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
 
     const rows = handle.db
       .select()
@@ -1994,6 +2296,16 @@ describe("syncSimpleFin — the D8.1 accounting cutover", () => {
       .where(eq(schema.transactions.accountId, card.id))
       .all();
     expect(rows).toHaveLength(0);
+
+    // Routine D8.1 exclusion, no race (the anchor never moves in this test)
+    // — must NOT fire the "landed on or before its balance date... use Undo
+    // ... then sync again" warning. That sentence is reserved for a GENUINE
+    // race (recheckCutoverAnchor red-team regression, v1.6.1): the anchor
+    // read at staging equals the anchor read inside the recheck, so this is
+    // exactly the "drop is routine, announcing it every run would be noise"
+    // case D4.3 exists to keep quiet.
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.some((w) => w.includes("balance date"))).toBe(false);
   });
 
   it("imports a feed row dated the day AFTER the anchor", async () => {
@@ -2027,6 +2339,70 @@ describe("syncSimpleFin — the D8.1 accounting cutover", () => {
       .where(eq(schema.transactions.accountId, card.id))
       .all();
     expect(rows).toHaveLength(1);
+  });
+
+  it("imports a row the STALE pre-fetch anchor would have excluded, once a mid-fetch Undo moves the REAL anchor earlier (rule 11)", async () => {
+    // The bug this pins: `cutoverAnchor` used to be read from the account row
+    // captured BEFORE `await fetchAccounts`, and a row on-or-before that STALE
+    // anchor was dropped in the staging loop itself — before
+    // `recheckCutoverAnchor` (inside the write transaction) ever got a chance
+    // to see it. `recheckCutoverAnchor` only ever NARROWS what was staged; it
+    // cannot ADD a row the staging loop already excluded. So a hand Undo
+    // landing mid-fetch and moving the anchor EARLIER (not later — the
+    // already-tested direction above) used to strand the row permanently: the
+    // next sync's own window starts after the account's last imported date,
+    // so it never asks the feed for this date again either.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      // The STALE anchor the staging loop used to read and filter against.
+      startingBalanceDate: "2026-08-20",
+    });
+
+    fetchAccountsMock.mockImplementation(async () => {
+      // The race: an Undo (revertLiabilityBalanceAction) lands mid-fetch,
+      // moving the REAL anchor EARLIER than the row about to be staged.
+      handle.db
+        .update(schema.accounts)
+        .set({ startingBalanceCents: -90_000, startingBalanceDate: "2026-08-10" })
+        .where(eq(schema.accounts.id, card.id))
+        .run();
+      return {
+        accounts: [
+          {
+            id: "ACT-CITI",
+            name: "CITI CARD",
+            balance: "-900.00",
+            "available-balance": null,
+            "balance-date": SEP_1_NOON,
+            transactions: [
+              // Dated ON the STALE anchor (2026-08-20) — the old code would
+              // have dropped this at staging time, before the transaction
+              // ever re-read the anchor. Strictly AFTER the new, earlier
+              // anchor (2026-08-10), so it is genuinely eligible once the
+              // real anchor is what decides.
+              { ...feedTxn("CITI-RACED", "-50.00", "COSTCO"), posted: 1787227200 }, // 2026-08-20T12:00Z
+            ],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    expect(outcome.insertedCount).toBe(1);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.accountId, card.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("CITI-RACED");
   });
 
   it("leaves an ASSET's pre-anchor history untouched — the cutover is card-only", async () => {
@@ -2167,6 +2543,17 @@ describe("syncSimpleFin — the D8.1 accounting cutover", () => {
       expect(citiCounts?.skippedBeforeAnchor).toBe(1);
       expect(citiCounts?.insertedCount).toBe(1);
     }
+
+    // Routine D8.1 exclusion (the anchor never moves during this sync's
+    // fetch — this is the ordinary "feed window reaches into pre-cutover
+    // history" case, not a race) must NOT fire the race warning. Reproduced
+    // as a real regression (red-team, v1.6.1): the widened staging fix that
+    // lets recheckCutoverAnchor catch an anchor moving BACKWARD also made it
+    // warn on every ordinary pre-cutover drop, including this successful,
+    // nothing-wrong sync — exactly the noise D4.3 exists to keep off this
+    // page. See `recheckCutoverAnchor`'s own docstring.
+    const warnings = "warnings" in outcome ? outcome.warnings : [];
+    expect(warnings.some((w) => w.includes("balance date"))).toBe(false);
   });
 });
 
