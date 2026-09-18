@@ -105,14 +105,20 @@ function SpineShell({ tabs, peek }: { tabs: TabItem[]; peek: React.ReactNode }) 
  * prerender rather than to be a designed-for loading state. On ordinary
  * synchronous SQLite reads this is not expected to be perceptible —
  * **but "ordinary" is doing real work in that sentence (pre-landing
- * review, red-team pass): this component shares the same better-sqlite3
- * connection as rule 5's `VACUUM INTO` snapshots (import commit, sync,
- * `db:export`) and rule 7's migration rebuilds, and Spine renders on
- * every route via the root layout, so a WAL-mode reader delayed behind
- * one of those writers would make this fallback visible sitewide for the
- * duration, not just on the page that triggered the write.** Not verified
- * empirically against a live snapshot/backfill running concurrently;
- * recorded as a known, unmeasured exposure rather than asserted safe.
+ * review, red-team pass; precision-corrected in post-merge review): this
+ * fallback's visible duration depends on `SpineContent`'s query path, which
+ * reads through the same underlying SQLite file (WAL mode) that rule 5's
+ * `VACUUM INTO` snapshots (import commit, sync, `db:export`) and rule 7's
+ * migration rebuilds also open their OWN connections against — separate
+ * `Database` instances, several of them in separate node processes
+ * entirely, not the same JS connection object or lock. WAL-mode contention
+ * is a file/OS-level phenomenon between those independent connections, not
+ * a same-connection one. Spine renders on every route via the root layout,
+ * so a reader delayed behind one of those writers would make this fallback
+ * visible sitewide for the duration, not just on the page that triggered
+ * the write.** Not verified empirically against a live snapshot/backfill
+ * running concurrently; recorded as a known, unmeasured exposure rather
+ * than asserted safe.
  */
 function SpineFallback() {
   const tabs: TabItem[] = TABS.map((tab) => ({ ...tab }));

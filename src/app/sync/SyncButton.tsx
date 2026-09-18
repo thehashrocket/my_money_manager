@@ -12,13 +12,11 @@ export function SyncButton({ disabled }: { disabled?: boolean }) {
     async () => syncNowAction(),
     INITIAL,
   );
-  // Found live while verifying the red-team fix on `_action-feedback.tsx`
-  // (cache-components-migration, pre-landing review) — this button's OWN
-  // `useActionState` result has the identical gap on a sibling component the
-  // red-team pass didn't separately name: no reset-on-hide, rendered
-  // unconditionally. Without this, running a sync, leaving `/sync`, and
-  // coming back would show the previous sync's "Already up to date" or
-  // warning text as if it were current.
+  // This button's `useActionState` result has no open/close toggle and
+  // renders unconditionally, so without a reset it keeps showing a previous
+  // sync's outcome ("Already up to date" or a warning) after leaving /sync
+  // and returning — same staleness class `ActionFeedbackProvider` guards
+  // against elsewhere on this page (see its own docstring).
   const shownState = useStatusResetOnHide(state, INITIAL);
 
   return (

@@ -59,6 +59,60 @@ src/
                    module-level or shared store, so each row keeps its own
                    independent consent exactly as the three components' local state
                    already did — only the CODE moved here, not the state
+  components/ledger/use-close-on-hide.ts
+                   useCloseOnHide(setOpen, pending?) — cache-components-migration
+                   (v1.6.0): resets a disclosure's `open` boolean to false when
+                   Activity hides the route it lives on, via a `useLayoutEffect`
+                   cleanup (not `useEffect` — Activity runs cleanups synchronously
+                   before hiding, matching real-unmount timing, so an async effect
+                   risks a flash of stale content on the next show). Before Cache
+                   Components, navigating away unmounted the route for free; under
+                   Activity the route is hidden, not unmounted, so a disclosure's
+                   toggle-wrapper-plus-remountable-inner-form pattern
+                   (CardTermsDisclosure/CardTermsForm, ReconcileDisclosure/
+                   ReconcileForm) needs this to keep its "closing gives a clean
+                   slate" guarantee. `pending` (optional, default false) skips the
+                   forced close while a submit is in flight — added post-landing
+                   after silent-failure-hunter found it reintroduced exactly the
+                   mid-save clobbering race CardTermsForm's own `disabled={pending}`
+                   Cancel button exists to prevent, through routing instead of a
+                   button click; ReconcileForm has NO Cancel button at all, making
+                   this hook its only close path and the guard load-bearing rather
+                   than cosmetic there. Read via a ref updated in a plain
+                   `useEffect` (writing during an effect, not render, so
+                   `react-hooks/refs` allows it) so the layout effect's own
+                   mount-once `[]` deps — required for the synchronous hide-timing
+                   guarantee — don't need to include it. Known accepted residual:
+                   in `pnpm dev` only, React Strict Mode's mount double-invoke fires
+                   the cleanup once, closing a disclosure that opened via
+                   `startOpen={true}` (ReconcileDisclosure via `_card-controls.tsx`'s
+                   DS56 handoff) — see the hook's own docstring for why a "skip the
+                   first cleanup" fix was rejected
+  components/ledger/use-status-reset-on-hide.ts
+                   useStatusResetOnHide<T>(state, idleState) — cache-components-
+                   migration (v1.6.0): returns `idleState` instead of `state` once
+                   the calling component has been hidden by Activity and shown
+                   again while still holding a non-idle `useActionState` result.
+                   Sibling of useCloseOnHide for the "message survives, not just
+                   the toggle" half of the same bug class. Reset via a
+                   `{ v: T } | null` sentinel wrapped in `useState` (a bare
+                   `useState<T | null>(null)` was tried first and rejected — it
+                   collides with a caller whose real `T` can legitimately be
+                   `null`), set inside a `[state]`-keyed `useLayoutEffect`
+                   cleanup rather than a ref, since `react-hooks/refs` forbids
+                   reading/writing a ref during render and this hook's return
+                   value is computed every render. Applied to every `/sync`,
+                   `/accounts`, `/goals`, `/import` and `/budget` surface found
+                   holding a `useActionState` result across a possible hide —
+                   including two found only AFTER the plan's own staged
+                   verification and the pre-landing review's specialist pass both
+                   missed them (ActionFeedbackProvider on `/sync`, a red-team
+                   finding; SyncButton on `/sync`, self-found verifying that fix;
+                   ActionForm on `/sync` and RefreshButton/RevertBalanceButton on
+                   `/accounts`, found by a post-merge PR review's code-reviewer and
+                   silent-failure-hunter passes, independently corroborating each
+                   other) — see TODOS.md's cache-components-migration follow-ups
+                   for the full list and why each was missed on an earlier pass
   db/              Drizzle schema + client singleton
   lib/             Pure functions: parsers, normalizer, categorization, money, utils
   lib/accounts/    loadAccountBalances — live per-account balance queries
