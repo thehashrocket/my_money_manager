@@ -135,7 +135,11 @@ describe("undoCategorizeTransaction — target row", () => {
       applyToPast: false,
     });
 
-    undoCategorizeTransaction(handle.db, snapshot);
+    const undo = undoCategorizeTransaction(handle.db, snapshot);
+    expect(undo.targetReverted).toBe(true);
+    if (!undo.targetReverted) throw new Error("unreachable — asserted above");
+    expect(undo.restoredCategoryId).toBe(household.id);
+    expect(undo.priorCategoryBecameFund).toBe(false);
 
     const row = handle.db
       .select()
@@ -177,6 +181,7 @@ describe("undoCategorizeTransaction — target row", () => {
 
     const undo = undoCategorizeTransaction(handle.db, snapshot);
     expect(undo.targetReverted).toBe(true);
+    if (!undo.targetReverted) throw new Error("unreachable — asserted above");
     expect(undo.restoredCategoryId).toBeNull();
     expect(undo.priorCategoryBecameFund).toBe(true);
 
@@ -202,6 +207,8 @@ describe("undoCategorizeTransaction — target row", () => {
     });
 
     const undo = undoCategorizeTransaction(handle.db, snapshot);
+    expect(undo.targetReverted).toBe(true);
+    if (!undo.targetReverted) throw new Error("unreachable — asserted above");
     expect(undo.priorCategoryBecameFund).toBe(false);
     expect(undo.restoredCategoryId).toBeNull();
   });

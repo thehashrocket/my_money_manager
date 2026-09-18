@@ -66,8 +66,20 @@ export function notifyWrite(
  * committed write too (it is what puts back the rule the refusal removed), so
  * its own failed refresh gets said out loud instead of being swallowed by a
  * neutral "reverted" that reads as everything being settled.
+ *
+ * `notes` takes the same array shape `notifyWrite` does (rather than a single
+ * `string | undefined`, which this function's own callers had started
+ * hand-rolling a second `[a, b].filter(...).join(" ")` around — the exact
+ * copy-drift `notifyWrite`'s own docstring is about). `null`/`undefined` are
+ * both dropped for the same reason: the sources spell "nothing to say"
+ * differently (an undo-specific fallback note is `undefined` when it didn't
+ * fire; `warning` arrives as `string | undefined` from `guardRefresh`).
  */
-export function notifyUndo(message: string, warning: string | undefined): void {
-  if (warning === undefined) toast(message);
-  else toast.warning(`${message} ${warning}`);
+export function notifyUndo(
+  message: string,
+  notes: readonly (string | null | undefined)[],
+): void {
+  const said = notes.filter((n): n is string => n !== undefined && n !== null);
+  if (said.length === 0) toast(message);
+  else toast.warning([message, ...said].join(" "));
 }

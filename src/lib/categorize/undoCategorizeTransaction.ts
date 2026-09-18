@@ -6,34 +6,51 @@ import type { RuleUndoAction } from "./undoBulkCategorize";
 
 type Db = typeof defaultDb;
 
-export type UndoCategorizeTransactionResult = {
-  /** True when the target row was reverted to its prior category (or NULL). */
-  targetReverted: boolean;
-  /**
-   * What the target row was ACTUALLY reverted to — `undefined` when
-   * `targetReverted` is false. Callers must render THIS, never
-   * `snapshot.targetPriorCategoryId` directly: the two can disagree (see
-   * `priorCategoryBecameFund`), and this is the only field that reflects what
-   * the write inside this transaction actually did.
-   */
-  restoredCategoryId?: number | null;
-  /**
-   * True when `snapshot.targetPriorCategoryId` pointed at a category that is
-   * now `kind='fund'` — reclassified between the original categorize action
-   * and this undo (an outside review's finding: two tabs, or two clicks in
-   * quick succession, no crafted input needed). Restoring into it would
-   * silently populate the one thing DESIGN.md documents as permanently
-   * empty for a fund, so this undo falls back to `null` (uncategorized)
-   * instead — the same "can't put it back exactly, land in the safe state"
-   * behavior this file already gives a row someone else re-categorized
-   * inside the undo window.
-   */
-  priorCategoryBecameFund: boolean;
-  /** Rows actually reset to NULL from the applyToPast set. */
-  revertedApplyToPastCount: number;
-  /** Rule action taken — see {@link RuleUndoAction}. */
-  ruleAction: RuleUndoAction;
-};
+export type UndoCategorizeTransactionResult =
+  | {
+      /** The target row was NOT reverted — the user re-categorized it to
+       *  something else inside the undo window, so it was left alone. There
+       *  is no restore destination to report. */
+      targetReverted: false;
+      /** Rows actually reset to NULL from the applyToPast set. */
+      revertedApplyToPastCount: number;
+      /** Rule action taken — see {@link RuleUndoAction}. */
+      ruleAction: RuleUndoAction;
+    }
+  | {
+      targetReverted: true;
+      /**
+       * What the target row was ACTUALLY reverted to. Callers must render
+       * THIS, never `snapshot.targetPriorCategoryId` directly: the two can
+       * disagree (see `priorCategoryBecameFund`), and this is the only field
+       * that reflects what the write inside this transaction actually did.
+       * A discriminated union rather than an optional field on purpose — an
+       * earlier version made this `restoredCategoryId?: number | null` and
+       * both an adversarial review and a type-design review independently
+       * flagged the same footgun: `undo.restoredCategoryId ?? fallback`
+       * type-checks and looks idiomatic (it's how this codebase spells a
+       * default everywhere else) but silently collapses "restored to
+       * nothing" into "nothing happened," which is wrong. Narrowing on
+       * `targetReverted` first makes that misuse a compile error instead.
+       */
+      restoredCategoryId: number | null;
+      /**
+       * True when `snapshot.targetPriorCategoryId` pointed at a category that is
+       * now `kind='fund'` — reclassified between the original categorize action
+       * and this undo (an outside review's finding: two tabs, or two clicks in
+       * quick succession, no crafted input needed). Restoring into it would
+       * silently populate the one thing DESIGN.md documents as permanently
+       * empty for a fund, so this undo falls back to `null` (uncategorized)
+       * instead — the same "can't put it back exactly, land in the safe state"
+       * behavior this file already gives a row someone else re-categorized
+       * inside the undo window.
+       */
+      priorCategoryBecameFund: boolean;
+      /** Rows actually reset to NULL from the applyToPast set. */
+      revertedApplyToPastCount: number;
+      /** Rule action taken — see {@link RuleUndoAction}. */
+      ruleAction: RuleUndoAction;
+    };
 
 /**
  * Reverse a {@link CategorizeTransactionSnapshot}.
@@ -131,10 +148,13 @@ export function undoCategorizeTransaction(
       }
     }
 
+    if (!targetReverted) {
+      return { targetReverted: false, revertedApplyToPastCount, ruleAction };
+    }
     return {
-      targetReverted,
-      restoredCategoryId: targetReverted ? restoreCategoryId : undefined,
-      priorCategoryBecameFund: targetReverted && priorCategoryIsFund,
+      targetReverted: true,
+      restoredCategoryId: restoreCategoryId,
+      priorCategoryBecameFund: priorCategoryIsFund,
       revertedApplyToPastCount,
       ruleAction,
     };
