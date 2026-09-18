@@ -786,6 +786,19 @@ describe("syncSimpleFin — pending/posted content-dedup promotion", () => {
     // `up-to-date`, not a `synced` batch that wrote zero rows.
     expect(outcome.status).toBe("up-to-date");
 
+    // Regression coverage (silent-failure-hunter, `/ship` PR review): the
+    // late-content-drop this test exercises used to produce NO warning at
+    // all, on either path — and specifically on THIS path (a
+    // `NothingVerifiedError` rollback), it was structurally unreachable,
+    // because `lateContentDropsByAccountId` lived inside the transaction
+    // and was lost the moment it rolled back. It's now declared outside the
+    // transaction (a plain JS Map survives a rolled-back DB transaction)
+    // and warned about on both the success and rollback paths.
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.warnings.join(" ")).toMatch(
+      /matched activity already imported by another process/i,
+    );
+
     const rows = handle.db
       .select()
       .from(schema.transactions)

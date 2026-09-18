@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SNAPSHOT_STUB } from "@/lib/simplefin/test/syncFixtures";
 
 /**
  * `linkAccountAction` used to discard `setAccountLink`'s return value
@@ -181,6 +182,53 @@ describe("syncNowAction — a refusal must not revalidate first", () => {
 
     expect(state.status).toBe("error");
     expect(revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("syncNowAction — a promotion is reported as success, not a warning", () => {
+  // Regression coverage (code-reviewer, `/ship` PR review): promotion notices
+  // used to ride in `outcome.warnings`, which `ok()` maps to `status:
+  // "warning"` (role="alert", amber) for ANY non-empty warnings array — so a
+  // clean sync that only confirmed a pending row as posted rendered as an
+  // alert, with the headline still reading "Imported 0 transactions" since
+  // that count is insert-only. A promotion is good news, not a problem.
+  it("renders plain 'ok' and names the promoted count, even when insertedCount is 0", async () => {
+    const { syncSimpleFin } = await import("@/lib/simplefin/sync");
+    vi.mocked(syncSimpleFin).mockResolvedValue({
+      status: "synced",
+      batchId: 1,
+      insertedCount: 0,
+      pairsLinked: 0,
+      ambiguous: [],
+      snapshot: SNAPSHOT_STUB,
+      accounts: [
+        {
+          accountId: 1,
+          name: "Checking",
+          insertedCount: 0,
+          duplicateByExternalId: 0,
+          duplicateByContent: 0,
+          skippedPending: 0,
+          skippedBeforeAnchor: 0,
+          promotedFromPending: 1,
+          reportedBalanceCents: null,
+          availableBalanceCents: null,
+          balanceDate: null,
+          computedBalanceCents: 0,
+          driftCents: null,
+        },
+      ],
+      balanceUpdates: [],
+      warnings: [],
+    } as Awaited<ReturnType<typeof syncSimpleFin>>);
+
+    const { syncNowAction } = await import("./actions");
+    const state = await syncNowAction();
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toMatch(
+      /confirmed 1 pending transaction as posted/i,
+    );
   });
 });
 

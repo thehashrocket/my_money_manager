@@ -1428,8 +1428,21 @@ export async function syncSimpleFin(
      * fourth hand-rolled copy of "correct `insertedCount` down, credit the
      * real reason, prune `expectedCardExternalIds`".
      */
-    lateContentDropsByAccountId: Map<number, Set<string>>;
   };
+  // Declared OUTSIDE the transaction, unlike the id/content/cutover drops
+  // above (which live inside `written` and are lost on rollback) — this one
+  // is populated by an inline check in the write loop with no standalone
+  // recheck function of its own to re-run against the live handle the way
+  // `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor` are
+  // re-run in the `NothingVerifiedError` catch below. A plain JS `Map`
+  // mutated inside `db.transaction()`'s callback survives a ROLLED-BACK
+  // transaction just fine — only the DB writes unwind, not this process's
+  // memory — so keeping it here is what lets the catch block still warn
+  // about (and prune) a late drop that happened during the attempt that
+  // ultimately threw `NothingVerifiedError` (silent-failure-hunter finding,
+  // `/ship`: this warning previously existed only via `written`, so it was
+  // both completely silent on the SUCCESS path and unreachable on rollback).
+  const lateContentDropsByAccountId = new Map<number, Set<string>>();
   try {
     written = db.transaction((tx) => {
     // The links were read before the network round trip; re-check them here,
@@ -1535,8 +1548,9 @@ export async function syncSimpleFin(
     // own after-the-fact count adjustment (same pattern as
     // `promotedByAccountId`): `insertedCount` was set at staging time,
     // before this row's own candidate raced away and revealed it was a
-    // duplicate all along.
-    const lateContentDropsByAccountId = new Map<number, Set<string>>();
+    // duplicate all along. `lateContentDropsByAccountId` itself is the
+    // OUTER-scoped one declared above `try` — not redeclared here — so it
+    // survives a `NothingVerifiedError` rollback.
 
     for (const { account, feedId, rows } of cutoverChecked) {
       for (const row of rows) {
@@ -1691,9 +1705,12 @@ export async function syncSimpleFin(
     // page's "left to categorize" (`transactionCount - autoCategorized`)
     // overcount by however many rows this batch promoted: the denominator
     // included them, the numerator structurally cannot (maintainability
-    // specialist finding, `/ship`). Exact because every row in
-    // `cutoverChecked` results in EITHER an insert or a promotion, never
-    // both and never neither.
+    // specialist finding, `/ship`). `verifiedTotal` above ALREADY excludes
+    // late content drops (a row in `cutoverChecked` can now end in one of
+    // THREE outcomes — insert, promotion, or a late-discovered duplicate,
+    // not just the first two), so `verifiedTotal - totalPromoted` is exact:
+    // every row still counted in `verifiedTotal` is either an insert or a
+    // promotion, and never both.
     const totalPromoted = [...promotedByAccountId.values()].reduce((n, c) => n + c, 0);
     tx.update(schema.importBatches)
       .set({ transactionCount: verifiedTotal - totalPromoted })
@@ -1733,7 +1750,6 @@ export async function syncSimpleFin(
       cutoverDroppedByAccountId,
       promotedByAccountId,
       earliestPromotedDate,
-      lateContentDropsByAccountId,
     };
   });
 
@@ -1817,6 +1833,19 @@ export async function syncSimpleFin(
     for (const w of cutoverWarnings) console.error(`sync: ${w}`);
     warnings.push(...cutoverWarnings);
     applyDedupPruning(staged, counts, cutoverDropped, "skippedBeforeAnchor");
+
+    // The fallback content check has no standalone recheck function to
+    // re-run here (unlike the three above) — but `lateContentDropsByAccountId`
+    // is declared OUTSIDE the transaction specifically so a drop it recorded
+    // during THIS attempt, before `NothingVerifiedError` unwound the write,
+    // is still sitting in this closure's memory (the DB rollback undoes the
+    // writes, not this process's variables). Applying and warning about it
+    // here is what makes this the one caller-visible place a
+    // `NothingVerifiedError` run could otherwise credit `insertedCount` for a
+    // row that was never actually going to be written (silent-failure-hunter
+    // finding, `/ship`).
+    applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
+    warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
     warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
     // Blank these fields for LINK-DROPPED accounts only — same reasoning as
@@ -1958,24 +1987,30 @@ export async function syncSimpleFin(
   // set at staging time before that was known. Applied through the SAME
   // mechanism the id/content/cutover rechecks already use, crediting it as
   // `duplicateByContent` — it is one, just discovered later than the others.
-  applyDedupPruning(staged, counts, written.lateContentDropsByAccountId, "duplicateByContent");
+  // Also warned about, unlike its three siblings above — it used to have no
+  // user-visible warning on any path (silent-failure-hunter finding, `/ship`).
+  applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
+  warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
 
   // Reclassify a promoted row out of `insertedCount` and into
   // `promotedFromPending` — decided only just now, inside the write
   // transaction's race re-check (`tryPromoteCandidate`), so it could not
   // have been known at staging time when `insertedCount` was first set.
-  const promotionNotices: string[] = [];
+  //
+  // This is deliberately NOT pushed into `warnings`: a promotion is good
+  // news (a row confirmed, not a problem), but every consumer of `warnings`
+  // — `ok()` in `src/app/sync/actions.ts`, `ActionStatus` — treats a
+  // non-empty warnings array as `role="alert"`/amber, which inverted this
+  // exact feature's own happy path (a promotion-only sync rendered as a
+  // warning, found by /ship's own code-reviewer pass). The per-account
+  // figure is already on `AccountSyncSummary.promotedFromPending`; the
+  // caller builds its own success sentence from that instead.
   for (const [accountId, promotedCount] of written.promotedByAccountId) {
     const c = counts.find((c) => c.accountId === accountId);
     if (!c || promotedCount === 0) continue;
     c.insertedCount -= promotedCount;
     c.promotedFromPending = promotedCount;
-    promotionNotices.push(
-      `${promotedCount} pending transaction${promotedCount === 1 ? "" : "s"} ` +
-        `confirmed as posted on "${c.name}".`,
-    );
   }
-  warnings.push(...promotionNotices);
 
   warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
@@ -2010,10 +2045,31 @@ export async function syncSimpleFin(
   // `sync_promotions`) would silently escape it. CSV's `commitImport` has
   // written this column since its own `toUpdate` path existed for the exact
   // same reason; sync never needed to until now.
-  db.update(schema.importBatches)
-    .set({ pairsLinkedCount: pairsLinked })
-    .where(eq(schema.importBatches.id, batchId))
-    .run();
+  //
+  // This UPDATE runs OUTSIDE the write transaction, after everything above —
+  // the insert/promotion batch, the transfer pairing — has already committed.
+  // Rule 3's own text calls `SQLITE_BUSY` "live here"; if this single-row
+  // write throws, the exception must not be allowed to reach `syncSimpleFin`'s
+  // caller, which has only ONE catch (`src/app/sync/actions.ts`) and would
+  // render a fully-committed, successful sync as a plain failure — the exact
+  // shape `guardPostCommitRead` exists to prevent, one write later. Degrading
+  // to a warning instead (the display-only figure on `/import/success` stays
+  // stale, never wrong in a way that costs money) is cheaper than losing the
+  // whole outcome (found by /ship's own silent-failure-hunter pass).
+  try {
+    db.update(schema.importBatches)
+      .set({ pairsLinkedCount: pairsLinked })
+      .where(eq(schema.importBatches.id, batchId))
+      .run();
+  } catch (err) {
+    console.error(
+      `[syncSimpleFin] failed to persist pairsLinkedCount for batch ${batchId}; the sync itself already committed`,
+      err,
+    );
+    warnings.push(
+      "Synced successfully, but the transfer-pair count on this batch's import summary may be out of date.",
+    );
+  }
   const finalised = finaliseBalances(counts, db);
   warnings.push(...missingAccountWarnings(finalised.missingAccounts));
 
@@ -2310,6 +2366,33 @@ function applyDedupPruning(
       c.insertedCount -= droppedIds.size;
     }
   }
+}
+
+/**
+ * The late fallback content check (the write loop's own `nowDuplicate` guard,
+ * immediately before insert) has no standalone recheck function of its own —
+ * unlike `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor`, it
+ * is inline logic inside the per-row insert loop, so it has no
+ * `{ warnings: string[] }` of its own the way those three do. This builds the
+ * equivalent sentence from the raw drop map, in the same voice as
+ * `recheckContentDedup`'s own warnings, so a genuine late-race drop is never
+ * silent (silent-failure-hunter finding, `/ship`: this used to have no
+ * user-visible warning on any path).
+ */
+function lateContentDropWarnings(
+  droppedByAccountId: ReadonlyMap<number, ReadonlySet<string>>,
+  staged: readonly { account: { id: number; name: string } }[],
+): string[] {
+  return staged.flatMap((entry) => {
+    const droppedIds = droppedByAccountId.get(entry.account.id);
+    if (!droppedIds || droppedIds.size === 0) return [];
+    const n = droppedIds.size;
+    return [
+      `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" matched activity ` +
+        `already imported by another process while this sync was running, so ` +
+        `${n === 1 ? "it was" : "they were"} skipped.`,
+    ];
+  });
 }
 
 /**

@@ -84,18 +84,38 @@ export type UndoResult =
  * here and the pairing is restored ONLY if it still points back at this
  * transaction; otherwise this row is left unpaired, which is a state a
  * human can act on (re-link manually) rather than a silently wrong one.
+ *
+ * Returns whether `promotion.transactionId` still existed to revert.
+ * `tryPromoteCandidate`'s own docstring names deletion as one of the two
+ * races this whole mechanism guards against, but nothing in this app can
+ * delete a promoted (posted, non-`manual`) row through the UI today — see
+ * `manualTransaction.ts`'s `import_source = 'manual'` guard — so this is
+ * only reachable via direct DB manipulation (`pnpm db:studio`, a hand-run
+ * migration). Still worth checking rather than assuming: without it, the
+ * final UPDATE below silently affects 0 rows (better-sqlite3 doesn't throw
+ * on that), and the caller would credit `revertedCount` for a row that was
+ * never actually put back to pending — a durable fact reported to the user
+ * that would be false (silent-failure-hunter finding, `/ship`).
  */
 function revertPromotion(
   tx: SyncTx,
   promotion: typeof schema.syncPromotions.$inferSelect,
-): void {
+): boolean {
   const current = tx
     .select({ transferPairId: schema.transactions.transferPairId })
     .from(schema.transactions)
     .where(eq(schema.transactions.id, promotion.transactionId))
     .get();
 
-  if (current && current.transferPairId !== promotion.priorTransferPairId) {
+  if (!current) {
+    console.error(
+      `[undoSyncBatch] sync_promotions row ${promotion.id} names transaction ` +
+        `${promotion.transactionId}, which no longer exists — nothing to revert`,
+    );
+    return false;
+  }
+
+  if (current.transferPairId !== promotion.priorTransferPairId) {
     if (current.transferPairId !== null) {
       tx.update(schema.transactions)
         .set({ transferPairId: null })
@@ -135,6 +155,7 @@ function revertPromotion(
     })
     .where(eq(schema.transactions.id, promotion.transactionId))
     .run();
+  return true;
 }
 
 /**
@@ -249,8 +270,9 @@ export function undoSyncBatch(batchId: number, db: Db = defaultDb): UndoResult {
       .from(schema.syncPromotions)
       .where(eq(schema.syncPromotions.batchId, batchId))
       .all();
+    let revertedCount = 0;
     for (const promotion of promotions) {
-      revertPromotion(tx, promotion);
+      if (revertPromotion(tx, promotion)) revertedCount++;
     }
 
     const doomed = tx
@@ -275,7 +297,7 @@ export function undoSyncBatch(batchId: number, db: Db = defaultDb): UndoResult {
       status: "undone" as const,
       batchId,
       deletedCount: doomed.length,
-      revertedCount: promotions.length,
+      revertedCount,
     };
   });
 }
