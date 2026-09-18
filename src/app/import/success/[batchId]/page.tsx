@@ -26,12 +26,15 @@ export default async function SuccessPage({
 
   // `batch.pairsLinkedCount` is what `commitImport`/`syncSimpleFin` actually
   // linked as part of THIS batch, including a pair that links a `toUpdate`
-  // row (a pending row posting), which keeps its ORIGINAL batch's id — a
+  // row (a pending row posting) or a `sync_promotions`-owned row (a
+  // promoted pending row) — both keep their ORIGINAL batch's id, so a
   // `COUNT(*) WHERE import_batch_id = batchId` query would miss that pair
-  // entirely. Only null for a batch written before this column existed (a
-  // sync batch never sets it either, since its matcher has no `toUpdate`
-  // concept and the batch-scoped count is exact for it by construction), so
-  // the query below is a fallback, not the primary source.
+  // entirely. `syncSimpleFin` writes this column too as of the promotion
+  // fix (it never needed to before promotion existed, since a sync batch
+  // had no `toUpdate`-equivalent concept and the batch-scoped count was
+  // exact for it by construction). Only null for a batch written before
+  // this column existed, so the query below is a fallback, not the primary
+  // source.
   const pairsLinked =
     batch.pairsLinkedCount ??
     db

@@ -74,7 +74,7 @@ beforeEach(() => {
   unlinkTransferPairMock.mockReset();
   unlinkTransferPairMock.mockReturnValue("unlinked");
   undoSyncBatchMock.mockReset();
-  undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2 });
+  undoSyncBatchMock.mockReturnValue({ status: "undone", batchId: 3, deletedCount: 2, revertedCount: 0 });
   // mockRESET, not mockClear: the refresh-failure tests below install a
   // throwing implementation, and `mockClear` only wipes call history. Leaving
   // the implementation in place would make every later test in this file
@@ -599,6 +599,38 @@ describe("undoSyncAction — a refusal must not revalidate the form away", () =>
     const paths = vi.mocked(revalidatePath).mock.calls.map((c) => c[0]);
     expect(paths).toEqual(
       expect.arrayContaining(["/sync", "/", "/transactions", "/categorize", "/budget"]),
+    );
+  });
+
+  it("reports a promotion-only undo as 'put back to pending', not 'removed 0 transactions'", async () => {
+    undoSyncBatchMock.mockReturnValue({
+      status: "undone",
+      batchId: 3,
+      deletedCount: 0,
+      revertedCount: 1,
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toBe(
+      "Undid the sync — removed 0 transactions and put 1 transaction back to pending.",
+    );
+  });
+
+  it("reports a mixed undo (deleted AND reverted) with both counts", async () => {
+    undoSyncBatchMock.mockReturnValue({
+      status: "undone",
+      batchId: 3,
+      deletedCount: 1,
+      revertedCount: 2,
+    });
+
+    const state = await undoSyncAction({ status: "idle" }, formData({ batchId: "3" }));
+
+    expect(state.status).toBe("ok");
+    expect(state.status !== "idle" && state.message).toBe(
+      "Undid the sync — removed 1 transaction and put 2 transactions back to pending.",
     );
   });
 

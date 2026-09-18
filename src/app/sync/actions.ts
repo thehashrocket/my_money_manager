@@ -211,10 +211,17 @@ export async function undoSyncAction(
     return fail(result.reason);
   }
 
-  return ok(
-    `Undid the sync — removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}.`,
-    revalidateAll(),
-  );
+  // `revertedCount` (a promoted row put back to pending) is reported
+  // alongside `deletedCount`, not folded into it — "removed 0 transactions"
+  // would be misleading for a promotion-only undo, since real state changed
+  // and nothing was actually removed.
+  const parts = [`removed ${result.deletedCount} transaction${result.deletedCount === 1 ? "" : "s"}`];
+  if (result.revertedCount > 0) {
+    parts.push(
+      `put ${result.revertedCount} transaction${result.revertedCount === 1 ? "" : "s"} back to pending`,
+    );
+  }
+  return ok(`Undid the sync — ${parts.join(" and ")}.`, revalidateAll());
 }
 
 export async function linkAccountAction(

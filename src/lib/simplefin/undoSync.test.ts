@@ -123,6 +123,53 @@ describe("findLastSyncBatch", () => {
       deriveBatchLabel("simplefin", batch.importedAt),
     );
   });
+
+  it("counts a PROMOTED row toward transactionCount but excludes its category from categorizedCount", () => {
+    // Regression coverage: transactionCount used to be a bare
+    // `WHERE import_batch_id = batch.id` count, which a promoted row (kept
+    // on its ORIGINAL, pre-promotion batch id — see sync_promotions) is
+    // never part of. categorizedCount must NOT follow it there: undo
+    // REVERTS a promoted row rather than deleting it, so its categorization
+    // is never at risk and folding it in would overstate what undo destroys
+    // ("Undoing deletes N rows you've already categorised").
+    const account = seedAccount();
+    const category = seedCategory();
+
+    const originalBatch = seedBatch("csv", "starone.csv");
+    const promoted = seedTxn({
+      accountId: account.id,
+      batchId: originalBatch.id,
+      amountCents: -487,
+      categoryId: category.id,
+    });
+
+    const syncBatch = seedBatch("simplefin", "simplefin 2026-09-02 10:00Z");
+    seedTxn({
+      accountId: account.id,
+      batchId: syncBatch.id,
+      amountCents: -300,
+    });
+
+    handle.db
+      .insert(schema.syncPromotions)
+      .values({
+        batchId: syncBatch.id,
+        transactionId: promoted.id,
+        priorIsPending: true,
+        priorRawMemo: "PENDING COFFEE",
+        priorNormalizedMerchant: "PENDING COFFEE",
+        priorImportRowHash: "hash-prior",
+      })
+      .run();
+
+    const summary = findLastSyncBatch(handle.db);
+    expect(summary?.batchId).toBe(syncBatch.id);
+    // 1 inserted (batch-owned) + 1 promoted (sync_promotions-owned) = 2.
+    expect(summary?.transactionCount).toBe(2);
+    // Only batch-owned rows count here — the promoted row's category isn't
+    // at risk from undo, so it must not appear in this destructive-undo count.
+    expect(summary?.categorizedCount).toBe(0);
+  });
 });
 
 describe("undoSyncBatch", () => {
@@ -144,6 +191,7 @@ describe("undoSyncBatch", () => {
       status: "undone",
       batchId: batch.id,
       deletedCount: 2,
+      revertedCount: 0,
     });
 
     const remaining = handle.db.select().from(schema.transactions).all();
@@ -398,7 +446,7 @@ describe("REGRESSION R2 — a manual batch must not suppress a sync's undo", () 
     });
 
     const result = undoSyncBatch(sync.id, handle.db);
-    expect(result).toEqual({ status: "undone", batchId: sync.id, deletedCount: 1 });
+    expect(result).toEqual({ status: "undone", batchId: sync.id, deletedCount: 1, revertedCount: 0 });
 
     // The manual row is untouched — it was never part of the sync.
     const remaining = handle.db.select().from(schema.transactions).all();
