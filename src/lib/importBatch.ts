@@ -4,6 +4,11 @@ import { parseStarOneCsv, type ParsedRow, type ParseError } from "./parseCsv";
 import { normalizeMerchant, extractCardLastFour } from "./normalize";
 import { computeImportRowHash } from "./hash";
 import { contentSignature } from "./contentSignature";
+import {
+  buildContentCandidates,
+  claimPendingCandidate,
+  type ContentCandidate as ExistingCandidate,
+} from "./contentCandidates";
 import { buildRuleMatcher } from "./rules";
 import {
   deriveStartingBalance,
@@ -150,8 +155,12 @@ export function buildPreview(
   // Lists (not just counts) also let a posted incoming row find and update a
   // PENDING existing candidate specifically, rather than being indifferent to
   // which copy it "spends" — see the pending-row branch below.
-  type ExistingCandidate = { id: number; isPending: boolean };
-  const contentCandidates = new Map<string, ExistingCandidate[]>();
+  //
+  // Grouping is `buildContentCandidates` (`src/lib/contentCandidates.ts`),
+  // shared with sync's own promotion path — both need to tell a pending
+  // existing row apart from a posted one at the same signature, not just
+  // count how many exist.
+  let contentCandidates = new Map<string, ExistingCandidate[]>();
   if (transformed.length > 0) {
     let minDate = transformed[0].date;
     let maxDate = transformed[0].date;
@@ -178,12 +187,7 @@ export function buildPreview(
       )
       .all();
 
-    for (const r of existingInRange) {
-      const sig = contentSignature(r);
-      const list = contentCandidates.get(sig) ?? [];
-      list.push({ id: r.id, isPending: r.isPending });
-      contentCandidates.set(sig, list);
-    }
+    contentCandidates = buildContentCandidates(existingInRange);
 
     // Rows already matched by hash claim their own existing row's candidate
     // before anything else is compared. Without this, an earlier unmatched row
@@ -202,6 +206,10 @@ export function buildPreview(
    * candidate when `r` itself is posted — that pairing is the pending row's
    * real-world counterpart arriving, not a coincidental repeat, so the caller
    * updates the existing row in place instead of just dropping this one.
+   * `claimPendingCandidate` (shared with sync's own promotion path) owns the
+   * pending-preference decision; falling back to `list.pop()` for "claim
+   * anything else" is CSV-specific — sync's own dedup never claims a posted
+   * candidate this way, it counts them separately (see `contentCandidates.ts`).
    */
   function claimContentCandidate(r: {
     date: string;
@@ -210,16 +218,11 @@ export function buildPreview(
     isPending: boolean;
   }): ExistingCandidate | undefined {
     const sig = contentSignature(r);
-    const list = contentCandidates.get(sig);
-    if (!list || list.length === 0) return undefined;
-
     if (!r.isPending) {
-      const pendingIndex = list.findIndex((c) => c.isPending);
-      if (pendingIndex !== -1) {
-        return list.splice(pendingIndex, 1)[0];
-      }
+      const pending = claimPendingCandidate(contentCandidates, sig);
+      if (pending) return pending;
     }
-    return list.pop();
+    return contentCandidates.get(sig)?.pop();
   }
 
   const rows: ImportPreviewRow[] = transformed.map((r, i) => {
