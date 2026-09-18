@@ -1244,6 +1244,62 @@ describe("syncSimpleFin — NothingVerifiedError rollback path flushes SURVIVING
       .all();
     expect(checkingRows).toHaveLength(0);
   });
+
+  // Same root cause as the warning-flush fix above, a third instance (Codex
+  // structured review, `/ship` Step 11): the rollback branch's `counts.map()`
+  // used to blank `reportedBalanceCents`/`duplicateByExternalId`/etc. for
+  // EVERY staged account unconditionally, which was equivalent to "only the
+  // link-dropped ones" back when NothingVerifiedError could only mean
+  // everyone was link-dropped. This branch's widening broke that
+  // equivalence — an unrelated, unaffected account's genuine feed balance
+  // and duplicate counts were being thrown away purely because a DIFFERENT
+  // account's routine cutover exclusion triggered the same rollback.
+  it("preserves an UNRELATED account's real reported balance and duplicate counts when a card's routine pre-cutover sync triggers the rollback path", async () => {
+    const checking = seedAccount({ simplefinAccountId: "ACT-CHK", name: "Checking", startingBalanceCents: 100_000 });
+    seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-20",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CHK",
+          name: "REGULAR CHECKING",
+          balance: "1000.00",
+          "available-balance": "1000.00",
+          "balance-date": SEP_1_NOON,
+          transactions: [], // genuinely nothing new this run
+        },
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          // Pre-anchor only — the P4 residual routes this through
+          // NothingVerifiedError instead of the cheap up-to-date return.
+          transactions: [{ ...feedTxn("CITI-OLD", "-50.00", "COSTCO"), posted: 1785585600 }], // 2026-08-01
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+
+    const checkingSummary = outcome.accounts.find((a) => a.accountId === checking.id);
+    // Checking's link never moved and it was never staged with anything to
+    // drop — its genuine feed balance must survive, not come back null.
+    expect(checkingSummary?.reportedBalanceCents).toBe(100_000);
+    expect(checkingSummary?.availableBalanceCents).toBe(100_000);
+    expect(checkingSummary?.balanceDate).not.toBeNull();
+    expect(checkingSummary?.insertedCount).toBe(0);
+  });
 });
 
 describe("syncSimpleFin — snapshot consistency", () => {

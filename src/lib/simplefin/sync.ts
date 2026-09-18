@@ -1411,16 +1411,39 @@ export async function syncSimpleFin(
     applyDedupPruning(staged, counts, cutoverDropped, "skippedBeforeAnchor");
     warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
+    // Blank these fields for LINK-DROPPED accounts only — same reasoning as
+    // the commit path's own zeroing a few dozen lines below (rule 1: a
+    // reported balance the account's link no longer holds would make
+    // `finaliseBalances` manufacture a fabricated `driftCents` against a
+    // ledger deliberately missing the withheld rows). `NothingVerifiedError`
+    // used to mean "every staged account was link-dropped" — that made
+    // blanket-zeroing every account here equivalent to zeroing only the
+    // dropped ones. This branch's own widening broke that equivalence: it can
+    // now ALSO mean "everyone had a routine zero-net-row sync for unrelated
+    // reasons" (a card's pre-cutover-only history, say), and a SURVIVING
+    // account's `insertedCount` is already correctly 0 by this point (either
+    // it had nothing to begin with, or `applyDedupPruning` above already
+    // brought it there) — its `reportedBalanceCents`/`duplicateByExternalId`/
+    // etc. are real, valid facts from staging that blanket-zeroing was
+    // silently discarding, silencing that account's own drift check for the
+    // run (Codex adversarial finding, `/ship` Step 11, empirically confirmed:
+    // an unrelated, unaffected checking account's genuine reported balance
+    // and duplicate counts came back null purely because a DIFFERENT
+    // account's routine cutover exclusion triggered this rollback path).
     const finalised = finaliseBalances(
-      counts.map((c) => ({
-        ...c,
-        insertedCount: 0,
-        duplicateByExternalId: 0,
-        duplicateByContent: 0,
-        reportedBalanceCents: null,
-        availableBalanceCents: null,
-        balanceDate: null,
-      })),
+      counts.map((c) =>
+        dropped.has(c.accountId)
+          ? {
+              ...c,
+              insertedCount: 0,
+              duplicateByExternalId: 0,
+              duplicateByContent: 0,
+              reportedBalanceCents: null,
+              availableBalanceCents: null,
+              balanceDate: null,
+            }
+          : c,
+      ),
       db,
     );
     warnings.push(...missingAccountWarnings(finalised.missingAccounts));
