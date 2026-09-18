@@ -48,8 +48,11 @@ import { ruleActionSignature, type RuleAction } from "@/lib/categorize/keyTraina
  * transaction-id-keyed component surviving the rename and carrying stale
  * consent to the new merchant) — see that function's own docstring for both
  * exact reproductions. Passing both through here rather than computing them
- * internally keeps this hook agnostic to where the pick lives
- * (`sessionStorage` on `/categorize`, component state on `/transactions`).
+ * internally keeps this hook agnostic to where the pick lives — plain
+ * component state on both `/categorize` and `/transactions` as of the
+ * cache-components-migration plan (Stage 2 deleted `/categorize`'s
+ * `sessionStorage`-backed version; Activity now preserves component state
+ * across navigation without it).
  */
 export function useRememberConsent(
   normalizedMerchant: string,

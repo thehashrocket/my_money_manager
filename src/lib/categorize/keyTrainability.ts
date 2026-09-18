@@ -456,11 +456,15 @@ export function filedCategoryIdsAfterMove(
  * Is this a category id at all?
  *
  * The client passes the combobox's raw string through `Number()`, where an
- * empty selection becomes `0` and a corrupted parked pick (`sessionStorage`,
- * see `_pending-pick.ts`) becomes `NaN`. Both used to read as a distinct
- * "second category" and disabled the checkbox with the multi-category
- * explanation on a merchant with one filing or none. Category ids are
- * `AUTOINCREMENT` primary keys, so positive integers is the whole test.
+ * empty selection becomes `0`. Both `0` and a `NaN` (a defensive case — the
+ * pending pick this guards was once `sessionStorage`-backed and could
+ * deserialize as garbage; as of the cache-components-migration plan it is
+ * plain component `useState`, which cannot produce one, but the check stays
+ * since `Number()` on arbitrary input is not otherwise guaranteed positive)
+ * used to read as a distinct "second category" and disabled the checkbox
+ * with the multi-category explanation on a merchant with one filing or
+ * none. Category ids are `AUTOINCREMENT` primary keys, so positive integers
+ * is the whole test.
  */
 function isRealCategoryId(id: number | null): id is number {
   return id !== null && Number.isInteger(id) && id > 0;

@@ -10,7 +10,6 @@ import { formatCents } from "@/lib/money";
 import { StateCard } from "@/components/ledger/state-card";
 import { FOCUS_RING } from "@/components/ledger/focus-ring";
 import { MerchantRow, ROW_GRID } from "./_merchant-row";
-import { prunePendingPicks } from "./_pending-pick";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -57,8 +56,12 @@ function scopeKeysCanOverlap(a: string, b: string): boolean {
  *   sitting, an undo from another tab, a re-categorization) stayed invisible
  *   for the rest of the session with no way to reach it, since the only
  *   removal path was that row's own Undo and the row was already unmounted.
- * - Nothing else: the per-row pending pick lives in `sessionStorage`, because
- *   it has to outlive this component (D19).
+ * - Nothing else: the per-row pending pick is plain component state inside
+ *   `MerchantRow` itself (cache-components-migration, Stage 2 — it used to
+ *   live in `sessionStorage` because it had to outlive this component under
+ *   D19; Activity now preserves the component instance across the
+ *   `/transactions` round trip for free, so the pick's lifetime matches the
+ *   row's own).
  *
  * `aria-live="polite"` on the counter mirrors the Sonner toast for screen
  * readers (Pass 6 accessibility decision).
@@ -145,19 +148,6 @@ export function CategorizeUi({
     () => initialGroups.filter((g) => !hidden.has(g.normalizedMerchant)),
     [initialGroups, hidden],
   );
-
-  // A pick parked for a merchant this page no longer lists is finished
-  // business — see `prunePendingPicks`. That equivalence only holds
-  // ALL-TIME: `initialGroups` scoped to one month is a subset, so a merchant
-  // "not listed" can mean "outside this month" rather than "no uncategorized
-  // rows anywhere" (Codex adversarial review). Pruning on a scoped payload
-  // would delete a still-relevant pick for every merchant with backlog
-  // outside the viewed month — narrowing when this runs, not reworking what
-  // it decides, keeps the original all-time guarantee intact.
-  useEffect(() => {
-    if (scope) return;
-    prunePendingPicks(initialGroups.map((g) => g.normalizedMerchant));
-  }, [initialGroups, scope]);
 
   const onDismissedChange = (
     merchant: string,

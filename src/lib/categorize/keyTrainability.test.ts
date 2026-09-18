@@ -138,9 +138,10 @@ describe("classifyKeyTrainability — what counts as a category id", () => {
   });
 
   it("ignores a corrupted parked pick, which arrives as NaN", () => {
-    // Picks are parked in `sessionStorage` (`_pending-pick.ts`) and read back
-    // as raw strings, so `Number(...)` can yield NaN. NaN is distinct from
-    // every real id under Set semantics, so it used to count as a category.
+    // Defensive: a pending pick reaches this function as a raw string run
+    // through `Number(...)`, which can yield NaN for non-numeric input. NaN
+    // is distinct from every real id under Set semantics, so it used to
+    // count as a category.
     expect(classifyKeyTrainability("SAFEWAY", [3], Number.NaN).trainable).toBe(
       true,
     );
@@ -206,11 +207,11 @@ describe("describeRuleAction", () => {
     expect(action).toEqual({ kind: "none", message: verdict.message });
   });
 
-  // PR review, test-coverage pass (finding 3): a corrupted sessionStorage
-  // parked pick (`_pending-pick.ts`) arrives here as NaN, same as it does at
-  // `classifyKeyTrainability`'s own `pendingCategoryId` — this function has
-  // to reject it the identical way, or a corrupted pick renders "Remove
-  // conflicting rule" as ENABLED with no real pick behind it.
+  // PR review, test-coverage pass (finding 3): a corrupted pending pick
+  // arrives here as NaN, same as it does at `classifyKeyTrainability`'s own
+  // `pendingCategoryId` — this function has to reject it the identical way,
+  // or a corrupted pick renders "Remove conflicting rule" as ENABLED with no
+  // real pick behind it.
   it.each([Number.NaN, 0, -1])(
     "returns none for a non-real pendingCategoryId (%s), even with an existing rule pointing elsewhere",
     (badPending) => {
