@@ -9,6 +9,26 @@ type Db = typeof defaultDb;
 export type UndoCategorizeTransactionResult = {
   /** True when the target row was reverted to its prior category (or NULL). */
   targetReverted: boolean;
+  /**
+   * What the target row was ACTUALLY reverted to — `undefined` when
+   * `targetReverted` is false. Callers must render THIS, never
+   * `snapshot.targetPriorCategoryId` directly: the two can disagree (see
+   * `priorCategoryBecameFund`), and this is the only field that reflects what
+   * the write inside this transaction actually did.
+   */
+  restoredCategoryId?: number | null;
+  /**
+   * True when `snapshot.targetPriorCategoryId` pointed at a category that is
+   * now `kind='fund'` — reclassified between the original categorize action
+   * and this undo (an outside review's finding: two tabs, or two clicks in
+   * quick succession, no crafted input needed). Restoring into it would
+   * silently populate the one thing DESIGN.md documents as permanently
+   * empty for a fund, so this undo falls back to `null` (uncategorized)
+   * instead — the same "can't put it back exactly, land in the safe state"
+   * behavior this file already gives a row someone else re-categorized
+   * inside the undo window.
+   */
+  priorCategoryBecameFund: boolean;
   /** Rows actually reset to NULL from the applyToPast set. */
   revertedApplyToPastCount: number;
   /** Rule action taken — see {@link RuleUndoAction}. */
@@ -18,7 +38,10 @@ export type UndoCategorizeTransactionResult = {
 /**
  * Reverse a {@link CategorizeTransactionSnapshot}.
  *
- * Target row: reset to `targetPriorCategoryId` (may be null). Guard: only if
+ * Target row: reset to `targetPriorCategoryId` (may be null) — UNLESS that
+ * category has since been reclassified to `kind='fund'` (checked fresh here,
+ * not trusted from the snapshot), in which case it falls back to `null`
+ * rather than silently populating a fund's transactions. Guard: only if
  * the row still points at `newCategoryId` — if the user re-categorized after
  * the apply, we leave their work alone (symmetry with bulk undo).
  *
@@ -45,9 +68,25 @@ export function undoCategorizeTransaction(
   snapshot: CategorizeTransactionSnapshot,
 ): UndoCategorizeTransactionResult {
   return db.transaction((tx) => {
+    // Rule 11: read the prior category's CURRENT kind inside this same write
+    // transaction, not trusted from the snapshot's moment — the snapshot is
+    // whatever the categorize action saw, which can be stale by the time this
+    // undo runs (the 10s toast window is exactly long enough for a second tab
+    // to reclassify that category to `fund` via the `⋯` menu).
+    const priorCategoryIsFund =
+      snapshot.targetPriorCategoryId !== null &&
+      tx
+        .select({ kind: schema.categories.kind })
+        .from(schema.categories)
+        .where(eq(schema.categories.id, snapshot.targetPriorCategoryId))
+        .get()?.kind === "fund";
+    const restoreCategoryId = priorCategoryIsFund
+      ? null
+      : snapshot.targetPriorCategoryId;
+
     const targetResult = tx
       .update(schema.transactions)
-      .set({ categoryId: snapshot.targetPriorCategoryId, updatedAt: new Date() })
+      .set({ categoryId: restoreCategoryId, updatedAt: new Date() })
       .where(
         and(
           eq(schema.transactions.id, snapshot.targetTxnId),
@@ -92,7 +131,13 @@ export function undoCategorizeTransaction(
       }
     }
 
-    return { targetReverted, revertedApplyToPastCount, ruleAction };
+    return {
+      targetReverted,
+      restoredCategoryId: targetReverted ? restoreCategoryId : undefined,
+      priorCategoryBecameFund: targetReverted && priorCategoryIsFund,
+      revertedApplyToPastCount,
+      ruleAction,
+    };
   });
 }
 

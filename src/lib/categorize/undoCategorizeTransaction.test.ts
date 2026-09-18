@@ -145,6 +145,67 @@ describe("undoCategorizeTransaction — target row", () => {
     expect(row?.categoryId).toBe(household.id);
   });
 
+  it("falls back to NULL rather than restoring into a category reclassified to fund since the categorize call (outside review finding)", () => {
+    // Reproduces the exact race an outside adversarial review found: the
+    // household transaction is moved to Groceries, `household` is then
+    // reclassified to `fund` (e.g. a second tab, or a fast click of the ⋯
+    // menu), and only THEN is the 10-second Undo toast clicked. Restoring
+    // into `household` at that point would silently populate the one thing
+    // DESIGN.md documents as permanently empty for a fund.
+    const a = seedAccount();
+    const b = seedBatch();
+    const household = seedCategory("Household");
+    const groceries = seedCategory("Groceries");
+    const target = seedTxn({
+      accountId: a.id,
+      batchId: b.id,
+      categoryId: household.id,
+    });
+
+    const snapshot = categorizeTransaction(handle.db, {
+      transactionId: target.id,
+      categoryId: groceries.id,
+      rememberMerchant: false,
+      applyToPast: false,
+    });
+
+    handle.db
+      .update(schema.categories)
+      .set({ kind: "fund" })
+      .where(eq(schema.categories.id, household.id))
+      .run();
+
+    const undo = undoCategorizeTransaction(handle.db, snapshot);
+    expect(undo.targetReverted).toBe(true);
+    expect(undo.restoredCategoryId).toBeNull();
+    expect(undo.priorCategoryBecameFund).toBe(true);
+
+    const row = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, target.id))
+      .get();
+    expect(row?.categoryId).toBeNull();
+  });
+
+  it("does not set priorCategoryBecameFund when the prior category was already NULL", () => {
+    const a = seedAccount();
+    const b = seedBatch();
+    const groceries = seedCategory("Groceries");
+    const target = seedTxn({ accountId: a.id, batchId: b.id });
+
+    const snapshot = categorizeTransaction(handle.db, {
+      transactionId: target.id,
+      categoryId: groceries.id,
+      rememberMerchant: false,
+      applyToPast: false,
+    });
+
+    const undo = undoCategorizeTransaction(handle.db, snapshot);
+    expect(undo.priorCategoryBecameFund).toBe(false);
+    expect(undo.restoredCategoryId).toBeNull();
+  });
+
   it("skips target row that the user re-categorized post-apply (targetReverted=false)", () => {
     const a = seedAccount();
     const b = seedBatch();

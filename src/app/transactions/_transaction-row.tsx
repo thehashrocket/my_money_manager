@@ -217,20 +217,36 @@ export function TransactionRowForm({
               );
               const reverted =
                 (undo.targetReverted ? 1 : 0) + undo.revertedApplyToPastCount;
-              setCurrentCategoryId(priorCategoryId);
+              // `undo.restoredCategoryId` is what the server ACTUALLY wrote —
+              // usually `priorCategoryId`, but never the prior category once
+              // it's become a fund (rule: a fund can never hold a
+              // transaction). Falls back to the optimistic `priorCategoryId`
+              // only when the row wasn't reverted at all (e.g. re-categorized
+              // by the user in the meantime), matching this block's
+              // pre-existing behavior for that unrelated case.
+              const revertedTo =
+                undo.restoredCategoryId !== undefined
+                  ? undo.restoredCategoryId
+                  : priorCategoryId;
+              setCurrentCategoryId(revertedTo);
               setCurrentCategoryName(
-                priorCategoryId === null
+                revertedTo === null
                   ? null
-                  : (leafCategories.find((c) => c.id === priorCategoryId)
-                      ?.name ?? null),
+                  : (leafCategories.find((c) => c.id === revertedTo)?.name ??
+                      null),
               );
               setPickerValue(
-                priorCategoryId !== null ? String(priorCategoryId) : "",
+                revertedTo !== null ? String(revertedTo) : "",
               );
-              onUndone(priorCategoryId, reverted);
+              onUndone(revertedTo, reverted);
+              const fundFallbackWarning = undo.priorCategoryBecameFund
+                ? "Its previous category is now a fund, so it's uncategorized instead."
+                : undefined;
               notifyUndo(
                 `Reverted ${reverted} row${reverted === 1 ? "" : "s"}.${describeRuleUndo(undo.ruleAction)}`,
-                undo.warning,
+                [fundFallbackWarning, undo.warning]
+                  .filter((w): w is string => w !== undefined && w !== null)
+                  .join(" ") || undefined,
               );
             } catch (err) {
               toast.error(err instanceof Error ? err.message : "Undo failed.");

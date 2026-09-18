@@ -554,6 +554,24 @@ count(*) FROM transactions t JOIN categories c ON c.id = t.category_id WHERE
 c.kind = 'fund'` returns **0**. The invariant this section states was never
 violated in practice, not just closed going forward.
 
+**A THIRD review (Codex adversarial, pre-landing) found a second, independent
+path into a fund that the `rules.ts` fix did not touch: undo.**
+`undoCategorizeTransaction` restored a transaction to its snapshotted PRIOR
+category with no check on that category's *current* kind — so categorize a
+row, reclassify its old category to `fund` in a second tab (or a fast second
+click), then click the original action's 10-second Undo toast, and the row
+landed in the fund with no explicit action targeting it at all. Reproduced
+directly against the code (no crafted input, no fixture manipulation) before
+being fixed: the function now re-checks the prior category's kind INSIDE its
+own write transaction (rule 11 — never trust a value read before the moment
+it's used) and falls back to `null` (uncategorized) instead of the fund,
+matching the fallback this same file already used for a row someone else
+re-categorized during the undo window. `undoBulkRetarget`'s structurally
+similar unguarded restore was checked and is NOT the same bug — it is
+deliberate: `bulkRetarget` allows a fund as a retarget SOURCE (moving rows
+*off* it), so undoing that retarget must be able to put them back. Only
+`undoCategorizeTransaction` was the accidental gap.
+
 Consequences that follow from it, so they are not re-litigated one at a time:
 
 - `loadGoals` keeps `withdrawn` **outflows-only** (`amount_cents < 0`), not the
