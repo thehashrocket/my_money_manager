@@ -326,6 +326,36 @@ function queryContentDedupCandidateRows(
 }
 
 /**
+ * Bug B's own candidate population — the OPPOSITE predicate from
+ * `queryContentDedupCandidateRows` above: rows already tagged with THIS
+ * feed's own provenance, within the lookback floor. Shared between the
+ * pre-fetch snapshot (`syncSimpleFin`, which only needs `externalId`) and
+ * `recheckReissuedIds`'s write-time recheck (which also needs
+ * `date`/`amountCents`/`rawMemo` to compute a content signature) — same
+ * discipline as `queryContentDedupCandidateRows` itself: this shares only
+ * the SQL, never a decision, so the two call sites' predicates cannot
+ * independently drift (maintainability specialist finding, `/ship`).
+ */
+function querySameFeedRowsSince(db: AnyDb, accountId: number, feedId: FeedAccountId, floorIso: string) {
+  return db
+    .select({
+      externalId: schema.transactions.externalId,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      rawMemo: schema.transactions.rawMemo,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.accountId, accountId),
+        eq(schema.transactions.simplefinSourceAccountId, feedId),
+        gte(schema.transactions.date, floorIso),
+      ),
+    )
+    .all();
+}
+
+/**
  * The posted-only content-dedup budget: how many times each signature is
  * already covered by an existing POSTED row. A pending existing row is
  * deliberately EXCLUDED from this tally — it is never a plain duplicate, it
@@ -499,8 +529,8 @@ function tryPromoteCandidate(
  *
  * The alternative, re-fetching the full 45-day window every time, is avoided for
  * bandwidth rather than for correctness: re-sent rows all carry an external_id
- * and would be caught by the cheap `seenExternalIds` set, never by content
- * dedup, which only ever applies to CSV rows.
+ * and would be caught by the cheap `idsKnownBeforeThisRun` set, never by
+ * content dedup, which only ever applies to CSV rows.
  */
 export function resolveStartDate(
   latestDates: (string | null)[],
@@ -1007,17 +1037,7 @@ export async function syncSimpleFin(
   const originalSameFeedRowIdsByAccountId = new Map<number, Set<string>>();
   for (const account of importAccounts) {
     const feedId = asFeedAccountId(account.simplefinAccountId!);
-    const ids = db
-      .select({ externalId: schema.transactions.externalId })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.accountId, account.id),
-          eq(schema.transactions.simplefinSourceAccountId, feedId),
-          gte(schema.transactions.date, contentFloorIso),
-        ),
-      )
-      .all()
+    const ids = querySameFeedRowsSince(db, account.id, feedId, contentFloorIso)
       .map((r) => r.externalId)
       .filter((v): v is string => !!v);
     originalSameFeedRowIdsByAccountId.set(account.id, new Set(ids));
@@ -1522,15 +1542,17 @@ export async function syncSimpleFin(
      */
     earliestPromotedDate: string | null;
     /**
-     * External ids caught by the write loop's fallback content check, per
-     * account — a genuine duplicate discovered too late to have been
-     * staged as one (cross-model adversarial finding, `/ship`; see the
-     * check's own declaration site). Shaped as `Set<string>` of external
-     * ids, not a bare count, specifically so it can be applied through the
-     * EXISTING `applyDedupPruning(..., "duplicateByContent")` — the same
-     * mechanism the id/content/cutover rechecks already use — rather than a
-     * fourth hand-rolled copy of "correct `insertedCount` down, credit the
-     * real reason, prune `expectedCardExternalIds`".
+     * Rows caught by the write loop's fallback content check, per account —
+     * a genuine duplicate discovered too late to have been staged as one
+     * (cross-model adversarial finding, `/ship`; see the check's own
+     * declaration site). Shaped as `StagedRow[]`, not a bare count or a
+     * `Set<string>` of external ids, specifically so it can be applied
+     * through the EXISTING `applyDedupPruning(..., "duplicateByContent")` —
+     * the same mechanism the id/content/reissued/cutover rechecks already
+     * use — rather than a fifth hand-rolled copy of "correct
+     * `insertedCount` down, credit the real reason". `expectedCardExternalIds`
+     * is NOT pruned here any more — see `finalizeExpectedCardExternalIds`,
+     * called once after every recheck and both late-drop mechanisms.
      */
   };
   // Declared OUTSIDE the transaction, unlike the id/content/cutover drops
@@ -1563,7 +1585,7 @@ export async function syncSimpleFin(
       verifyStagedLinks(staged, tx);
 
     // The link is not the only precondition carried across the `await`.
-    // `seenExternalIds` was read BEFORE the fetch, so a second sync (two /sync
+    // `idsKnownBeforeThisRun` was read BEFORE the fetch, so a second sync (two /sync
     // tabs, the same reachability bar the link guard is written for) can commit
     // rows for the same feed in the window — and those rows are protected by
     // the partial unique index on (simplefin_source_account_id, external_id),
@@ -2320,7 +2342,7 @@ class NothingVerifiedError extends Error {}
  * other two, rather than leaving it as the one recheck whose warning and
  * count adjustment lived exclusively inside the transaction.
  *
- * `seenExternalIds` was read in the staging loop, before `fetchAccounts`'
+ * `idsKnownBeforeThisRun` was read in the staging loop, before `fetchAccounts`'
  * round trip, so a second sync (two `/sync` tabs, or an overlapping
  * scheduled + manual sync) can commit rows for the same feed in that
  * window. Those rows are protected by the partial unique index on
@@ -2441,14 +2463,14 @@ function recheckLandedIds<
  * rollback path, against the live handle after the transaction is gone,
  * purely to rebuild its sentences.
  *
- * `droppedByAccountId` (external ids, not just a count — same shape
- * `recheckCutoverAnchor` returns) exists for the SAME reason that function's
- * own docstring gives: it lets the caller prune `expectedCardExternalIds`
- * (D8.4, built pre-fetch, before any recheck has run) and adjust `counts`.
- * A row this function drops was never going to land under this feed's
- * provenance either — the same "correctly, intentionally excluded, not
- * missing" fact `applyDedupPruning` exists to keep D8.4 from misreporting,
- * just discovered here instead of by the cutover. Both callers apply it
+ * `droppedByAccountId` is shaped as `Map<number, StagedRow[]>` — the actual
+ * dropped ROWS, not a bare count or a `Set<string>` of external ids — so
+ * `applyDedupPruning` can adjust `counts` by `droppedRows.length` even when
+ * 2+ rows share one external_id (Bug A's fix). `expectedCardExternalIds` is
+ * NOT pruned by this function or by `applyDedupPruning` any more — see
+ * `finalizeExpectedCardExternalIds`, which recomputes it once, after every
+ * recheck (id/content/reissued/cutover) and both of the write loop's own
+ * late-drop mechanisms have run. Both callers apply the count adjustment
  * through `applyDedupPruning(..., "duplicateByContent")` — never
  * `"skippedBeforeAnchor"`, which `recheckCutoverAnchor`'s own callers pass
  * instead: a content-race drop is a duplicate found late, not a cutover
@@ -2617,22 +2639,12 @@ function recheckReissuedIds<
   const checked = staged.map((entry) => {
     if (entry.rows.length === 0) return entry;
 
-    const freshSameFeedRows = db
-      .select({
-        externalId: schema.transactions.externalId,
-        date: schema.transactions.date,
-        amountCents: schema.transactions.amountCents,
-        rawMemo: schema.transactions.rawMemo,
-      })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.accountId, entry.account.id),
-          eq(schema.transactions.simplefinSourceAccountId, entry.feedId),
-          gte(schema.transactions.date, entry.contentFloorIso),
-        ),
-      )
-      .all();
+    const freshSameFeedRows = querySameFeedRowsSince(
+      db,
+      entry.account.id,
+      entry.feedId,
+      entry.contentFloorIso,
+    );
 
     const newlyAppeared = freshSameFeedRows.filter(
       (r) => r.externalId !== null && !entry.originalSameFeedRowIds.has(r.externalId),
@@ -2880,9 +2892,11 @@ function lateIdentityDropWarnings(
  * which the caller decides by using the result before or after its own insert.
  *
  * Cards only, matching the staging loop's own scope — an asset has no cutover
- * to re-check. `droppedByAccountId` lets the caller prune `expectedCardExternalIds`
- * (D8.4, built pre-fetch): an id dropped here was never going to land under
- * this feed's provenance, and D8.4 must not report it as unexplainedly missing.
+ * to re-check. `droppedByAccountId` is `Map<number, StagedRow[]>` (the
+ * dropped ROWS, not their external ids), which `applyDedupPruning` uses to
+ * adjust `counts`. `expectedCardExternalIds` is NOT pruned by this function —
+ * see `finalizeExpectedCardExternalIds`, which recomputes it once, after the
+ * full recheck chain and both of the write loop's own late-drop mechanisms.
  *
  * Callers must pass only accounts that SURVIVED their own link re-check.
  * `NothingVerifiedError`'s rollback path used to pass the raw pre-transaction
@@ -3097,11 +3111,14 @@ function missingAccountWarnings(names: string[]): string[] {
  * every path that can add to `expectedCardExternalIds`: an id only ever
  * enters that set when it is (a) already stored under this feed's tag before
  * this run started, (b) about to be written by THIS run's own insert loop
- * and not subsequently pruned by the link/id-race/content-race/cutover
- * re-checks (each of which removes its drops from the set — see
- * `applyDedupPruning` and the `dropped.has(...)` guard below), or (c) landed
- * by a concurrent sync this same run's raced-id check found already stored.
- * Every one of those is, by
+ * and a representative row for it survived every recheck
+ * (link/id-race/content-race/reissued-id/cutover) AND both of the write
+ * loop's own late-drop mechanisms — `finalizeExpectedCardExternalIds`
+ * recomputes the set ONCE, after all of those have run, rather than each
+ * recheck pruning it incrementally (see that function's own docstring for
+ * why the old incremental form broke once 2 rows could share one
+ * external_id) — or (c) landed by a concurrent sync this same run's
+ * raced-id check found already stored. Every one of those is, by
  * construction, provably in the database by the time this check runs — so
  * under CORRECT code this function can never actually find a gap. Its real
  * value is as a REGRESSION GUARD on the insert pipeline: if a future change

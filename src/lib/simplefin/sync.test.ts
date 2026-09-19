@@ -6669,6 +6669,49 @@ describe("syncSimpleFin — PR2: reissued external_id race (Bug B)", () => {
     expect(reissued).toHaveLength(0);
   });
 
+  it("is multiset-safe in the ASYMMETRIC direction too: two incoming rows share one signature but only ONE newly-appeared same-feed row exists — exactly one is dropped, the other survives and inserts", async () => {
+    // Distinguishes the shared `consumeBySignature` decrement-per-match from
+    // a bare signature-set membership check specifically for
+    // `recheckReissuedIds` — the symmetric 2-vs-2 test above cannot tell the
+    // two apart (both would report 2 dropped either way).
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    respondWith(
+      "ACT-1",
+      [feedTxn("REISSUED-X1", "-12.00", "COSTCO"), feedTxn("REISSUED-X2", "-12.00", "COSTCO")],
+      "-24.00",
+      {
+        during: () => {
+          const concurrentBatch = seedBatch("simplefin");
+          seedTxn({
+            accountId: account.id,
+            batchId: concurrentBatch.id,
+            amountCents: -1200,
+            rawMemo: "COSTCO",
+            date: "2026-09-01",
+            source: "simplefin",
+            externalId: "CONCURRENT-ONLY-ONE",
+          });
+        },
+      },
+    );
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // A bare signature-set check (no decrement) would wrongly drop BOTH
+    // incoming rows against the one newly-appeared row.
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(outcome.accounts[0].insertedCount).toBe(1);
+    const reissued = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.externalId, ["REISSUED-X1", "REISSUED-X2"]))
+      .all();
+    expect(reissued).toHaveLength(1);
+  });
+
   it("never drops a PROMOTION-candidate row via the reissued-id recheck — its own race is decided by candidate id, not by an unrelated row sharing its signature", async () => {
     const account = seedAccount({ simplefinAccountId: "ACT-1" });
     const csvBatch = seedBatch("csv");
