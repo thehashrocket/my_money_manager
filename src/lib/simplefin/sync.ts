@@ -326,6 +326,36 @@ function queryContentDedupCandidateRows(
 }
 
 /**
+ * Bug B's own candidate population — the OPPOSITE predicate from
+ * `queryContentDedupCandidateRows` above: rows already tagged with THIS
+ * feed's own provenance, within the lookback floor. Shared between the
+ * pre-fetch snapshot (`syncSimpleFin`, which only needs `externalId`) and
+ * `recheckReissuedIds`'s write-time recheck (which also needs
+ * `date`/`amountCents`/`rawMemo` to compute a content signature) — same
+ * discipline as `queryContentDedupCandidateRows` itself: this shares only
+ * the SQL, never a decision, so the two call sites' predicates cannot
+ * independently drift (maintainability specialist finding, `/ship`).
+ */
+function querySameFeedRowsSince(db: AnyDb, accountId: number, feedId: FeedAccountId, floorIso: string) {
+  return db
+    .select({
+      externalId: schema.transactions.externalId,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      rawMemo: schema.transactions.rawMemo,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.accountId, accountId),
+        eq(schema.transactions.simplefinSourceAccountId, feedId),
+        gte(schema.transactions.date, floorIso),
+      ),
+    )
+    .all();
+}
+
+/**
  * The posted-only content-dedup budget: how many times each signature is
  * already covered by an existing POSTED row. A pending existing row is
  * deliberately EXCLUDED from this tally — it is never a plain duplicate, it
@@ -499,8 +529,8 @@ function tryPromoteCandidate(
  *
  * The alternative, re-fetching the full 45-day window every time, is avoided for
  * bandwidth rather than for correctness: re-sent rows all carry an external_id
- * and would be caught by the cheap `seenExternalIds` set, never by content
- * dedup, which only ever applies to CSV rows.
+ * and would be caught by the cheap `idsKnownBeforeThisRun` set, never by
+ * content dedup, which only ever applies to CSV rows.
  */
 export function resolveStartDate(
   latestDates: (string | null)[],
@@ -985,6 +1015,34 @@ export async function syncSimpleFin(
 
   const { startIso, startUnix } = resolveStartDate(latestDates, now);
 
+  // Content dedup only has to cover what the feed can actually send, which
+  // the 45-day cap bounds. Computed ONCE, here, and threaded through both
+  // the pre-fetch snapshot below and the staging loop's own content budget —
+  // two independent `isoDaysAgo(MAX_LOOKBACK_DAYS, now)` calls happened to
+  // agree only because both passed the same `now`, before this was hoisted;
+  // that "agree by coincidence, not by construction" shape is exactly what
+  // the `Staged.contentFloorIso` field exists to prevent one layer down
+  // (see its own docstring), and a second, independent top-level call site
+  // reopened the identical risk for `recheckReissuedIds`'s snapshot.
+  const contentFloorIso = isoDaysAgo(MAX_LOOKBACK_DAYS, now);
+
+  // Bug B (reissued-external_id race) — snapshot which same-feed row ids
+  // exist BEFORE this sync's own fetch resolves. Deliberately NOT captured
+  // alongside `originalContentBudget` below (which is read AFTER
+  // `await fetchAccounts`) — a row a concurrent sync lands DURING this
+  // sync's own fetch would already be present by the time a post-fetch
+  // snapshot ran, so a post-fetch snapshot's fresh/frozen diff would find no
+  // delta and miss exactly the race this exists to catch. See
+  // `recheckReissuedIds`'s own docstring.
+  const originalSameFeedRowIdsByAccountId = new Map<number, Set<string>>();
+  for (const account of importAccounts) {
+    const feedId = asFeedAccountId(account.simplefinAccountId!);
+    const ids = querySameFeedRowsSince(db, account.id, feedId, contentFloorIso)
+      .map((r) => r.externalId)
+      .filter((v): v is string => !!v);
+    originalSameFeedRowIdsByAccountId.set(account.id, new Set(ids));
+  }
+
   const creds = readAccessUrl();
   const response = await fetchAccounts(creds, {
     startDate: startUnix,
@@ -1043,6 +1101,21 @@ export async function syncSimpleFin(
      * entry makes them agree by construction instead.
      */
     contentFloorIso: string;
+    /**
+     * Bug B — the pre-fetch snapshot of this account's own same-feed row
+     * external ids, frozen before `await fetchAccounts` resolved. See
+     * `recheckReissuedIds`.
+     */
+    originalSameFeedRowIds: ReadonlySet<string>;
+    /**
+     * The external ids present in `rows` AT STAGING TIME, before any
+     * recheck runs — used by `finalizeExpectedCardExternalIds` to tell
+     * apart an id that was NEVER at risk of a recheck drop (staged via the
+     * "already known before this run" branch, which never enters `rows` at
+     * all) from one that WAS staged into `rows` and needs to still have a
+     * surviving representative after every recheck to remain expected.
+     */
+    originalStagedRowExternalIds: ReadonlySet<string>;
   };
   const staged: Staged[] = [];
   const counts: AccountSyncCounts[] = [];
@@ -1081,7 +1154,23 @@ export async function syncSimpleFin(
     // constraint instead — aborting the whole batch with a raw SqliteError. A
     // feed row's date comes from `posted`, but postedToIsoDate falls back to
     // `transacted_at`, so a derived date can legitimately precede startIso.
-    const seenExternalIds = new Set(
+    // D8.4 — an id here was in the DB, under this feed's own provenance,
+    // BEFORE this sync ran — the one fact D8.4's "findable" claim actually
+    // depends on. An id that only appears via a WITHIN-RESPONSE duplicate
+    // (a later occurrence in THIS SAME response) is deliberately NOT part
+    // of this set — that population is `rowsByExternalId` below, grouped
+    // and resolved as a UNIT once every occurrence in the response has
+    // been collected, which distinguishes an identical repeat (still
+    // correctly, quietly deduped, findable via its own eventual insert or
+    // an existing-resource match) from the Bug A anomaly (2+ genuinely
+    // different signatures under the same id, none findable via any prior
+    // occurrence, resolved together rather than independently — see that
+    // loop's own comment for why independence was the actual defect).
+    // Before this was split into two sets, a single mutable
+    // `seenExternalIds` collapsed both populations into one membership
+    // test — this file's own subtler history is what a within-response
+    // duplicate needs to be told apart correctly.
+    const idsKnownBeforeThisRun = new Set(
       db
         .select({ externalId: schema.transactions.externalId })
         .from(schema.transactions)
@@ -1095,24 +1184,13 @@ export async function syncSimpleFin(
         .map((r) => r.externalId)
         .filter((v): v is string => !!v),
     );
-    // D8.4 — a FROZEN copy, taken before the loop mutates `seenExternalIds`
-    // to also catch WITHIN-RESPONSE duplicates (below). An id in this frozen
-    // set was in the DB, under this feed's own provenance, before this sync
-    // ran — the one fact D8.4's "findable" claim actually depends on. An id
-    // that only entered `seenExternalIds` because an EARLIER transaction in
-    // THIS SAME response used it is not covered by that fact: if that earlier
-    // occurrence was itself dropped by content-dedup (a real, if rare, case —
-    // nothing validates that a feed response carries no repeated id), it was
-    // never written under this feed's tag either, and `checkCardCompleteness`
-    // would report a permanent false "missing" alarm for an id that was
-    // always correctly, quietly deduped.
-    const idsKnownBeforeThisRun = new Set(seenExternalIds);
 
     // Content dedup only has to cover what the feed can actually send, which the
     // 45-day cap bounds — so this uses the lookback floor rather than startIso.
     // Bounding it at startIso let a feed row dated before the window content-match
-    // nothing and insert a duplicate of an older CSV row.
-    const contentFloorIso = isoDaysAgo(MAX_LOOKBACK_DAYS, now);
+    // nothing and insert a duplicate of an older CSV row. `contentFloorIso` itself
+    // is the one, top-level `isoDaysAgo(MAX_LOOKBACK_DAYS, now)` call — see its
+    // own declaration for why a second, independent call site is a hazard.
     // ONE query for both the posted-only budget and the pending promotion
     // candidates — see `loadContentDedupData`'s own docstring.
     const { budget: contentBudget, promotionCandidates } = loadContentDedupData(
@@ -1134,6 +1212,26 @@ export async function syncSimpleFin(
     let duplicateByContent = 0;
     let skippedPending = 0;
     const toInsert: StagedRow[] = [];
+
+    // Ordinary (non-duplicate-id) staging: a single occurrence checked
+    // against this sync's pending-promotion candidates, then the
+    // posted-only content budget, then pushed as a brand-new row.
+    const stageOrdinaryRow = (row: MappedRow): void => {
+      const sig = contentSignature(row);
+      const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
+      if (pendingCandidate) {
+        toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+        return;
+      }
+      const budget = contentBudget.get(sig) ?? 0;
+      if (budget > 0) {
+        contentBudget.set(sig, budget - 1);
+        duplicateByContent++;
+        return;
+      }
+      toInsert.push(row);
+      if (isCard) expectedCardExternalIds.push(row.externalId);
+    };
 
     // D8.1 — THE ACCOUNTING CUTOVER.
     //
@@ -1200,6 +1298,30 @@ export async function syncSimpleFin(
       );
     }
 
+    // Bug A (D8.1 cutover-boundary duplicate-id loss) plus two further
+    // interaction bugs an outside adversarial pass found in an earlier,
+    // sequential version of this design (Codex structured review + Codex
+    // adversarial, both against this same branch): a content-dedup or
+    // promotion-candidate match discovered on one occurrence of a
+    // within-response duplicate external_id must speak for the WHOLE id,
+    // not just the occurrence that happened to find it — otherwise a
+    // second, differing-signature occurrence either (a) independently
+    // re-checks its OWN signature, finds nothing, and inserts as a brand
+    // new row even though the feed's own id claims it is the SAME
+    // transaction the first occurrence already matched to an existing row
+    // (a genuine double-count, since external_id is supposed to be a
+    // stable identity for one transaction), or (b) claims a pending row's
+    // promotion reservation and then loses the write-time identity race to
+    // a SIBLING occurrence that was staged first, permanently stranding
+    // the reservation (`claimPendingCandidate` already popped it from the
+    // pool at staging time, and nothing else can claim it again).
+    //
+    // The fix: group every NOT-known-before-this-run row by external_id
+    // FIRST, and resolve each group as a UNIT before committing anything
+    // to `toInsert`, rather than deciding row-by-row in array order (order
+    // dependence was the actual defect — whichever occurrence happened to
+    // be processed first decided what later occurrences saw).
+    const rowsByExternalId = new Map<string, MappedRow[]>();
     for (const txn of blockedByManualHistory ? [] : (remote?.transactions ?? [])) {
       const row = mapTransaction(txn);
 
@@ -1223,64 +1345,113 @@ export async function syncSimpleFin(
       // the write transaction) is the only place that decides whether it
       // actually gets written. `skippedBeforeAnchor` stays 0 through this whole
       // loop and is set entirely by `applyDedupPruning` downstream.
-      if (seenExternalIds.has(row.externalId)) {
+
+      // FINDABLE only if this id was in the DB, under this feed's own
+      // provenance, BEFORE this sync ran — never merely because an EARLIER
+      // occurrence in THIS SAME response already carries it (that
+      // within-response case is `rowsByExternalId` below, resolved as a
+      // group once every occurrence in the response has been collected —
+      // it is a DIFFERENT population with different semantics, and
+      // conflating the two into one mutable set used to be the very bug
+      // rule 3's red-team pass found here — see the field's own docstring
+      // above).
+      if (idsKnownBeforeThisRun.has(row.externalId)) {
         duplicateByExternalId++;
-        // FINDABLE only if this id was in the DB, under this feed's own
-        // provenance, BEFORE this sync ran (`idsKnownBeforeThisRun`) — NOT
-        // merely because `seenExternalIds` (a live set, mutated below) saw it
-        // earlier in THIS SAME response. A red-team pass caught the gap: two
-        // occurrences of the same id in one feed response, where the FIRST
-        // is dropped by content-dedup (lands under different provenance,
-        // correctly) and the SECOND then reads as "already known" purely
-        // because the first one's `.add()` put it there — pushing an id into
-        // `expectedCardExternalIds` that was never written under this feed's
-        // tag by either occurrence, and that D8.4 would then report as
-        // permanently, falsely missing.
-        if (isCard && idsKnownBeforeThisRun.has(row.externalId)) {
+        if (isCard) {
           expectedCardExternalIds.push(row.externalId);
         }
         continue;
       }
-      seenExternalIds.add(row.externalId);
 
-      const sig = contentSignature(row);
+      const group = rowsByExternalId.get(row.externalId);
+      if (group) {
+        group.push(row);
+      } else {
+        rowsByExternalId.set(row.externalId, [row]);
+      }
+    }
 
-      // A posted incoming row's real-world PENDING counterpart, if one
-      // exists, is claimed FIRST — before the ordinary posted-only budget
-      // check below. This row is pushed onto `toInsert` LIKE ANY OTHER NEW
-      // ROW (carrying `promotionCandidateId`), not diverted into a separate
-      // list: `recheckLandedIds` and `recheckContentDedup` both iterate
-      // `entry.rows`, so a promotable row gets the exact same
-      // concurrent-writer protection as a brand-new row for free. The write
-      // transaction re-verifies the candidate is still available and
-      // redirects the write from INSERT to UPDATE only then (see the insert
-      // loop below) — never here, staging is read-only.
-      // D8.4's `expectedCardExternalIds` is deliberately NOT populated here:
-      // CSV import is asset-only (`import/page.tsx` filters to
-      // `accountClass === "asset"`), so a card can never hold a CSV-origin
-      // pending row and this branch never fires for one in practice.
-      const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
-      if (pendingCandidate) {
-        toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+    for (const occurrences of rowsByExternalId.values()) {
+      if (occurrences.length === 1) {
+        stageOrdinaryRow(occurrences[0]);
         continue;
       }
 
-      const budget = contentBudget.get(sig) ?? 0;
-      if (budget > 0) {
-        contentBudget.set(sig, budget - 1);
-        duplicateByContent++;
-        // NOT added to `expectedCardExternalIds`. This row's date/amount/memo
-        // matched a DIFFERENTLY-provenanced existing row on purpose — a
-        // manual entry, a CSV row, or one tagged under a re-minted feed id
-        // (rule 3) — and that match is what makes writing this one
-        // unnecessary. The existing row does not and never will carry THIS
-        // feed's external id, so a check that expected to find one here
-        // would be checking for a fact that was never going to be true, on
-        // every single ordinary case of this dedup path succeeding.
+      // Within-response duplicate id. Collapse EXACT signature repeats
+      // first — order-independent by construction (every occurrence is
+      // already collected, so this is a plain grouping, not a sequential
+      // registry) — reducing to at most one representative per DISTINCT
+      // signature.
+      const distinctBySignature = new Map<string, MappedRow>();
+      for (const row of occurrences) {
+        const sig = contentSignature(row);
+        if (!distinctBySignature.has(sig)) {
+          distinctBySignature.set(sig, row);
+        } else {
+          duplicateByExternalId++;
+        }
+      }
+      const distinctRows = [...distinctBySignature.values()];
+
+      if (distinctRows.length === 1) {
+        // Every occurrence was an identical repeat after all.
+        stageOrdinaryRow(distinctRows[0]);
         continue;
       }
-      toInsert.push(row);
-      if (isCard) expectedCardExternalIds.push(row.externalId);
+
+      // 2+ genuinely differing signatures for one external_id — the
+      // actual anomalous shape that was reproduced (two dates for one
+      // id). Scan every distinct occurrence for a promotion-candidate or
+      // content-budget match BEFORE committing any of them to `toInsert`,
+      // so a match found on ANY occurrence resolves the whole id rather
+      // than only the occurrence that happened to find it. See
+      // docs/plans/sync-pending-promotion.md's "Design — Bug A" for the
+      // full reasoning and the rejected designs this converged on.
+      let resolved = false;
+      for (const row of distinctRows) {
+        const sig = contentSignature(row);
+        // A posted incoming row's real-world PENDING counterpart, if one
+        // exists, is claimed FIRST — before the ordinary posted-only
+        // budget check below, mirroring `stageOrdinaryRow`'s own order.
+        const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
+        if (pendingCandidate) {
+          toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+          resolved = true;
+          break;
+        }
+        const budget = contentBudget.get(sig) ?? 0;
+        if (budget > 0) {
+          contentBudget.set(sig, budget - 1);
+          duplicateByContent++;
+          resolved = true;
+          break;
+        }
+      }
+      if (resolved) {
+        // The id is spoken for by the match above — every OTHER distinct
+        // occurrence is a duplicate of that same identity, not an
+        // independent transaction, regardless of its own signature. This
+        // is what closes both the content-match-escape case (an existing
+        // row matched one occurrence; the sibling must not also insert)
+        // and the promotion-reservation-orphaning case (the reservation
+        // is claimed here, inside this same resolution, so no sibling
+        // occurrence ever reaches the write loop to race it away).
+        duplicateByExternalId += distinctRows.length - 1;
+        continue;
+      }
+
+      // No occurrence matches anything existing — genuinely nothing to
+      // resolve against. Push every distinct occurrence through
+      // independently, carrying the SAME externalId — `toInsert` can
+      // legitimately hold 2+ rows sharing one external_id here.
+      // `recheckCutoverAnchor` (inside the write transaction, using the
+      // FRESH anchor) picks the real survivor for a card, per row, using
+      // each row's own real date — never a swap; the insert-time identity
+      // guard is the backstop for the rare genuine anomaly elsewhere.
+      for (const row of distinctRows) {
+        toInsert.push(row);
+        if (isCard) expectedCardExternalIds.push(row.externalId);
+      }
     }
 
     if (skippedPending > 0) {
@@ -1299,6 +1470,8 @@ export async function syncSimpleFin(
       expectedCardExternalIds,
       originalContentBudget,
       contentFloorIso,
+      originalSameFeedRowIds: originalSameFeedRowIdsByAccountId.get(account.id) ?? new Set(),
+      originalStagedRowExternalIds: new Set(toInsert.map((r) => r.externalId)),
     });
 
     // NULLED, not reported, when blocked — the same reasoning `finaliseBalances`
@@ -1396,9 +1569,10 @@ export async function syncSimpleFin(
     insertedCount: number;
     linkWarnings: string[];
     droppedAccountIds: number[];
-    idDroppedByAccountId: Map<number, Set<string>>;
-    contentDroppedByAccountId: Map<number, Set<string>>;
-    cutoverDroppedByAccountId: Map<number, Set<string>>;
+    idDroppedByAccountId: Map<number, StagedRow[]>;
+    contentDroppedByAccountId: Map<number, StagedRow[]>;
+    reissuedDroppedByAccountId: Map<number, StagedRow[]>;
+    cutoverDroppedByAccountId: Map<number, StagedRow[]>;
     /**
      * How many rows this batch actually PROMOTED (updated a pending row in
      * place) per account, as opposed to inserted — decided inside the write
@@ -1418,15 +1592,17 @@ export async function syncSimpleFin(
      */
     earliestPromotedDate: string | null;
     /**
-     * External ids caught by the write loop's fallback content check, per
-     * account — a genuine duplicate discovered too late to have been
-     * staged as one (cross-model adversarial finding, `/ship`; see the
-     * check's own declaration site). Shaped as `Set<string>` of external
-     * ids, not a bare count, specifically so it can be applied through the
-     * EXISTING `applyDedupPruning(..., "duplicateByContent")` — the same
-     * mechanism the id/content/cutover rechecks already use — rather than a
-     * fourth hand-rolled copy of "correct `insertedCount` down, credit the
-     * real reason, prune `expectedCardExternalIds`".
+     * Rows caught by the write loop's fallback content check, per account —
+     * a genuine duplicate discovered too late to have been staged as one
+     * (cross-model adversarial finding, `/ship`; see the check's own
+     * declaration site). Shaped as `StagedRow[]`, not a bare count or a
+     * `Set<string>` of external ids, specifically so it can be applied
+     * through the EXISTING `applyDedupPruning(..., "duplicateByContent")` —
+     * the same mechanism the id/content/reissued/cutover rechecks already
+     * use — rather than a fifth hand-rolled copy of "correct
+     * `insertedCount` down, credit the real reason". `expectedCardExternalIds`
+     * is NOT pruned here any more — see `finalizeExpectedCardExternalIds`,
+     * called once after every recheck and both late-drop mechanisms.
      */
   };
   // Declared OUTSIDE the transaction, unlike the id/content/cutover drops
@@ -1442,7 +1618,15 @@ export async function syncSimpleFin(
   // ultimately threw `NothingVerifiedError` (silent-failure-hunter finding,
   // `/ship`: this warning previously existed only via `written`, so it was
   // both completely silent on the SUCCESS path and unreachable on rollback).
-  const lateContentDropsByAccountId = new Map<number, Set<string>>();
+  const lateContentDropsByAccountId = new Map<number, StagedRow[]>();
+  // Bug A's genuine-anomaly backstop — see its declaration site inside the
+  // write loop below for the full reasoning. Declared OUTER-scoped for the
+  // same reason as `lateContentDropsByAccountId`: a plain JS `Map` mutated
+  // inside `db.transaction()`'s callback survives a ROLLED-BACK transaction
+  // (only the DB writes unwind), so the `NothingVerifiedError` catch block
+  // can still warn about and prune a late identity-race drop that happened
+  // during the attempt that ultimately threw.
+  const lateIdentityDropsByAccountId = new Map<number, StagedRow[]>();
   try {
     written = db.transaction((tx) => {
     // The links were read before the network round trip; re-check them here,
@@ -1451,7 +1635,7 @@ export async function syncSimpleFin(
       verifyStagedLinks(staged, tx);
 
     // The link is not the only precondition carried across the `await`.
-    // `seenExternalIds` was read BEFORE the fetch, so a second sync (two /sync
+    // `idsKnownBeforeThisRun` was read BEFORE the fetch, so a second sync (two /sync
     // tabs, the same reachability bar the link guard is written for) can commit
     // rows for the same feed in the window — and those rows are protected by
     // the partial unique index on (simplefin_source_account_id, external_id),
@@ -1490,6 +1674,18 @@ export async function syncSimpleFin(
     } = recheckContentDedup(verified, tx);
     linkWarnings.push(...contentWarnings);
 
+    // Bug B (reissued-external_id race) — see `recheckReissuedIds`'s own
+    // docstring. Runs content-adjacent (after `recheckContentDedup`, before
+    // `recheckCutoverAnchor`) so a row that is BOTH a reissued-id race match
+    // AND genuinely pre-cutover gets exactly one warning, not two
+    // contradictory-looking ones.
+    const {
+      checked: reissuedChecked,
+      droppedByAccountId: reissuedDroppedByAccountId,
+      warnings: reissuedWarnings,
+    } = recheckReissuedIds(contentChecked, tx);
+    linkWarnings.push(...reissuedWarnings);
+
     // D8.1 — THE CUTOVER ANCHOR IS ALSO A PRECONDITION CARRIED ACROSS THE
     // `AWAIT` (rule 11), the same class of race the re-checks above exist
     // for. See `recheckCutoverAnchor`'s own docstring for why.
@@ -1497,8 +1693,15 @@ export async function syncSimpleFin(
       checked: cutoverChecked,
       droppedByAccountId: cutoverDroppedByAccountId,
       warnings: cutoverWarnings,
-    } = recheckCutoverAnchor(contentChecked, tx);
+    } = recheckCutoverAnchor(reissuedChecked, tx);
     linkWarnings.push(...cutoverWarnings);
+
+    // `expectedCardExternalIds` is NOT finalized here — the write loop below
+    // can still drop a row via its own two late mechanisms
+    // (`lateContentDropsByAccountId`, `lateIdentityDropsByAccountId`), so
+    // finalizing now would need those same two invariants
+    // `finalizeExpectedCardExternalIds`'s own docstring warns against
+    // relying on. See the call site right after the write loop instead.
 
     // Adjusted DOWN after the write loop below for rows the fallback
     // content check catches as late duplicates (`lateContentDropsByAccountId`)
@@ -1552,8 +1755,47 @@ export async function syncSimpleFin(
     // OUTER-scoped one declared above `try` — not redeclared here — so it
     // survives a `NothingVerifiedError` rollback.
 
+    // Bug A's genuine-anomaly guard — reachable ONLY when 2+ rows sharing
+    // one external_id BOTH survived every recheck above (two real,
+    // distinct SimpleFIN transactions issued the same id, both dated after
+    // a card's anchor, or any duplicate id on a non-card account where no
+    // cutover filter ever runs to narrow it to one). Every routine case is
+    // already resolved before this loop starts; this is the last-resort,
+    // never-silent backstop for the shape neither the staging collapse nor
+    // `recheckCutoverAnchor` can decide on principle. Checked before BOTH
+    // write paths a row can claim an identity through — an ordinary INSERT
+    // and `tryPromoteCandidate`'s UPDATE — because a repeated id promoting
+    // via one occurrence while its sibling reaches the other path still
+    // violates the same unique index. The claim is recorded only AFTER a
+    // SUCCESSFUL write, never after a failed promotion attempt, so a
+    // failed promotion still falls through to the ordinary insert path
+    // exactly as `tryPromoteCandidate`'s existing contract requires.
+    // Keyed by feed, THEN externalId — never a concatenated string. Both
+    // components are unrestricted text SimpleFIN permits containing a
+    // colon, so a `${feedId}:${externalId}` join could collide two
+    // genuinely distinct identities (`feed="bank:acct"`, id="42"` vs.
+    // `feed="bank"`, id=`"acct:42"`) onto the same key — found
+    // independently by both Codex adversarial and Codex structured
+    // review against this same branch. The nested Map has no such
+    // ambiguity: each level compares its own string in full.
+    const claimedIdentities = new Map<FeedAccountId, Set<string>>();
+    const isIdentityClaimed = (feedId: FeedAccountId, externalId: string): boolean =>
+      claimedIdentities.get(feedId)?.has(externalId) ?? false;
+    const claimIdentity = (feedId: FeedAccountId, externalId: string): void => {
+      const claimed = claimedIdentities.get(feedId) ?? new Set<string>();
+      claimed.add(externalId);
+      claimedIdentities.set(feedId, claimed);
+    };
+
     for (const { account, feedId, rows } of cutoverChecked) {
       for (const row of rows) {
+        if (isIdentityClaimed(feedId, row.externalId)) {
+          const existingDrops = lateIdentityDropsByAccountId.get(account.id) ?? [];
+          existingDrops.push(row);
+          lateIdentityDropsByAccountId.set(account.id, existingDrops);
+          continue;
+        }
+
         if (row.promotionCandidateId !== undefined) {
           const promoted = tryPromoteCandidate(
             tx,
@@ -1563,6 +1805,7 @@ export async function syncSimpleFin(
             feedId,
           );
           if (promoted) {
+            claimIdentity(feedId, row.externalId);
             promotedByAccountId.set(
               account.id,
               (promotedByAccountId.get(account.id) ?? 0) + 1,
@@ -1621,9 +1864,9 @@ export async function syncSimpleFin(
             .all()
             .some((r) => contentSignature(r) === contentSignature(row));
           if (nowDuplicate) {
-            const ids = lateContentDropsByAccountId.get(account.id) ?? new Set<string>();
-            ids.add(row.externalId);
-            lateContentDropsByAccountId.set(account.id, ids);
+            const existingDrops = lateContentDropsByAccountId.get(account.id) ?? [];
+            existingDrops.push(row);
+            lateContentDropsByAccountId.set(account.id, existingDrops);
             continue;
           }
           // Falls through to an ordinary INSERT below, now genuinely safe:
@@ -1666,6 +1909,7 @@ export async function syncSimpleFin(
           })
           .returning({ id: schema.transactions.id })
           .all();
+        claimIdentity(feedId, row.externalId);
 
         // Same audit trail as the CSV path (importBatch.ts) — lets a
         // too-broad rule's auto-categorization be undone per batch.
@@ -1688,12 +1932,31 @@ export async function syncSimpleFin(
     // `transactionCount`, the aggregate `insertedCount`) treats it as a
     // real write. Cross-model adversarial review (Codex structured review
     // + independent Claude adversarial subagent, `/ship`) both found this
-    // exact gap.
+    // exact gap. The identity-race backstop (Bug A's genuine-anomaly guard)
+    // gets the identical treatment — it also never writes.
     const totalLateContentDrops = [...lateContentDropsByAccountId.values()].reduce(
-      (n, ids) => n + ids.size,
+      (n, rows) => n + rows.length,
       0,
     );
-    verifiedTotal -= totalLateContentDrops;
+    const totalLateIdentityDrops = [...lateIdentityDropsByAccountId.values()].reduce(
+      (n, rows) => n + rows.length,
+      0,
+    );
+    verifiedTotal -= totalLateContentDrops + totalLateIdentityDrops;
+
+    // The full recheck chain AND both of the write loop's own late-drop
+    // mechanisms have now run — this is the one point `expectedCardExternalIds`
+    // can be correctly finalized from the FINAL surviving rows, by
+    // construction rather than by an invariant living elsewhere. See
+    // `finalizeExpectedCardExternalIds`'s own docstring for why this
+    // replaced four separate incremental `applyDedupPruning`-driven prunes,
+    // and why it must run here rather than right after `cutoverChecked`.
+    finalizeExpectedCardExternalIds(
+      staged,
+      cutoverChecked,
+      lateContentDropsByAccountId,
+      lateIdentityDropsByAccountId,
+    );
 
     // INSERT-only, matching CSV's `commitImport` (`transactionCount:
     // toInsert.length`) — NOT `verifiedTotal`, which also counts promoted
@@ -1723,6 +1986,19 @@ export async function syncSimpleFin(
       throw new NothingVerifiedError();
     }
 
+    // The write loop's own two late-drop mechanisms (the fallback content
+    // check and Bug A's genuine-anomaly identity backstop, both above) have
+    // no recheck function to fold into `linkWarnings` the way the four
+    // pre-write rechecks already do — they only exist once the write loop
+    // itself runs. Folded in HERE, before persistence, for the same reason
+    // the comment below states: without this, a late-identity-drop or
+    // late-content-drop warning existed only in the transient `warnings`
+    // return value, never in `snapshotWarning` — closing the tab (or a
+    // second visit to the batch's success page) lost the only explanation
+    // for a withheld row (Codex adversarial finding, `/ship`).
+    linkWarnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
+    linkWarnings.push(...lateIdentityDropWarnings(lateIdentityDropsByAccountId, staged));
+
     // C2: the drop warnings are the ONLY record that rows were withheld, and
     // until now they lived exclusively in one `useActionState` value — close
     // the tab and 40 unimported bank rows left no trace anywhere. Rule 5 already
@@ -1747,6 +2023,7 @@ export async function syncSimpleFin(
       droppedAccountIds,
       idDroppedByAccountId,
       contentDroppedByAccountId,
+      reissuedDroppedByAccountId,
       cutoverDroppedByAccountId,
       promotedByAccountId,
       earliestPromotedDate,
@@ -1809,7 +2086,7 @@ export async function syncSimpleFin(
       recheckLandedIds(stagedForIdRecheck, db);
     for (const w of idWarnings) console.error(`sync: ${w}`);
     warnings.push(...idWarnings);
-    applyDedupPruning(staged, counts, idDropped, "duplicateByExternalId");
+    applyDedupPruning(counts, idDropped, "duplicateByExternalId");
 
     // The content pass gets the same rebuild next, for the same reason:
     // `NothingVerifiedError` can fire because content dedup alone dropped
@@ -1826,26 +2103,49 @@ export async function syncSimpleFin(
       recheckContentDedup(idChecked, db);
     for (const w of contentWarnings) console.error(`sync: ${w}`);
     warnings.push(...contentWarnings);
-    applyDedupPruning(staged, counts, contentDropped, "duplicateByContent");
+    applyDedupPruning(counts, contentDropped, "duplicateByContent");
 
-    const { droppedByAccountId: cutoverDropped, warnings: cutoverWarnings } =
-      recheckCutoverAnchor(contentChecked, db);
+    // Bug B's rebuild, same position as the write path (content-adjacent,
+    // before cutover).
+    const { checked: reissuedChecked, droppedByAccountId: reissuedDropped, warnings: reissuedWarnings } =
+      recheckReissuedIds(contentChecked, db);
+    for (const w of reissuedWarnings) console.error(`sync: ${w}`);
+    warnings.push(...reissuedWarnings);
+    applyDedupPruning(counts, reissuedDropped, "duplicateByContent");
+
+    const { checked: cutoverChecked, droppedByAccountId: cutoverDropped, warnings: cutoverWarnings } =
+      recheckCutoverAnchor(reissuedChecked, db);
     for (const w of cutoverWarnings) console.error(`sync: ${w}`);
     warnings.push(...cutoverWarnings);
-    applyDedupPruning(staged, counts, cutoverDropped, "skippedBeforeAnchor");
+    applyDedupPruning(counts, cutoverDropped, "skippedBeforeAnchor");
 
-    // The fallback content check has no standalone recheck function to
-    // re-run here (unlike the three above) — but `lateContentDropsByAccountId`
-    // is declared OUTSIDE the transaction specifically so a drop it recorded
-    // during THIS attempt, before `NothingVerifiedError` unwound the write,
-    // is still sitting in this closure's memory (the DB rollback undoes the
-    // writes, not this process's variables). Applying and warning about it
-    // here is what makes this the one caller-visible place a
-    // `NothingVerifiedError` run could otherwise credit `insertedCount` for a
-    // row that was never actually going to be written (silent-failure-hunter
-    // finding, `/ship`).
-    applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
+    // The fallback content check and the identity-race backstop have no
+    // standalone recheck function to re-run here (unlike the four above) —
+    // but `lateContentDropsByAccountId`/`lateIdentityDropsByAccountId` are
+    // declared OUTSIDE the transaction specifically so a drop either
+    // recorded during THIS attempt, before `NothingVerifiedError` unwound
+    // the write, is still sitting in this closure's memory (the DB rollback
+    // undoes the writes, not this process's variables). Applying and
+    // warning about them here is what makes this the one caller-visible
+    // place a `NothingVerifiedError` run could otherwise credit
+    // `insertedCount` for a row that was never actually going to be written
+    // (silent-failure-hunter finding, `/ship`).
+    applyDedupPruning(counts, lateContentDropsByAccountId, "duplicateByContent");
     warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
+    applyDedupPruning(counts, lateIdentityDropsByAccountId, "duplicateByExternalId");
+    warnings.push(...lateIdentityDropWarnings(lateIdentityDropsByAccountId, staged));
+
+    // The full chain AND both late-drop mechanisms have now run — finalize
+    // `expectedCardExternalIds` from the FINAL surviving rows, same as the
+    // write path (this rollback path never inserted anything, so "final"
+    // here means "would have survived to insert had the transaction not
+    // rolled back").
+    finalizeExpectedCardExternalIds(
+      staged,
+      cutoverChecked,
+      lateContentDropsByAccountId,
+      lateIdentityDropsByAccountId,
+    );
     warnings.push(...safeCheckCardCompleteness(staged, dropped, db));
 
     // Blank these fields for LINK-DROPPED accounts only — same reasoning as
@@ -1951,34 +2251,38 @@ export async function syncSimpleFin(
 
   // A row the in-transaction id re-check dropped (a second `/sync` tab, or an
   // overlapping scheduled sync, landing the same external id while this run
-  // was fetching) never appears "missing" to D8.4 in practice — the id is
-  // already stored under this feed's provenance by whichever writer raced
-  // this one, so `checkCardCompleteness`'s own query finds it regardless of
-  // whether it stays in `expectedCardExternalIds`. Routed through
-  // `applyDedupPruning` anyway for the count half: `insertedCount`/
-  // `duplicateByExternalId` were set in the STAGING loop, before this
-  // re-check could know some of those "new" rows had already landed
-  // elsewhere — without this, the per-account summary claims more rows
-  // landed under THIS account than the batch actually holds.
-  applyDedupPruning(staged, counts, written.idDroppedByAccountId, "duplicateByExternalId");
+  // was fetching): `insertedCount`/`duplicateByExternalId` were set in the
+  // STAGING loop, before this re-check could know some of those "new" rows
+  // had already landed elsewhere — without this, the per-account summary
+  // claims more rows landed under THIS account than the batch actually
+  // holds. `expectedCardExternalIds` is NOT adjusted here — it was already
+  // finalized INSIDE the transaction, before it committed, by
+  // `finalizeExpectedCardExternalIds` (see its own docstring).
+  applyDedupPruning(counts, written.idDroppedByAccountId, "duplicateByExternalId");
 
   // A row the in-transaction content-dedup re-check dropped (a concurrent CSV
-  // import or a second sync racing this one) must not appear "missing" to
-  // D8.4 either — `expectedCardExternalIds` was built at staging time, before
-  // this recheck could know the row would turn out to be a race-duplicate.
-  // Without this, `checkCardCompleteness` reports a correctly, intentionally
-  // deduped row as unexplainedly absent from the ledger.
-  applyDedupPruning(staged, counts, written.contentDroppedByAccountId, "duplicateByContent");
+  // import or a second sync racing this one): the count-half of the same
+  // adjustment, for the same reason.
+  applyDedupPruning(counts, written.contentDroppedByAccountId, "duplicateByContent");
+
+  // Bug B (reissued-external_id race) — the same kind of fact as the
+  // content re-check above, just discovered via a different candidate
+  // population, so it is credited to the same `duplicateByContent` bucket.
+  applyDedupPruning(counts, written.reissuedDroppedByAccountId, "duplicateByContent");
 
   // A row the in-transaction cutover re-check dropped (a Reconcile racing
-  // this sync's fetch) must not appear "missing" to D8.4 — it was correctly
-  // excluded, just later than the staging loop's own pre-fetch check could
-  // know. `insertedCount`/`skippedBeforeAnchor` were set in the STAGING loop,
-  // before this re-check could know some rows would be dropped — without
-  // adjusting them, the outcome would claim more rows landed than actually
-  // did, the same class of fabricated-fact bug rule 1's "no-op reported as an
-  // update" doctrine exists to prevent, just on a count instead of a balance.
-  applyDedupPruning(staged, counts, written.cutoverDroppedByAccountId, "skippedBeforeAnchor");
+  // this sync's fetch): `insertedCount`/`skippedBeforeAnchor` were set in
+  // the STAGING loop, before this re-check could know some rows would be
+  // dropped — without adjusting them, the outcome would claim more rows
+  // landed than actually did, the same class of fabricated-fact bug rule
+  // 1's "no-op reported as an update" doctrine exists to prevent, just on a
+  // count instead of a balance. `expectedCardExternalIds` itself is NOT
+  // adjusted here — it was already finalized INSIDE the transaction, before
+  // it committed, from the FINAL surviving rows AND both of the write
+  // loop's own late-drop mechanisms, by `finalizeExpectedCardExternalIds`
+  // (see its own docstring for why the old incremental per-recheck pruning
+  // broke under Bug A's fix).
+  applyDedupPruning(counts, written.cutoverDroppedByAccountId, "skippedBeforeAnchor");
 
   // A row whose candidate raced away and fell back toward an ordinary
   // insert is NOT always safely counted as one: the write loop's own
@@ -1987,10 +2291,19 @@ export async function syncSimpleFin(
   // set at staging time before that was known. Applied through the SAME
   // mechanism the id/content/cutover rechecks already use, crediting it as
   // `duplicateByContent` — it is one, just discovered later than the others.
-  // Also warned about, unlike its three siblings above — it used to have no
-  // user-visible warning on any path (silent-failure-hunter finding, `/ship`).
-  applyDedupPruning(staged, counts, lateContentDropsByAccountId, "duplicateByContent");
-  warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
+  // The warning text itself is NOT re-pushed here — it is already folded
+  // into `written.linkWarnings` (pushed into `warnings` above), which is
+  // where it was persisted to `snapshotWarning` inside the transaction;
+  // pushing it again here would duplicate the sentence in the rendered
+  // outcome without adding anything to what got persisted.
+  applyDedupPruning(counts, lateContentDropsByAccountId, "duplicateByContent");
+
+  // Bug A's genuine-anomaly backstop — see its declaration site in the write
+  // loop. Reachable only when 2+ rows sharing one external_id both survived
+  // every recheck; never silently absorbed. Same non-duplication reasoning
+  // as above — its warning text already rode in with `written.linkWarnings`.
+  applyDedupPruning(counts, lateIdentityDropsByAccountId, "duplicateByExternalId");
+  warnings.push(...lateIdentityDropWarnings(lateIdentityDropsByAccountId, staged));
 
   // Reclassify a promoted row out of `insertedCount` and into
   // `promotedFromPending` — decided only just now, inside the write
@@ -2109,7 +2422,7 @@ class NothingVerifiedError extends Error {}
  * other two, rather than leaving it as the one recheck whose warning and
  * count adjustment lived exclusively inside the transaction.
  *
- * `seenExternalIds` was read in the staging loop, before `fetchAccounts`'
+ * `idsKnownBeforeThisRun` was read in the staging loop, before `fetchAccounts`'
  * round trip, so a second sync (two `/sync` tabs, or an overlapping
  * scheduled + manual sync) can commit rows for the same feed in that
  * window. Those rows are protected by the partial unique index on
@@ -2149,8 +2462,8 @@ function recheckLandedIds<
     feedId: FeedAccountId;
     rows: readonly StagedRow[];
   },
->(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
-  const droppedByAccountId = new Map<number, Set<string>>();
+>(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, StagedRow[]>; warnings: string[] } {
+  const droppedByAccountId = new Map<number, StagedRow[]>();
   const checked = staged.map((entry) => {
     if (entry.rows.length === 0) return entry;
     const landed = new Set(
@@ -2174,14 +2487,20 @@ function recheckLandedIds<
         .flatMap((r) => (r.externalId === null ? [] : [r.externalId])),
     );
     if (landed.size === 0) return entry;
-    droppedByAccountId.set(entry.account.id, landed);
+    // Row-identity subtraction, not an external_id-set difference — Bug A's
+    // fix can legitimately stage 2+ rows sharing one external_id (a
+    // duplicate id with genuinely differing signatures), and every one of
+    // them shares the SAME landed id, so all must be dropped and all must
+    // be COUNTED, not collapsed to one by a shared id string.
+    const dropped = entry.rows.filter((r) => landed.has(r.externalId));
+    droppedByAccountId.set(entry.account.id, dropped);
     return { ...entry, rows: entry.rows.filter((r) => !landed.has(r.externalId)) };
   });
 
   const warnings = staged.flatMap((entry) => {
-    const droppedIds = droppedByAccountId.get(entry.account.id);
-    if (!droppedIds || droppedIds.size === 0) return [];
-    const n = droppedIds.size;
+    const dropped = droppedByAccountId.get(entry.account.id);
+    if (!dropped || dropped.length === 0) return [];
+    const n = dropped.length;
     return [
       `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" had already been ` +
         `imported by another sync running at the same time, so ${n === 1 ? "it was" : "they were"} skipped.`,
@@ -2224,14 +2543,14 @@ function recheckLandedIds<
  * rollback path, against the live handle after the transaction is gone,
  * purely to rebuild its sentences.
  *
- * `droppedByAccountId` (external ids, not just a count — same shape
- * `recheckCutoverAnchor` returns) exists for the SAME reason that function's
- * own docstring gives: it lets the caller prune `expectedCardExternalIds`
- * (D8.4, built pre-fetch, before any recheck has run) and adjust `counts`.
- * A row this function drops was never going to land under this feed's
- * provenance either — the same "correctly, intentionally excluded, not
- * missing" fact `applyDedupPruning` exists to keep D8.4 from misreporting,
- * just discovered here instead of by the cutover. Both callers apply it
+ * `droppedByAccountId` is shaped as `Map<number, StagedRow[]>` — the actual
+ * dropped ROWS, not a bare count or a `Set<string>` of external ids — so
+ * `applyDedupPruning` can adjust `counts` by `droppedRows.length` even when
+ * 2+ rows share one external_id (Bug A's fix). `expectedCardExternalIds` is
+ * NOT pruned by this function or by `applyDedupPruning` any more — see
+ * `finalizeExpectedCardExternalIds`, which recomputes it once, after every
+ * recheck (id/content/reissued/cutover) and both of the write loop's own
+ * late-drop mechanisms have run. Both callers apply the count adjustment
  * through `applyDedupPruning(..., "duplicateByContent")` — never
  * `"skippedBeforeAnchor"`, which `recheckCutoverAnchor`'s own callers pass
  * instead: a content-race drop is a duplicate found late, not a cutover
@@ -2249,8 +2568,8 @@ function recheckContentDedup<
 >(
   staged: readonly T[],
   db: AnyDb,
-): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
-  const droppedByAccountId = new Map<number, Set<string>>();
+): { checked: T[]; droppedByAccountId: Map<number, StagedRow[]>; warnings: string[] } {
+  const droppedByAccountId = new Map<number, StagedRow[]>();
   const checked = staged.map((entry) => {
     if (entry.rows.length === 0) return entry;
 
@@ -2270,79 +2589,216 @@ function recheckContentDedup<
     }
     if (deltaRemaining.size === 0) return entry;
 
-    const survivors: StagedRow[] = [];
-    const droppedIds = new Set<string>();
-    for (const row of entry.rows) {
-      // A promotion-candidate row is NEVER eligible to be dropped here
-      // (red-team finding, `/ship`, confirmed by direct reading) — this
-      // delta represents an unrelated POSTED duplicate that appeared for
-      // this signature since staging, and a promotion row was never staged
-      // as competing for that posted-only budget in the first place (it
-      // matched a PENDING candidate, a separate resource entirely). Its own
-      // race window is decided precisely, by candidate id, inside the write
-      // transaction (`tryPromoteCandidate`'s fresh `is_pending` re-read) —
-      // not by whether SOME row shares its content signature. Treating it
-      // as an ordinary insert here would let an unrelated posted duplicate
-      // sacrifice this row, silently stranding the pending row it was going
-      // to promote and reproducing rule 1's phantom `driftCents` bug this
-      // whole fix exists to close, just gated behind a narrow race instead
-      // of firing every time.
-      if (row.promotionCandidateId !== undefined) {
-        survivors.push(row);
-        continue;
-      }
-      const sig = contentSignature(row);
-      const remaining = deltaRemaining.get(sig) ?? 0;
-      if (remaining > 0) {
-        deltaRemaining.set(sig, remaining - 1);
-        droppedIds.add(row.externalId);
-        continue;
-      }
-      survivors.push(row);
-    }
-    if (droppedIds.size === 0) return entry;
-    droppedByAccountId.set(entry.account.id, droppedIds);
+    // A promotion-candidate row is NEVER eligible to be dropped here
+    // (red-team finding, `/ship`, confirmed by direct reading) — this
+    // delta represents an unrelated POSTED duplicate that appeared for
+    // this signature since staging, and a promotion row was never staged
+    // as competing for that posted-only budget in the first place (it
+    // matched a PENDING candidate, a separate resource entirely). Its own
+    // race window is decided precisely, by candidate id, inside the write
+    // transaction (`tryPromoteCandidate`'s fresh `is_pending` re-read) —
+    // not by whether SOME row shares its content signature. Treating it
+    // as an ordinary insert here would let an unrelated posted duplicate
+    // sacrifice this row, silently stranding the pending row it was going
+    // to promote and reproducing rule 1's phantom `driftCents` bug this
+    // whole fix exists to close, just gated behind a narrow race instead
+    // of firing every time. `consumeBySignature` enforces this exemption
+    // once, for both this function and `recheckReissuedIds`.
+    const { survivors, dropped } = consumeBySignature(entry.rows, deltaRemaining);
+    if (dropped.length === 0) return entry;
+    droppedByAccountId.set(entry.account.id, dropped);
     return { ...entry, rows: survivors };
   });
 
-  const warnings = staged.flatMap((entry) => {
-    const droppedIds = droppedByAccountId.get(entry.account.id);
-    if (!droppedIds || droppedIds.size === 0) return [];
-    const n = droppedIds.size;
-    return [
-      `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" matched activity ` +
-        `already imported by another process while this sync was running, so ` +
-        `${n === 1 ? "it was" : "they were"} skipped.`,
-    ];
-  });
+  const warnings = lateDropWarnings(
+    droppedByAccountId,
+    staged,
+    (n, name) =>
+      `${n} transaction${n === 1 ? "" : "s"} on "${name}" matched activity ` +
+      `already imported by another process while this sync was running, so ` +
+      `${n === 1 ? "it was" : "they were"} skipped.`,
+  );
   return { checked, droppedByAccountId, warnings };
 }
 
 /**
- * Applies a recheck's drop — `recheckLandedIds`'s, `recheckContentDedup`'s or
- * `recheckCutoverAnchor`'s — to `staged`/`counts`: prunes the dropped ids out
- * of `expectedCardExternalIds` (D8.4 must not report a correctly,
- * intentionally excluded row as missing) and keeps `counts` honest. One
- * shared function rather than three hand-duplicated copies — this file's
+ * Consumes `rows` against a per-signature multiset budget (`deltaRemaining`,
+ * MUTATED in place) — the shared MECHANICAL half of `recheckContentDedup`
+ * and `recheckReissuedIds`: decrement per match, so one budget unit
+ * eliminates AT MOST one row, never every row sharing its signature. A
+ * promotion-candidate row is NEVER eligible to be dropped this way — its
+ * own race is decided precisely by candidate id inside
+ * `tryPromoteCandidate`, not by whether some unrelated row shares its
+ * content signature (see `recheckContentDedup`'s own comment for the full
+ * reasoning, which applies identically to both callers). What DIFFERS
+ * between the two — which signatures populate `deltaRemaining` in the
+ * first place (an unrelated posted duplicate's fresh-vs-frozen delta, vs a
+ * newly-appeared same-feed row under a different external_id) — is the
+ * actual DECISION, and stays entirely in each caller; this shares only the
+ * counting loop, the same line `applyDedupPruning`'s own docstring draws
+ * for its bookkeeping tail.
+ */
+function consumeBySignature(
+  rows: readonly StagedRow[],
+  deltaRemaining: Map<string, number>,
+): { survivors: StagedRow[]; dropped: StagedRow[] } {
+  const survivors: StagedRow[] = [];
+  const dropped: StagedRow[] = [];
+  for (const row of rows) {
+    if (row.promotionCandidateId !== undefined) {
+      survivors.push(row);
+      continue;
+    }
+    const sig = contentSignature(row);
+    const remaining = deltaRemaining.get(sig) ?? 0;
+    if (remaining > 0) {
+      deltaRemaining.set(sig, remaining - 1);
+      dropped.push(row);
+      continue;
+    }
+    survivors.push(row);
+  }
+  return { survivors, dropped };
+}
+
+/**
+ * Bug B (reissued external_id race). `queryContentDedupCandidateRows`'s
+ * ordinary content-dedup candidacy deliberately EXCLUDES a row already
+ * tagged with THIS feed's own provenance — the assumption being "the id
+ * pass already accounts for it," true when the same feed reissues a STABLE
+ * id across repeated fetches. False when the feed genuinely issues a NEW id
+ * for what's really the same event across two overlapping fetches (a
+ * concurrent `/sync` run's write landing DURING this sync's own fetch): the
+ * id pass doesn't match (different ids), and ordinary candidacy exclusion
+ * means content dedup doesn't either, so a genuine duplicate row lands.
+ *
+ * `entry.originalSameFeedRowIds` is frozen BEFORE `await fetchAccounts`
+ * resolves (see the call site near the top of `syncSimpleFin`) — not
+ * alongside the post-fetch `originalContentBudget`, which would already
+ * include a row that landed DURING this sync's own fetch, missing exactly
+ * the race this exists to catch. A same-feed row whose external_id is NOT
+ * in that frozen set appeared strictly during this sync's own fetch window
+ * — only a concurrent writer can produce one, since this sync has not
+ * inserted anything under this feed yet at this point in its own
+ * transaction.
+ *
+ * Multiset-safe (`deltaRemaining`-style decrement), mirroring
+ * `recheckContentDedup` exactly: one newly-appeared same-feed row
+ * eliminates AT MOST one incoming row, never every incoming row sharing its
+ * signature. Skips any row carrying `promotionCandidateId`, mirroring
+ * `recheckContentDedup`'s own established exemption for the same reason —
+ * a promotion candidate's own race is decided precisely by candidate id
+ * inside `tryPromoteCandidate`, not by whether some unrelated row shares its
+ * content signature.
+ *
+ * Deliberately does NOT cross-check against what `recheckLandedIds` already
+ * dropped in the same pass. Whether a same-feed row appearing during the
+ * race window represents a genuine reissue of an incoming row (should drop)
+ * or a coincidentally identical, genuinely separate transaction (should NOT
+ * drop) is undecidable from content alone — the same ambiguity rule 4
+ * documents for same-account reversals. Accepted as proportionate: the
+ * exposure window is bounded by `SYNC_TIMEOUT_MS`, a small fraction of rule
+ * 3's own already-accepted coincidental-content window (the full 45-day
+ * lookback, every ordinary sync, forever).
+ *
+ * `AnyDb`, not `SyncTx` — genuinely dual-use like its three siblings: called
+ * from inside the write transaction AND, on the `NothingVerifiedError`
+ * rollback path, against the live handle after the transaction is gone,
+ * purely to rebuild its warning and count adjustment.
+ */
+function recheckReissuedIds<
+  T extends {
+    account: { id: number; name: string };
+    feedId: FeedAccountId;
+    rows: readonly StagedRow[];
+    originalSameFeedRowIds: ReadonlySet<string>;
+    contentFloorIso: string;
+  },
+>(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, StagedRow[]>; warnings: string[] } {
+  const droppedByAccountId = new Map<number, StagedRow[]>();
+  const checked = staged.map((entry) => {
+    if (entry.rows.length === 0) return entry;
+
+    const freshSameFeedRows = querySameFeedRowsSince(
+      db,
+      entry.account.id,
+      entry.feedId,
+      entry.contentFloorIso,
+    );
+
+    const newlyAppeared = freshSameFeedRows.filter(
+      (r) => r.externalId !== null && !entry.originalSameFeedRowIds.has(r.externalId),
+    );
+    if (newlyAppeared.length === 0) return entry;
+
+    const deltaRemaining = new Map<string, number>();
+    for (const r of newlyAppeared) {
+      const sig = contentSignature(r);
+      deltaRemaining.set(sig, (deltaRemaining.get(sig) ?? 0) + 1);
+    }
+
+    // `consumeBySignature` — shared with `recheckContentDedup` — is what
+    // makes this multiset-safe (one newly-appeared row eliminates at most
+    // one incoming row) and exempts a promotion-candidate row from being
+    // sacrificed to an unrelated match, mirroring that function's own
+    // established reasoning.
+    const { survivors, dropped } = consumeBySignature(entry.rows, deltaRemaining);
+    if (dropped.length === 0) return entry;
+    droppedByAccountId.set(entry.account.id, dropped);
+    return { ...entry, rows: survivors };
+  });
+
+  const warnings = lateDropWarnings(
+    droppedByAccountId,
+    staged,
+    (n, name) =>
+      `${n} transaction${n === 1 ? "" : "s"} on "${name}" matched a ` +
+      `transaction already confirmed under a different id while this sync was ` +
+      `running, so ${n === 1 ? "it was" : "they were"} skipped.`,
+  );
+  return { checked, droppedByAccountId, warnings };
+}
+
+/**
+ * Applies a recheck's drop — `recheckLandedIds`'s, `recheckContentDedup`'s,
+ * `recheckReissuedIds`'s or `recheckCutoverAnchor`'s — to `counts`. One
+ * shared function rather than four hand-duplicated copies — this file's
  * cutover-side pruning once drifted from its content-side counterpart in
  * exactly this way (only one of the two adjusted `insertedCount`) before the
- * two were unified into this function, which is why a third recheck
- * (`recheckLandedIds`) was routed through the existing shared tail instead of
- * growing its own copy.
+ * two were unified into this function, which is why a third and fourth
+ * recheck (`recheckLandedIds`, `recheckReissuedIds`) were routed through the
+ * existing shared tail instead of growing their own copies.
+ *
+ * `droppedByAccountId` maps to the actual dropped ROWS, not to a `Set` of
+ * external ids (round-3 outside-review correction) — Bug A's fix can
+ * legitimately stage 2+ rows sharing one external_id (a duplicate id with
+ * genuinely differing content signatures), and an id-Set-sized count
+ * silently undercounts the moment more than one row shares a dropped id: a
+ * straddling pair's ONE actual dropped row would be folded into the ONE
+ * distinct id string both rows share, reporting zero. Counting
+ * `droppedRows.length` is correct regardless of how many rows share an id.
+ *
+ * Deliberately does NOT touch `expectedCardExternalIds` any more — see
+ * `finalizeExpectedCardExternalIds`, which recomputes it ONCE after the
+ * full recheck chain completes, rather than incrementally here. The old
+ * incremental approach (removing every occurrence of a dropped id) was
+ * itself wrong for the same reason: dropping ONE of 2 rows sharing an id
+ * would strip the id from the expectation set even when its SURVIVING
+ * sibling is still going to land under it.
  *
  * `countField` is which SPECIFIC reason gets credited with the drop —
  * `"duplicateByExternalId"` for an id-race find, `"duplicateByContent"` for a
- * content-race find, `"skippedBeforeAnchor"` for a cutover exclusion. These
- * are semantically different facts (rule 1 defines `skippedBeforeAnchor`
- * precisely; an id- or content-race drop IS a duplicate, just discovered
- * late) and must never be conflated, which is why this stays a required
- * PARAMETER rather than being inferred or defaulted — the three RECHECK
- * functions themselves stay entirely separate for the same reason (see
- * `recheckContentDedup`'s own docstring); only this bookkeeping tail, which
- * decides nothing about WHICH rows were dropped, is shared.
+ * content-race find (including a reissued-id race — the same kind of fact,
+ * just found via a different candidate population), `"skippedBeforeAnchor"`
+ * for a cutover exclusion. These are semantically different facts (rule 1
+ * defines `skippedBeforeAnchor` precisely; an id- or content-race drop IS a
+ * duplicate, just discovered late) and must never be conflated, which is why
+ * this stays a required PARAMETER rather than being inferred or defaulted —
+ * the recheck functions themselves stay entirely separate for the same
+ * reason (see `recheckContentDedup`'s own docstring); only this bookkeeping
+ * tail, which decides nothing about WHICH rows were dropped, is shared.
  */
 function applyDedupPruning(
-  staged: readonly { account: { id: number }; expectedCardExternalIds: string[] }[],
   counts: readonly {
     accountId: number;
     duplicateByExternalId: number;
@@ -2350,49 +2806,148 @@ function applyDedupPruning(
     skippedBeforeAnchor: number;
     insertedCount: number;
   }[],
-  droppedByAccountId: ReadonlyMap<number, ReadonlySet<string>>,
+  droppedByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
   countField: "duplicateByExternalId" | "duplicateByContent" | "skippedBeforeAnchor",
 ): void {
-  for (const [accountId, droppedIds] of droppedByAccountId) {
-    const entry = staged.find((s) => s.account.id === accountId);
-    if (entry) {
-      entry.expectedCardExternalIds = entry.expectedCardExternalIds.filter(
-        (id) => !droppedIds.has(id),
-      );
-    }
+  for (const [accountId, droppedRows] of droppedByAccountId) {
     const c = counts.find((c) => c.accountId === accountId);
     if (c) {
-      c[countField] += droppedIds.size;
-      c.insertedCount -= droppedIds.size;
+      c[countField] += droppedRows.length;
+      c.insertedCount -= droppedRows.length;
     }
   }
 }
 
 /**
- * The late fallback content check (the write loop's own `nowDuplicate` guard,
- * immediately before insert) has no standalone recheck function of its own —
- * unlike `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor`, it
- * is inline logic inside the per-row insert loop, so it has no
- * `{ warnings: string[] }` of its own the way those three do. This builds the
- * equivalent sentence from the raw drop map, in the same voice as
- * `recheckContentDedup`'s own warnings, so a genuine late-race drop is never
- * silent (silent-failure-hunter finding, `/ship`: this used to have no
- * user-visible warning on any path).
+ * Recomputes `expectedCardExternalIds`'s FINAL value once, after every
+ * recheck in the chain (id, content, reissued, cutover) AND the write
+ * loop's own two late-drop mechanisms have all run — rather than
+ * incrementally filtering it after each recheck's own drop the way
+ * `applyDedupPruning` used to. The incremental form was wrong under Bug A's
+ * fix: dropping ONE of 2 rows sharing an external_id would strip the id
+ * from the expectation set even when its SURVIVING sibling is still going
+ * to land under it (round-3 outside-review correction).
+ *
+ * Must run AFTER, not merely alongside, `lateContentDropsByAccountId`/
+ * `lateIdentityDropsByAccountId` — both are populated by the write loop
+ * itself, which runs over `cutoverChecked`'s rows. Calling this beforehand
+ * (an adversarial-review finding on this very diff) left a card row that
+ * survives every recheck but is THEN caught by one of those two late drops
+ * still marked "expected", relying on two invariants elsewhere (a late
+ * content drop can only ever be a promotion-candidate row, which is
+ * asset-only by construction; a late identity drop always shares its
+ * external_id with a row that DID survive) to keep that from ever actually
+ * misfiring — correct today, but "defended by an invariant nothing here
+ * enforces" is exactly the shape rule 11 treats as a defect waiting to
+ * happen, not a design to leave in place when the real fix is this cheap.
+ *
+ * Takes `cutoverChecked` directly (not a pre-built `Map`) and the two
+ * late-drop maps, computing the final surviving row set internally — the
+ * caller building an identical `Map` at each call site was its own small
+ * duplication.
+ *
+ * An id staged via the "already known before this run" branch NEVER enters
+ * `rows` at any point — `entry.originalStagedRowExternalIds` (captured at
+ * staging, before any recheck) excludes it by construction, so it is never
+ * at risk from a drop and always stays expected. An id that DID enter
+ * `rows` at staging time survives here only if a representative row for it
+ * is present in the FINAL surviving rows, after every recheck AND every
+ * late drop.
  */
-function lateContentDropWarnings(
-  droppedByAccountId: ReadonlyMap<number, ReadonlySet<string>>,
+function finalizeExpectedCardExternalIds(
+  staged: readonly {
+    account: { id: number };
+    expectedCardExternalIds: string[];
+    originalStagedRowExternalIds: ReadonlySet<string>;
+  }[],
+  cutoverChecked: readonly { account: { id: number }; rows: readonly StagedRow[] }[],
+  lateContentDropsByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
+  lateIdentityDropsByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
+): void {
+  const lateDroppedByAccountId = new Map<number, Set<StagedRow>>();
+  for (const map of [lateContentDropsByAccountId, lateIdentityDropsByAccountId]) {
+    for (const [accountId, rows] of map) {
+      const set = lateDroppedByAccountId.get(accountId) ?? new Set<StagedRow>();
+      for (const row of rows) set.add(row);
+      lateDroppedByAccountId.set(accountId, set);
+    }
+  }
+
+  for (const entry of staged) {
+    if (entry.expectedCardExternalIds.length === 0) continue;
+    const lateDropped = lateDroppedByAccountId.get(entry.account.id);
+    const cutoverEntry = cutoverChecked.find((e) => e.account.id === entry.account.id);
+    const survivingIds = new Set(
+      (cutoverEntry?.rows ?? [])
+        .filter((r) => !lateDropped?.has(r))
+        .map((r) => r.externalId),
+    );
+    entry.expectedCardExternalIds = entry.expectedCardExternalIds.filter(
+      (id) => !entry.originalStagedRowExternalIds.has(id) || survivingIds.has(id),
+    );
+  }
+}
+
+/**
+ * The write loop's own two inline drop mechanisms — the late fallback
+ * content check (`nowDuplicate`, immediately before a promotion-fallback
+ * insert) and Bug A's genuine-anomaly identity backstop — have no
+ * standalone recheck function of their own, unlike
+ * `recheckLandedIds`/`recheckContentDedup`/`recheckReissuedIds`/
+ * `recheckCutoverAnchor`: they are inline logic inside the per-row insert
+ * loop, so neither has a `{ warnings: string[] }` of its own the way those
+ * four do. This builds the equivalent sentence from a raw drop map — the
+ * MESSAGE differs per caller (`sentence`, taking the count and account
+ * name), but formatting `n` and a name into one pluralized string decides
+ * nothing about WHICH rows were dropped, the same test `applyDedupPruning`'s
+ * own docstring uses to justify sharing ITS bookkeeping tail — so a genuine
+ * late-race drop is never silent on either path (silent-failure-hunter
+ * finding, `/ship`: this used to have no user-visible warning on any path).
+ */
+function lateDropWarnings(
+  droppedByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
   staged: readonly { account: { id: number; name: string } }[],
+  sentence: (n: number, accountName: string) => string,
 ): string[] {
   return staged.flatMap((entry) => {
-    const droppedIds = droppedByAccountId.get(entry.account.id);
-    if (!droppedIds || droppedIds.size === 0) return [];
-    const n = droppedIds.size;
-    return [
-      `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" matched activity ` +
-        `already imported by another process while this sync was running, so ` +
-        `${n === 1 ? "it was" : "they were"} skipped.`,
-    ];
+    const dropped = droppedByAccountId.get(entry.account.id);
+    if (!dropped || dropped.length === 0) return [];
+    return [sentence(dropped.length, entry.account.name)];
   });
+}
+
+function lateContentDropWarnings(
+  droppedByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
+  staged: readonly { account: { id: number; name: string } }[],
+): string[] {
+  return lateDropWarnings(
+    droppedByAccountId,
+    staged,
+    (n, name) =>
+      `${n} transaction${n === 1 ? "" : "s"} on "${name}" matched activity ` +
+      `already imported by another process while this sync was running, so ` +
+      `${n === 1 ? "it was" : "they were"} skipped.`,
+  );
+}
+
+/**
+ * Bug A's genuine-anomaly backstop, in the same voice as its siblings — a
+ * repeated external_id where 2+ occurrences survived every recheck (two
+ * real, distinct SimpleFIN transactions issued the same id) is never
+ * silently absorbed; one is inserted deterministically and every later
+ * claim for that identity is named here.
+ */
+function lateIdentityDropWarnings(
+  droppedByAccountId: ReadonlyMap<number, readonly StagedRow[]>,
+  staged: readonly { account: { id: number; name: string } }[],
+): string[] {
+  return lateDropWarnings(
+    droppedByAccountId,
+    staged,
+    (n, name) =>
+      `${n} transaction${n === 1 ? "" : "s"} on "${name}" shared an id with ` +
+      `another transaction from the same sync, so ${n === 1 ? "it was" : "they were"} skipped.`,
+  );
 }
 
 /**
@@ -2417,9 +2972,11 @@ function lateContentDropWarnings(
  * which the caller decides by using the result before or after its own insert.
  *
  * Cards only, matching the staging loop's own scope — an asset has no cutover
- * to re-check. `droppedByAccountId` lets the caller prune `expectedCardExternalIds`
- * (D8.4, built pre-fetch): an id dropped here was never going to land under
- * this feed's provenance, and D8.4 must not report it as unexplainedly missing.
+ * to re-check. `droppedByAccountId` is `Map<number, StagedRow[]>` (the
+ * dropped ROWS, not their external ids), which `applyDedupPruning` uses to
+ * adjust `counts`. `expectedCardExternalIds` is NOT pruned by this function —
+ * see `finalizeExpectedCardExternalIds`, which recomputes it once, after the
+ * full recheck chain and both of the write loop's own late-drop mechanisms.
  *
  * Callers must pass only accounts that SURVIVED their own link re-check.
  * `NothingVerifiedError`'s rollback path used to pass the raw pre-transaction
@@ -2493,9 +3050,9 @@ function recheckCutoverAnchor<
     account: { id: number; type: AccountType; name: string; startingBalanceDate: string };
     rows: readonly StagedRow[];
   },
->(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, Set<string>>; warnings: string[] } {
-  const droppedByAccountId = new Map<number, Set<string>>();
-  const racedDroppedByAccountId = new Map<number, Set<string>>();
+>(staged: readonly T[], db: AnyDb): { checked: T[]; droppedByAccountId: Map<number, StagedRow[]>; warnings: string[] } {
+  const droppedByAccountId = new Map<number, StagedRow[]>();
+  const racedDroppedByAccountId = new Map<number, StagedRow[]>();
   const checked = staged.map((entry) => {
     if (!isCreditCard(entry.account.type) || entry.rows.length === 0) return entry;
     const current = db
@@ -2511,28 +3068,36 @@ function recheckCutoverAnchor<
     );
     if (stillEligible.length === entry.rows.length) return entry;
 
-    const stillEligibleIds = new Set(stillEligible.map((r) => r.externalId));
-    const dropped = entry.rows.filter((r) => !stillEligibleIds.has(r.externalId));
-    droppedByAccountId.set(entry.account.id, new Set(dropped.map((r) => r.externalId)));
+    // Row-identity subtraction (the PREDICATE itself, negated), NOT an
+    // external_id-SET difference (round-3 outside-review finding: the old
+    // `stillEligibleIds`-based derivation reported ZERO dropped for a
+    // straddling pair, because Bug A's fix can legitimately stage 2 rows
+    // sharing one external_id, and the survivor's own id being "present"
+    // in `stillEligibleIds` made the id-keyed filter treat the DROPPED
+    // sibling as present too).
+    const dropped = entry.rows.filter(
+      (r) => !isAfterAnchor({ date: r.date, anchor: current.startingBalanceDate }),
+    );
+    droppedByAccountId.set(entry.account.id, dropped);
 
     // Raced iff eligible under the OLD (staging-time) anchor but not the
     // fresh one — see this function's own docstring for why that formula
     // both excludes routine drops sharing an account with a real race AND
     // naturally yields zero for a backward-moved anchor.
-    const racedIds = dropped
-      .filter((r) => isAfterAnchor({ date: r.date, anchor: entry.account.startingBalanceDate }))
-      .map((r) => r.externalId);
-    if (racedIds.length > 0) {
-      racedDroppedByAccountId.set(entry.account.id, new Set(racedIds));
+    const raced = dropped.filter((r) =>
+      isAfterAnchor({ date: r.date, anchor: entry.account.startingBalanceDate }),
+    );
+    if (raced.length > 0) {
+      racedDroppedByAccountId.set(entry.account.id, raced);
     }
 
     return { ...entry, rows: stillEligible };
   });
 
   const warnings = staged.flatMap((entry) => {
-    const racedIds = racedDroppedByAccountId.get(entry.account.id);
-    if (!racedIds || racedIds.size === 0) return [];
-    const n = racedIds.size;
+    const raced = racedDroppedByAccountId.get(entry.account.id);
+    if (!raced || raced.length === 0) return [];
+    const n = raced.length;
     return [
       `${n} transaction${n === 1 ? "" : "s"} on "${entry.account.name}" landed on or ` +
         `before its balance date while this sync was running, so ${n === 1 ? "it wasn't" : "they weren't"} ` +
@@ -2626,11 +3191,14 @@ function missingAccountWarnings(names: string[]): string[] {
  * every path that can add to `expectedCardExternalIds`: an id only ever
  * enters that set when it is (a) already stored under this feed's tag before
  * this run started, (b) about to be written by THIS run's own insert loop
- * and not subsequently pruned by the link/id-race/content-race/cutover
- * re-checks (each of which removes its drops from the set — see
- * `applyDedupPruning` and the `dropped.has(...)` guard below), or (c) landed
- * by a concurrent sync this same run's raced-id check found already stored.
- * Every one of those is, by
+ * and a representative row for it survived every recheck
+ * (link/id-race/content-race/reissued-id/cutover) AND both of the write
+ * loop's own late-drop mechanisms — `finalizeExpectedCardExternalIds`
+ * recomputes the set ONCE, after all of those have run, rather than each
+ * recheck pruning it incrementally (see that function's own docstring for
+ * why the old incremental form broke once 2 rows could share one
+ * external_id) — or (c) landed by a concurrent sync this same run's
+ * raced-id check found already stored. Every one of those is, by
  * construction, provably in the database by the time this check runs — so
  * under CORRECT code this function can never actually find a gap. Its real
  * value is as a REGRESSION GUARD on the insert pipeline: if a future change

@@ -399,15 +399,568 @@ depth), the next step is implementation, not a fourth plan-only review round.
   `src/lib/simplefin/undoSync.test.ts`, `src/lib/contentCandidates.test.ts`,
   `src/lib/importBatch.test.ts`.
 
-## PR2 — cutover-boundary duplicate external_id loss (TODOS.md:3463)
+## PR2 — cutover-boundary duplicate-id loss + reissued-external_id race (TODOS.md:3463 + the "different external ids" P2)
 
-Narrower and compound (needs a genuinely duplicate `external_id` in one feed
-response AND that duplicate straddling a card's D8.1 cutover anchor). Sketch
-only, to be designed in detail once PR1 lands: prefer, among same-external-id
-occurrences within one response, the one that survives cutover under the
-*fresh* (post-await) anchor rather than blind array order — using the stale
-pre-fetch anchor only as a tie-break signal, not as the decision itself, to
-avoid reopening rule 11's read-before-await trap. Needs its own
-`recheckLandedIds`-style verification and its own regression tests before
-being called done, matching this file's now-established review cadence for
-every change in this function.
+Bundled deliberately (`/plan-eng-review`, 2026-09-18): both are instances of
+the same underlying question — how much can `syncSimpleFin` trust a
+SimpleFIN `external_id` to be a stable identity for one real-world
+transaction. Three outside-review rounds (Codex) ran against the design
+before implementation began, each finding real, confirmed structural gaps in
+the previous round's fix — the same cadence PR1 went through. See "What the
+outside review changed" below for the full history; this section is the
+converged design.
+
+### Bug A — D8.1 cutover-boundary duplicate-id loss
+
+When SimpleFIN sends the SAME `external_id` twice in one response and the
+two occurrences straddle a card's cutover anchor (one dated on/before, one
+strictly after), the staging loop's `seenExternalIds` set collapses them by
+array order — whichever occurs FIRST wins the id slot and is the only one
+that ever reaches `entry.rows`; the second is discarded as an ordinary
+`duplicateByExternalId`. If the pre-anchor occurrence happens to come first,
+the post-anchor, ELIGIBLE occurrence is silently, permanently lost — neither
+one lands. Reproduced empirically (anchor `2026-08-20`, occurrences dated
+`2026-08-15` and `2026-09-01`, same external id → `ROWS: []`).
+
+### Bug B — reissued external_id for the same real transaction
+
+`queryContentDedupCandidateRows` (`sync.ts:267-326`) excludes any row
+already tagged `simplefin_source_account_id = feedId` from content-dedup
+candidacy, on the assumption "the id pass already accounts for it" — true
+when the same feed reissues a STABLE id across repeated fetches (the
+ordinary case, caught upstream by `seenExternalIds` before content dedup is
+ever consulted). False if the feed genuinely issues a NEW id for what's
+really the same event across two overlapping fetches (reproduced with a
+mocked concurrent-sync side effect landing a row mid-fetch under a different
+id) — the id pass doesn't match (different ids), and candidacy exclusion
+means content dedup doesn't either, so a genuine duplicate row lands.
+Pre-existing on `main`, unmeasured on the live ledger.
+
+### Design decisions locked
+
+- **Bug A: defer the tie-break to the write transaction, never a
+  staging-time heuristic on the stale pre-fetch anchor.** Rule 11's own
+  reasoning applies directly — the fresh anchor is only known
+  post-`await fetchAccounts`. A heuristic using the stale anchor as a
+  tie-break signal was considered and rejected: the losing occurrence would
+  be discarded before ever reaching the fresh-anchor check, reopening
+  exactly the class of bug this file has already found and fixed three
+  times (rule 11's own list).
+- **Bug A: no date-swap.** An earlier design carried a single surviving row
+  plus an `alternateDates` array, swapped in by `recheckCutoverAnchor` at
+  write time. Rejected — `contentSignature` includes date, and the swap
+  happened AFTER `recheckContentDedup` already ran against the pre-swap
+  date, so a differently-provenanced existing row matching the ALTERNATE
+  date would never be checked against, letting a genuine duplicate slip
+  through uncaught. The converged design never swaps a row's date; each
+  occurrence keeps its own real date from staging through insert.
+- **Bug B: scope to this sync's own race window (the fetch round trip),
+  never a "same-feed row absent from this fetch" heuristic.** The naive
+  heuristic is unsafe: a same-feed row legitimately vanishes from a fetch
+  just by aging past the 45-day lookback floor, which would wrongly match it
+  against a coincidentally-identical, genuinely different transaction — the
+  exact regression rule 3 already fixed once (two identical same-day
+  coffees must both survive). The actual reproduction is a race (two
+  overlapping `/sync` fetches), not a steady-state pattern, so the fix
+  mirrors `recheckContentDedup`'s frozen/fresh diff on ROW IDENTITY, scoped
+  to same-feed rows that appeared strictly during THIS sync's own fetch —
+  snapshotted BEFORE `await fetchAccounts` (not alongside the post-fetch
+  `originalContentBudget` capture, which would already include a row that
+  landed during the fetch itself, missing the exact race that was
+  reproduced).
+- **Bug B: no re-tagging.** Once a race is detected, the incoming duplicate
+  is dropped and the existing (older-id) row is left as-is. No schema
+  change, no new undo/snapshot semantics.
+- **Two residuals accepted, not fixed, both bounded and disclosed:**
+  1. **Bug A** — a genuine SimpleFIN anomaly (two REAL, distinct
+     transactions issued the SAME external_id, both surviving every recheck
+     independently) has no principled resolution; one is inserted
+     deterministically and the drop is warned, never silently absorbed.
+  2. **Bug B** — whether a same-feed row appearing during the race window
+     represents a genuine reissue of an incoming row (should drop) or a
+     coincidentally-identical, genuinely separate transaction (should NOT
+     drop) is undecidable from content alone — the same ambiguity rule 4
+     documents for same-account reversals. Accepted as proportionate: the
+     exposure window is bounded by `SYNC_TIMEOUT_MS` (60s, `sync.ts:108`),
+     roughly 1/64,800th of rule 3's own already-accepted coincidental-content
+     window (the full 45-day lookback, every ordinary sync, forever).
+     Separately, if a reissue is genuinely PERMANENT (the feed's new id, not
+     a one-off race artifact), every later ordinary sync reporting the new
+     id will still insert it as a duplicate — dropping the raced occurrence
+     doesn't touch the steady-state candidacy exclusion the fix
+     deliberately leaves alone (touching it reopens rule 3's regression).
+     TODOS.md's own reproduction is race-scoped, not permanent-reissue-
+     scoped, so this closes exactly the reported bug; the broader case is
+     out of scope for this PR.
+  3. **Bug A, a narrower pre-existing residual found during implementation
+     review** — `idsKnownBeforeThisRun` (an id already stored under this
+     feed's provenance from a PRIOR sync) short-circuits unconditionally,
+     before the signature registry ever runs: `duplicateByExternalId++` and
+     `continue`, regardless of content signature. If SimpleFIN ever
+     reissued an id ACROSS two separate syncs (not within one response —
+     that is Bug A's own scope) for what is really a DIFFERENT real
+     transaction, that new transaction would be silently absorbed as an
+     ordinary duplicate, with no warning — the identical anomaly Bug A now
+     warns about explicitly, just one sync apart instead of within one
+     response. Not fixed here: closing it would mean re-evaluating an
+     already-known id's signature on every ordinary sync, a materially
+     larger and differently-shaped change than this PR's scope, for a case
+     with the same zero-evidence status as the other two residuals above.
+
+### Design — Bug A: signature-aware collapse, no swap
+
+**Collapse ONLY on an exact signature match.** A per-response
+`Map<string /* externalId */, Set<string> /* processed signatures */>`
+records every occurrence's content signature the moment it is evaluated —
+BEFORE the promotion/content-budget check, and regardless of whether that
+check ends up dropping it. (This is the round-3 correction: recording only
+STAGED rows' signatures is not enough — a content-dropped first occurrence
+never reaches `entry.rows`, so a second, identical occurrence would
+wrongly see "nothing processed yet" and get independently re-evaluated
+against an already-spent budget, reproducing the same bug through a
+different path.) When a within-response duplicate's signature EXACTLY
+matches one already recorded for that external_id, it is dropped silently,
+today's exact behavior, no new state beyond the signature registry.
+
+When a duplicate's signature genuinely DIFFERS from every signature already
+recorded for that external_id (the actual anomalous case — two dates for
+one id), it is NOT collapsed. It runs through the identical
+promotion-candidate / content-budget check any ordinary row gets, using ITS
+OWN real signature — safe, because a distinct signature cannot double-spend
+the budget slot an earlier, different-signatured occurrence already
+consumed. If unmatched, it is pushed to `entry.rows` carrying the SAME
+`externalId` as the earlier-staged occurrence. `entry.rows` can now
+legitimately hold 2+ rows sharing one `externalId`, but only when their
+signatures genuinely differ — the identical-repeat case, which the existing
+counting machinery already handles, never produces this shape.
+
+**No swap, ever.** Each row keeps its own real date from staging through
+every recheck through insert. `recheckContentDedup` (diffs by signature) and
+`recheckCutoverAnchor` (`isAfterAnchor` is already a per-row filter) both
+already operate correctly and independently per row when 2 rows happen to
+share an `externalId` with different signatures.
+
+**Generalizing the drop-accounting machinery — the real scope growth, and
+where it actually reaches (round 3 found more of it than round 1 knew
+about).** Four producers currently report a drop as `Set<string>` of
+external ids, all of which need to become row-identity-based
+(`Map<number, StagedRow[]>` or equivalent) so a straddling pair's ONE actual
+dropped row is counted as 1, not silently folded into a same-id survivor and
+reported as zero:
+1. `recheckLandedIds`
+2. `recheckContentDedup`
+3. `recheckCutoverAnchor` — needs more than a container-type change: its
+   current derivation computes the dropped set as "all ids minus SURVIVING
+   ids" (`sync.ts:2514-2516`), which for a straddling pair reports ZERO
+   dropped (the id is still present among survivors, since the pair shares
+   one external_id). This must become a direct row-identity subtraction
+   (which specific ROWS failed `isAfterAnchor`), not an id-set difference.
+4. `lateContentDropsByAccountId` — the write loop's own inline "fallback
+   content check" (`sync.ts:1607-1628`), missed in round 1's scope: it feeds
+   `applyDedupPruning` on both the success and `NothingVerifiedError`
+   rollback paths and separately decrements `verifiedTotal`
+   (`sync.ts:1508`, `1692`). Needs the identical conversion.
+
+`applyDedupPruning`'s count decrement becomes `droppedRows.length`, not a
+`Set.size` of ids. `expectedCardExternalIds` correctness (round 3
+correction): an id can be legitimately expected via TWO populations that
+never enter `entry.rows` at all — a row already known before this run
+(`idsKnownBeforeThisRun`) and a row dropped by ordinary id/content match —
+so the fix is NOT "intersect with final survivors" (which would erase a
+legitimate expectation that was never staged in the first place). It is:
+remove an id from the expectation set only when every row that WAS staged
+under it failed to survive AND the id wasn't independently expected via one
+of those other populations. `written`'s return shape and the rollback
+path's discarded `cutoverChecked`/`contentChecked` intermediates need to
+thread final survivor identity through explicitly rather than being
+reconstructed after the fact.
+
+**Insert-time identity guard — still needed, for the 2-survivor anomaly
+only.** A transaction-scoped `Set<string>` keyed `` `${feedId}:${externalId}` ``,
+checked before BOTH the ordinary INSERT and `tryPromoteCandidate`'s UPDATE
+(closing round 1's finding: a repeated id must not claim identity twice via
+either write path — one occurrence promoting a pending candidate while its
+sibling reaches an ordinary INSERT still violates the unique index). The
+claim is recorded only AFTER a successful INSERT or promotion, never after a
+failed promotion attempt (round 3 correction — a failed promotion attempt
+must fall through to the ordinary insert path exactly as
+`tryPromoteCandidate`'s existing contract already requires, unblocked by a
+premature claim). First successful claim wins; a later claim for the same
+key is skipped with a warning, folded into `duplicateByExternalId`, and
+must reduce `verifiedTotal` and the per-account `insertedCount` the same way
+every other late drop does — reachable now only for the genuine anomaly,
+since every routine case is already resolved before the write loop starts.
+
+### Design — Bug B: `recheckReissuedIds`
+
+New sibling recheck, same family as `recheckLandedIds` / `recheckContentDedup`
+/ `recheckCutoverAnchor`, added to both the write path and the
+`NothingVerifiedError` rollback path in the same position (after
+`recheckContentDedup`, before `recheckCutoverAnchor`, so a row that is both
+a reissued-id race AND genuinely pre-cutover gets one warning, not two
+contradictory ones, matching the existing content-then-cutover chaining
+precedent).
+
+**Staging (new, small addition):** for every linked account, BEFORE
+`await fetchAccounts` (not alongside the post-fetch `originalContentBudget`
+capture — this timing is what makes the recheck actually cover the
+reproduced race, where the concurrent write lands DURING the fetch), query
+`SELECT id, external_id FROM transactions WHERE accountId=? AND
+simplefin_source_account_id=feedId AND date >= floorIso` and freeze the id
+set as `originalSameFeedRowIds` on the (soon-to-be) `Staged` entry.
+
+**Recheck (`recheckReissuedIds(staged, db)`):** re-run the same query with
+`date, amountCents, rawMemo` added, inside the write transaction. Filter to
+rows whose `id` is NOT in `originalSameFeedRowIds` — same-feed rows that
+appeared strictly during this sync's own fetch window (only a concurrent
+writer can produce one; this sync hasn't inserted anything yet at this point
+in its own transaction). Build a `Map<signature, count>` from these
+newly-appeared rows, mirroring `recheckContentDedup`'s own `deltaRemaining`
+decrement-per-match exactly (multiset-safe — one newly-appeared row
+eliminates at most one incoming row, never every incoming row sharing its
+signature). Skip any row carrying `promotionCandidateId`, mirroring
+`recheckContentDedup`'s own established exemption for the same reason.
+Reuses `applyDedupPruning(..., "duplicateByContent")` — this IS a
+content-based duplicate find, just from a different candidate population.
+
+**Warning text**, distinguishable from `recheckContentDedup`'s own: "N
+transaction(s) on "X" matched a transaction already confirmed under a
+different id while this sync was running, so it/they were skipped."
+
+**No `recheckLandedIds` cross-check** (considered in an earlier revision,
+removed) — whether to exclude a newly-appeared row already "used" by
+`recheckLandedIds`'s own id-race drop doesn't actually prevent a real bug:
+the underlying DB row is a fact regardless of what happened to some other
+incoming occurrence of its own id, and excluding it would just as often
+wrongly let a genuine reissue through as it would prevent a coincidence.
+
+### What the outside review changed
+
+**Round 1** (against a design that let both occurrences of a duplicate id
+flow independently through the ordinary per-row pipeline, and captured
+Bug B's snapshot alongside the post-fetch `originalContentBudget`): found
+the independent-flow design would regress within-response duplicate
+handling once budget is exhausted by the first occurrence; found
+`applyDedupPruning` undercounts once 2 rows share one external_id; found
+the insert-time guard needed to also cover `tryPromoteCandidate`'s UPDATE
+path; found the post-fetch snapshot timing misses the exact race that was
+reproduced (the concurrent write lands DURING the fetch); found the
+signature match needed multiset-safe consumption; correctly identified that
+"drop, don't retag" doesn't fully close a hypothetical permanent reissue.
+
+**Round 2** (against a "collapse always, carry `alternateDates`, swap at
+write time" design): found the swap bypasses content dedup, since
+`contentSignature` includes date and the swap happens after
+`recheckContentDedup` already ran against the pre-swap date; found the
+round-1 regression-test citation was invalid — `hasPreExistingManualCardHistory`
+(verified by reading it directly, `hasPreExistingManualCardHistory.ts:51-60`)
+blocks the WHOLE account's feed processing whenever it carries any manual
+row, so the cited test's assertion passes for that unrelated reason, not
+because of within-response content-dedup logic (the underlying bug was
+independently re-confirmed by hand-tracing a non-card account, so the
+design conclusion stood even though the citation didn't); found the
+`recheckLandedIds` cross-check for Bug B lacked the data to work and wasn't
+solving a real problem; corrected the residual's scope (recurs on every
+later sync reporting the new id, not just a one-off hypothetical).
+
+**Round 3** (against the converged "no-swap, signature-aware collapse,
+row-identity drop accounting" design): confirmed no wholesale redesign
+needed. Found the signature registry must record EVERY processed signature
+(including ones that were themselves content-dropped, never reaching
+`entry.rows`), not just staged ones — otherwise an identical repeat of an
+already-dropped occurrence reproduces the original bug through a different
+path. Found `recheckCutoverAnchor`'s own existing drop derivation (surviving
+ids subtracted from all ids) reports zero drops for a straddling pair
+specifically because the survivor shares the dropped row's external_id —
+a genuine bug in code this design was reusing, not just a container-type
+mismatch. Found a fourth, previously-missed drop producer
+(`lateContentDropsByAccountId`, the write loop's own inline fallback content
+check) needing the identical conversion. Corrected the Bug B residual's
+window from an unsupported "milliseconds" claim to the actual
+`SYNC_TIMEOUT_MS` bound (60s) — the proportionality argument against rule
+3's already-accepted risk still holds at the corrected scale (~1/64,800).
+
+### Test plan
+
+- **Bug A — identical-duplicate regression, corrected fixture.** A
+  NON-card account (no `hasPreExistingManualCardHistory` interference) with
+  an existing differently-provenanced row, and a feed response sending one
+  external_id TWICE with IDENTICAL content matching that existing row —
+  asserts NEITHER occurrence inserts, `duplicateByContent` incremented by
+  exactly 1 (one event, one drop), regardless of which occurrence the
+  signature registry happened to process first.
+- **Bug A — identical-duplicate where the first occurrence is itself
+  content-dropped (round-3 case).** Distinguishes "processed" from
+  "staged": the first occurrence matches an existing row and is dropped
+  before ever reaching `entry.rows`; the second, identical occurrence must
+  still be recognized as already-processed and dropped too, not
+  independently re-evaluated against an already-spent budget.
+- **Bug A — core cutover repro**, no swap: anchor `2026-08-20`, occurrences
+  dated `2026-08-15`/`2026-09-01`, same external_id — the post-anchor
+  occurrence inserts under its own real date, the pre-anchor occurrence
+  drops as `skippedBeforeAnchor`, with `insertedCount`/`expectedCardExternalIds`
+  both correct for exactly 1 dropped row (not silently 0 via an id-set
+  difference — the round-3-caught bug).
+- **Bug A — TWO dropped occurrences sharing one id** (distinguishes
+  `Set.size` from `StagedRow[].length`, per round 3 — a test with only one
+  drop cannot tell the fixed code from the old, buggy one by coincidence).
+- **Bug A — non-card account, duplicate id, differing dates** (no cutover
+  filter ever runs): both occurrences reach the insert loop; the
+  insert-time identity guard keeps exactly one, warns, increments
+  `duplicateByExternalId`, and correctly reduces `verifiedTotal`/
+  `insertedCount`.
+- **Bug A — promotion-vs-insert identity race**, both orderings
+  (promotion-first, insert-first) and a failed-promotion-then-survivor
+  case: the identity claim is recorded only after a successful write, never
+  after a failed promotion attempt.
+- **Bug A — `expectedCardExternalIds` correctness** for an id that was
+  never staged at all (`idsKnownBeforeThisRun`) alongside a straddling pair
+  in the same run — the never-staged id's expectation must survive
+  unaffected by the pair's own accounting.
+- **Bug B — core repro, corrected timing**: the concurrent write happens
+  during `await fetchAccounts` itself (not merely between staging and
+  write), proving the pre-fetch snapshot actually covers the reproduced
+  window.
+- **Bug B — multiset guard**: two newly-appeared same-feed rows against two
+  incoming rows sharing one signature — both incoming rows are correctly
+  matched and dropped (not one drop wrongly absorbing both incoming rows,
+  and not a bare set-membership check treating the pair as one match).
+- **Bug B — promotion exemption**, mirroring `recheckContentDedup`'s own.
+- **Bug B — rollback-path equivalent**, using a still-linked account whose
+  OWN reissue drop is what causes `NothingVerifiedError` (an
+  all-link-dropped setup excludes accounts before any recheck runs and
+  cannot exercise this path).
+- **Ordering/interaction**: a row that is both a reissued-id race match AND
+  genuinely pre-cutover — exactly one warning fires, matching the existing
+  content-then-cutover precedent test shape.
+
+### What already exists (reused, not rebuilt)
+
+- `contentSignature` (`src/lib/contentSignature.ts`) — unchanged, reused for
+  both the signature registry (Bug A) and `recheckReissuedIds`'s multiset
+  match (Bug B).
+- `recheckContentDedup`'s `deltaRemaining` decrement-per-match shape — the
+  exact multiset algorithm `recheckReissuedIds` mirrors, not reimplements.
+- `applyDedupPruning` — generalized (row-identity instead of id-Set), not
+  replaced; every existing caller's call SHAPE is unchanged.
+- `isAfterAnchor` (`src/lib/accounts/isAfterAnchor.ts`) — unchanged;
+  `recheckCutoverAnchor`'s per-row filter already does the right thing once
+  fed rows with distinct signatures, no change to the eligibility test
+  itself.
+- The `NothingVerifiedError` rollback path's existing rebuild-every-recheck
+  discipline — `recheckReissuedIds` slots into the SAME pattern
+  `recheckLandedIds`/`recheckContentDedup`/`recheckCutoverAnchor` already
+  established there, not a new mechanism.
+- `AnyDb`/`SyncTx` dual-use typing — every new/changed function follows the
+  same structural-generic `T extends {...}` pattern the three existing
+  rechecks already use, per rule 11's own `_DB_IS_NOT_A_TX` discipline.
+
+### Data flow — Bug A (per account, per external_id group)
+
+```
+feed response, one account
+        │
+        ▼
+ for each txn (posted only) ──► seenExternalIds.has(id)?
+        │                              │
+        │ no                           │ yes
+        ▼                              ▼
+  record signature in          idsKnownBeforeThisRun.has(id)?
+  registry[id] (ALWAYS,        (pre-existing DB row, ordinary case)
+  before matching)                │              │
+        │                        yes             no (within-response dup)
+        ▼                         │              │
+  promotion/content-budget        ▼              ▼
+  check (as today)          duplicateByExternalId   registry[id].has(thisSignature)?
+        │                   (drop, unchanged)         │            │
+   ┌────┴────┐                                       yes           no
+   │matched? │                                        │            │
+   yes       no                                       ▼            ▼
+   │         │                                     drop, no    independent
+   ▼         ▼                                     new state   promotion/budget
+ drop    push to entry.rows                                    check using ITS
+(as today)  (may now share an                                  OWN signature
+            externalId with an                                       │
+            earlier row in this                                 ┌────┴────┐
+            group, iff signatures                                matched? │
+            differ)                                              yes    no
+                                                                   │      │
+                                                                   ▼      ▼
+                                                                 drop  push (shares
+                                                                       externalId,
+                                                                       different sig)
+
+        write transaction (fresh anchor known here)
+        ────────────────────────────────────────────
+        recheckLandedIds → recheckContentDedup →
+        recheckReissuedIds → recheckCutoverAnchor
+        (each now row-identity-aware; a straddling
+        pair's pre-anchor row drops, post-anchor
+        row survives, using ITS OWN real date)
+                     │
+                     ▼
+        insert-time identity guard (feedId:externalId)
+        — only reachable if 2+ rows for one id BOTH
+        survived every recheck (genuine anomaly):
+        first claim (INSERT or promotion UPDATE) wins,
+        later claim warns + counts as duplicateByExternalId
+```
+
+### Failure modes
+
+| Codepath | Realistic failure | Test? | Error handling? | User sees |
+|---|---|---|---|---|
+| Signature registry misses a content-dropped first occurrence | Reintroduces the original duplicate-content bug through a new path | Yes (round-3 test above) | N/A — correctness fix | Silent if untested; correct+silent if tested (matches existing dedup UX) |
+| `recheckCutoverAnchor`'s own id-set-difference drop derivation | Under-reports drops for any straddling pair, corrupting `insertedCount` | Yes (two-dropped-occurrences test) | N/A — bookkeeping | A wrong number on `/sync`'s summary; no data loss, but a misleading count |
+| Insert-time guard checked but not recorded until after write | A promotion that FAILS still lets a same-id INSERT through the guard | Yes (failed-promotion-then-survivor test) | Falls through to ordinary insert, by design | Correct row lands; no user-visible symptom |
+| `recheckReissuedIds` pre-fetch snapshot query fails/times out | Sync fails open — no per-account isolation exists for a snapshot query failure today either (matches existing risk profile of every other staging-time query) | Not newly tested — same risk class as existing staging queries | Existing per-sync error handling (outcome returned as state, never thrown, per the file's own doctrine) | A failed sync reports failure, not a silent partial result |
+| Genuine 2-survivor anomaly (Bug A) | A real SimpleFIN id collision between 2 distinct transactions | Yes | Deterministic pick + warning, never silent | Warning naming the account; one transaction visibly missing, explained |
+| Permanent reissue (Bug B residual) | An id change that isn't a race artifact keeps re-duplicating | Not tested (out of scope, disclosed) | None — accepted residual | A duplicate row on a later sync, same as today's status quo |
+
+No critical gap (untested AND unhandled AND silent) survives this design —
+the two residuals are both handled (deterministic pick, or accepted
+degrades-to-today's-behavior) and both disclosed, not silent-and-untested.
+
+### Worktree parallelization strategy
+
+Sequential implementation, no parallelization opportunity — every task (T1
+through T5) touches the same single file (`src/lib/simplefin/sync.ts`) and
+its one test file, with T2 (drop-accounting generalization) as a hard
+prerequisite for T1's collapse logic and T3's insert-time guard to be
+verifiable at all.
+
+### NOT in scope
+
+- Re-tagging the existing row's `external_id` on a Bug B match.
+- Any change to `queryContentDedupCandidateRows`'s existing steady-state
+  candidacy predicate — both accepted residuals above depend on it staying
+  exactly as-is.
+- A fully general "N occurrences, arbitrary field differences" resolution
+  for Bug A — scoped specifically to occurrences differing in DATE (what
+  was reproduced); an occurrence differing in amount/memo behaves as today
+  (first-processed wins), unmeasured and out of scope.
+- TODOS.md's separate P4 (`/sync` vs `/import/success` count-display
+  mismatch on a promotion) and P3 (stale `transfer_pair_rejections` row
+  surviving a promotion-undo) residuals — unrelated mechanisms, the latter
+  explicitly deferred pending a product decision.
+
+## Implementation Tasks (PR2)
+
+- [x] **T1 (P1, human: ~2h / CC: ~30min)** — signature registry + collapse
+  logic in the staging loop (Bug A). Files: `src/lib/simplefin/sync.ts`.
+- [x] **T2 (P1, human: ~4h / CC: ~1h)** — generalize drop accounting to
+  row-identity across all four producers (`recheckLandedIds`,
+  `recheckContentDedup`, `recheckCutoverAnchor`'s own derivation fix,
+  `lateContentDropsByAccountId`) plus `applyDedupPruning` and
+  `expectedCardExternalIds` correctness. Files: `src/lib/simplefin/sync.ts`.
+- [x] **T3 (P1, human: ~2h / CC: ~30min)** — insert-time identity guard
+  covering both INSERT and `tryPromoteCandidate`'s UPDATE. Files:
+  `src/lib/simplefin/sync.ts`.
+- [x] **T4 (P1, human: ~3h / CC: ~40min)** — `recheckReissuedIds`: pre-fetch
+  snapshot, multiset-safe write-time recheck, both call sites (write path +
+  rollback path). Files: `src/lib/simplefin/sync.ts`.
+- [x] **T5 (P1, human: ~4h / CC: ~1h)** — full test suite per the Test plan
+  above. Files: `src/lib/simplefin/sync.test.ts`.
+
+### Implementation review (2026-09-19, `/feature-dev`)
+
+Three specialist review agents ran in parallel against the actual diff
+(silent-failure-hunter, code-simplifier, pr-test-analyzer) — the first
+implementation-level review this design received, as opposed to the three
+design-level Codex rounds above. All three independently verified `tsc`
+clean and the full suite green before reviewing. Findings, all fixed in the
+same pass:
+
+- **Correctness-adjacent (code-simplifier, independently confirmed
+  not-currently-live by silent-failure-hunter):** `finalizeExpectedCardExternalIds`
+  ran before the write loop's own two late-drop mechanisms
+  (`lateContentDropsByAccountId`, `lateIdentityDropsByAccountId`) populated
+  — correct today only because of two invariants living elsewhere (a late
+  content drop can only ever be a promotion-candidate row, asset-only by
+  construction; a late identity drop always shares its id with a surviving
+  sibling), not because the code enforces it. Moved to run after both, on
+  both the write path and rollback path, computing final survivorship by
+  actually subtracting the late-dropped rows.
+- **Re-opened hazard (code-simplifier):** a second, independent
+  `isoDaysAgo(MAX_LOOKBACK_DAYS, now)` call for the pre-fetch snapshot
+  agreed with the staging loop's own `contentFloorIso` only because both
+  passed the same `now` — exactly the "agree by coincidence, not by
+  construction" shape `Staged.contentFloorIso`'s own docstring says this
+  file already fixed once. Hoisted to one call, threaded through both.
+- **DRY (code-simplifier):** `lateIdentityDropWarnings` was a byte-for-byte
+  copy of `lateContentDropWarnings` with one sentence swapped; the
+  `recheckReissuedIds` consumption loop duplicated `recheckContentDedup`'s
+  verbatim, including its promotion-exemption as an uncommented second
+  implementation. Extracted `lateDropWarnings`/`consumeBySignature` shared
+  helpers (the mechanical half only — each recheck's own DECISION, i.e.
+  which signatures populate the budget, stays separate, per this file's
+  established line for what `applyDedupPruning` shares vs. what it doesn't).
+  `seenExternalIds` (a live, mutated Set) was also removable entirely once
+  `processedSignaturesByExternalId` existed — verified logically equivalent
+  before removing.
+- **Critical test gap (pr-test-analyzer):** this plan's own Failure modes
+  table cited a "failed-promotion-then-survivor" test as existing
+  evidence for its "no critical gap survives this design" claim — it did
+  not exist. Added, along with the reverse ordering (insert-first blocks a
+  later promotion attempt entirely, candidate left stranded pending) and a
+  card-specific genuine-2-survivor-anomaly test (the non-card case doesn't
+  exercise `expectedCardExternalIds`/D8.4 interaction at all).
+- **Test gap (pr-test-analyzer):** no test for Bug B's own "exactly one
+  warning" ordering guarantee (reissued-id-and-pre-cutover), the same
+  ordering-regression class the pre-existing content-vs-cutover test
+  guards against for an older pairing. Added. Also added: a write-path
+  (commit, not rollback) exercise of `written.reissuedDroppedByAccountId` —
+  every original Bug B test happened to land on the rollback path.
+- **Documentation-only (silent-failure-hunter):** a narrower, pre-existing
+  residual — an id reissued ACROSS two separate syncs (not within one
+  response) for a genuinely different transaction is silently absorbed by
+  `idsKnownBeforeThisRun`'s unconditional short-circuit, with no warning.
+  Recorded as a third named residual above; not fixed (same zero-evidence
+  status as the other two, and closing it needs a larger, differently-shaped
+  change).
+
+Two review-time findings were caught and self-corrected before being
+reported as fixed: an initial test for the identity guard used an
+incorrect Unix timestamp (mapping to 2026-08-09, not the intended
+2026-08-15), and a mutation-testing spot-check confirmed the guard's
+"claim only after a successful write" ordering doesn't currently produce
+an observably different outcome in this file's single-threaded, sequential
+per-row loop (each row's own promotion-or-insert fully resolves before the
+next row starts) — kept as a defensive, correctness-by-construction
+invariant per round 3's own reasoning, not because a test demonstrates an
+observable bug from getting it wrong today.
+
+`pnpm exec tsc --noEmit`, `pnpm lint`, and the full project test suite
+(2292 → 2307 tests) all pass. Two of the highest-value regression tests
+(the `recheckCutoverAnchor` row-count fix and the Bug B pre-fetch-timing
+fix) were independently verified by temporarily reverting each fix and
+confirming the corresponding test fails, then restoring it.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run |
+| Outside Review | Codex CLI, automatic | Independent 2nd opinion | 3 | issues_found → converged | Round 1: 6 findings (independent-flow content-dedup regression, `applyDedupPruning` id-vs-row counting, promotion-path identity gap, post-fetch snapshot timing miss, non-multiset match, residual scope). Round 2: 5 findings (date-swap bypasses content dedup, invalid test citation — verified by reading `hasPreExistingManualCardHistory` directly, unneeded cross-check removed, corrected residual scope). Round 3: 4 findings (signature registry must record dropped-not-just-staged occurrences, `recheckCutoverAnchor`'s own id-set-difference derivation undercounts, a 4th missed drop producer `lateContentDropsByAccountId`, residual window corrected from an unsupported "milliseconds" claim to `SYNC_TIMEOUT_MS`). Round 3 verdict: "no wholesale redesign is needed." |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open (resolved) | 2 architecture issues raised and resolved via `AskUserQuestion` (Bug A tie-break design; Bug B race-scoping design), plus a user-directed scope expansion (bundle both bugs into one PR, overriding the reviewer's initial split recommendation) and one accepted-lower-completeness call (drop rather than re-tag on a Bug B match). 0 code-quality or performance findings beyond the architecture decisions themselves. |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | not run — backend-only change, no UI surface |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | not run |
+
+- **OUTSIDE COVERAGE:** provider `codex`, phase `plan-review`, 3 completed
+  passes (rounds 1–3), each finding real, confirmed structural issues in the
+  prior round's design — verified independently against the live code and
+  test suite before being accepted, not taken on faith. Round 3 explicitly
+  reported no remaining need for a fourth round.
+- **CROSS-MODEL:** No disagreement between the native review and the outside
+  voice at any round — every Codex finding was independently verified
+  against the actual source (line-level citations checked, one citation
+  found genuinely wrong for an unrelated reason — `hasPreExistingManualCardHistory`
+  — but the underlying defect it was cited for was independently
+  re-confirmed by hand-tracing, so the design conclusion stood even though
+  the specific test reference didn't) and incorporated rather than disputed.
+- **VERDICT:** ENG REVIEW CLEARED (design converged after 3 outside-review
+  rounds, 0 unresolved decisions) — implementation not yet started. This PR
+  is design-locked, not shipped; `/ship`'s own review gate applies
+  separately once T1–T5 are implemented.
+
+NO UNRESOLVED DECISIONS

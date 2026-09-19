@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-09-18
+
+### Fixed
+- **A SimpleFIN feed sending the same transaction id twice in one response, with the two occurrences straddling a card's import cutover date, no longer silently loses the eligible one.** Carried over from the previous two releases as "known, not fixed." Sync's dedup logic no longer picks a single winner between same-id occurrences by whichever order the feed happened to list them in — every occurrence now flows through independently, keeping its own real date, and the existing cutover check (which already re-reads the account's current anchor at write time) decides which one is eligible.
+- **A transaction whose SimpleFIN id changes between two overlapping syncs — a genuine race, not a routine re-fetch — no longer inserts as a duplicate.** Sync now recognizes a same-account transaction that appeared during its own fetch window under a new id and matches an incoming row's date, amount and memo, and treats it as the same real transaction rather than a new one.
+- **Three further edge cases in the fix above, found during this release's own adversarial review before it shipped:** a transaction whose id was reused twice in one response could, in one specific ordering, still be counted twice toward "already imported" bookkeeping without actually being written twice (harmless, but the count was wrong); a pending transaction's promotion-to-posted could in principle be lost if two same-id occurrences in one response happened to arrive in a particular order; and the message explaining why a transaction was withheld for sharing an id with another one in the same sync wasn't always saved for later — closing the tab could lose the only explanation.
+
+### Known, not fixed this release
+- A separate, rare case remains open: if SimpleFIN ever durably switches to reporting a new id for an already-imported transaction — not during a race, just permanently — a later ordinary sync would still insert a duplicate. There's no evidence this has happened; fixing it needs a way to tell "this transaction's id was replaced" apart from "this is a coincidentally identical, but genuinely different, transaction," which doesn't exist yet. Recorded in `TODOS.md`.
+
 ## [1.6.3] - 2026-09-18
 
 ### Fixed
