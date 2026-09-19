@@ -6131,6 +6131,45 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(outcome.accounts[0].insertedCount).toBe(0);
   });
 
+  it("does NOT independently insert a DIFFERING-signature sibling once an existing row's content already matched a different occurrence of the same external_id (Codex structured-review finding, `/ship`: a content match must speak for the whole id, not just the occurrence that found it)", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -2000,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-08-31",
+      source: "csv",
+    });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("REISSUED-CONTENT-MATCH", "-20.00"), posted: 1788177600 }, // 2026-08-31 — matches the existing CSV row's content
+      { ...feedTxn("REISSUED-CONTENT-MATCH", "-20.00"), posted: SEP_1_NOON }, // 2026-09-01 — matches nothing on its own
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+
+    // The 2026-09-01 occurrence must NOT land as a second, independent row —
+    // under the pre-fix, sequential/order-dependent design it did, because
+    // its own signature (checked independently) matched nothing, so it fell
+    // through to a plain insert even though the feed's own external_id
+    // claims it is the SAME transaction as the 2026-08-31 occurrence, which
+    // already matched an existing row.
+    const tagged = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "REISSUED-CONTENT-MATCH"))
+      .all();
+    expect(tagged).toHaveLength(0);
+    expect(outcome.accounts[0].insertedCount).toBe(0);
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(outcome.accounts[0].duplicateByExternalId).toBe(1);
+  });
+
   it("recovers the eligible occurrence when a duplicate external_id straddles a card's cutover anchor (the core repro) — with NO date swap: the surviving row keeps its own real date throughout", async () => {
     const card = seedAccount({
       simplefinAccountId: "ACT-CITI",
@@ -6346,9 +6385,22 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(summary.insertedCount).toBe(1);
     expect(summary.duplicateByExternalId).toBe(1);
     expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+
+    // Codex adversarial finding (`/ship`): the late-identity-drop warning
+    // used to exist only in this transient `outcome.warnings` array, never
+    // in `import_batches.snapshotWarning` — closing the tab (or a later
+    // visit to the batch's success page) lost the only explanation for the
+    // withheld transaction, with no way to recover it. It must be
+    // persisted alongside every other pre-write recheck's warning.
+    const written = handle.db
+      .select()
+      .from(schema.importBatches)
+      .where(eq(schema.importBatches.id, outcome.batchId))
+      .get();
+    expect(written?.snapshotWarning).toMatch(/shared an id/);
   });
 
-  it("blocks a same-id INSERT after its sibling occurrence already claimed the identity via PROMOTION — the guard covers both write paths, not INSERT alone", async () => {
+  it("resolves a same-id PROMOTION match at STAGING time, before its sibling occurrence ever reaches the write-time identity guard", async () => {
     const account = seedAccount({ simplefinAccountId: "ACT-1" });
     const csvBatch = seedBatch("csv");
     // A pending row matching the EARLIER-dated occurrence's own signature —
@@ -6365,7 +6417,7 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
 
     respondWith("ACT-1", [
       { ...feedTxn("DUP-PROMO-RACE", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15 — matches the pending row, promotes
-      { ...feedTxn("DUP-PROMO-RACE", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — no match, would ordinarily insert
+      { ...feedTxn("DUP-PROMO-RACE", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — matches nothing on its own
     ]);
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
@@ -6379,11 +6431,17 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
       .where(eq(schema.transactions.externalId, "DUP-PROMO-RACE"))
       .all();
     // Exactly one row carries this external_id — the PROMOTED (formerly
-    // pending) row — and the sibling's would-be insert was blocked by the
-    // identity guard rather than violating the unique index.
+    // pending) row. The 2026-09-01 occurrence is never independently
+    // staged at all: the promotion match found for its sibling resolves
+    // the WHOLE id during staging's group-scan (Codex-found interaction
+    // bug — a match on one occurrence must speak for the id, not just
+    // itself), so it never reaches `toInsert` or the write-time identity
+    // guard. That is why no "shared an id" warning fires here — this is
+    // an ordinary, silent staging-time collapse, not the write-time
+    // backstop reserved for a genuine 2-survivor anomaly.
     expect(rows).toHaveLength(1);
     expect(rows[0].isPending).toBe(false);
-    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(false);
   });
 
   it("keeps a NEVER-STAGED id's completeness expectation intact alongside a straddling pair's own accounting in the same run", async () => {
@@ -6441,17 +6499,19 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(straddleRows).toHaveLength(1);
   });
 
-  it("claims the identity via an ordinary INSERT when its sibling occurrence's PROMOTION attempt genuinely FAILS — the plan's own failure-modes table cites this scenario; it must actually exist", async () => {
+  it("claims the identity via an ordinary INSERT when its staging-time PROMOTION reservation genuinely FAILS at write time — the plan's own failure-modes table cites this scenario; it must actually exist", async () => {
     // Real race window, same idiom as the pre-existing "does not lose or
     // duplicate a transaction when the candidate is deleted" test above:
     // the candidate is removed BETWEEN staging (which finds it pending and
-    // attaches a `promotionCandidateId` to the earlier-dated occurrence)
-    // and the write transaction, via `createSnapshotMock`'s hook. Deletion,
-    // not a same-content promotion, is what makes the occurrence fall
-    // through the `nowDuplicate` safety check cleanly (a same-content
-    // promotion would leave a matching posted row behind and get THIS
-    // occurrence correctly caught as a late content duplicate instead —
-    // a different, already-tested path).
+    // attaches a `promotionCandidateId` to the earlier-dated occurrence,
+    // resolving this within-response duplicate id's whole group — its
+    // 2026-09-01 sibling is dropped as an ordinary duplicate right there,
+    // never independently staged) and the write transaction, via
+    // `createSnapshotMock`'s hook. Deletion, not a same-content promotion,
+    // is what makes the occurrence fall through the `nowDuplicate` safety
+    // check cleanly (a same-content promotion would leave a matching
+    // posted row behind and get THIS occurrence correctly caught as a late
+    // content duplicate instead — a different, already-tested path).
     const account = seedAccount({ simplefinAccountId: "ACT-1" });
     const csvBatch = seedBatch("csv");
     const pending = seedTxn({
@@ -6479,9 +6539,13 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(outcome.status).toBe("synced");
     if (outcome.status !== "synced") throw new Error("unreachable");
 
-    // Exactly one row lands — the FIRST occurrence's fallback insert claims
-    // the identity (the candidate is gone, so nothing was ever promoted),
-    // and the second occurrence's own insert is blocked by the guard.
+    // Exactly one row lands — the staging-time-resolved occurrence's
+    // fallback insert claims the identity once its reservation genuinely
+    // failed (the candidate is gone, so nothing was ever promoted). The
+    // 2026-09-01 sibling was never independently staged in the first
+    // place (see the staging-time comment above), so no write-time
+    // "shared an id" backstop fires here either — it never reaches that
+    // guard at all.
     const rows = handle.db
       .select()
       .from(schema.transactions)
@@ -6491,10 +6555,10 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
     const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
     expect(summary.promotedFromPending).toBe(0);
-    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(false);
   });
 
-  it("blocks a LATER occurrence's PROMOTION attempt when an EARLIER occurrence's ordinary INSERT already claimed the identity — the reverse ordering from the promotion-first test above; the candidate is left stranded pending, never promoted", async () => {
+  it("prefers a LATER occurrence's PROMOTION match over an EARLIER occurrence that matches nothing — a resource match anywhere in the group resolves the whole id, regardless of array order (closes the promotion-reservation-orphaning bug Codex found)", async () => {
     const account = seedAccount({ simplefinAccountId: "ACT-1" });
     const csvBatch = seedBatch("csv");
     const pending = seedTxn({
@@ -6508,8 +6572,8 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     });
 
     respondWith("ACT-1", [
-      { ...feedTxn("DUP-INSERT-FIRST", "-30.00", "TARGET"), posted: 1786795200 }, // 2026-08-15 — no match, plain insert, claims the identity
-      { ...feedTxn("DUP-INSERT-FIRST", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — matches the pending row, but never reaches tryPromoteCandidate
+      { ...feedTxn("DUP-INSERT-FIRST", "-30.00", "TARGET"), posted: 1786795200 }, // 2026-08-15 — matches nothing on its own
+      { ...feedTxn("DUP-INSERT-FIRST", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — matches the pending row
     ]);
 
     const outcome = await syncSimpleFin({ now: NOW }, handle.db);
@@ -6522,18 +6586,22 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
       .from(schema.transactions)
       .where(eq(schema.transactions.externalId, "DUP-INSERT-FIRST"))
       .all();
+    // The PROMOTION match wins for the whole id — even though the
+    // 2026-08-15 occurrence was staged FIRST in array order — so the
+    // pending row's reservation is actually used rather than being
+    // claimed at staging time and then stranded when a sibling occurrence
+    // happens to reach the write loop's identity guard first (the exact
+    // bug an outside adversarial review reproduced against the previous,
+    // sequential version of this design). The 2026-08-15 occurrence,
+    // which matches no existing resource, is dropped as an ordinary
+    // duplicate of the same id and never independently inserted.
     expect(rows).toHaveLength(1);
-    expect(rows[0].date).toBe("2026-08-15");
-
-    // The candidate is untouched — the guard fired before `tryPromoteCandidate`
-    // was ever called for the second occurrence.
-    const stillPending = handle.db
-      .select()
-      .from(schema.transactions)
-      .where(eq(schema.transactions.id, pending.id))
-      .get();
-    expect(stillPending?.isPending).toBe(true);
-    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+    expect(rows[0].date).toBe("2026-09-01");
+    expect(rows[0].isPending).toBe(false);
+    expect(rows[0].id).toBe(pending.id);
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(1);
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.promotedFromPending).toBe(1);
   });
 
   it("guards the genuine 2-survivor anomaly on a CARD specifically — the identity guard and expectedCardExternalIds/D8.4 accounting interacting, not just the non-card case above", async () => {

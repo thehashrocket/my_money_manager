@@ -1158,17 +1158,18 @@ export async function syncSimpleFin(
     // BEFORE this sync ran — the one fact D8.4's "findable" claim actually
     // depends on. An id that only appears via a WITHIN-RESPONSE duplicate
     // (a later occurrence in THIS SAME response) is deliberately NOT part
-    // of this set — that population is `processedSignaturesByExternalId`
-    // below, which additionally distinguishes an identical repeat (still
-    // correctly, quietly deduped, so still findable via its own earlier
-    // occurrence or its own eventual insert) from the Bug A anomaly (a
-    // genuinely different signature under the same id, which is not
-    // findable via ANY prior occurrence and must fall through to its own
-    // independent promotion/content-budget check). Before this was split
-    // into two sets, a single mutable `seenExternalIds` collapsed both
-    // populations into one membership test — this file's own subtler
-    // history (`processedSignaturesByExternalId`'s docstring below) is what
-    // a within-response duplicate needs to be told apart correctly.
+    // of this set — that population is `rowsByExternalId` below, grouped
+    // and resolved as a UNIT once every occurrence in the response has
+    // been collected, which distinguishes an identical repeat (still
+    // correctly, quietly deduped, findable via its own eventual insert or
+    // an existing-resource match) from the Bug A anomaly (2+ genuinely
+    // different signatures under the same id, none findable via any prior
+    // occurrence, resolved together rather than independently — see that
+    // loop's own comment for why independence was the actual defect).
+    // Before this was split into two sets, a single mutable
+    // `seenExternalIds` collapsed both populations into one membership
+    // test — this file's own subtler history is what a within-response
+    // duplicate needs to be told apart correctly.
     const idsKnownBeforeThisRun = new Set(
       db
         .select({ externalId: schema.transactions.externalId })
@@ -1211,12 +1212,26 @@ export async function syncSimpleFin(
     let duplicateByContent = 0;
     let skippedPending = 0;
     const toInsert: StagedRow[] = [];
-    // Bug A (D8.1 cutover-boundary duplicate-id loss) — every content
-    // signature PROCESSED so far for a given external_id, recorded before
-    // the promotion/content-budget check and regardless of its outcome. See
-    // the collapse logic below for why "processed" (not "staged") is the
-    // right registry.
-    const processedSignaturesByExternalId = new Map<string, Set<string>>();
+
+    // Ordinary (non-duplicate-id) staging: a single occurrence checked
+    // against this sync's pending-promotion candidates, then the
+    // posted-only content budget, then pushed as a brand-new row.
+    const stageOrdinaryRow = (row: MappedRow): void => {
+      const sig = contentSignature(row);
+      const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
+      if (pendingCandidate) {
+        toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+        return;
+      }
+      const budget = contentBudget.get(sig) ?? 0;
+      if (budget > 0) {
+        contentBudget.set(sig, budget - 1);
+        duplicateByContent++;
+        return;
+      }
+      toInsert.push(row);
+      if (isCard) expectedCardExternalIds.push(row.externalId);
+    };
 
     // D8.1 — THE ACCOUNTING CUTOVER.
     //
@@ -1283,6 +1298,30 @@ export async function syncSimpleFin(
       );
     }
 
+    // Bug A (D8.1 cutover-boundary duplicate-id loss) plus two further
+    // interaction bugs an outside adversarial pass found in an earlier,
+    // sequential version of this design (Codex structured review + Codex
+    // adversarial, both against this same branch): a content-dedup or
+    // promotion-candidate match discovered on one occurrence of a
+    // within-response duplicate external_id must speak for the WHOLE id,
+    // not just the occurrence that happened to find it — otherwise a
+    // second, differing-signature occurrence either (a) independently
+    // re-checks its OWN signature, finds nothing, and inserts as a brand
+    // new row even though the feed's own id claims it is the SAME
+    // transaction the first occurrence already matched to an existing row
+    // (a genuine double-count, since external_id is supposed to be a
+    // stable identity for one transaction), or (b) claims a pending row's
+    // promotion reservation and then loses the write-time identity race to
+    // a SIBLING occurrence that was staged first, permanently stranding
+    // the reservation (`claimPendingCandidate` already popped it from the
+    // pool at staging time, and nothing else can claim it again).
+    //
+    // The fix: group every NOT-known-before-this-run row by external_id
+    // FIRST, and resolve each group as a UNIT before committing anything
+    // to `toInsert`, rather than deciding row-by-row in array order (order
+    // dependence was the actual defect — whichever occurrence happened to
+    // be processed first decided what later occurrences saw).
+    const rowsByExternalId = new Map<string, MappedRow[]>();
     for (const txn of blockedByManualHistory ? [] : (remote?.transactions ?? [])) {
       const row = mapTransaction(txn);
 
@@ -1306,16 +1345,16 @@ export async function syncSimpleFin(
       // the write transaction) is the only place that decides whether it
       // actually gets written. `skippedBeforeAnchor` stays 0 through this whole
       // loop and is set entirely by `applyDedupPruning` downstream.
-      const sig = contentSignature(row);
 
       // FINDABLE only if this id was in the DB, under this feed's own
       // provenance, BEFORE this sync ran — never merely because an EARLIER
-      // occurrence in THIS SAME response already claimed it (that
-      // within-response case is `processedSignaturesByExternalId` below,
-      // checked next; it is a DIFFERENT population with different
-      // semantics, and conflating the two into one mutable set used to be
-      // the very bug rule 3's red-team pass found here — see the field's
-      // own docstring above).
+      // occurrence in THIS SAME response already carries it (that
+      // within-response case is `rowsByExternalId` below, resolved as a
+      // group once every occurrence in the response has been collected —
+      // it is a DIFFERENT population with different semantics, and
+      // conflating the two into one mutable set used to be the very bug
+      // rule 3's red-team pass found here — see the field's own docstring
+      // above).
       if (idsKnownBeforeThisRun.has(row.externalId)) {
         duplicateByExternalId++;
         if (isCard) {
@@ -1324,84 +1363,95 @@ export async function syncSimpleFin(
         continue;
       }
 
-      // Within-response duplicate id (Bug A — D8.1 cutover-boundary
-      // duplicate-id loss). Collapse ONLY when this occurrence's signature
-      // EXACTLY matches one already PROCESSED for this external_id —
-      // "processed", not merely "staged": a first occurrence that itself
-      // matched a promotion candidate or an existing content-budget row
-      // never reaches `toInsert`, so an identical second occurrence must
-      // still be recognized as already-accounted-for rather than
-      // independently re-evaluated against an already-spent resource (that
-      // would silently insert a genuine duplicate — the original defect
-      // this design closes). A signature genuinely DIFFERING from every one
-      // already processed for this id is the actual anomalous shape that
-      // was reproduced (two dates for one id) — it is NOT collapsed, and
-      // falls through to the identical promotion/content-budget check any
-      // ordinary row gets, using ITS OWN signature. That is safe: a
-      // distinct signature cannot double-spend the slot a DIFFERENT
-      // signature already consumed. If unmatched, it is pushed to
-      // `toInsert` carrying the SAME `externalId` as the earlier-staged
-      // occurrence — `toInsert` can now legitimately hold 2+ rows sharing
-      // one external_id, but only when their signatures genuinely differ.
-      // `recheckCutoverAnchor` (inside the write transaction, using the
-      // FRESH anchor) is what then picks the real survivor, per row, using
-      // each row's own real date — never a swap. See
+      const group = rowsByExternalId.get(row.externalId);
+      if (group) {
+        group.push(row);
+      } else {
+        rowsByExternalId.set(row.externalId, [row]);
+      }
+    }
+
+    for (const occurrences of rowsByExternalId.values()) {
+      if (occurrences.length === 1) {
+        stageOrdinaryRow(occurrences[0]);
+        continue;
+      }
+
+      // Within-response duplicate id. Collapse EXACT signature repeats
+      // first — order-independent by construction (every occurrence is
+      // already collected, so this is a plain grouping, not a sequential
+      // registry) — reducing to at most one representative per DISTINCT
+      // signature.
+      const distinctBySignature = new Map<string, MappedRow>();
+      for (const row of occurrences) {
+        const sig = contentSignature(row);
+        if (!distinctBySignature.has(sig)) {
+          distinctBySignature.set(sig, row);
+        } else {
+          duplicateByExternalId++;
+        }
+      }
+      const distinctRows = [...distinctBySignature.values()];
+
+      if (distinctRows.length === 1) {
+        // Every occurrence was an identical repeat after all.
+        stageOrdinaryRow(distinctRows[0]);
+        continue;
+      }
+
+      // 2+ genuinely differing signatures for one external_id — the
+      // actual anomalous shape that was reproduced (two dates for one
+      // id). Scan every distinct occurrence for a promotion-candidate or
+      // content-budget match BEFORE committing any of them to `toInsert`,
+      // so a match found on ANY occurrence resolves the whole id rather
+      // than only the occurrence that happened to find it. See
       // docs/plans/sync-pending-promotion.md's "Design — Bug A" for the
-      // full reasoning and the two rejected designs (a stale-anchor
-      // heuristic, and a single-row `alternateDates` swap) this converged
-      // on.
-      const alreadyProcessed = processedSignaturesByExternalId.get(row.externalId);
-      if (alreadyProcessed?.has(sig)) {
-        duplicateByExternalId++;
+      // full reasoning and the rejected designs this converged on.
+      let resolved = false;
+      for (const row of distinctRows) {
+        const sig = contentSignature(row);
+        // A posted incoming row's real-world PENDING counterpart, if one
+        // exists, is claimed FIRST — before the ordinary posted-only
+        // budget check below, mirroring `stageOrdinaryRow`'s own order.
+        const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
+        if (pendingCandidate) {
+          toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
+          resolved = true;
+          break;
+        }
+        const budget = contentBudget.get(sig) ?? 0;
+        if (budget > 0) {
+          contentBudget.set(sig, budget - 1);
+          duplicateByContent++;
+          resolved = true;
+          break;
+        }
+      }
+      if (resolved) {
+        // The id is spoken for by the match above — every OTHER distinct
+        // occurrence is a duplicate of that same identity, not an
+        // independent transaction, regardless of its own signature. This
+        // is what closes both the content-match-escape case (an existing
+        // row matched one occurrence; the sibling must not also insert)
+        // and the promotion-reservation-orphaning case (the reservation
+        // is claimed here, inside this same resolution, so no sibling
+        // occurrence ever reaches the write loop to race it away).
+        duplicateByExternalId += distinctRows.length - 1;
         continue;
       }
 
-      // Recorded BEFORE the promotion/content-budget check below, and
-      // regardless of its outcome — this is what lets a LATER, IDENTICAL
-      // within-response duplicate collapse even when THIS occurrence itself
-      // ends up dropped by that check (round-3 outside-review correction).
-      {
-        const signatures = alreadyProcessed ?? new Set<string>();
-        signatures.add(sig);
-        processedSignaturesByExternalId.set(row.externalId, signatures);
+      // No occurrence matches anything existing — genuinely nothing to
+      // resolve against. Push every distinct occurrence through
+      // independently, carrying the SAME externalId — `toInsert` can
+      // legitimately hold 2+ rows sharing one external_id here.
+      // `recheckCutoverAnchor` (inside the write transaction, using the
+      // FRESH anchor) picks the real survivor for a card, per row, using
+      // each row's own real date — never a swap; the insert-time identity
+      // guard is the backstop for the rare genuine anomaly elsewhere.
+      for (const row of distinctRows) {
+        toInsert.push(row);
+        if (isCard) expectedCardExternalIds.push(row.externalId);
       }
-
-      // A posted incoming row's real-world PENDING counterpart, if one
-      // exists, is claimed FIRST — before the ordinary posted-only budget
-      // check below. This row is pushed onto `toInsert` LIKE ANY OTHER NEW
-      // ROW (carrying `promotionCandidateId`), not diverted into a separate
-      // list: `recheckLandedIds` and `recheckContentDedup` both iterate
-      // `entry.rows`, so a promotable row gets the exact same
-      // concurrent-writer protection as a brand-new row for free. The write
-      // transaction re-verifies the candidate is still available and
-      // redirects the write from INSERT to UPDATE only then (see the insert
-      // loop below) — never here, staging is read-only.
-      // D8.4's `expectedCardExternalIds` is deliberately NOT populated here:
-      // CSV import is asset-only (`import/page.tsx` filters to
-      // `accountClass === "asset"`), so a card can never hold a CSV-origin
-      // pending row and this branch never fires for one in practice.
-      const pendingCandidate = claimPendingCandidate(promotionCandidates, sig);
-      if (pendingCandidate) {
-        toInsert.push({ ...row, promotionCandidateId: pendingCandidate.id });
-        continue;
-      }
-
-      const budget = contentBudget.get(sig) ?? 0;
-      if (budget > 0) {
-        contentBudget.set(sig, budget - 1);
-        duplicateByContent++;
-        // NOT added to `expectedCardExternalIds`. This row's date/amount/memo
-        // matched a DIFFERENTLY-provenanced existing row on purpose — a
-        // manual entry, a CSV row, or one tagged under a re-minted feed id
-        // (rule 3) — and that match is what makes writing this one
-        // unnecessary. The existing row does not and never will carry THIS
-        // feed's external id, so a check that expected to find one here
-        // would be checking for a fact that was never going to be true, on
-        // every single ordinary case of this dedup path succeeding.
-        continue;
-      }
-      toInsert.push(row);
-      if (isCard) expectedCardExternalIds.push(row.externalId);
     }
 
     if (skippedPending > 0) {
@@ -1720,12 +1770,26 @@ export async function syncSimpleFin(
     // SUCCESSFUL write, never after a failed promotion attempt, so a
     // failed promotion still falls through to the ordinary insert path
     // exactly as `tryPromoteCandidate`'s existing contract requires.
-    const claimedIdentities = new Set<string>();
+    // Keyed by feed, THEN externalId — never a concatenated string. Both
+    // components are unrestricted text SimpleFIN permits containing a
+    // colon, so a `${feedId}:${externalId}` join could collide two
+    // genuinely distinct identities (`feed="bank:acct"`, id="42"` vs.
+    // `feed="bank"`, id=`"acct:42"`) onto the same key — found
+    // independently by both Codex adversarial and Codex structured
+    // review against this same branch. The nested Map has no such
+    // ambiguity: each level compares its own string in full.
+    const claimedIdentities = new Map<FeedAccountId, Set<string>>();
+    const isIdentityClaimed = (feedId: FeedAccountId, externalId: string): boolean =>
+      claimedIdentities.get(feedId)?.has(externalId) ?? false;
+    const claimIdentity = (feedId: FeedAccountId, externalId: string): void => {
+      const claimed = claimedIdentities.get(feedId) ?? new Set<string>();
+      claimed.add(externalId);
+      claimedIdentities.set(feedId, claimed);
+    };
 
     for (const { account, feedId, rows } of cutoverChecked) {
       for (const row of rows) {
-        const identityKey = `${feedId}:${row.externalId}`;
-        if (claimedIdentities.has(identityKey)) {
+        if (isIdentityClaimed(feedId, row.externalId)) {
           const existingDrops = lateIdentityDropsByAccountId.get(account.id) ?? [];
           existingDrops.push(row);
           lateIdentityDropsByAccountId.set(account.id, existingDrops);
@@ -1741,7 +1805,7 @@ export async function syncSimpleFin(
             feedId,
           );
           if (promoted) {
-            claimedIdentities.add(identityKey);
+            claimIdentity(feedId, row.externalId);
             promotedByAccountId.set(
               account.id,
               (promotedByAccountId.get(account.id) ?? 0) + 1,
@@ -1845,7 +1909,7 @@ export async function syncSimpleFin(
           })
           .returning({ id: schema.transactions.id })
           .all();
-        claimedIdentities.add(identityKey);
+        claimIdentity(feedId, row.externalId);
 
         // Same audit trail as the CSV path (importBatch.ts) — lets a
         // too-broad rule's auto-categorization be undone per batch.
@@ -1921,6 +1985,19 @@ export async function syncSimpleFin(
       // catch, because this transaction's work is about to be discarded.
       throw new NothingVerifiedError();
     }
+
+    // The write loop's own two late-drop mechanisms (the fallback content
+    // check and Bug A's genuine-anomaly identity backstop, both above) have
+    // no recheck function to fold into `linkWarnings` the way the four
+    // pre-write rechecks already do — they only exist once the write loop
+    // itself runs. Folded in HERE, before persistence, for the same reason
+    // the comment below states: without this, a late-identity-drop or
+    // late-content-drop warning existed only in the transient `warnings`
+    // return value, never in `snapshotWarning` — closing the tab (or a
+    // second visit to the batch's success page) lost the only explanation
+    // for a withheld row (Codex adversarial finding, `/ship`).
+    linkWarnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
+    linkWarnings.push(...lateIdentityDropWarnings(lateIdentityDropsByAccountId, staged));
 
     // C2: the drop warnings are the ONLY record that rows were withheld, and
     // until now they lived exclusively in one `useActionState` value — close
@@ -2214,14 +2291,17 @@ export async function syncSimpleFin(
   // set at staging time before that was known. Applied through the SAME
   // mechanism the id/content/cutover rechecks already use, crediting it as
   // `duplicateByContent` — it is one, just discovered later than the others.
-  // Also warned about, unlike its three siblings above — it used to have no
-  // user-visible warning on any path (silent-failure-hunter finding, `/ship`).
+  // The warning text itself is NOT re-pushed here — it is already folded
+  // into `written.linkWarnings` (pushed into `warnings` above), which is
+  // where it was persisted to `snapshotWarning` inside the transaction;
+  // pushing it again here would duplicate the sentence in the rendered
+  // outcome without adding anything to what got persisted.
   applyDedupPruning(counts, lateContentDropsByAccountId, "duplicateByContent");
-  warnings.push(...lateContentDropWarnings(lateContentDropsByAccountId, staged));
 
   // Bug A's genuine-anomaly backstop — see its declaration site in the write
   // loop. Reachable only when 2+ rows sharing one external_id both survived
-  // every recheck; never silently absorbed.
+  // every recheck; never silently absorbed. Same non-duplication reasoning
+  // as above — its warning text already rode in with `written.linkWarnings`.
   applyDedupPruning(counts, lateIdentityDropsByAccountId, "duplicateByExternalId");
   warnings.push(...lateIdentityDropWarnings(lateIdentityDropsByAccountId, staged));
 
