@@ -2797,7 +2797,6 @@ function finalizeExpectedCardExternalIds(
 }
 
 /**
-/**
  * The write loop's own two inline drop mechanisms — the late fallback
  * content check (`nowDuplicate`, immediately before a promotion-fallback
  * insert) and Bug A's genuine-anomaly identity backstop — have no

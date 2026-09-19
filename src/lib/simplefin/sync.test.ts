@@ -6227,6 +6227,98 @@ describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", ()
     expect(rows).toHaveLength(0);
   });
 
+  it("recheckLandedIds counts BOTH rows sharing one external_id when a concurrent writer lands that id during the race window — the same row-count-vs-id-Set-size fix as recheckCutoverAnchor above, for a different producer", async () => {
+    // Bug A's fix makes it possible for 2 rows to share one external_id with
+    // DIFFERING signatures for the first time — previously impossible under
+    // the old array-order collapse. `recheckLandedIds` drops both correctly
+    // (its filter already operates row-by-row), but its OWN
+    // `droppedByAccountId` count must also reflect 2 dropped rows, not 1,
+    // exactly the shape recheckCutoverAnchor was already caught undercounting.
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-ID-RACE", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15
+      { ...feedTxn("DUP-ID-RACE", "-20.00", "TARGET"), posted: SEP_1_NOON }, // 2026-09-01, differs in amount+memo too
+    ]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      // A concurrent sync lands the SAME external_id between staging and
+      // the write transaction — recheckLandedIds must drop BOTH staged
+      // occurrences (they share this id), not just one.
+      const concurrentBatch = seedBatch("simplefin");
+      seedTxn({
+        accountId: account.id,
+        batchId: concurrentBatch.id,
+        amountCents: -999,
+        rawMemo: "ALREADY LANDED",
+        date: "2026-08-20",
+        source: "simplefin",
+        externalId: "DUP-ID-RACE",
+      });
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    // The old, buggy code (a Set<string> of dropped external ids) would
+    // report 1 here — both rows collapse to the one id string they share.
+    expect(summary.duplicateByExternalId).toBe(2);
+    expect(summary.insertedCount).toBe(0);
+  });
+
+  it("recheckContentDedup counts BOTH rows sharing one external_id when both are caught by an unrelated content match — same fix, for the content-race producer", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-CONTENT-RACE", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15
+      { ...feedTxn("DUP-CONTENT-RACE", "-20.00", "TARGET"), posted: SEP_1_NOON }, // 2026-09-01
+    ]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      // Two unrelated, differently-provenanced (CSV) rows appear during the
+      // race window, each matching ONE of the two staged occurrences'
+      // content signature exactly. `recheckContentDedup` must drop both
+      // staged rows via content match and count 2, not 1.
+      seedTxn({
+        accountId: account.id,
+        batchId: csvBatch.id,
+        amountCents: -1500,
+        rawMemo: "COSTCO",
+        date: "2026-08-15",
+        source: "csv",
+      });
+      seedTxn({
+        accountId: account.id,
+        batchId: csvBatch.id,
+        amountCents: -2000,
+        rawMemo: "TARGET",
+        date: "2026-09-01",
+        source: "csv",
+      });
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    // The old, buggy code would report 1 here for the same reason.
+    expect(summary.duplicateByContent).toBe(2);
+    expect(summary.insertedCount).toBe(0);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-CONTENT-RACE"))
+      .all();
+    expect(rows).toHaveLength(0);
+  });
+
   it("keeps exactly one occurrence and warns for a duplicate external_id on a NON-card account, where no cutover filter ever runs to narrow it", async () => {
     const account = seedAccount({ simplefinAccountId: "ACT-1" });
 
