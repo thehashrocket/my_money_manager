@@ -492,6 +492,20 @@ Pre-existing on `main`, unmeasured on the live ledger.
      TODOS.md's own reproduction is race-scoped, not permanent-reissue-
      scoped, so this closes exactly the reported bug; the broader case is
      out of scope for this PR.
+  3. **Bug A, a narrower pre-existing residual found during implementation
+     review** — `idsKnownBeforeThisRun` (an id already stored under this
+     feed's provenance from a PRIOR sync) short-circuits unconditionally,
+     before the signature registry ever runs: `duplicateByExternalId++` and
+     `continue`, regardless of content signature. If SimpleFIN ever
+     reissued an id ACROSS two separate syncs (not within one response —
+     that is Bug A's own scope) for what is really a DIFFERENT real
+     transaction, that new transaction would be silently absorbed as an
+     ordinary duplicate, with no warning — the identical anomaly Bug A now
+     warns about explicitly, just one sync apart instead of within one
+     response. Not fixed here: closing it would mean re-evaluating an
+     already-known id's signature on every ordinary sync, a materially
+     larger and differently-shaped change than this PR's scope, for a case
+     with the same zero-evidence status as the other two residuals above.
 
 ### Design — Bug A: signature-aware collapse, no swap
 
@@ -832,21 +846,95 @@ verifiable at all.
 
 ## Implementation Tasks (PR2)
 
-- [ ] **T1 (P1, human: ~2h / CC: ~30min)** — signature registry + collapse
+- [x] **T1 (P1, human: ~2h / CC: ~30min)** — signature registry + collapse
   logic in the staging loop (Bug A). Files: `src/lib/simplefin/sync.ts`.
-- [ ] **T2 (P1, human: ~4h / CC: ~1h)** — generalize drop accounting to
+- [x] **T2 (P1, human: ~4h / CC: ~1h)** — generalize drop accounting to
   row-identity across all four producers (`recheckLandedIds`,
   `recheckContentDedup`, `recheckCutoverAnchor`'s own derivation fix,
   `lateContentDropsByAccountId`) plus `applyDedupPruning` and
   `expectedCardExternalIds` correctness. Files: `src/lib/simplefin/sync.ts`.
-- [ ] **T3 (P1, human: ~2h / CC: ~30min)** — insert-time identity guard
+- [x] **T3 (P1, human: ~2h / CC: ~30min)** — insert-time identity guard
   covering both INSERT and `tryPromoteCandidate`'s UPDATE. Files:
   `src/lib/simplefin/sync.ts`.
-- [ ] **T4 (P1, human: ~3h / CC: ~40min)** — `recheckReissuedIds`: pre-fetch
+- [x] **T4 (P1, human: ~3h / CC: ~40min)** — `recheckReissuedIds`: pre-fetch
   snapshot, multiset-safe write-time recheck, both call sites (write path +
   rollback path). Files: `src/lib/simplefin/sync.ts`.
-- [ ] **T5 (P1, human: ~4h / CC: ~1h)** — full test suite per the Test plan
+- [x] **T5 (P1, human: ~4h / CC: ~1h)** — full test suite per the Test plan
   above. Files: `src/lib/simplefin/sync.test.ts`.
+
+### Implementation review (2026-09-19, `/feature-dev`)
+
+Three specialist review agents ran in parallel against the actual diff
+(silent-failure-hunter, code-simplifier, pr-test-analyzer) — the first
+implementation-level review this design received, as opposed to the three
+design-level Codex rounds above. All three independently verified `tsc`
+clean and the full suite green before reviewing. Findings, all fixed in the
+same pass:
+
+- **Correctness-adjacent (code-simplifier, independently confirmed
+  not-currently-live by silent-failure-hunter):** `finalizeExpectedCardExternalIds`
+  ran before the write loop's own two late-drop mechanisms
+  (`lateContentDropsByAccountId`, `lateIdentityDropsByAccountId`) populated
+  — correct today only because of two invariants living elsewhere (a late
+  content drop can only ever be a promotion-candidate row, asset-only by
+  construction; a late identity drop always shares its id with a surviving
+  sibling), not because the code enforces it. Moved to run after both, on
+  both the write path and rollback path, computing final survivorship by
+  actually subtracting the late-dropped rows.
+- **Re-opened hazard (code-simplifier):** a second, independent
+  `isoDaysAgo(MAX_LOOKBACK_DAYS, now)` call for the pre-fetch snapshot
+  agreed with the staging loop's own `contentFloorIso` only because both
+  passed the same `now` — exactly the "agree by coincidence, not by
+  construction" shape `Staged.contentFloorIso`'s own docstring says this
+  file already fixed once. Hoisted to one call, threaded through both.
+- **DRY (code-simplifier):** `lateIdentityDropWarnings` was a byte-for-byte
+  copy of `lateContentDropWarnings` with one sentence swapped; the
+  `recheckReissuedIds` consumption loop duplicated `recheckContentDedup`'s
+  verbatim, including its promotion-exemption as an uncommented second
+  implementation. Extracted `lateDropWarnings`/`consumeBySignature` shared
+  helpers (the mechanical half only — each recheck's own DECISION, i.e.
+  which signatures populate the budget, stays separate, per this file's
+  established line for what `applyDedupPruning` shares vs. what it doesn't).
+  `seenExternalIds` (a live, mutated Set) was also removable entirely once
+  `processedSignaturesByExternalId` existed — verified logically equivalent
+  before removing.
+- **Critical test gap (pr-test-analyzer):** this plan's own Failure modes
+  table cited a "failed-promotion-then-survivor" test as existing
+  evidence for its "no critical gap survives this design" claim — it did
+  not exist. Added, along with the reverse ordering (insert-first blocks a
+  later promotion attempt entirely, candidate left stranded pending) and a
+  card-specific genuine-2-survivor-anomaly test (the non-card case doesn't
+  exercise `expectedCardExternalIds`/D8.4 interaction at all).
+- **Test gap (pr-test-analyzer):** no test for Bug B's own "exactly one
+  warning" ordering guarantee (reissued-id-and-pre-cutover), the same
+  ordering-regression class the pre-existing content-vs-cutover test
+  guards against for an older pairing. Added. Also added: a write-path
+  (commit, not rollback) exercise of `written.reissuedDroppedByAccountId` —
+  every original Bug B test happened to land on the rollback path.
+- **Documentation-only (silent-failure-hunter):** a narrower, pre-existing
+  residual — an id reissued ACROSS two separate syncs (not within one
+  response) for a genuinely different transaction is silently absorbed by
+  `idsKnownBeforeThisRun`'s unconditional short-circuit, with no warning.
+  Recorded as a third named residual above; not fixed (same zero-evidence
+  status as the other two, and closing it needs a larger, differently-shaped
+  change).
+
+Two review-time findings were caught and self-corrected before being
+reported as fixed: an initial test for the identity guard used an
+incorrect Unix timestamp (mapping to 2026-08-09, not the intended
+2026-08-15), and a mutation-testing spot-check confirmed the guard's
+"claim only after a successful write" ordering doesn't currently produce
+an observably different outcome in this file's single-threaded, sequential
+per-row loop (each row's own promotion-or-insert fully resolves before the
+next row starts) — kept as a defensive, correctness-by-construction
+invariant per round 3's own reasoning, not because a test demonstrates an
+observable bug from getting it wrong today.
+
+`pnpm exec tsc --noEmit`, `pnpm lint`, and the full project test suite
+(2292 → 2307 tests) all pass. Two of the highest-value regression tests
+(the `recheckCutoverAnchor` row-count fix and the Bug B pre-fetch-timing
+fix) were independently verified by temporarily reverting each fix and
+confirming the corresponding test fails, then restoring it.
 
 ## GSTACK REVIEW REPORT
 

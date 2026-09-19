@@ -192,8 +192,17 @@ function respondWith(
   simplefinAccountId: string,
   transactions: SimpleFinTransaction[],
   balance = "0.00",
+  opts: {
+    /**
+     * A side effect (typically a concurrent-writer DB mutation) to run
+     * WHILE this sync's own `await fetchAccounts` is in flight — the exact
+     * window rule 11's rechecks exist to defend. Runs via
+     * `mockImplementation` rather than `mockResolvedValue`.
+     */
+    during?: () => void;
+  } = {},
 ): void {
-  fetchAccountsMock.mockResolvedValue({
+  const response = {
     accounts: [
       {
         id: simplefinAccountId,
@@ -204,7 +213,16 @@ function respondWith(
         transactions,
       },
     ],
-  } satisfies SimpleFinResponse);
+  } satisfies SimpleFinResponse;
+  if (opts.during) {
+    const during = opts.during;
+    fetchAccountsMock.mockImplementation(async () => {
+      during();
+      return response;
+    });
+  } else {
+    fetchAccountsMock.mockResolvedValue(response);
+  }
 }
 
 describe("syncSimpleFin dedup", () => {
@@ -4243,6 +4261,15 @@ describe("syncSimpleFin — D8.4 card completeness check", () => {
   });
 
   it("stays QUIET when the SAME external id appears TWICE in one feed response, and the first occurrence is content-deduped (red team)", async () => {
+    // NOTE (PR2 review): this fixture's card carries a manual row, so
+    // `hasPreExistingManualCardHistory` blocks the whole feed-transaction
+    // loop for it — this test's pass is therefore about that guard, not
+    // about the within-response collapse logic its name describes. The
+    // PR2 describe block below ("cutover-boundary duplicate-id loss (Bug
+    // A)") has the real regression guard for that logic, on a non-card
+    // fixture. Left in place because it's still a valid guard for its own
+    // (different) scenario.
+    //
     // The sibling test above fixed one false-positive route; this closes a
     // second, found by a red-team pass on the fix itself. `seenExternalIds`
     // is a LIVE set: it starts DB-derived, but the loop also `.add()`s to it
@@ -6051,5 +6078,687 @@ describe("syncSimpleFin re-verifies the account link inside the write transactio
 
     // Exactly one warning for this account, not two.
     expect(outcome.warnings.filter((w) => w.includes("Citi"))).toHaveLength(1);
+  });
+});
+
+// PR2 (docs/plans/sync-pending-promotion.md) — two bugs bundled as one
+// underlying question: how much can `syncSimpleFin` trust a SimpleFIN
+// `external_id` to be a stable identity for one real-world transaction.
+// Converged after 3 rounds of outside review (Codex); see the plan file's
+// "What the outside review changed" for the full round-by-round history.
+describe("syncSimpleFin — PR2: cutover-boundary duplicate-id loss (Bug A)", () => {
+  it("collapses an identical within-response duplicate id even when the FIRST occurrence is itself content-dropped (round-3 regression)", async () => {
+    // Supersedes the "appears TWICE" test above (see the pointer comment on
+    // that test) as the real regression guard for this collapse logic: that
+    // test's card fixture carries a manual row, which
+    // `hasPreExistingManualCardHistory` blocks entirely — its pass was never
+    // actually exercising within-response collapse. This fixture is a
+    // NON-card account with a differently-provenanced CSV row instead, so
+    // nothing short-circuits the feed-transaction loop before it runs.
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -2000,
+      rawMemo: COFFEE_MEMO,
+      date: "2026-09-01",
+      source: "csv",
+    });
+
+    const dupe = feedTxn("DUPLICATE-TXN", "-20.00");
+    respondWith("ACT-1", [dupe, dupe]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    // Neither occurrence ever gets this feed's provenance.
+    const tagged = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUPLICATE-TXN"))
+      .all();
+    expect(tagged).toHaveLength(0);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    // Occurrence 1 genuinely matches the existing CSV row's content budget
+    // (duplicateByContent). Occurrence 2 collapses against occurrence 1's
+    // already-PROCESSED signature (duplicateByExternalId) — under the v1
+    // design this session rejected, occurrence 2 would instead see an
+    // already-drained budget and insert as a genuine, unwarranted duplicate.
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(outcome.accounts[0].duplicateByExternalId).toBe(1);
+    expect(outcome.accounts[0].insertedCount).toBe(0);
+  });
+
+  it("recovers the eligible occurrence when a duplicate external_id straddles a card's cutover anchor (the core repro) — with NO date swap: the surviving row keeps its own real date throughout", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-20",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1050.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            { ...feedTxn("DUP-STRADDLE", "-50.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15, pre-anchor
+            { ...feedTxn("DUP-STRADDLE", "-50.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01, post-anchor
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-STRADDLE"))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe("2026-09-01");
+
+    const summary = outcome.accounts.find((a) => a.accountId === card.id)!;
+    expect(summary.insertedCount).toBe(1);
+    expect(summary.skippedBeforeAnchor).toBe(1);
+  });
+
+  it("counts BOTH rows when 2 occurrences sharing one external_id are dropped together — distinguishes a row-count fix from an id-Set-size regression", async () => {
+    // Both dated before the anchor: 0 survivors. The pre-fix `recheckCutoverAnchor`
+    // derivation (`stillEligibleIds`, an external_id SET) got this particular
+    // shape right BY COINCIDENCE for zero survivors — the real bug it hid was
+    // `droppedByAccountId`'s own count collapsing 2 dropped rows sharing one id
+    // down to a Set of size 1, undercounting `skippedBeforeAnchor` by half.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-09-05",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1000.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            { ...feedTxn("DUP-BOTH-PRE", "-50.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15
+            { ...feedTxn("DUP-BOTH-PRE", "-50.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    const summary = outcome.accounts.find((a) => a.accountId === card.id)!;
+    // The old, buggy code reported 1 here (both rows share one external_id
+    // string, collapsed by `new Set(...)`), not 2.
+    expect(summary.skippedBeforeAnchor).toBe(2);
+    expect(summary.insertedCount).toBe(0);
+    // `finalizeExpectedCardExternalIds`'s zero-survivors branch: reverting
+    // it to a no-op would still pass every assertion above (this test never
+    // otherwise inspects warnings) while silently reintroducing a false
+    // "doesn't appear in the ledger" D8.4 alarm for this id.
+    expect(outcome.warnings.some((w) => w.includes("appear in the ledger"))).toBe(false);
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-BOTH-PRE"))
+      .all();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("keeps exactly one occurrence and warns for a duplicate external_id on a NON-card account, where no cutover filter ever runs to narrow it", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-NONCARD", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15
+      { ...feedTxn("DUP-NONCARD", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-NONCARD"))
+      .all();
+    // Exactly one survives the insert-time identity guard — never both (the
+    // unique index would have aborted the whole transaction) and never
+    // zero (a genuine SimpleFIN anomaly is never silently absorbed).
+    expect(rows).toHaveLength(1);
+
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.insertedCount).toBe(1);
+    expect(summary.duplicateByExternalId).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+  });
+
+  it("blocks a same-id INSERT after its sibling occurrence already claimed the identity via PROMOTION — the guard covers both write paths, not INSERT alone", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    // A pending row matching the EARLIER-dated occurrence's own signature —
+    // this occurrence promotes it in place rather than inserting.
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -1500,
+      rawMemo: "COSTCO",
+      date: "2026-08-15",
+      source: "csv",
+      isPending: true,
+    });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-PROMO-RACE", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15 — matches the pending row, promotes
+      { ...feedTxn("DUP-PROMO-RACE", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — no match, would ordinarily insert
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-PROMO-RACE"))
+      .all();
+    // Exactly one row carries this external_id — the PROMOTED (formerly
+    // pending) row — and the sibling's would-be insert was blocked by the
+    // identity guard rather than violating the unique index.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isPending).toBe(false);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+  });
+
+  it("keeps a NEVER-STAGED id's completeness expectation intact alongside a straddling pair's own accounting in the same run", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-20",
+    });
+    // Already stored under THIS feed's own provenance, before this sync
+    // runs — `idsKnownBeforeThisRun`, never staged into `rows` at all.
+    const simplefinBatch = seedBatch("simplefin");
+    seedTxn({
+      accountId: card.id,
+      batchId: simplefinBatch.id,
+      amountCents: -999,
+      rawMemo: "ALREADY THERE",
+      date: "2026-08-25",
+      source: "simplefin",
+      externalId: "ALREADY-KNOWN",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1060.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            feedTxn("ALREADY-KNOWN", "-9.99", "ALREADY THERE"),
+            { ...feedTxn("DUP-STRADDLE-2", "-50.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15, pre-anchor
+            { ...feedTxn("DUP-STRADDLE-2", "-50.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01, post-anchor
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // No D8.4 "don't appear in the ledger" false alarm for either id — the
+    // already-known one was never at risk, and the straddling pair's
+    // surviving occurrence correctly satisfies its own expectation.
+    expect(outcome.warnings.some((w) => w.includes("appear in the ledger"))).toBe(false);
+
+    const straddleRows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-STRADDLE-2"))
+      .all();
+    expect(straddleRows).toHaveLength(1);
+  });
+
+  it("claims the identity via an ordinary INSERT when its sibling occurrence's PROMOTION attempt genuinely FAILS — the plan's own failure-modes table cites this scenario; it must actually exist", async () => {
+    // Real race window, same idiom as the pre-existing "does not lose or
+    // duplicate a transaction when the candidate is deleted" test above:
+    // the candidate is removed BETWEEN staging (which finds it pending and
+    // attaches a `promotionCandidateId` to the earlier-dated occurrence)
+    // and the write transaction, via `createSnapshotMock`'s hook. Deletion,
+    // not a same-content promotion, is what makes the occurrence fall
+    // through the `nowDuplicate` safety check cleanly (a same-content
+    // promotion would leave a matching posted row behind and get THIS
+    // occurrence correctly caught as a late content duplicate instead —
+    // a different, already-tested path).
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -1500,
+      rawMemo: "COSTCO",
+      date: "2026-08-15",
+      source: "csv",
+      isPending: true,
+    });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-FAILED-PROMO", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15 — matches the (soon-deleted) pending row
+      { ...feedTxn("DUP-FAILED-PROMO", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — independent, no match
+    ]);
+
+    createSnapshotMock.mockImplementationOnce(() => {
+      handle.db.delete(schema.transactions).where(eq(schema.transactions.id, pending.id)).run();
+      return SNAPSHOT_STUB;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    // Exactly one row lands — the FIRST occurrence's fallback insert claims
+    // the identity (the candidate is gone, so nothing was ever promoted),
+    // and the second occurrence's own insert is blocked by the guard.
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-FAILED-PROMO"))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.promotedFromPending).toBe(0);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+  });
+
+  it("blocks a LATER occurrence's PROMOTION attempt when an EARLIER occurrence's ordinary INSERT already claimed the identity — the reverse ordering from the promotion-first test above; the candidate is left stranded pending, never promoted", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    const pending = seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -1500,
+      rawMemo: "COSTCO",
+      date: "2026-09-01",
+      source: "csv",
+      isPending: true,
+    });
+
+    respondWith("ACT-1", [
+      { ...feedTxn("DUP-INSERT-FIRST", "-30.00", "TARGET"), posted: 1786795200 }, // 2026-08-15 — no match, plain insert, claims the identity
+      { ...feedTxn("DUP-INSERT-FIRST", "-15.00", "COSTCO"), posted: SEP_1_NOON }, // 2026-09-01 — matches the pending row, but never reaches tryPromoteCandidate
+    ]);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-INSERT-FIRST"))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].date).toBe("2026-08-15");
+
+    // The candidate is untouched — the guard fired before `tryPromoteCandidate`
+    // was ever called for the second occurrence.
+    const stillPending = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, pending.id))
+      .get();
+    expect(stillPending?.isPending).toBe(true);
+    expect(handle.db.select().from(schema.syncPromotions).all()).toHaveLength(0);
+  });
+
+  it("guards the genuine 2-survivor anomaly on a CARD specifically — the identity guard and expectedCardExternalIds/D8.4 accounting interacting, not just the non-card case above", async () => {
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-08-01",
+    });
+
+    fetchAccountsMock.mockResolvedValue({
+      accounts: [
+        {
+          id: "ACT-CITI",
+          name: "CITI CARD",
+          balance: "-1030.00",
+          "available-balance": null,
+          "balance-date": SEP_1_NOON,
+          transactions: [
+            // Both dated AFTER the anchor — two real, distinct SimpleFIN
+            // transactions issued the same external_id, both surviving
+            // `recheckCutoverAnchor` independently.
+            { ...feedTxn("DUP-CARD-ANOMALY", "-15.00", "COSTCO"), posted: 1786795200 }, // 2026-08-15
+            { ...feedTxn("DUP-CARD-ANOMALY", "-15.00", "TARGET"), posted: SEP_1_NOON }, // 2026-09-01
+          ],
+        },
+      ],
+    } satisfies SimpleFinResponse);
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const rows = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "DUP-CARD-ANOMALY"))
+      .all();
+    // Exactly one survives — never both (unique index) and never zero.
+    expect(rows).toHaveLength(1);
+    const summary = outcome.accounts.find((a) => a.accountId === card.id)!;
+    expect(summary.insertedCount).toBe(1);
+    expect(summary.duplicateByExternalId).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("shared an id"))).toBe(true);
+    // D8.4 must not report the surviving row's own id as unexplainedly
+    // missing — it landed under this exact id, just via whichever
+    // occurrence won the race.
+    expect(outcome.warnings.some((w) => w.includes("appear in the ledger"))).toBe(false);
+  });
+});
+
+describe("syncSimpleFin — PR2: reissued external_id race (Bug B)", () => {
+  it("catches a reissued external_id when the concurrent write lands DURING this sync's own fetch — the pre-fetch snapshot timing this depends on", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    // This sync's OWN fetch reports a real transaction under a DIFFERENT,
+    // newly-issued external_id from the one a concurrent writer uses below.
+    respondWith("ACT-1", [feedTxn("REISSUED-ID", "-30.00", "COSTCO")], "-30.00", {
+      // The race: a CONCURRENT sync writes this same real transaction under
+      // a DIFFERENT external_id while THIS sync's own fetch is in flight —
+      // i.e., strictly BEFORE `await fetchAccounts` resolves, which is
+      // BEFORE this sync's own pre-fetch snapshot... except the snapshot is
+      // taken before this callback even runs (it runs before `await
+      // fetchAccounts` is called at all), so this write genuinely lands in
+      // the window the snapshot is designed to catch.
+      during: () => {
+        const concurrentBatch = seedBatch("simplefin");
+        seedTxn({
+          accountId: account.id,
+          batchId: concurrentBatch.id,
+          amountCents: -3000,
+          rawMemo: "COSTCO",
+          date: "2026-09-01",
+          source: "simplefin",
+          externalId: "CONCURRENT-WRITE-ID",
+        });
+      },
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    // The incoming row is recognized as the same real transaction and
+    // dropped — not inserted as a genuine duplicate.
+    const reissued = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "REISSUED-ID"))
+      .all();
+    expect(reissued).toHaveLength(0);
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("confirmed under a different id"))).toBe(true);
+  });
+
+  it("is multiset-safe: two newly-appeared same-feed rows against two incoming rows sharing one signature — BOTH are matched and dropped, never one drop absorbing both", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    respondWith(
+      "ACT-1",
+      [feedTxn("REISSUED-A", "-12.00", "COSTCO"), feedTxn("REISSUED-B", "-12.00", "COSTCO")],
+      "-24.00",
+      {
+        during: () => {
+          const concurrentBatch = seedBatch("simplefin");
+          for (const id of ["CONCURRENT-A", "CONCURRENT-B"]) {
+            seedTxn({
+              accountId: account.id,
+              batchId: concurrentBatch.id,
+              amountCents: -1200,
+              rawMemo: "COSTCO",
+              date: "2026-09-01",
+              source: "simplefin",
+              externalId: id,
+            });
+          }
+        },
+      },
+    );
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.accounts[0].duplicateByContent).toBe(2);
+    const reissued = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(inArray(schema.transactions.externalId, ["REISSUED-A", "REISSUED-B"]))
+      .all();
+    expect(reissued).toHaveLength(0);
+  });
+
+  it("never drops a PROMOTION-candidate row via the reissued-id recheck — its own race is decided by candidate id, not by an unrelated row sharing its signature", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+    const csvBatch = seedBatch("csv");
+    seedTxn({
+      accountId: account.id,
+      batchId: csvBatch.id,
+      amountCents: -1800,
+      rawMemo: "COSTCO",
+      date: "2026-09-01",
+      source: "csv",
+      isPending: true,
+    });
+
+    respondWith("ACT-1", [feedTxn("PROMOTES-ME", "-18.00", "COSTCO")], "-18.00", {
+      // A same-feed row appears during the fetch sharing the SAME content
+      // signature as the pending candidate's own promotion target.
+      during: () => {
+        const concurrentBatch = seedBatch("simplefin");
+        seedTxn({
+          accountId: account.id,
+          batchId: concurrentBatch.id,
+          amountCents: -1800,
+          rawMemo: "COSTCO",
+          date: "2026-09-01",
+          source: "simplefin",
+          externalId: "UNRELATED-CONCURRENT",
+        });
+      },
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+    // The pending row was PROMOTED (its own race decided by candidate id),
+    // not sacrificed to the unrelated concurrent row's matching signature.
+    const promoted = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "PROMOTES-ME"))
+      .all();
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0].isPending).toBe(false);
+  });
+
+  it("rebuilds the reissued-id warning and count on the NothingVerifiedError rollback path, for a STILL-LINKED account whose own reissue drop is what causes the rollback", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    // The ONLY row this sync stages, and it is the reissue drop itself —
+    // nothing survives, so `verifiedTotal === 0` and the whole run rolls
+    // back via `NothingVerifiedError`, exercising the rebuild path rather
+    // than the write path.
+    respondWith("ACT-1", [feedTxn("REISSUED-ROLLBACK", "-6.00", "COSTCO")], "-6.00", {
+      during: () => {
+        const concurrentBatch = seedBatch("simplefin");
+        seedTxn({
+          accountId: account.id,
+          batchId: concurrentBatch.id,
+          amountCents: -600,
+          rawMemo: "COSTCO",
+          date: "2026-09-01",
+          source: "simplefin",
+          externalId: "CONCURRENT-ROLLBACK",
+        });
+      },
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    expect(outcome.accounts[0].duplicateByContent).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("confirmed under a different id"))).toBe(true);
+  });
+
+  it("gives exactly ONE warning, not two, for a row that is BOTH a reissued-id race match AND genuinely pre-cutover — recheckReissuedIds runs before recheckCutoverAnchor specifically for this", async () => {
+    // Mirrors the pre-existing content-vs-cutover interaction test ("gives
+    // exactly ONE warning, not two, for a row that is BOTH content-raced
+    // AND genuinely pre-cutover") for the NEW seam recheckReissuedIds
+    // introduces. If the ordering ever regressed (cutover before reissued),
+    // this row would ALSO get "landed on or before its balance date" —
+    // a real, already-shipped-once bug class for the older pairing.
+    const card = seedAccount({
+      simplefinAccountId: "ACT-CITI",
+      name: "Citi",
+      type: "credit",
+      startingBalanceCents: -100_000,
+      startingBalanceDate: "2026-09-05",
+    });
+
+    fetchAccountsMock.mockImplementation(async () => {
+      const concurrentBatch = seedBatch("simplefin");
+      seedTxn({
+        accountId: card.id,
+        batchId: concurrentBatch.id,
+        amountCents: -1500,
+        rawMemo: "COSTCO",
+        date: "2026-08-15",
+        source: "simplefin",
+        externalId: "CONCURRENT-CARD-REISSUE",
+      });
+      return {
+        accounts: [
+          {
+            id: "ACT-CITI",
+            name: "CITI CARD",
+            balance: "-1015.00",
+            "available-balance": null,
+            "balance-date": SEP_1_NOON,
+            transactions: [
+              // Pre-anchor (2026-08-15 < 2026-09-05) AND matches the
+              // concurrent same-feed row's content under a different id.
+              { ...feedTxn("REISSUED-PRE-CUTOVER", "-15.00", "COSTCO"), posted: 1786795200 },
+            ],
+          },
+        ],
+      } satisfies SimpleFinResponse;
+    });
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("up-to-date");
+    if (outcome.status !== "up-to-date") throw new Error("unreachable");
+    const cardWarnings = outcome.warnings.filter((w) => w.includes("Citi"));
+    expect(cardWarnings).toHaveLength(1);
+    expect(cardWarnings[0]).toContain("confirmed under a different id");
+    expect(outcome.warnings.some((w) => w.includes("balance date"))).toBe(false);
+  });
+
+  it("applies written.reissuedDroppedByAccountId on the COMMIT (write) path, not just the rollback rebuild — every prior Bug B test happened to end up on the rollback path", async () => {
+    const account = seedAccount({ simplefinAccountId: "ACT-1" });
+
+    respondWith(
+      "ACT-1",
+      [
+        // Dropped as a reissue of the concurrent row seeded below.
+        feedTxn("REISSUED-COMMIT-PATH", "-12.00", "COSTCO"),
+        // Genuinely new — nothing matches it, so the transaction commits
+        // (`verifiedTotal > 0`) instead of rolling back, and the SUCCESS
+        // path's own `applyDedupPruning(counts,
+        // written.reissuedDroppedByAccountId, ...)` call is what actually
+        // gets exercised.
+        feedTxn("GENUINELY-NEW", "-20.00", "TARGET"),
+      ],
+      "-32.00",
+      {
+        during: () => {
+          const concurrentBatch = seedBatch("simplefin");
+          seedTxn({
+            accountId: account.id,
+            batchId: concurrentBatch.id,
+            amountCents: -1200,
+            rawMemo: "COSTCO",
+            date: "2026-09-01",
+            source: "simplefin",
+            externalId: "CONCURRENT-COMMIT-PATH",
+          });
+        },
+      },
+    );
+
+    const outcome = await syncSimpleFin({ now: NOW }, handle.db);
+
+    expect(outcome.status).toBe("synced");
+    if (outcome.status !== "synced") throw new Error("unreachable");
+
+    const reissued = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "REISSUED-COMMIT-PATH"))
+      .all();
+    expect(reissued).toHaveLength(0);
+    const genuine = handle.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.externalId, "GENUINELY-NEW"))
+      .all();
+    expect(genuine).toHaveLength(1);
+
+    const summary = outcome.accounts.find((a) => a.accountId === account.id)!;
+    expect(summary.insertedCount).toBe(1);
+    expect(summary.duplicateByContent).toBe(1);
+    expect(outcome.warnings.some((w) => w.includes("confirmed under a different id"))).toBe(true);
   });
 });
